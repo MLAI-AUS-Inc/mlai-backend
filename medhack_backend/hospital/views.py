@@ -1,13 +1,18 @@
 # app/views.py
 import csv
-from django.shortcuts import render
+import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .models import Submission
+from rest_framework.permissions import AllowAny
+from rest_framework.decorators import permission_classes
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)  
 
 # Suppose you have your ground_truth.csv with the same number of rows
 # or you have ground truth in a database. We'll assume a local CSV for this example.
-GROUND_TRUTH_FILE = 'medhack_backend/hospital/Eval_Labels.csv'
+GROUND_TRUTH_FILE = './hospital/Eval_Labels.csv'
 
 def load_ground_truth():
     true_labels = []
@@ -48,10 +53,12 @@ def custom_score(true_labels, pred_labels):
     return total_score
 
 @csrf_exempt
+@permission_classes([AllowAny])
 def submit_predictions(request):
     if request.method == 'POST':
         # Get participant name
         participant_name = request.POST.get('participant_name', 'Anonymous')
+        logger.info(f"participant_name: {participant_name}")
         
         # Get the CSV file from the request
         csv_file = request.FILES.get('predictions_csv')
@@ -78,6 +85,8 @@ def submit_predictions(request):
             participant_name=participant_name,
             score=score
         )
+        logger.info(f"submission: {submission.score}")
+
         
         return JsonResponse({
             'message': 'Submission scored successfully',
