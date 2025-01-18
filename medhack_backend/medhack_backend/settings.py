@@ -11,6 +11,13 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 """
 
 from pathlib import Path
+from dotenv import load_dotenv
+import os
+from datetime import timedelta
+from corsheaders.defaults import default_headers
+
+import dj_database_url
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -74,12 +81,29 @@ WSGI_APPLICATION = 'medhack_backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+database_url = os.getenv('DATABASE_URL')
+default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
+default_config.update({
+    'ENGINE': 'django.db.backends.postgresql',
+})
+
+if 'DYNO' in os.environ:  # Running on Heroku
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=database_url,
+            engine='django.db.backends.postgresql',
+            conn_max_age=600,
+            ssl_require=True
+        )
     }
-}
+else:
+    # Local settings (macOS)
+    DATABASES = {
+        'default': default_config
+    }
+
+AUTH_USER_MODEL = 'hospital.User'
+
 
 
 # Password validation
