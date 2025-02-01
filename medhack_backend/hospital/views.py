@@ -42,14 +42,14 @@ def custom_score(true_labels, pred_labels):
             elif p in crisis:
                 total_score -= 1
             else:
-                total_score -= 1
+                total_score -= 3
         elif t in crisis:
             if p in crisis:
                 total_score += 3
             elif p in warning:
-                total_score -= 1
+                total_score -= 3
             else:
-                total_score -= 2
+                total_score -= 10
     return total_score
 
 @csrf_exempt
