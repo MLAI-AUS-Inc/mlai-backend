@@ -35,12 +35,21 @@ SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    'localhost', 
+    "http://localhost:3000",
+    '127.0.0.1',
+    "https://api.med-hack.com",
+    "https://med-hack.com",
+    "https://www.med-hack.com",
+    "https://firebasestorage.googleapis.com",
+]
 
 
 # Application definition
 
 INSTALLED_APPS = [
+    'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -48,10 +57,12 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'hospital',
+    "rest_framework",
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -80,9 +91,43 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'medhack_backend.wsgi.application'
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://firebasestorage.googleapis.com",
+    "https://api.med-hack.com",
+    "https://med-hack.com",
+    "https://www.med-hack.com",
+]
 
-# Database
-# https://docs.djangoproject.com/en/4.1/ref/settings/#databases
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'X-Recaptcha-Token',
+]
+
+# CSRF and session settings
+CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read the CSRF token
+CSRF_COOKIE_SAMESITE = 'Lax'  # Adjust as needed (e.g., 'None' if using cross-site requests with HTTPS)
+CSRF_COOKIE_SECURE = not DEBUG  # True if using HTTPS
+SESSION_COOKIE_HTTPONLY = False
+SESSION_COOKIE_SAMESITE = 'Lax'  # Adjust as needed
+SESSION_COOKIE_SECURE = False  # Should be True in production with HTTPS
+
+# Content Security Policy
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
+CSP_SCRIPT_SRC = ("'self'",)
+
+# X-Frame-Options
+X_FRAME_OPTIONS = 'DENY'
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "https://firebasestorage.googleapis.com",
+    "https://api.med-hack.com",
+    "https://med-hack.com",
+    "https://www.med-hack.com",
+]
 
 database_url = os.getenv('DATABASE_URL')
 default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
@@ -106,6 +151,30 @@ else:
     }
 
 AUTH_USER_MODEL = 'hospital.User'
+
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'backend.authentication.CustomJWTAuthentication',
+    ],
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=1440),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'AUTH_COOKIE': 'access_token',  # Cookie name for access token
+    'AUTH_COOKIE_REFRESH': 'refresh_token',  # Cookie name for refresh token
+    'AUTH_COOKIE_SECURE': not DEBUG,  # Set to True in production with HTTPS
+    'AUTH_COOKIE_HTTP_ONLY': True,
+    'AUTH_COOKIE_SAMESITE': 'Lax',
+}
+
+# HSTS (HTTP Strict Transport Security)
+SECURE_HSTS_SECONDS = 31536000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
 
 
 
@@ -144,6 +213,10 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.1/howto/static-files/
 
 STATIC_URL = 'static/'
+
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.1/ref/settings/#default-auto-field
