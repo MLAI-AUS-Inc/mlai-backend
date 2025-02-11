@@ -3,7 +3,7 @@ import csv
 import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from medhack_backend.hospital.serializers import MyTokenObtainPairSerializer
+from .serializers import MyTokenObtainPairSerializer
 from .models import Submission
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import permission_classes
@@ -22,7 +22,6 @@ from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .models import User
-from google.oauth2 import service_account 
 from .customerio_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 
 
@@ -310,3 +309,20 @@ class MagicLinkVerifyView(APIView):
             return Response({"error": "Invalid or expired token."}, 
                           status=status.HTTP_400_BAD_REQUEST)
 
+class CurrentUserView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not user.is_authenticated:
+            return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        data = {
+            'full_name': user.full_name,
+            'email': user.email,
+            'role': user.role,
+            'is_superuser': user.is_superuser,
+        }
+
+        
+        return Response(data, status=status.HTTP_200_OK)

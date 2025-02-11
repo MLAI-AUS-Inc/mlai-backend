@@ -47,6 +47,6 @@ class UserAdmin(BaseUserAdmin):
     )
     
     search_fields = ('id', 'email', 'full_name')
-    ordering = ('full_name')
+    ordering = ('full_name',)
 
 admin.site.register(User, UserAdmin)
