@@ -2,7 +2,6 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
 
-
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, role='professional', password=None, **extra_fields):
         if not email:
@@ -42,8 +41,23 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
-    
+
 class Submission(models.Model):
+    # Associate a submission with a user (if available)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
     participant_name = models.CharField(max_length=100)
     score = models.FloatField()
     submitted_at = models.DateTimeField(auto_now_add=True)
+
+class Prediction(models.Model):
+    submission = models.ForeignKey(Submission, related_name='predictions', on_delete=models.CASCADE)
+    row_id = models.IntegerField()  # row number (order in the CSV)
+    predicted_label = models.IntegerField()
+    correct_label = models.IntegerField()
+    timestamp = models.DateTimeField(null=True, blank=True)
+    diastolic_bp = models.FloatField(null=True, blank=True)
+    systolic_bp = models.FloatField(null=True, blank=True)
+    heart_rate = models.FloatField(null=True, blank=True)
+    respiratory_rate = models.FloatField(null=True, blank=True)
+    oxygen_saturation = models.FloatField(null=True, blank=True)
+

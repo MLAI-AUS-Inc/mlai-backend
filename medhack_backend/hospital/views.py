@@ -1,6 +1,7 @@
 # app/views.py
 import csv
 import logging
+import datetime
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .serializers import MyTokenObtainPairSerializer
@@ -21,7 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from .models import User
+from .models import User, Prediction
 from .customerio_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 
 
@@ -30,32 +31,48 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)  
 
-# Suppose you have your ground_truth.csv with the same number of rows
-# or you have ground truth in a database. We'll assume a local CSV for this example.
-GROUND_TRUTH_FILE = './hospital/Eval_Labels.csv'
 
+# Map the original state_label (0-17) to your 4 classes (0-3)
+def map_state_label(state_label):
+    mapping = {
+        0: 0,
+        9: 0,
+        10: 0,
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        11: 2,
+        12: 2,
+        13: 2,
+        14: 2,
+        15: 2,
+        16: 3,
+    }
+    return mapping.get(int(state_label), -1)
+
+# Load the full ground truth CSV as a list of dictionaries.
 def load_ground_truth():
-    true_labels = []
-    with open(GROUND_TRUTH_FILE, 'r') as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header if any
+    gt_rows = []
+    with open('./hospital/Eval_Labels.csv', 'r') as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            # row[0] is the label. Adjust as needed.
-            true_labels.append(int(row[0]))
-    return true_labels
+            gt_rows.append(row)
+    return gt_rows
 
 def custom_score(true_labels, pred_labels):
-    normal = {0, 9, 10 }
+    # (Your custom scoring logic remains unchanged.)
+    normal = {0, 9, 10}
     warning = {1, 2, 3, 4, 5, 6, 7, 8}
     crisis = {11, 12, 13, 14, 15}
-
     total_score = 0
     for t, p in zip(true_labels, pred_labels):
         if t in normal:
-            if p in normal:
-                total_score += 0
-            else:
-                total_score -= 2
+            total_score += 0 if p in normal else -2
         elif t in warning:
             if p in warning:
                 total_score += 2
@@ -73,47 +90,94 @@ def custom_score(true_labels, pred_labels):
     return total_score
 
 @csrf_exempt
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def submit_predictions(request):
     if request.method == 'POST':
-        # Get participant name
+        # Get the authenticated user if available; otherwise, use participant_name from POST.
+        user = request.user if request.user.is_authenticated else None
         participant_name = request.POST.get('participant_name', 'Anonymous')
-        logger.info(f"participant_name: {participant_name}")
         
-        # Get the CSV file from the request
+        # Get the CSV file with predicted labels.
         csv_file = request.FILES.get('predictions_csv')
         if not csv_file:
             return JsonResponse({'error': 'No CSV file uploaded'}, status=400)
-
-        # Parse CSV
+        
+        # Parse predictions CSV (assume it has a header and one column: predicted_label)
         pred_labels = []
         file_data = csv_file.read().decode('utf-8').splitlines()
         reader = csv.reader(file_data)
-        next(reader)  # skip header if your CSV has one
+        next(reader, None)  # skip header
         for row in reader:
-            # assuming row[0] is "predicted_label"
             pred_labels.append(int(row[0]))
         
-        # Load ground truth
-        true_labels = load_ground_truth()
+        # Load full ground truth rows (each row is a dict with all info)
+        gt_rows = load_ground_truth()
         
-        # Score
+        # Extract true labels (using the state_label from CSV and mapping them)
+        true_labels = [map_state_label(row['state_label']) for row in gt_rows]
         score = custom_score(true_labels, pred_labels)
         
-        # Save to DB
+        # Create a Submission instance linked to the user if available.
         submission = Submission.objects.create(
+            user=user,
             participant_name=participant_name,
             score=score
         )
-        logger.info(f"submission: {submission.score}")
-
+        
+        # Loop through each row and save a Prediction record with all desired fields.
+        for idx, (pred, gt) in enumerate(zip(pred_labels, gt_rows), start=1):
+            # Parse timestamp (adjust format as needed)
+            ts = datetime.datetime.strptime(gt['timestamp'], '%Y-%m-%d %H:%M:%S')
+            Prediction.objects.create(
+                submission=submission,
+                row_id=idx,
+                predicted_label=pred,
+                correct_label=map_state_label(gt['state_label']),
+                timestamp=ts,
+                diastolic_bp=float(gt['diastolic_bp']),
+                systolic_bp=float(gt['systolic_bp']),
+                heart_rate=float(gt['heart_rate']),
+                respiratory_rate=float(gt['respiratory_rate']),
+                oxygen_saturation=float(gt['oxygen_saturation'])
+            )
         
         return JsonResponse({
             'message': 'Submission scored successfully',
             'participant_name': participant_name,
             'score': score
         })
-    
+    return JsonResponse({'error': 'Invalid request'}, status=405)
+
+
+@csrf_exempt
+@permission_classes([IsAuthenticated])  # Switch to IsAuthenticated if you require auth
+def get_submission(request):
+    if request.method == 'GET':
+        if not request.user.is_authenticated:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+        submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
+        if not submission:
+            return JsonResponse({'error': 'No submission found'}, status=404)
+        
+        predictions = submission.predictions.all().order_by('row_id')
+        submission_data = {
+            'submission_id': submission.id,
+            'participant_name': submission.participant_name,
+            'score': submission.score,
+            'submitted_at': submission.submitted_at.isoformat(),
+            'predictions': [{
+                'row_id': p.row_id,
+                'predicted_label': p.predicted_label,
+                'correct_label': p.correct_label,
+                'timestamp': p.timestamp.isoformat() if p.timestamp else None,
+                'diastolic_bp': p.diastolic_bp,
+                'systolic_bp': p.systolic_bp,
+                'heart_rate': p.heart_rate,
+                'respiratory_rate': p.respiratory_rate,
+                'oxygen_saturation': p.oxygen_saturation,
+            } for p in predictions]
+        }
+        return JsonResponse(submission_data)
     return JsonResponse({'error': 'Invalid request'}, status=405)
 
 
