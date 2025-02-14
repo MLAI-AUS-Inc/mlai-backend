@@ -406,6 +406,48 @@ class CookieTokenRefreshView(TokenRefreshView):
             path='/',
         )
         return response
+    
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_leaderboard_submissions(request):
+    # Get teams that have at least one submission
+    teams = Team.objects.filter(submission__isnull=False).distinct()
+    leaderboard = []
+
+    for team in teams:
+        # Get the team's highest scoring submission
+        best_submission = team.submission_set.order_by('-score').first()
+        if best_submission is None:
+            continue
+
+        # Retrieve team member details. 
+        # Your custom User model has 'full_name' instead of 'first_name'/'last_name'.
+        members = team.members.all().values("full_name")
+
+        team_data = {
+            "team_id": team.team_id,
+            "team_name": team.team_name,
+            "members": list(members),  # e.g. [{ "full_name": "Sam Donegan" }, ...]
+        }
+        submission_data = {
+            "submission_id": best_submission.id,
+            "participant_name": best_submission.participant_name,
+            "score": best_submission.score,
+            "accuracy": best_submission.accuracy,
+            "submitted_at": best_submission.submitted_at.isoformat(),
+        }
+
+        leaderboard.append({
+            "team": team_data,
+            **submission_data,
+        })
+
+    # Sort the leaderboard by score in descending order
+    leaderboard.sort(key=lambda x: x["score"], reverse=True)
+    return JsonResponse(leaderboard, safe=False)
+
+
 
     
 @csrf_exempt
