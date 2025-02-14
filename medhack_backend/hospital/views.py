@@ -1,9 +1,12 @@
 # app/views.py
 import csv
 import logging
+import datetime
+from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from medhack_backend.hospital.serializers import MyTokenObtainPairSerializer
+from django.views.decorators.http import require_http_methods
+from .serializers import MyTokenObtainPairSerializer
 from .models import Submission
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import permission_classes
@@ -19,10 +22,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import AllowAny
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from .models import User
-from google.oauth2 import service_account 
+from .models import User, Prediction
 from .customerio_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 
 
@@ -31,32 +33,48 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)  
 
-# Suppose you have your ground_truth.csv with the same number of rows
-# or you have ground truth in a database. We'll assume a local CSV for this example.
-GROUND_TRUTH_FILE = './hospital/Eval_Labels.csv'
 
+# Map the original state_label (0-17) to your 4 classes (0-3)
+def map_state_label(state_label):
+    mapping = {
+        0: 0,
+        9: 0,
+        10: 0,
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        11: 2,
+        12: 2,
+        13: 2,
+        14: 2,
+        15: 2,
+        16: 3,
+    }
+    return mapping.get(int(state_label), -1)
+
+# Load the full ground truth CSV as a list of dictionaries.
 def load_ground_truth():
-    true_labels = []
-    with open(GROUND_TRUTH_FILE, 'r') as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header if any
+    gt_rows = []
+    with open('./hospital/test_data_backend.csv', 'r') as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            # row[0] is the label. Adjust as needed.
-            true_labels.append(int(row[0]))
-    return true_labels
+            gt_rows.append(row)
+    return gt_rows
 
 def custom_score(true_labels, pred_labels):
-    normal = {0, 9, 10 }
+    # (Your custom scoring logic remains unchanged.)
+    normal = {0, 9, 10}
     warning = {1, 2, 3, 4, 5, 6, 7, 8}
     crisis = {11, 12, 13, 14, 15}
-
     total_score = 0
     for t, p in zip(true_labels, pred_labels):
         if t in normal:
-            if p in normal:
-                total_score += 0
-            else:
-                total_score -= 2
+            total_score += 0 if p in normal else -2
         elif t in warning:
             if p in warning:
                 total_score += 2
@@ -73,49 +91,220 @@ def custom_score(true_labels, pred_labels):
                 total_score -= 10
     return total_score
 
-@csrf_exempt
-@permission_classes([AllowAny])
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def submit_predictions(request):
     if request.method == 'POST':
-        # Get participant name
-        participant_name = request.POST.get('participant_name', 'Anonymous')
-        logger.info(f"participant_name: {participant_name}")
+        if not request.user.is_authenticated:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+        logger.info(f"submit_predictions: user={request.user}, is_authenticated={request.user.is_authenticated}")
         
-        # Get the CSV file from the request
+        user = request.user
+        participant_name = user.full_name or "Anonymous"
+
+        # Instead of getting team_id from POST, retrieve it from the user.
+        # This assumes each user belongs to at least one team. If they might not,
+        # you can default to None.
+        team = user.teams.first() if user.teams.exists() else None
+
         csv_file = request.FILES.get('predictions_csv')
         if not csv_file:
             return JsonResponse({'error': 'No CSV file uploaded'}, status=400)
-
-        # Parse CSV
+        
+        # Parse predictions CSV. We assume the CSV has a header like: ID,predicted_label
         pred_labels = []
         file_data = csv_file.read().decode('utf-8').splitlines()
-        reader = csv.reader(file_data)
-        next(reader)  # skip header if your CSV has one
+        reader = csv.reader(file_data, delimiter=',')
+        header = next(reader, None)  # skip header
+        
+        try:
+            predicted_label_index = header.index('predicted_label')
+        except ValueError:
+            predicted_label_index = 1  # assume second column
+        
         for row in reader:
-            # assuming row[0] is "predicted_label"
-            pred_labels.append(int(row[0]))
+            if not row:
+                continue
+            try:
+                pred = int(row[predicted_label_index].strip())
+                pred_labels.append(pred)
+            except Exception as e:
+                return JsonResponse({'error': f'Error parsing row {row}: {str(e)}'}, status=400)
         
-        # Load ground truth
-        true_labels = load_ground_truth()
+        gt_rows_all = load_ground_truth()
         
-        # Score
-        score = custom_score(true_labels, pred_labels)
+        if len(pred_labels) != len(gt_rows_all):
+            return JsonResponse({
+                'error': f'Number of predictions ({len(pred_labels)}) does not match number of ground truth rows ({len(gt_rows_all)})'
+            }, status=400)
         
-        # Save to DB
+        true_labels_all = [map_state_label(row['state_label']) for row in gt_rows_all]
+        score = custom_score(true_labels_all, pred_labels)
+        correct_count = sum(1 for t, p in zip(true_labels_all, pred_labels) if t == p)
+        accuracy = correct_count / len(true_labels_all) if true_labels_all else 0
+        
+        # Create a Submission with the authenticated user and associated team (if available)
         submission = Submission.objects.create(
+            user=user,
+            team=team,
             participant_name=participant_name,
-            score=score
+            score=score,
+            accuracy=accuracy
         )
-        logger.info(f"submission: {submission.score}")
+        
+        public_indices = [i for i, row in enumerate(gt_rows_all) if row.get('Usage', '').strip() == 'Public']
 
+        predictions_to_create = []
+        for public_idx, global_idx in enumerate(public_indices, start=1):
+            pred = pred_labels[global_idx]
+            gt = gt_rows_all[global_idx]
+            try:
+                ts = datetime.datetime.strptime(gt['timestamp'], '%Y-%m-%d %H:%M:%S')
+                # Convert the naive datetime to an aware datetime using the current timezone
+                ts = timezone.make_aware(ts, timezone.get_current_timezone())
+            except Exception:
+                ts = None
+            predictions_to_create.append(Prediction(
+                submission=submission,
+                row_id=public_idx,
+                predicted_label=pred,
+                correct_label=map_state_label(gt['state_label']),
+                timestamp=ts,
+                diastolic_bp=float(gt['diastolic_bp']),
+                systolic_bp=float(gt['systolic_bp']),
+                heart_rate=float(gt['heart_rate']),
+                respiratory_rate=float(gt['respiratory_rate']),
+                oxygen_saturation=float(gt['oxygen_saturation'])
+            ))
+
+        Prediction.objects.bulk_create(predictions_to_create)
         
         return JsonResponse({
             'message': 'Submission scored successfully',
             'participant_name': participant_name,
-            'score': score
+            'team_id': team.team_id if team else None,
+            'score': score,
+            'accuracy': accuracy
         })
     
     return JsonResponse({'error': 'Invalid request'}, status=405)
+
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_submission(request):
+    if request.method == 'GET':
+        if not request.user.is_authenticated:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+        submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
+        if not submission:
+            return JsonResponse({'error': 'No submission found'}, status=404)
+        
+        predictions = submission.predictions.all().order_by('row_id')
+
+        # If the submission has a team, include the team's name in the response
+        team_data = None
+        if submission.team:
+            team_data = {
+                'team_id': submission.team.team_id,
+                'team_name': submission.team.team_name
+            }
+
+        submission_data = {
+            'submission_id': submission.id,
+            'participant_name': submission.participant_name,
+            'score': submission.score,
+            'accuracy': submission.accuracy,  # ensure numeric
+            'submitted_at': submission.submitted_at.isoformat(),
+            'team': team_data,  # Add the team info
+            'predictions': [{
+                'row_id': p.row_id,
+                'predicted_label': p.predicted_label,
+                'correct_label': p.correct_label,
+                'timestamp': p.timestamp.isoformat() if p.timestamp else None,
+                'diastolic_bp': p.diastolic_bp,
+                'systolic_bp': p.systolic_bp,
+                'heart_rate': p.heart_rate,
+                'respiratory_rate': p.respiratory_rate,
+                'oxygen_saturation': p.oxygen_saturation,
+            } for p in predictions]
+        }
+        return JsonResponse(submission_data)
+    return JsonResponse({'error': 'Invalid request'}, status=405)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_submission_by_id(request, submission_id):
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'Authentication required'}, status=401)
+    
+    try:
+        # Ensure the submission belongs to the current user
+        submission = Submission.objects.get(id=submission_id, user=request.user)
+    except Submission.DoesNotExist:
+        return JsonResponse({'error': 'Submission not found'}, status=404)
+    
+    predictions = submission.predictions.all().order_by('row_id')
+    
+    team_data = None
+    if submission.team:
+        team_data = {
+            'team_id': submission.team.team_id,
+            'team_name': submission.team.team_name
+        }
+    
+    submission_data = {
+        'submission_id': submission.id,
+        'participant_name': submission.participant_name,
+        'score': submission.score,
+        'accuracy': submission.accuracy,
+        'submitted_at': submission.submitted_at.isoformat(),
+        'team': team_data,
+        'predictions': [{
+            'row_id': p.row_id,
+            'predicted_label': p.predicted_label,
+            'correct_label': p.correct_label,
+            'timestamp': p.timestamp.isoformat() if p.timestamp else None,
+            'diastolic_bp': p.diastolic_bp,
+            'systolic_bp': p.systolic_bp,
+            'heart_rate': p.heart_rate,
+            'respiratory_rate': p.respiratory_rate,
+            'oxygen_saturation': p.oxygen_saturation,
+        } for p in predictions]
+    }
+    
+    return JsonResponse(submission_data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_recent_submissions(request):
+    user = request.user
+    # Assume each user belongs to at least one team.
+    # Using the related name "teams" (from the ManyToManyField in Team)
+    team = user.teams.first()
+    if not team:
+        return JsonResponse({'error': 'User is not part of any team'}, status=400)
+    
+    # Retrieve the 5 most recent submissions for this team
+    submissions = Submission.objects.filter(team=team).order_by('-submitted_at')[:5]
+    
+    submission_list = []
+    for sub in submissions:
+        submission_list.append({
+            'submission_id': sub.id,
+            'participant_name': sub.participant_name,
+            'score': sub.score,
+            'accuracy': sub.accuracy,
+            'submitted_at': sub.submitted_at.isoformat(),
+            'team': {
+                'team_id': team.team_id,
+                'team_name': team.team_name
+            }
+        })
+    return JsonResponse(submission_list, safe=False)
+
 
 
 class SendMagicLinkView(APIView):
@@ -310,3 +499,20 @@ class MagicLinkVerifyView(APIView):
             return Response({"error": "Invalid or expired token."}, 
                           status=status.HTTP_400_BAD_REQUEST)
 
+class CurrentUserView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not user.is_authenticated:
+            return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        data = {
+            'full_name': user.full_name,
+            'email': user.email,
+            'role': user.role,
+            'is_superuser': user.is_superuser,
+        }
+
+        
+        return Response(data, status=status.HTTP_200_OK)
