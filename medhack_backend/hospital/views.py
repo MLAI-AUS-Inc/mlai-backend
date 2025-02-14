@@ -233,6 +233,49 @@ def get_submission(request):
         return JsonResponse(submission_data)
     return JsonResponse({'error': 'Invalid request'}, status=405)
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_submission_by_id(request, submission_id):
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'Authentication required'}, status=401)
+    
+    try:
+        # Ensure the submission belongs to the current user
+        submission = Submission.objects.get(id=submission_id, user=request.user)
+    except Submission.DoesNotExist:
+        return JsonResponse({'error': 'Submission not found'}, status=404)
+    
+    predictions = submission.predictions.all().order_by('row_id')
+    
+    team_data = None
+    if submission.team:
+        team_data = {
+            'team_id': submission.team.team_id,
+            'team_name': submission.team.team_name
+        }
+    
+    submission_data = {
+        'submission_id': submission.id,
+        'participant_name': submission.participant_name,
+        'score': submission.score,
+        'accuracy': submission.accuracy,
+        'submitted_at': submission.submitted_at.isoformat(),
+        'team': team_data,
+        'predictions': [{
+            'row_id': p.row_id,
+            'predicted_label': p.predicted_label,
+            'correct_label': p.correct_label,
+            'timestamp': p.timestamp.isoformat() if p.timestamp else None,
+            'diastolic_bp': p.diastolic_bp,
+            'systolic_bp': p.systolic_bp,
+            'heart_rate': p.heart_rate,
+            'respiratory_rate': p.respiratory_rate,
+            'oxygen_saturation': p.oxygen_saturation,
+        } for p in predictions]
+    }
+    
+    return JsonResponse(submission_data)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
