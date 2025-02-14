@@ -1,1 +1,1 @@
-web: gunicorn medhack_backend.wsgi
+web: cd medhack_backend && gunicorn medhack_backend.wsgi:application
