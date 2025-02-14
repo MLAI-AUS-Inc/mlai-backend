@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from .serializers import MyTokenObtainPairSerializer
-from .models import Submission
+from .models import Submission, Team
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import permission_classes
 import logging
@@ -334,7 +334,7 @@ class SendMagicLinkView(APIView):
                     user.save()
                     logger.info(f"Created new user: {email}")
                 else:
-                    # Existing user, update fields if necessary
+                    # Existing user, optionally update fields
                     updated = False
                     if full_name and user.full_name != full_name:
                         user.full_name = full_name
@@ -430,6 +430,10 @@ def logout_view(request):
     
 
 class MagicLinkVerifyView(APIView):
+    """
+    Verifies the token from the magic link, activates the user (if needed),
+    and issues JWT tokens.
+    """
     authentication_classes = []
     permission_classes = [AllowAny]
 
@@ -440,24 +444,19 @@ class MagicLinkVerifyView(APIView):
         if email:
             try:
                 user = User.objects.get(email=email)
+
                 if not user.is_active:
                     user.is_active = True
                     user.save()
-                    logger.info(f"Activated user account for {email}")
 
-                # Generate tokens
+
+                # Generate JWT tokens
                 refresh = RefreshToken.for_user(user)
                 access_token = str(refresh.access_token)
                 refresh_token = str(refresh)
 
-                # Determine the user's avatar URL from the ProfessionalProfile
-                default_avatar_url = (
-                    "https://firebasestorage.googleapis.com/v0/b/a-duet.appspot.com/o/"
-                    "default_avatar.jpg?alt=media&token=c77bbde6-e898-4acd-8bb9-29d210064153"
-                )
-
-                # Prepare the response
-                response = Response({
+                # Build the response payload
+                response_data = {
                     'message': 'Login successful',
                     'user': {
                         'email': user.email,
@@ -465,10 +464,13 @@ class MagicLinkVerifyView(APIView):
                         'role': user.role,
                         'is_superuser': user.is_superuser,
                         'is_active': user.is_active,
-                    }
-                }, status=status.HTTP_200_OK)
+                        'has_team': user.has_team,
+                    },
+                }
 
-                # Set cookies with explicit configuration
+                response = Response(response_data, status=status.HTTP_200_OK)
+
+                # Set cookies (optional, if you want to store tokens in cookies)
                 response.set_cookie(
                     key='access_token',
                     value=access_token,
@@ -492,12 +494,10 @@ class MagicLinkVerifyView(APIView):
 
             except User.DoesNotExist:
                 logger.error(f"User with email {email} does not exist.")
-                return Response({"error": "User does not exist."}, 
-                              status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": "User does not exist."}, status=status.HTTP_400_BAD_REQUEST)
         else:
             logger.warning("Invalid or expired magic link token.")
-            return Response({"error": "Invalid or expired token."}, 
-                          status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
 
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
@@ -516,3 +516,35 @@ class CurrentUserView(APIView):
 
         
         return Response(data, status=status.HTTP_200_OK)
+    
+class UpdateProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        user = request.user
+        full_name = request.data.get("full_name")
+        team_name = request.data.get("team")
+
+        if not full_name or not team_name:
+            return Response(
+                {"error": "Both full_name and team are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Update the user's profile
+        user.full_name = full_name
+        user.has_team = True  # Mark profile as completed
+        user.save()
+
+        # Associate the user with a team. For example, look up the team by name.
+        try:
+            team_obj = Team.objects.get(team_name=team_name)
+        except Team.DoesNotExist:
+            # Optionally, create a new Team if not found.
+            team_obj = Team.objects.create(team_name=team_name)
+
+        # Associate the user with this team (if you want a many-to-many relationship)
+        user.teams.set([team_obj])
+
+        return Response({"message": "Profile updated successfully."}, status=status.HTTP_200_OK)
+
