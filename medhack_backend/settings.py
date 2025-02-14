@@ -43,6 +43,7 @@ ALLOWED_HOSTS = [
     "https://med-hack.com",
     "https://www.med-hack.com",
     "https://firebasestorage.googleapis.com",
+    'api.med-hack.com'
 ]
 
 
@@ -97,6 +98,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://api.med-hack.com",
     "https://med-hack.com",
     "https://www.med-hack.com",
+    "api.med-hack.com"
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -127,6 +129,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://api.med-hack.com",
     "https://med-hack.com",
     "https://www.med-hack.com",
+    "api.med-hack.com"
 ]
 
 database_url = os.getenv('DATABASE_URL')
