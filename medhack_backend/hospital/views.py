@@ -2,6 +2,7 @@
 import csv
 import logging
 import datetime
+from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -99,7 +100,7 @@ def submit_predictions(request):
         logger.info(f"submit_predictions: user={request.user}, is_authenticated={request.user.is_authenticated}")
         
         user = request.user
-        participant_name = request.POST.get('participant_name', 'Anonymous')
+        participant_name = user.full_name or "Anonymous"
 
         # Instead of getting team_id from POST, retrieve it from the user.
         # This assumes each user belongs to at least one team. If they might not,
@@ -152,15 +153,18 @@ def submit_predictions(request):
         )
         
         public_indices = [i for i, row in enumerate(gt_rows_all) if row.get('Usage', '').strip() == 'Public']
-        
+
+        predictions_to_create = []
         for public_idx, global_idx in enumerate(public_indices, start=1):
             pred = pred_labels[global_idx]
             gt = gt_rows_all[global_idx]
             try:
                 ts = datetime.datetime.strptime(gt['timestamp'], '%Y-%m-%d %H:%M:%S')
+                # Convert the naive datetime to an aware datetime using the current timezone
+                ts = timezone.make_aware(ts, timezone.get_current_timezone())
             except Exception:
                 ts = None
-            Prediction.objects.create(
+            predictions_to_create.append(Prediction(
                 submission=submission,
                 row_id=public_idx,
                 predicted_label=pred,
@@ -171,7 +175,9 @@ def submit_predictions(request):
                 heart_rate=float(gt['heart_rate']),
                 respiratory_rate=float(gt['respiratory_rate']),
                 oxygen_saturation=float(gt['oxygen_saturation'])
-            )
+            ))
+
+        Prediction.objects.bulk_create(predictions_to_create)
         
         return JsonResponse({
             'message': 'Submission scored successfully',
@@ -190,19 +196,28 @@ def submit_predictions(request):
 def get_submission(request):
     if request.method == 'GET':
         if not request.user.is_authenticated:
-            logger.info("user is not authenticated")
             return JsonResponse({'error': 'Authentication required'}, status=401)
         submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
         if not submission:
-            logger.info("No submission found")
             return JsonResponse({'error': 'No submission found'}, status=404)
         
         predictions = submission.predictions.all().order_by('row_id')
+
+        # If the submission has a team, include the team's name in the response
+        team_data = None
+        if submission.team:
+            team_data = {
+                'team_id': submission.team.team_id,
+                'team_name': submission.team.team_name
+            }
+
         submission_data = {
             'submission_id': submission.id,
             'participant_name': submission.participant_name,
             'score': submission.score,
+            'accuracy': submission.accuracy,  # ensure numeric
             'submitted_at': submission.submitted_at.isoformat(),
+            'team': team_data,  # Add the team info
             'predictions': [{
                 'row_id': p.row_id,
                 'predicted_label': p.predicted_label,
@@ -217,6 +232,36 @@ def get_submission(request):
         }
         return JsonResponse(submission_data)
     return JsonResponse({'error': 'Invalid request'}, status=405)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_recent_submissions(request):
+    user = request.user
+    # Assume each user belongs to at least one team.
+    # Using the related name "teams" (from the ManyToManyField in Team)
+    team = user.teams.first()
+    if not team:
+        return JsonResponse({'error': 'User is not part of any team'}, status=400)
+    
+    # Retrieve the 5 most recent submissions for this team
+    submissions = Submission.objects.filter(team=team).order_by('-submitted_at')[:5]
+    
+    submission_list = []
+    for sub in submissions:
+        submission_list.append({
+            'submission_id': sub.id,
+            'participant_name': sub.participant_name,
+            'score': sub.score,
+            'accuracy': sub.accuracy,
+            'submitted_at': sub.submitted_at.isoformat(),
+            'team': {
+                'team_id': team.team_id,
+                'team_name': team.team_name
+            }
+        })
+    return JsonResponse(submission_list, safe=False)
+
 
 
 class SendMagicLinkView(APIView):
