@@ -145,9 +145,14 @@ if 'DYNO' in os.environ:  # Running on Heroku
         )
     }
 else:
-    # Local settings (macOS)
+    # Local settings (macOS) connecting to Heroku DB also need SSL if you use the Heroku DATABASE_URL
     DATABASES = {
-        'default': default_config
+        'default': dj_database_url.config(
+            default=database_url,
+            engine='django.db.backends.postgresql',
+            conn_max_age=600,
+            ssl_require=True
+        )
     }
 
 AUTH_USER_MODEL = 'hospital.User'

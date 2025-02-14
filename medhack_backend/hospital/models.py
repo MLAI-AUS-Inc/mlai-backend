@@ -31,6 +31,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='participant')
     is_superuser = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    has_team = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)  # Required for admin interface
     date_joined = models.DateTimeField(default=timezone.now)
 
