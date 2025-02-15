@@ -2,7 +2,7 @@ import json
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import User, Team
+from .models import User, Team, Submission
 
 class UserAdmin(BaseUserAdmin):
     list_display = (
@@ -73,3 +73,14 @@ class TeamAdmin(admin.ModelAdmin):
     member_list.short_description = "Members"
 
 admin.site.register(Team, TeamAdmin)
+
+class SubmissionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'participant_name', 'team', 'score', 'accuracy', 'submitted_at')
+    list_editable = ('participant_name', 'team',)
+    list_filter = ('team', 'submitted_at')
+    search_fields = ('participant_name', 'team__team_name')
+    ordering = ('-submitted_at',)
+    # Optionally, restrict the fields that can be edited in the change form.
+    fields = ('user', 'team', 'participant_name', 'score', 'accuracy')
+
+admin.site.register(Submission, SubmissionAdmin)
