@@ -540,6 +540,8 @@ class MagicLinkVerifyView(APIView):
         else:
             logger.warning("Invalid or expired magic link token.")
             return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+        
+
 
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
@@ -548,15 +550,25 @@ class CurrentUserView(APIView):
         user = request.user
         if not user.is_authenticated:
             return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
-            
+        
+        # Retrieve the user's team details (assuming one team)
+        team = user.teams.first()
+        team_data = None
+        if team:
+            members = team.members.all().values("full_name")
+            team_data = {
+                "team_name": team.team_name,
+                "members": list(members)
+            }
+        
         data = {
             'full_name': user.full_name,
             'email': user.email,
             'role': user.role,
             'is_superuser': user.is_superuser,
+            'team': team_data,  # team will be null if not set
         }
 
-        
         return Response(data, status=status.HTTP_200_OK)
     
 class UpdateProfileView(APIView):
@@ -566,27 +578,41 @@ class UpdateProfileView(APIView):
         user = request.user
         full_name = request.data.get("full_name")
         team_name = request.data.get("team")
+        email = request.data.get("email")
 
-        if not full_name or not team_name:
+        # Require all fields to be provided.
+        if not full_name or not team_name or not email:
             return Response(
-                {"error": "Both full_name and team are required."},
+                {"error": "full_name, team, and email are required."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Update the user's profile
+        # Update the user's profile information.
         user.full_name = full_name
+
+        # Only update the email if it's changed.
+        if email and email != user.email:
+            # TODO: Consider marking the email as unverified and sending a verification email.
+            user.email = email
+
         user.has_team = True  # Mark profile as completed
         user.save()
 
-        # Associate the user with a team. For example, look up the team by name.
+        # Associate the user with a team. Create the team if it doesn't exist.
         try:
             team_obj = Team.objects.get(team_name=team_name)
         except Team.DoesNotExist:
-            # Optionally, create a new Team if not found.
             team_obj = Team.objects.create(team_name=team_name)
 
-        # Associate the user with this team (if you want a many-to-many relationship)
         user.teams.set([team_obj])
 
         return Response({"message": "Profile updated successfully."}, status=status.HTTP_200_OK)
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_team_names(request):
+    # Retrieve all teams ordered by name (or any order you prefer)
+    teams = Team.objects.all().order_by('team_name')
+    team_names = list(teams.values_list('team_name', flat=True))
+    return Response(team_names)

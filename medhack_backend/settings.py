@@ -20,10 +20,10 @@ import dj_database_url
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 
 # Quick-start development settings - unsuitable for production
@@ -70,6 +70,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
 ]
 
 ROOT_URLCONF = 'medhack_backend.urls'
@@ -98,7 +99,6 @@ CORS_ALLOWED_ORIGINS = [
     "https://api.med-hack.com",
     "https://med-hack.com",
     "https://www.med-hack.com",
-    "api.med-hack.com"
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -129,7 +129,6 @@ CSRF_TRUSTED_ORIGINS = [
     "https://api.med-hack.com",
     "https://med-hack.com",
     "https://www.med-hack.com",
-    "api.med-hack.com"
 ]
 
 database_url = os.getenv('DATABASE_URL')
