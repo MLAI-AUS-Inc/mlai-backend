@@ -13,7 +13,7 @@ urlpatterns = [
     path('get_current_user/', views.CurrentUserView.as_view(), name='get_current_user'),
     path('update_user/', views.UpdateProfileView.as_view(), name='update_user'),
     path('get_submission/<int:submission_id>/', views.get_submission_by_id, name='get_submission_by_id'),
-    path('get_leaderboard_submissions/', views.get_leaderboard_submissions, name='get_leaderboard_submissions'),
+    # path('get_leaderboard_submissions/', views.get_leaderboard_submissions, name='get_leaderboard_submissions'),
     path('get_team_names/', views.get_team_names, name='get_team_names'),
     path('logout/', views.logout_view, name='logout'),
 ]
