@@ -6,13 +6,11 @@ customerio==2.1
 dj-database-url==2.3.0
 Django==5.1.5
 django-cors-headers==4.6.0
-django-rest-framework==0.1.0
 djangorestframework==3.15.2
 djangorestframework_simplejwt==5.4.0
 google-auth==2.38.0
 gunicorn==23.0.0
 idna==3.10
-logging==0.4.9.6
 packaging==24.2
 psycopg==3.2.4
 pyasn1==0.6.1

@@ -35,16 +35,7 @@ SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = [
-    'localhost', 
-    "http://localhost:3000",
-    '127.0.0.1',
-    "https://api.med-hack.com",
-    "https://med-hack.com",
-    "https://www.med-hack.com",
-    "https://firebasestorage.googleapis.com",
-    'api.med-hack.com'
-]
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -58,6 +49,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'hospital',
+    'core',
+    'esafety',
     "rest_framework",
 ]
 
@@ -73,7 +66,7 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
 ]
 
-ROOT_URLCONF = 'medhack_backend.urls'
+ROOT_URLCONF = 'mlai.urls'
 
 TEMPLATES = [
     {
@@ -91,45 +84,10 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'medhack_backend.wsgi.application'
+WSGI_APPLICATION = 'mlai.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://firebasestorage.googleapis.com",
-    "https://api.med-hack.com",
-    "https://med-hack.com",
-    "https://www.med-hack.com",
-]
-
-CORS_ALLOW_CREDENTIALS = True
-
-CORS_ALLOW_HEADERS = list(default_headers) + [
-    'X-Recaptcha-Token',
-]
-
-# CSRF and session settings
-CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read the CSRF token
-CSRF_COOKIE_SAMESITE = 'Lax'  # Adjust as needed (e.g., 'None' if using cross-site requests with HTTPS)
-CSRF_COOKIE_SECURE = not DEBUG  # True if using HTTPS
-SESSION_COOKIE_HTTPONLY = False
-SESSION_COOKIE_SAMESITE = 'Lax'  # Adjust as needed
-SESSION_COOKIE_SECURE = False  # Should be True in production with HTTPS
-
-# Content Security Policy
-CSP_DEFAULT_SRC = ("'self'",)
-CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
-CSP_SCRIPT_SRC = ("'self'",)
-
-# X-Frame-Options
-X_FRAME_OPTIONS = 'DENY'
-
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "https://firebasestorage.googleapis.com",
-    "https://api.med-hack.com",
-    "https://med-hack.com",
-    "https://www.med-hack.com",
-]
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', "http://localhost:3000").split(',')
+CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', "http://localhost:3000").split(',')
 
 database_url = os.getenv('DATABASE_URL')
 default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
@@ -153,7 +111,7 @@ else:
             default=database_url,
             engine='django.db.backends.postgresql',
             conn_max_age=600,
-            ssl_require=True
+            ssl_require=False
         )
     }
 
@@ -229,3 +187,8 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # https://docs.djangoproject.com/en/4.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+try:
+    from .settings_prod import *
+except ImportError:
+    pass
