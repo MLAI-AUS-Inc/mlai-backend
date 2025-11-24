@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 signer = TimestampSigner()
 
 # Load API Key from environment
-CUSTOMER_IO_API_KEY = os.getenv('CUSTOMER_IO_API_KEY')
+CUSTOMER_IO_API_KEY = os.getenv('CUSTOMERIO_API_KEY')
 
 def generate_magic_link(user, base_url="https://www.med-hack.com"):
     """
