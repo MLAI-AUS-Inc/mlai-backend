@@ -115,7 +115,7 @@ else:
         )
     }
 
-AUTH_USER_MODEL = 'hospital.User'
+AUTH_USER_MODEL = 'core.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
