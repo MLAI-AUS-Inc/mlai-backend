@@ -14,7 +14,8 @@ jobs:
       uses: shimataro/ssh-key-action@v2
       with:
         key: ${{ secrets.DO_SSH_KEY }}
-        known_hosts: ${{ secrets.KNOWN_HOSTS }}
+        known_hosts: |
+          |1|um2bvFU9oK5fWlrQab1g5MiuP2w=|2dzMeF+PlByY+j7YAIqfwxccVhU= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFtJFB6f5Sre9BcqBAFtbRQBee4YQqqqiXieFwKAd5Xf
         if_key_exists: replace
 
     - name: Add Known Hosts
