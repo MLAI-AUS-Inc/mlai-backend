@@ -25,7 +25,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .models import User, Prediction
-from .customerio_utils import generate_magic_link, send_magic_link_email, verify_magic_link
+from core.email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 
 
 
