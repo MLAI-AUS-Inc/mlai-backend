@@ -86,8 +86,10 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'mlai.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', "http://localhost:3000").split(',')
-CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', "http://localhost:3000").split(',')
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://esafety.localhost:5173').split(',')
+CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:3000,http://esafety.localhost:5173').split(',')
+CORS_ALLOW_CREDENTIALS = True  # Required for cookies to work cross-origin
+
 
 database_url = os.getenv('DATABASE_URL')
 default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
@@ -195,4 +197,4 @@ except ImportError:
 
 # App URLs
 MEDHACK_URL = os.getenv('MEDHACK_URL', 'http://localhost:3000')
-ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://localhost:3001')
+ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://esafety.localhost:5173')

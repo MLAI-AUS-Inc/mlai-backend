@@ -1,7 +1,7 @@
 import os
 import logging
 from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
-from customerio import APIClient, SendEmailRequest, CustomerIOException
+from customerio import APIClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,7 +36,7 @@ def verify_magic_link(token, max_age=3600):
         logger.warning("Magic link token is invalid.")
         return None
 
-def send_magic_link_email(user, magic_link, message_id="1"):
+def send_magic_link_email(user, magic_link, message_id="2"):
     """
     Sends the magic link email using Customer.io.
     """
@@ -44,30 +44,31 @@ def send_magic_link_email(user, magic_link, message_id="1"):
         logger.error("CUSTOMER_IO_API_KEY not set in environment.")
         return
 
-    api = APIClient(CUSTOMER_IO_API_KEY)
+    client = APIClient(CUSTOMER_IO_API_KEY)
 
-    # Using the user-provided template structure
-    request = SendEmailRequest(
-        transactional_message_id=message_id,
-        message_data={
+    # Prepare display name
+    full_name = user.full_name.strip() if user.full_name else ''
+    first_name = full_name.split(' ')[0] if full_name else ''
+    display_name = full_name or user.email
+
+    # Build request body as dictionary (not SendEmailRequest object)
+    request_body = {
+        "transactional_message_id": message_id,
+        "message_data": {
             "magic_link": magic_link,
-            "full_name": user.full_name,
+            "first_name": first_name or display_name,
+            "full_name": display_name,
         },
-        identifiers={
-            "id": str(user.id)
+        "to": user.email,
+        "identifiers": {
+            "id": str(user.id),
         },
-        to=user.email,
-        _from="admin@mlai.au", # Fallback required by SDK/API
-        subject="Your Login Link", # Fallback required by SDK/API
-        body="Please use the link to login." # Fallback required by SDK/API
-    )
+    }
 
     try:
-        api.send_email(request)
-        logger.info(f"Magic link email sent to {user.email} using message_id {message_id}")
-    except CustomerIOException as e:
-        logger.error(f"Error sending email to {user.email}: {e}")
-        raise e
+        response = client.send_email(request_body)
+        logger.info(f"Magic link email sent to {user.email} using message_id {message_id}: {response}")
+        return response
     except Exception as e:
-        logger.error(f"Unexpected error sending email: {e}")
+        logger.error(f"Error sending email to {user.email}: {e}")
         raise e

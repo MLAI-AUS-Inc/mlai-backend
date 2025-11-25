@@ -48,13 +48,13 @@ class SendMagicLinkView(APIView):
             
             if app == 'esafety':
                 base_url = settings.ESAFETY_URL
-                message_id = "2"
             else:
                 base_url = settings.MEDHACK_URL
-                message_id = "1"
 
+            # Use message_id "2" for both apps since it's configured in Customer.io
             magic_link = generate_magic_link(user, base_url=base_url)
-            send_magic_link_email(user, magic_link, message_id=message_id)
+            logger.info(f"Generated magic link for {email}: {magic_link}")
+            send_magic_link_email(user, magic_link, message_id="2")
             logger.info(f"Sent magic link to existing user: {email} for app {app}")
 
             return Response(
@@ -100,8 +100,6 @@ class CreateUserView(APIView):
 
             # Generate magic link and send email OUTSIDE the transaction
             # so if email fails, user is still created.
-            # Generate magic link and send email OUTSIDE the transaction
-            # so if email fails, user is still created.
             
             # Determine app context
             app = data.get('app', 'hospital')
@@ -109,14 +107,13 @@ class CreateUserView(APIView):
             
             if app == 'esafety':
                 base_url = settings.ESAFETY_URL
-                message_id = "2"
             else:
                 base_url = settings.MEDHACK_URL
-                message_id = "1"
 
+            # Use message_id "2" for both apps since it's configured in Customer.io
             magic_link = generate_magic_link(user, base_url=base_url)
             try:
-                send_magic_link_email(user, magic_link, message_id=message_id)
+                send_magic_link_email(user, magic_link, message_id="2")
                 logger.info(f"Sent magic link to new user: {email} for app {app}")
                 message = "Account created and magic link sent."
             except Exception as e:
@@ -171,8 +168,7 @@ class MagicLinkVerifyView(APIView):
                         'is_active': user.is_active,
                         'has_team': user.has_team,
                     },
-                    # TODO: Make this configurable
-                    'next_url': 'http://localhost:3000/dashboard', 
+                    'next_url': 'http://esafety.localhost:5173/platform/app/dashboard', 
                 }
 
                 response = Response(response_data, status=status.HTTP_200_OK)
@@ -180,27 +176,36 @@ class MagicLinkVerifyView(APIView):
                 # Set cookies
                 # Use settings for secure flag to support local dev (HTTP) vs prod (HTTPS)
                 from django.conf import settings
-                secure_cookie = settings.SIMPLE_JWT.get('AUTH_COOKIE_SECURE', False)
+                
+                # For local development, don't set domain, secure, or samesite
+                # This creates "host-only" cookies that work with localhost
+                # In production, set domain to .yourdomain.com with Secure=True and SameSite=None
+                is_production = not settings.DEBUG
+                cookie_kwargs = {
+                    'httponly': True,
+                    'path': '/',
+                }
+                if is_production:
+                    cookie_kwargs.update({
+                        'domain': '.yourdomain.com',  # Set your production domain
+                        'secure': True,
+                        'samesite': 'None',
+                    })
                 
                 response.set_cookie(
                     key='access_token',
                     value=access_token,
                     max_age=86400,  # 1 day
-                    httponly=True,
-                    secure=secure_cookie, 
-                    samesite='None' if secure_cookie else 'Lax', # SameSite=None requires Secure=True
-                    path='/',
+                    **cookie_kwargs
                 )
                 response.set_cookie(
                     key='refresh_token',
                     value=refresh_token,
                     max_age=172800,  # 2 days
-                    httponly=True,
-                    secure=secure_cookie,
-                    samesite='None' if secure_cookie else 'Lax',
-                    path='/',
+                    **cookie_kwargs
                 )
 
+                logger.info(f"Set cookies for {email}: production={is_production}, kwargs={cookie_kwargs}")
                 return response
 
             except User.DoesNotExist:
