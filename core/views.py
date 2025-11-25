@@ -22,50 +22,84 @@ class SendMagicLinkView(APIView):
 
     def post(self, request):
         data = request.data
-
         email = data.get('email')
+        
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            user = User.objects.filter(email__iexact=email).first()
+            
+            if not user:
+                # User does not exist, return specific response to frontend
+                return Response(
+                    {"user_exists": False, "message": "User does not exist."}, 
+                    status=status.HTTP_200_OK
+                )
+
+            # User exists, send magic link
+            if not user.is_active:
+                # Optionally handle inactive users differently, but for now we'll allow them to re-verify
+                pass
+
+            magic_link = generate_magic_link(user)
+            send_magic_link_email(user, magic_link)
+            logger.info(f"Sent magic link to existing user: {email}")
+
+            return Response(
+                {"user_exists": True, "message": "Magic link sent to your email."}, 
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.exception(f"Error in SendMagicLinkView: {str(e)}")
+            return Response({"error": "An error occurred while processing your request."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CreateUserView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        data = request.data
+        email = data.get('email')
         full_name = data.get('fullName', '')
         role = data.get('role', 'participant')
 
+        if not email:
+            return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             with transaction.atomic():
-                # Check if user already exists
-                user, created = User.objects.get_or_create(email=email)
+                if User.objects.filter(email__iexact=email).exists():
+                    return Response(
+                        {"error": "User with this email already exists."}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
-                if created:
-                    # New user, set additional fields
-                    user.full_name = full_name
-                    user.role = role
-                    user.is_active = False  # User is inactive until they verify email
-                    user.save()
-                    logger.info(f"Created new user: {email}")
-                else:
-                    # Existing user, optionally update fields
-                    updated = False
-                    if full_name and user.full_name != full_name:
-                        user.full_name = full_name
-                        updated = True
-                    if user.role != role:
-                        user.role = role
-                        updated = True
-                    if updated:
-                        user.save()
-                        logger.info(f"Updated user information for: {email}")
-                    else:
-                        logger.info(f"No updates needed for existing user: {email}")
+                user = User.objects.create_user(
+                    email=email,
+                    role=role,
+                    full_name=full_name
+                )
+                user.is_active = False # Require verification
+                user.save()
+                
+                logger.info(f"Created new user: {email}")
 
                 # Generate magic link and send email
                 magic_link = generate_magic_link(user)
                 send_magic_link_email(user, magic_link)
-                logger.info(f"Sent magic link to: {email}")
+                logger.info(f"Sent magic link to new user: {email}")
 
-                return Response({"message": "Magic link sent to your email."}, status=status.HTTP_200_OK)
+                return Response(
+                    {"message": "Account created and magic link sent."}, 
+                    status=status.HTTP_201_CREATED
+                )
+
         except Exception as e:
-            logger.exception(f"Error in SendMagicLinkView: {str(e)}")
-            return Response({"error": "An error occurred while processing your request."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.exception(f"Error in CreateUserView: {str(e)}")
+            return Response({"error": "An error occurred while creating the account."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class MagicLinkVerifyView(APIView):
     """
