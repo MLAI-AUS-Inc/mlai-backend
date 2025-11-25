@@ -1,0 +1,25 @@
+from django.db import models
+from django.conf import settings
+
+class Team(models.Model):
+    # team_id is now a positive integer unique field
+    team_id = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    team_name = models.CharField(max_length=100)
+    members = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='esafety_teams')
+
+    def save(self, *args, **kwargs):
+        if self.team_id is None:
+            # Automatically assign next available team_id starting from 1
+            last_team = Team.objects.all().order_by('-team_id').first()
+            if last_team and last_team.team_id < 100:
+                self.team_id = last_team.team_id + 1
+            else:
+                # If no team exists, assign 1
+                self.team_id = 1
+        # Validate team_id is between 1 and 100
+        if self.team_id < 1 or self.team_id > 100:
+            raise ValueError("team_id must be between 1 and 100")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.team_name} (ID: {self.team_id})"

@@ -42,9 +42,20 @@ class SendMagicLinkView(APIView):
                 # Optionally handle inactive users differently, but for now we'll allow them to re-verify
                 pass
 
-            magic_link = generate_magic_link(user)
-            send_magic_link_email(user, magic_link)
-            logger.info(f"Sent magic link to existing user: {email}")
+            # Determine app context
+            app = data.get('app', 'hospital')
+            from django.conf import settings
+            
+            if app == 'esafety':
+                base_url = settings.ESAFETY_URL
+                message_id = "2"
+            else:
+                base_url = settings.MEDHACK_URL
+                message_id = "1"
+
+            magic_link = generate_magic_link(user, base_url=base_url)
+            send_magic_link_email(user, magic_link, message_id=message_id)
+            logger.info(f"Sent magic link to existing user: {email} for app {app}")
 
             return Response(
                 {"user_exists": True, "message": "Magic link sent to your email."}, 
@@ -87,15 +98,37 @@ class CreateUserView(APIView):
                 
                 logger.info(f"Created new user: {email}")
 
-                # Generate magic link and send email
-                magic_link = generate_magic_link(user)
-                send_magic_link_email(user, magic_link)
-                logger.info(f"Sent magic link to new user: {email}")
+            # Generate magic link and send email OUTSIDE the transaction
+            # so if email fails, user is still created.
+            # Generate magic link and send email OUTSIDE the transaction
+            # so if email fails, user is still created.
+            
+            # Determine app context
+            app = data.get('app', 'hospital')
+            from django.conf import settings
+            
+            if app == 'esafety':
+                base_url = settings.ESAFETY_URL
+                message_id = "2"
+            else:
+                base_url = settings.MEDHACK_URL
+                message_id = "1"
 
-                return Response(
-                    {"message": "Account created and magic link sent."}, 
-                    status=status.HTTP_201_CREATED
-                )
+            magic_link = generate_magic_link(user, base_url=base_url)
+            try:
+                send_magic_link_email(user, magic_link, message_id=message_id)
+                logger.info(f"Sent magic link to new user: {email} for app {app}")
+                message = "Account created and magic link sent."
+            except Exception as e:
+                logger.error(f"Failed to send magic link to {email}: {e}")
+                # In development/hackathon, we might want to return the link if email fails
+                # or just log it. For now, we'll return a warning.
+                message = "Account created, but failed to send email. Please check logs for magic link."
+
+            return Response(
+                {"message": message, "magic_link": magic_link}, # Return link for dev convenience
+                status=status.HTTP_201_CREATED
+            )
 
         except Exception as e:
             logger.exception(f"Error in CreateUserView: {str(e)}")
@@ -120,6 +153,7 @@ class MagicLinkVerifyView(APIView):
                 if not user.is_active:
                     user.is_active = True
                     user.save()
+                    logger.info(f"Activated user account for {email}")
 
                 # Generate JWT tokens
                 refresh = RefreshToken.for_user(user)
@@ -137,18 +171,24 @@ class MagicLinkVerifyView(APIView):
                         'is_active': user.is_active,
                         'has_team': user.has_team,
                     },
+                    # TODO: Make this configurable
+                    'next_url': 'http://localhost:3000/dashboard', 
                 }
 
                 response = Response(response_data, status=status.HTTP_200_OK)
 
-                # Set cookies (optional, if you want to store tokens in cookies)
+                # Set cookies
+                # Use settings for secure flag to support local dev (HTTP) vs prod (HTTPS)
+                from django.conf import settings
+                secure_cookie = settings.SIMPLE_JWT.get('AUTH_COOKIE_SECURE', False)
+                
                 response.set_cookie(
                     key='access_token',
                     value=access_token,
                     max_age=86400,  # 1 day
                     httponly=True,
-                    secure=True,  # Set to True in production
-                    samesite='None',
+                    secure=secure_cookie, 
+                    samesite='None' if secure_cookie else 'Lax', # SameSite=None requires Secure=True
                     path='/',
                 )
                 response.set_cookie(
@@ -156,8 +196,8 @@ class MagicLinkVerifyView(APIView):
                     value=refresh_token,
                     max_age=172800,  # 2 days
                     httponly=True,
-                    secure=True,  # Set to True in production
-                    samesite='None',
+                    secure=secure_cookie,
+                    samesite='None' if secure_cookie else 'Lax',
                     path='/',
                 )
 
@@ -226,23 +266,39 @@ class CurrentUserView(APIView):
         if not user.is_authenticated:
             return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
         
-        # Retrieve the user's team details (assuming one team)
-        # Note: 'teams' related name might need to be checked if Team model is in another app
-        team = user.teams.first() if hasattr(user, 'teams') else None
-        team_data = None
-        if team:
-            members = team.members.all().values("full_name")
-            team_data = {
-                "team_name": team.team_name,
+        # Retrieve hospital team
+        hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
+        hospital_team_data = None
+        if hospital_team:
+            members = hospital_team.members.all().values("full_name")
+            hospital_team_data = {
+                "team_name": hospital_team.team_name,
+                "team_id": hospital_team.team_id,
+                "members": list(members)
+            }
+
+        # Retrieve esafety team
+        esafety_team = user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None
+        esafety_team_data = None
+        if esafety_team:
+            members = esafety_team.members.all().values("full_name")
+            esafety_team_data = {
+                "team_name": esafety_team.team_name,
+                "team_id": esafety_team.team_id,
                 "members": list(members)
             }
         
+        # Determine primary team for backward compatibility (prefer hospital)
+        primary_team_data = hospital_team_data if hospital_team_data else esafety_team_data
+
         data = {
             'full_name': user.full_name,
             'email': user.email,
             'role': user.role,
             'is_superuser': user.is_superuser,
-            'team': team_data,  # team will be null if not set
+            'team': primary_team_data,  # Backward compatibility
+            'hospital_team': hospital_team_data,
+            'esafety_team': esafety_team_data,
         }
 
         return Response(data, status=status.HTTP_200_OK)

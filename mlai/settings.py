@@ -192,3 +192,7 @@ try:
     from .settings_prod import *
 except ImportError:
     pass
+
+# App URLs
+MEDHACK_URL = os.getenv('MEDHACK_URL', 'http://localhost:3000')
+ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://localhost:3001')
