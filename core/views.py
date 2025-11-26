@@ -177,20 +177,19 @@ class MagicLinkVerifyView(APIView):
                 # Use settings for secure flag to support local dev (HTTP) vs prod (HTTPS)
                 from django.conf import settings
                 
-                # For local development, don't set domain, secure, or samesite
-                # This creates "host-only" cookies that work with localhost
+                # For local development, set domain to .localhost to allow sharing between subdomains
                 # In production, set domain to .yourdomain.com with Secure=True and SameSite=None
                 is_production = not settings.DEBUG
+                
+                cookie_domain = None if not is_production else '.med-hack.com' # Replace with actual prod domain
+                
                 cookie_kwargs = {
                     'httponly': True,
                     'path': '/',
+                    'domain': cookie_domain,
+                    'secure': is_production,
+                    'samesite': 'None' if is_production else 'Lax',
                 }
-                if is_production:
-                    cookie_kwargs.update({
-                        'domain': '.yourdomain.com',  # Set your production domain
-                        'secure': True,
-                        'samesite': 'None',
-                    })
                 
                 response.set_cookie(
                     key='access_token',
@@ -205,7 +204,7 @@ class MagicLinkVerifyView(APIView):
                     **cookie_kwargs
                 )
 
-                logger.info(f"Set cookies for {email}: production={is_production}, kwargs={cookie_kwargs}")
+                logger.info(f"Set cookies for {email}: kwargs={cookie_kwargs}")
                 return response
 
             except User.DoesNotExist:
@@ -223,19 +222,21 @@ class MyTokenObtainPairView(TokenObtainPairView):
         access_token = response.data.get('access')
         refresh_token = response.data.get('refresh')
 
+        from django.conf import settings
+        is_production = not settings.DEBUG
         response.set_cookie(
             key='access_token',
             value=access_token,
             httponly=True,
-            secure=False,  # True in production with HTTPS
-            samesite='None',  # 'Lax' is acceptable for same-origin requests
+            secure=is_production,
+            samesite='None' if is_production else 'Lax',
         )
         response.set_cookie(
             key='refresh_token',
             value=refresh_token,
             httponly=True,
-            secure=False,  # True in production with HTTPS
-            samesite='None',
+            secure=is_production,
+            samesite='None' if is_production else 'Lax',
         )
         # Remove tokens from response body
         response.data = {}
@@ -253,12 +254,14 @@ class CookieTokenRefreshView(TokenRefreshView):
             return Response({'error': 'Invalid token'}, status=401)
         access_token = serializer.validated_data['access']
         response = Response()
+        from django.conf import settings
+        is_production = not settings.DEBUG
         response.set_cookie(
             key='access_token',
             value=access_token,
             httponly=True,
-            secure=True,  # Must be True when SameSite=None
-            samesite='None',
+            secure=is_production,
+            samesite='None' if is_production else 'Lax',
             path='/',
         )
         return response

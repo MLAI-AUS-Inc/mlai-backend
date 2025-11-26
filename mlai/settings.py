@@ -36,6 +36,7 @@ SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+
 DEBUG = True
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS.extend(['.localhost', 'esafety.localhost'])
 
 
 # Application definition
@@ -88,7 +89,7 @@ WSGI_APPLICATION = 'mlai.wsgi.application'
 
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://esafety.localhost:5173').split(',')
 CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:3000,http://esafety.localhost:5173').split(',')
-CORS_ALLOW_CREDENTIALS = True  # Required for cookies to work cross-origin
+CORS_ALLOW_CREDENTIALS = True
 
 
 database_url = os.getenv('DATABASE_URL')
