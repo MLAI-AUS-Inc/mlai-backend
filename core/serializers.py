@@ -29,3 +29,10 @@ class RegisterSerializer(serializers.ModelSerializer):
             user.is_active = False
             user.save()
         return user
+
+from .models import Hackathon
+
+class HackathonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Hackathon
+        fields = ['name', 'slug', 'description', 'start_date', 'end_date', 'bg_image_url']

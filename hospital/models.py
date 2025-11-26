@@ -27,7 +27,7 @@ class Team(models.Model):
 
 class Submission(models.Model):
     # Associate a submission with a user and a team (if available)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='hospital_submissions')
     team = models.ForeignKey(Team, on_delete=models.CASCADE, null=True, blank=True)
     participant_name = models.CharField(max_length=100)
     score = models.FloatField()

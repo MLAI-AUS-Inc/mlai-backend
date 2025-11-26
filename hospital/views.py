@@ -99,7 +99,7 @@ def submit_predictions(request):
         # Instead of getting team_id from POST, retrieve it from the user.
         # This assumes each user belongs to at least one team. If they might not,
         # you can default to None.
-        team = user.teams.first() if hasattr(user, 'teams') and user.teams.exists() else None
+        team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') and user.hospital_teams.exists() else None
 
         csv_file = request.FILES.get('predictions_csv')
         if not csv_file:

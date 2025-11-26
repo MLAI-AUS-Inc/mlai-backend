@@ -12,6 +12,9 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
+from .models import Hackathon
+from .serializers import MyTokenObtainPairSerializer, HackathonSerializer
+from rest_framework.generics import ListAPIView, RetrieveAPIView
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -158,6 +161,49 @@ class MagicLinkVerifyView(APIView):
                 refresh_token = str(refresh)
 
                 # Build the response payload
+                # Determine next_url based on app context
+                # The frontend should ideally pass 'app' and 'next' as query params to the magic link,
+                # but since the token is generated with a fixed URL structure, we might need to rely on
+                # the frontend to handle the redirection logic or encode it in the token (which requires changing generation).
+                # For now, we will try to read 'app' and 'next' from the request query params if they are preserved,
+                # or default to a sensible logic.
+                
+                # However, the current flow is: User clicks link -> GET /verify-magic-link/?token=...
+                # If we want to support multiple apps, the link itself must carry the info or the token must.
+                # Assuming the link is constructed as: /verify-magic-link/?token=...&app=esafety&next=/dashboard
+                
+                app_param = request.query_params.get('app')
+                next_param = request.query_params.get('next')
+                
+                from django.conf import settings
+                
+                if app_param == 'esafety':
+                    base_url = settings.ESAFETY_URL
+                elif app_param == 'hospital':
+                    base_url = settings.MEDHACK_URL
+                else:
+                    # Default to hospital if not specified, or try to infer?
+                    # Let's default to hospital for backward compatibility if needed, 
+                    # but maybe esafety is the new default?
+                    # Let's stick to the plan: default to hospital logic or check what SendMagicLinkView did.
+                    # SendMagicLinkView defaults to 'hospital'.
+                    base_url = settings.MEDHACK_URL
+
+                # Construct the full next_url
+                # If next_param is provided (e.g. '/esafety.app.dashboard'), append it.
+                # Otherwise default to a dashboard.
+                if next_param:
+                    # Ensure next_param starts with /
+                    if not next_param.startswith('/'):
+                        next_param = '/' + next_param
+                    next_url = f"{base_url}{next_param}"
+                else:
+                    # Default landing pages
+                    if app_param == 'esafety':
+                        next_url = f"{base_url}/esafety.app.dashboard"
+                    else:
+                        next_url = f"{base_url}/hospital.app.dashboard"
+
                 response_data = {
                     'message': 'Login successful',
                     'user': {
@@ -168,7 +214,7 @@ class MagicLinkVerifyView(APIView):
                         'is_active': user.is_active,
                         'has_team': user.has_team,
                     },
-                    'next_url': 'http://esafety.localhost:5173/platform/app/dashboard', 
+                    'next_url': next_url, 
                 }
 
                 response = Response(response_data, status=status.HTTP_200_OK)
@@ -357,3 +403,14 @@ def logout_view(request):
         return response
     except Exception as e:
         return Response({'error': 'Logout failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class HackathonListView(ListAPIView):
+    queryset = Hackathon.objects.all()
+    serializer_class = HackathonSerializer
+    permission_classes = [AllowAny]
+
+class HackathonDetailView(RetrieveAPIView):
+    queryset = Hackathon.objects.all()
+    serializer_class = HackathonSerializer
+    permission_classes = [AllowAny]
+    lookup_field = 'slug'

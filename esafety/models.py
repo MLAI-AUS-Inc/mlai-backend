@@ -23,3 +23,13 @@ class Team(models.Model):
 
     def __str__(self):
         return f"{self.team_name} (ID: {self.team_id})"
+
+class Submission(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='esafety_submissions')
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, null=True, blank=True)
+    file_url = models.URLField(blank=True, null=True) # Assuming file upload or link
+    score = models.FloatField(default=0.0)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Submission by {self.user} at {self.submitted_at}"
