@@ -3,8 +3,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
-from .models import Team, Submission
-from .serializers import TeamSerializer, SubmissionSerializer
+from .models import Team, Submission, Announcement
+from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
 
 class TeamListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -71,3 +71,10 @@ class LeaderboardView(APIView):
                 "score": sub.score
             })
         return Response(data)
+
+from rest_framework import generics
+
+class AnnouncementListView(generics.ListAPIView):
+    queryset = Announcement.objects.all()
+    serializer_class = AnnouncementSerializer
+    permission_classes = [permissions.IsAuthenticated]

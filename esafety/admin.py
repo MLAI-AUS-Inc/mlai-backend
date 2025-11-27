@@ -1,14 +1,11 @@
-import json
 from django.contrib import admin
-from django.utils.html import format_html
 from .models import Team, Submission, Announcement
 
+@admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ('team_id', 'team_name', 'member_list', 'member_count')
-    search_fields = ('team_id', 'team_name')
+    list_display = ('team_name', 'team_id')
+    search_fields = ('team_name',)
     ordering = ('team_id',)
-    filter_horizontal = ('members',)  # Easy widget for editing members
-
 
 @admin.register(Submission)
 class SubmissionAdmin(admin.ModelAdmin):
@@ -21,6 +18,3 @@ class AnnouncementAdmin(admin.ModelAdmin):
     list_display = ('title', 'author', 'created_at')
     list_filter = ('created_at',)
     search_fields = ('title', 'body')
-    ordering = ('-created_at',)
-    # Optionally, restrict the fields that can be edited in the change form.
-    fields = ('user', 'team', 'participant_name', 'score', 'accuracy')

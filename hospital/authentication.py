@@ -31,7 +31,13 @@ class CustomJWTAuthentication(JWTAuthentication):
                 logger.info(f"User authenticated via cookie: {user.email}")
                 return (user, validated_token)
             except exceptions.AuthenticationFailed as e:
-                logger.warning(f"Cookie authentication failed: {str(e)}")
+                # Try to decode token to see user_id for debugging
+                try:
+                    unverified_token = self.get_unverified_token(access_token)
+                    user_id = unverified_token.get('user_id')
+                    logger.warning(f"Cookie authentication failed for user_id {user_id}: {str(e)}")
+                except:
+                    logger.warning(f"Cookie authentication failed: {str(e)}")
                 return None
             except Exception as e:
                 logger.error(f"Unexpected error during cookie authentication: {str(e)}")

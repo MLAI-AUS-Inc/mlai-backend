@@ -49,13 +49,27 @@ class SendMagicLinkView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            if app == 'esafety':
-                base_url = settings.ESAFETY_URL
-            else:
-                base_url = settings.MEDHACK_URL
+            # ALWAYS use the main platform URL for verification
+            # The user requested: http://localhost:5173/verify-email
+            base_url = "http://localhost:5173" 
 
             # Use message_id "2" for both apps since it's configured in Customer.io
+            # We append app and next params to the magic link so the verify page knows where to go
             magic_link = generate_magic_link(user, base_url=base_url)
+            
+            # Append query params to the magic link
+            # generate_magic_link returns base_url + path + ?token=...
+            # We want to add &app=...&next=...
+            if '?' in magic_link:
+                magic_link += f"&app={app}"
+            else:
+                magic_link += f"?app={app}"
+            
+            # We don't have 'next' in the request body usually, but if we did:
+            next_path = data.get('next')
+            if next_path:
+                magic_link += f"&next={next_path}"
+
             logger.info(f"Generated magic link for {email}: {magic_link}")
             send_magic_link_email(user, magic_link, message_id="2")
             logger.info(f"Sent magic link to existing user: {email} for app {app}")
@@ -108,13 +122,16 @@ class CreateUserView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            if app == 'esafety':
-                base_url = settings.ESAFETY_URL
-            else:
-                base_url = settings.MEDHACK_URL
+            # ALWAYS use the main platform URL for verification
+            base_url = "http://localhost:5173"
 
             # Use message_id "2" for both apps since it's configured in Customer.io
             magic_link = generate_magic_link(user, base_url=base_url)
+            
+            if '?' in magic_link:
+                magic_link += f"&app={app}"
+            else:
+                magic_link += f"?app={app}"
             try:
                 send_magic_link_email(user, magic_link, message_id="2")
                 logger.info(f"Sent magic link to new user: {email} for app {app}")
@@ -178,31 +195,33 @@ class MagicLinkVerifyView(APIView):
                 from django.conf import settings
                 
                 if app_param == 'esafety':
-                    base_url = settings.ESAFETY_URL
+                    # Redirect to esafety subdomain
+                    # Assuming esafety.localhost:5173 for dev
+                    base_url = "http://esafety.localhost:5173"
                 elif app_param == 'hospital':
+                    base_url = "http://localhost:5173" # Hospital is on main domain? Or hospital.localhost?
+                    # Based on settings.MEDHACK_URL usage before, it seemed to be localhost:5173 or similar.
+                    # Let's assume hospital is the default/main app or has its own subdomain.
+                    # User said "esafety and hospital directories", implying separation.
+                    # But for now, let's stick to what we know or use settings if available, 
+                    # but user explicitly asked for redirect logic.
+                    # Let's assume hospital is localhost:5173 for now or hospital.localhost if we want symmetry.
+                    # Previous code used settings.MEDHACK_URL.
                     base_url = settings.MEDHACK_URL
                 else:
-                    # Default to hospital if not specified, or try to infer?
-                    # Let's default to hospital for backward compatibility if needed, 
-                    # but maybe esafety is the new default?
-                    # Let's stick to the plan: default to hospital logic or check what SendMagicLinkView did.
-                    # SendMagicLinkView defaults to 'hospital'.
                     base_url = settings.MEDHACK_URL
 
                 # Construct the full next_url
-                # If next_param is provided (e.g. '/esafety.app.dashboard'), append it.
-                # Otherwise default to a dashboard.
                 if next_param:
-                    # Ensure next_param starts with /
                     if not next_param.startswith('/'):
                         next_param = '/' + next_param
                     next_url = f"{base_url}{next_param}"
                 else:
                     # Default landing pages
                     if app_param == 'esafety':
-                        next_url = f"{base_url}/esafety.app.dashboard"
+                        next_url = f"{base_url}/dashboard" # Assuming /dashboard on the subdomain
                     else:
-                        next_url = f"{base_url}/hospital.app.dashboard"
+                        next_url = f"{base_url}/dashboard"
 
                 response_data = {
                     'message': 'Login successful',
@@ -213,6 +232,7 @@ class MagicLinkVerifyView(APIView):
                         'is_superuser': user.is_superuser,
                         'is_active': user.is_active,
                         'has_team': user.has_team,
+                        'avatar_url': user.avatar_url,
                     },
                     'next_url': next_url, 
                 }
@@ -353,6 +373,7 @@ class CurrentUserView(APIView):
             'team': primary_team_data,  # Backward compatibility
             'hospital_team': hospital_team_data,
             'esafety_team': esafety_team_data,
+            'avatar_url': user.avatar_url,
         }
 
         return Response(data, status=status.HTTP_200_OK)

@@ -6,14 +6,15 @@ from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from .models import Submission, Team, Prediction
+from .models import Submission, Team, Prediction, Announcement
+from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 import logging
 from dotenv import load_dotenv
 from django.db import transaction
 from django.contrib.auth import get_user_model
-from rest_framework import permissions, status
+from rest_framework import permissions, status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -309,3 +310,8 @@ def get_team_names(request):
     teams = Team.objects.all().order_by('team_name')
     team_names = list(teams.values_list('team_name', flat=True))
     return Response(team_names)
+
+class AnnouncementListView(generics.ListAPIView):
+    queryset = Announcement.objects.all()
+    serializer_class = AnnouncementSerializer
+    permission_classes = [permissions.IsAuthenticated]
