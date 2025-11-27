@@ -354,22 +354,22 @@ class CurrentUserView(APIView):
         hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
         hospital_team_data = None
         if hospital_team:
-            members = [{"full_name": m.full_name} for m in hospital_team.members.all()]
+            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url", "role")
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
-                "members": list(members)
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 
         # Retrieve esafety team
         esafety_team = user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None
         esafety_team_data = None
         if esafety_team:
-            members = [{"full_name": m.full_name} for m in esafety_team.members.all()]
+            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url", "role")
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
-                "members": list(members)
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
         
         # Determine primary team for backward compatibility (prefer hospital)
@@ -493,11 +493,11 @@ class UpdateProfileView(APIView):
         esafety_team = user.esafety_teams.first()
         esafety_team_data = None
         if esafety_team:
-            members = esafety_team.members.all().values("full_name")
+            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url", "role")
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
-                "members": list(members)
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 
         data = {

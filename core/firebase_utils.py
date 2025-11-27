@@ -3,6 +3,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore, storage
 import logging
 import os
+import uuid
+import urllib.parse
 from datetime import timedelta
 from dotenv import load_dotenv
 
@@ -33,8 +35,24 @@ def initialize_firebase():
         # Construct credentials dictionary
         # Handle potential newline escaping in private key
         private_key = FIREBASE_PRIVATE_KEY
-        if private_key and '\\n' in private_key:
-            private_key = private_key.replace('\\n', '\n')
+        
+        # Try to decode base64 if it doesn't look like a PEM key yet
+        if private_key and not private_key.strip().startswith('-----BEGIN PRIVATE KEY-----'):
+            try:
+                import base64
+                decoded = base64.b64decode(private_key).decode('utf-8')
+                if '-----BEGIN PRIVATE KEY-----' in decoded:
+                    private_key = decoded
+            except Exception:
+                pass
+
+        if private_key:
+            # Replace literal \n with actual newline
+            if '\\n' in private_key:
+                private_key = private_key.replace('\\n', '\n')
+            
+            # Fix potential double newlines from user copy-paste or echo
+            private_key = private_key.replace('\n\n', '\n')
 
         firebase_credentials = {
             "type": "service_account",
@@ -113,31 +131,19 @@ def upload_file_to_storage(file_obj, destination_path, content_type=None):
         blob.upload_from_file(file_obj, content_type=content_type)
         logger.info(f"Upload completed successfully to {destination_path}")
 
-        # For avatars, we generally want them to be publicly accessible or signed long-term.
-        # The user's example used signed URLs for avatars.
-        # Let's use signed URLs with long expiration (e.g., 7 days) or make public.
-        # Making public is easier for a website avatar.
+        # Generate a download token for the file
+        # This allows access via the Firebase Storage URL format without making the bucket public
+        token = str(uuid.uuid4())
+        metadata = {"firebaseStorageDownloadTokens": token}
+        blob.metadata = metadata
+        blob.patch()
         
-        # If the user wants to use signed URLs as per their snippet:
-        # "For avatars, generate a signed URL"
-        
-        # However, for a user profile avatar on a public/semi-public site, 
-        # making it public is usually better so it doesn't expire.
-        # But I will follow the user's snippet logic which used signed URLs for "avatars/"
-        # and public for "blurred-avatars/".
-        
-        # Actually, let's make it public for simplicity and reliability unless privacy is strict.
-        # The user's snippet had:
-        # if "avatars/" in destination_path: ... generate_signed_url ...
-        
-        # I'll stick to signed URL for now to match their code, but maybe increase expiration or just make public if it's easier.
-        # Let's make it public for now as it's a hackathon app and expiring avatars are annoying.
-        # Wait, the user specifically asked "save it in firebase storage with a url i can reference later".
-        # A signed URL expires. A public URL does not.
-        # I will make it public.
-        
-        blob.make_public()
-        return blob.public_url
+        # Construct the public URL (Firebase format)
+        # We must URL-encode the path (including slashes)
+        encoded_name = urllib.parse.quote(destination_path, safe='')
+        public_url = f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{encoded_name}?alt=media&token={token}"
+
+        return public_url
 
     except Exception as e:
         logger.error(f'Failed to upload file to Firebase Storage: {str(e)}', exc_info=True)
