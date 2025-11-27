@@ -94,9 +94,9 @@ CORS_ALLOW_CREDENTIALS = True
 
 database_url = os.getenv('DATABASE_URL')
 default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
-default_config.update({
-    'ENGINE': 'django.db.backends.postgresql',
-})
+# default_config.update({
+#     'ENGINE': 'django.db.backends.postgresql',
+# })
 
 if 'DYNO' in os.environ:  # Running on Heroku
     DATABASES = {
@@ -112,7 +112,7 @@ else:
     DATABASES = {
         'default': dj_database_url.config(
             default=database_url,
-            engine='django.db.backends.postgresql',
+            # engine='django.db.backends.postgresql',
             conn_max_age=600,
             ssl_require=False
         )

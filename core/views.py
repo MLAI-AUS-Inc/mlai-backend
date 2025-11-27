@@ -15,8 +15,9 @@ from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
-from .serializers import MyTokenObtainPairSerializer, HackathonSerializer
-from rest_framework.generics import ListAPIView, RetrieveAPIView
+from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
+from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
+from .permissions import IsOwnerOrTeammateOrSuperuser
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -542,3 +543,9 @@ class HackathonDetailView(RetrieveAPIView):
     serializer_class = HackathonSerializer
     permission_classes = [AllowAny]
     lookup_field = 'slug'
+
+class UserDetailView(RetrieveUpdateAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated, IsOwnerOrTeammateOrSuperuser]
+

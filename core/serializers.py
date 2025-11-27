@@ -39,3 +39,9 @@ class HackathonSerializer(serializers.ModelSerializer):
     class Meta:
         model = Hackathon
         fields = ['name', 'slug', 'description', 'start_date', 'end_date', 'bg_image_url']
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'about', 'role', 'avatar_url', 'is_superuser']
+        read_only_fields = ['email', 'role', 'is_superuser']
