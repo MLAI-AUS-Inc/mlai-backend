@@ -3,7 +3,7 @@ version: '3.8'
 services:
   web:
     build: .
-    command: gunicorn --bind 0.0.0.0:8000 mlai.wsgi:application
+    command: gunicorn --bind 0.0.0.0:8000 --timeout 120 mlai.wsgi:application
     volumes:
       - .:/app
     ports:

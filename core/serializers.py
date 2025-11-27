@@ -14,18 +14,21 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
 class RegisterSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['email', 'full_name']
+        fields = ['email', 'first_name', 'last_name']
         extra_kwargs = {
             'email': {'required': True},
-            'full_name': {'required': False},
+            'first_name': {'required': False},
+            'last_name': {'required': False},
         }
 
     def create(self, validated_data):
         email = validated_data['email']
-        full_name = validated_data.get('full_name', '')
+        first_name = validated_data.get('first_name', '')
+        last_name = validated_data.get('last_name', '')
         user, created = User.objects.get_or_create(email=email)
         if created:
-            user.full_name = full_name
+            user.first_name = first_name
+            user.last_name = last_name
             user.is_active = False
             user.save()
         return user

@@ -1,6 +1,7 @@
 import logging
 from django.db import transaction
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -13,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 from .models import Hackathon
+from esafety.models import Team as EsafetyTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 
@@ -91,7 +93,10 @@ class CreateUserView(APIView):
     def post(self, request):
         data = request.data
         email = data.get('email')
-        full_name = data.get('fullName', '')
+        first_name = data.get('firstName', '')
+        last_name = data.get('lastName', '')
+        full_name = f"{first_name} {last_name}".strip()
+        phone = data.get('phone')
         role = data.get('role', 'participant')
 
         if not email:
@@ -108,7 +113,9 @@ class CreateUserView(APIView):
                 user = User.objects.create_user(
                     email=email,
                     role=role,
-                    full_name=full_name
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone
                 )
                 user.is_active = False # Require verification
                 user.save()
@@ -227,6 +234,8 @@ class MagicLinkVerifyView(APIView):
                     'message': 'Login successful',
                     'user': {
                         'email': user.email,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
                         'full_name': user.full_name,
                         'role': user.role,
                         'is_superuser': user.is_superuser,
@@ -344,7 +353,7 @@ class CurrentUserView(APIView):
         hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
         hospital_team_data = None
         if hospital_team:
-            members = hospital_team.members.all().values("full_name")
+            members = [{"full_name": m.full_name} for m in hospital_team.members.all()]
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
@@ -355,7 +364,7 @@ class CurrentUserView(APIView):
         esafety_team = user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None
         esafety_team_data = None
         if esafety_team:
-            members = esafety_team.members.all().values("full_name")
+            members = [{"full_name": m.full_name} for m in esafety_team.members.all()]
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
@@ -366,8 +375,12 @@ class CurrentUserView(APIView):
         primary_team_data = hospital_team_data if hospital_team_data else esafety_team_data
 
         data = {
+            'first_name': user.first_name,
+            'last_name': user.last_name,
             'full_name': user.full_name,
             'email': user.email,
+            'phone': user.phone,
+            'about': user.about,
             'role': user.role,
             'is_superuser': user.is_superuser,
             'team': primary_team_data,  # Backward compatibility
@@ -384,17 +397,27 @@ class UpdateProfileView(APIView):
     def patch(self, request):
         user = request.user
         full_name = request.data.get("full_name")
+        first_name = request.data.get("first_name")
+        last_name = request.data.get("last_name")
         email = request.data.get("email")
-
-        # Require all fields to be provided.
-        if not full_name or not email:
-            return Response(
-                {"error": "full_name and email are required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        phone = request.data.get("phone")
+        about = request.data.get("about")
+        team_name = request.data.get("team")
 
         # Update the user's profile information.
-        user.full_name = full_name
+        if first_name:
+            user.first_name = first_name
+        if last_name:
+            user.last_name = last_name
+            
+        if full_name:
+            user.full_name = full_name
+        
+        if phone is not None:
+            user.phone = phone
+            
+        if about is not None:
+            user.about = about
 
         # Only update the email if it's changed.
         if email and email != user.email:
@@ -403,7 +426,91 @@ class UpdateProfileView(APIView):
 
         user.save()
 
-        return Response({"message": "Profile updated successfully."}, status=status.HTTP_200_OK)
+        # Handle team update if provided
+        if team_name:
+            # Remove user from any existing esafety teams
+            # Assuming a user can only be in one team for esafety
+            current_teams = user.esafety_teams.all()
+            for t in current_teams:
+                t.members.remove(user)
+            
+            # Find or create the team
+            # We use filter().first() to avoid errors if multiple teams somehow have same name (though unlikely with unique constraints if any)
+            # But Team model in esafety doesn't enforce unique name, only unique team_id. 
+            # Let's assume we want to match by name.
+            team = EsafetyTeam.objects.filter(team_name__iexact=team_name).first()
+            
+            if not team:
+                # Create new team
+                team = EsafetyTeam.objects.create(team_name=team_name)
+            
+            # Add user to the team
+            team.members.add(user)
+
+        # Handle avatar upload
+        avatar_file = request.FILES.get('avatar')
+        if avatar_file:
+            try:
+                from PIL import Image
+                from io import BytesIO
+                from .firebase_utils import upload_file_to_storage
+                
+                # Open image
+                img = Image.open(avatar_file)
+                
+                # Resize/Crop to square (optional but good for avatars)
+                # Simple resize to max 200x200 while maintaining aspect ratio, then center crop?
+                # Or just resize to 200x200 thumbnail
+                img.thumbnail((300, 300)) 
+                
+                # Save to buffer
+                output_buffer = BytesIO()
+                # Convert to RGB if RGBA (e.g. PNG) and saving as JPEG, 
+                # but let's keep original format or default to PNG for transparency
+                img_format = img.format if img.format else 'PNG'
+                img.save(output_buffer, format=img_format)
+                output_buffer.seek(0)
+                
+                # Upload
+                # Use user ID in filename to avoid collisions/overwrite
+                filename = f"avatars/{user.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
+                avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
+                
+                if avatar_url:
+                    user.avatar_url = avatar_url
+                    user.save()
+                    
+            except Exception as e:
+                logger.error(f"Error uploading avatar: {e}")
+                # Don't fail the whole request, just log it
+
+
+        # Return the updated profile
+        # Re-use CurrentUserView logic or similar structure
+        
+        # Retrieve esafety team (freshly updated)
+        esafety_team = user.esafety_teams.first()
+        esafety_team_data = None
+        if esafety_team:
+            members = esafety_team.members.all().values("full_name")
+            esafety_team_data = {
+                "team_name": esafety_team.team_name,
+                "team_id": esafety_team.team_id,
+                "members": list(members)
+            }
+
+        data = {
+            'full_name': user.full_name,
+            'email': user.email,
+            'phone': user.phone,
+            'about': user.about,
+            'role': user.role,
+            'is_superuser': user.is_superuser,
+            'team': esafety_team_data, 
+            'avatar_url': user.avatar_url,
+        }
+
+        return Response(data, status=status.HTTP_200_OK)
 
 @csrf_exempt
 @api_view(['POST'])

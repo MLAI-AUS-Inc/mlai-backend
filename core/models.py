@@ -28,7 +28,23 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('professional', 'Professional'), # Added for flexibility
     )
     email = models.EmailField(unique=True)
-    full_name = models.CharField(max_length=255, blank=True)
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+    
+    @full_name.setter
+    def full_name(self, value):
+        parts = value.strip().split(' ', 1)
+        self.first_name = parts[0]
+        if len(parts) > 1:
+            self.last_name = parts[1]
+        else:
+            self.last_name = ''
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    about = models.TextField(blank=True, null=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='participant')
     is_superuser = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)

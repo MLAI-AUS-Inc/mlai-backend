@@ -47,8 +47,9 @@ def send_magic_link_email(user, magic_link, message_id="2"):
     client = APIClient(CUSTOMER_IO_API_KEY)
 
     # Prepare display name
-    full_name = user.full_name.strip() if user.full_name else ''
-    first_name = full_name.split(' ')[0] if full_name else ''
+    # Prepare display name
+    full_name = user.full_name
+    first_name = user.first_name
     display_name = full_name or user.email
 
     # Build request body as dictionary (not SendEmailRequest object)

@@ -14,6 +14,18 @@ class TeamListView(APIView):
         serializer = TeamSerializer(teams, many=True)
         return Response(serializer.data)
 
+class TeamNamesListView(APIView):
+    permission_classes = [permissions.AllowAny] # Or IsAuthenticated? Prompt says "List available teams". Usually public or auth. Let's assume IsAuthenticated to be safe, or AllowAny if it's for a dropdown on a public page?
+    # The prompt says "GET /api/v1/teams/".
+    # Let's stick to IsAuthenticated as it's likely for a logged in user updating profile.
+    # But wait, "List available teams for the dropdown."
+    # If I am registering, I might need it? But profile update implies I am logged in.
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        team_names = Team.objects.values_list('team_name', flat=True)
+        return Response({"team_names": list(team_names)})
+
 class JoinTeamView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
