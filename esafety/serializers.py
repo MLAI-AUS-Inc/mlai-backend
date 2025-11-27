@@ -7,7 +7,7 @@ User = get_user_model()
 class TeamSerializer(serializers.ModelSerializer):
     class Meta:
         model = Team
-        fields = ['id', 'team_id', 'team_name', 'members']
+        fields = ['id', 'team_id', 'team_name', 'members', 'avatar_url']
 
 class SubmissionSerializer(serializers.ModelSerializer):
     class Meta:

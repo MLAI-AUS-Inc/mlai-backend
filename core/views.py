@@ -369,6 +369,7 @@ class CurrentUserView(APIView):
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
+                "avatar_url": esafety_team.avatar_url,
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
         
@@ -485,6 +486,42 @@ class UpdateProfileView(APIView):
                 logger.error(f"Error uploading avatar: {e}")
                 # Don't fail the whole request, just log it
 
+        # Handle team avatar upload
+        team_avatar_file = request.FILES.get('team_avatar')
+        if team_avatar_file:
+            # Get the user's current team (esafety)
+            # We assume the user is in a team if they are uploading a team avatar, 
+            # or they just joined/created one above.
+            team = user.esafety_teams.first()
+            if team:
+                try:
+                    from PIL import Image
+                    from io import BytesIO
+                    from .firebase_utils import upload_file_to_storage
+                    
+                    # Open image
+                    img = Image.open(team_avatar_file)
+                    
+                    # Resize/Crop
+                    img.thumbnail((300, 300)) 
+                    
+                    # Save to buffer
+                    output_buffer = BytesIO()
+                    img_format = img.format if img.format else 'PNG'
+                    img.save(output_buffer, format=img_format)
+                    output_buffer.seek(0)
+                    
+                    # Upload
+                    filename = f"team-avatars/{team.team_id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
+                    team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
+                    
+                    if team_avatar_url:
+                        team.avatar_url = team_avatar_url
+                        team.save()
+                        
+                except Exception as e:
+                    logger.error(f"Error uploading team avatar: {e}")
+
 
         # Return the updated profile
         # Re-use CurrentUserView logic or similar structure
@@ -497,6 +534,7 @@ class UpdateProfileView(APIView):
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
+                "avatar_url": esafety_team.avatar_url,
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 

@@ -6,6 +6,7 @@ class Team(models.Model):
     team_id = models.PositiveIntegerField(unique=True, blank=True, null=True)
     team_name = models.CharField(max_length=100)
     members = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='esafety_teams')
+    avatar_url = models.URLField(blank=True, null=True)
 
     def save(self, *args, **kwargs):
         if self.team_id is None:
