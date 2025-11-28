@@ -375,6 +375,7 @@ class CurrentUserView(APIView):
             'hospital_team': hospital_team_data,
             'esafety_team': esafety_team_data,
             'avatar_url': user.avatar_url,
+            'personas': user.personas,
         }
 
         return Response(data, status=status.HTTP_200_OK)
@@ -391,6 +392,12 @@ class UpdateProfileView(APIView):
         phone = request.data.get("phone")
         about = request.data.get("about")
         team_name = request.data.get("team")
+        
+        # Handle personas (list of strings)
+        if hasattr(request.data, 'getlist'):
+            personas = request.data.getlist("personas")
+        else:
+            personas = request.data.get("personas")
 
         logger.info(f"UpdateProfileView PATCH: user={user.email}, data_keys={list(request.data.keys())}, files_keys={list(request.FILES.keys())}")
 
@@ -408,6 +415,12 @@ class UpdateProfileView(APIView):
             
         if about is not None:
             user.about = about
+
+        if personas is not None:
+            # Ensure it's a list
+            if isinstance(personas, str):
+                personas = [personas]
+            user.personas = personas
 
         # Only update the email if it's changed.
         if email and email != user.email:
@@ -538,6 +551,7 @@ class UpdateProfileView(APIView):
             'is_superuser': user.is_superuser,
             'team': esafety_team_data, 
             'avatar_url': user.avatar_url,
+            'personas': user.personas,
         }
 
         return Response(data, status=status.HTTP_200_OK)

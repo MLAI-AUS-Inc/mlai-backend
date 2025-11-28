@@ -52,6 +52,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)  # Required for admin interface
     date_joined = models.DateTimeField(default=timezone.now)
     avatar_url = models.URLField(blank=True, null=True)
+    personas = models.JSONField(default=list, blank=True)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['role']
