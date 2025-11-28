@@ -4,6 +4,9 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from .models import Team, Submission, Announcement
+
+print("DEBUG: ESAFETY VIEWS MODULE LOADED")
+
 from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
 
 class TeamListView(APIView):
