@@ -41,7 +41,9 @@ class HackathonSerializer(serializers.ModelSerializer):
         fields = ['name', 'slug', 'description', 'start_date', 'end_date', 'bg_image_url']
 
 class UserSerializer(serializers.ModelSerializer):
+    team_avatar = serializers.FileField(write_only=True, required=False)
+    
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'about', 'role', 'avatar_url', 'is_superuser']
+        fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'about', 'role', 'avatar_url', 'is_superuser', 'team_avatar']
         read_only_fields = ['email', 'role', 'is_superuser']

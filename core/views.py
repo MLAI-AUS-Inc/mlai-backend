@@ -406,6 +406,8 @@ class UpdateProfileView(APIView):
         about = request.data.get("about")
         team_name = request.data.get("team")
 
+        logger.info(f"UpdateProfileView PATCH: user={user.email}, data_keys={list(request.data.keys())}, files_keys={list(request.FILES.keys())}")
+
         # Update the user's profile information.
         if first_name:
             user.first_name = first_name
@@ -487,8 +489,11 @@ class UpdateProfileView(APIView):
                 # Don't fail the whole request, just log it
 
         # Handle team avatar upload
-        team_avatar_file = request.FILES.get('team_avatar')
+        # Check both FILES and data (in case of different parsing)
+        team_avatar_file = request.FILES.get('team_avatar') or request.data.get('team_avatar')
+        
         if team_avatar_file:
+            logger.info(f"Processing team_avatar: {team_avatar_file}")
             # Get the user's current team (esafety)
             # We assume the user is in a team if they are uploading a team avatar, 
             # or they just joined/created one above.
