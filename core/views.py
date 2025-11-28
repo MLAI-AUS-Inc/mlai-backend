@@ -564,9 +564,15 @@ def logout_view(request):
         # Create response object
         response = Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
         
+        from django.conf import settings
+        is_production = not settings.DEBUG
+        cookie_domain = None if not is_production else '.mlai.au'
+        samesite = 'None' if is_production else 'Lax'
+
         # Delete authentication cookies
-        response.delete_cookie('access_token', path='/')
-        response.delete_cookie('refresh_token', path='/')
+        # We must provide the same domain and samesite as when they were set
+        response.delete_cookie('access_token', path='/', domain=cookie_domain, samesite=samesite)
+        response.delete_cookie('refresh_token', path='/', domain=cookie_domain, samesite=samesite)
         
         # Delete any session-related cookies
         response.delete_cookie('sessionid', path='/')
