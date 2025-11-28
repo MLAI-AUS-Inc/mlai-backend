@@ -52,9 +52,14 @@ class SendMagicLinkView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            # ALWAYS use the main platform URL for verification
-            # The user requested: http://localhost:5173/verify-email
-            base_url = "http://localhost:5173" 
+            # Determine base_url based on app and environment
+            if settings.DEBUG:
+                if app == 'esafety':
+                    base_url = "http://esafety.localhost:5173"
+                else:
+                    base_url = "http://localhost:5173"
+            else:
+                base_url = "https://mlai.au" 
 
             # Use message_id "2" for both apps since it's configured in Customer.io
             # We append app and next params to the magic link so the verify page knows where to go
@@ -130,8 +135,14 @@ class CreateUserView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            # ALWAYS use the main platform URL for verification
-            base_url = "http://localhost:5173"
+            # Determine base_url based on app and environment
+            if settings.DEBUG:
+                if app == 'esafety':
+                    base_url = "http://esafety.localhost:5173"
+                else:
+                    base_url = "http://localhost:5173"
+            else:
+                base_url = "https://mlai.au"
 
             # Use message_id "2" for both apps since it's configured in Customer.io
             magic_link = generate_magic_link(user, base_url=base_url)
@@ -202,22 +213,14 @@ class MagicLinkVerifyView(APIView):
                 
                 from django.conf import settings
                 
-                if app_param == 'esafety':
-                    # Redirect to esafety subdomain
-                    # Assuming esafety.localhost:5173 for dev
-                    base_url = "http://esafety.localhost:5173"
-                elif app_param == 'hospital':
-                    base_url = "http://localhost:5173" # Hospital is on main domain? Or hospital.localhost?
-                    # Based on settings.MEDHACK_URL usage before, it seemed to be localhost:5173 or similar.
-                    # Let's assume hospital is the default/main app or has its own subdomain.
-                    # User said "esafety and hospital directories", implying separation.
-                    # But for now, let's stick to what we know or use settings if available, 
-                    # but user explicitly asked for redirect logic.
-                    # Let's assume hospital is localhost:5173 for now or hospital.localhost if we want symmetry.
-                    # Previous code used settings.MEDHACK_URL.
-                    base_url = settings.MEDHACK_URL
+                # Determine base_url based on app and environment
+                if settings.DEBUG:
+                    if app_param == 'esafety':
+                        base_url = "http://esafety.localhost:5173"
+                    else:
+                        base_url = "http://localhost:5173"
                 else:
-                    base_url = settings.MEDHACK_URL
+                    base_url = "https://mlai.au"
 
                 # Construct the full next_url
                 if next_param:
