@@ -52,12 +52,10 @@ class SendMagicLinkView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            # Determine base_url based on app and environment
+            # Determine base_url based on environment
+            # We now use a single domain for both apps
             if settings.DEBUG:
-                if app == 'esafety':
-                    base_url = "http://esafety.localhost:5173"
-                else:
-                    base_url = "http://localhost:5173"
+                base_url = "http://localhost:5173"
             else:
                 base_url = "https://mlai.au" 
 
@@ -135,12 +133,9 @@ class CreateUserView(APIView):
             app = data.get('app', 'hospital')
             from django.conf import settings
             
-            # Determine base_url based on app and environment
+            # Determine base_url based on environment
             if settings.DEBUG:
-                if app == 'esafety':
-                    base_url = "http://esafety.localhost:5173"
-                else:
-                    base_url = "http://localhost:5173"
+                base_url = "http://localhost:5173"
             else:
                 base_url = "https://mlai.au"
 
@@ -198,27 +193,15 @@ class MagicLinkVerifyView(APIView):
 
                 # Build the response payload
                 # Determine next_url based on app context
-                # The frontend should ideally pass 'app' and 'next' as query params to the magic link,
-                # but since the token is generated with a fixed URL structure, we might need to rely on
-                # the frontend to handle the redirection logic or encode it in the token (which requires changing generation).
-                # For now, we will try to read 'app' and 'next' from the request query params if they are preserved,
-                # or default to a sensible logic.
-                
-                # However, the current flow is: User clicks link -> GET /verify-magic-link/?token=...
-                # If we want to support multiple apps, the link itself must carry the info or the token must.
-                # Assuming the link is constructed as: /verify-magic-link/?token=...&app=esafety&next=/dashboard
                 
                 app_param = request.query_params.get('app')
                 next_param = request.query_params.get('next')
                 
                 from django.conf import settings
                 
-                # Determine base_url based on app and environment
+                # Determine base_url based on environment
                 if settings.DEBUG:
-                    if app_param == 'esafety':
-                        base_url = "http://esafety.localhost:5173"
-                    else:
-                        base_url = "http://localhost:5173"
+                    base_url = "http://localhost:5173"
                 else:
                     base_url = "https://mlai.au"
 
@@ -230,7 +213,7 @@ class MagicLinkVerifyView(APIView):
                 else:
                     # Default landing pages
                     if app_param == 'esafety':
-                        next_url = f"{base_url}/dashboard" # Assuming /dashboard on the subdomain
+                        next_url = f"{base_url}/esafety/dashboard" 
                     else:
                         next_url = f"{base_url}/dashboard"
 
@@ -256,11 +239,11 @@ class MagicLinkVerifyView(APIView):
                 # Use settings for secure flag to support local dev (HTTP) vs prod (HTTPS)
                 from django.conf import settings
                 
-                # For local development, set domain to .localhost to allow sharing between subdomains
-                # In production, set domain to .yourdomain.com with Secure=True and SameSite=None
+                # For local development, set domain to None (host only)
+                # In production, set domain to .mlai.au with Secure=True and SameSite=None
                 is_production = not settings.DEBUG
                 
-                cookie_domain = None if not is_production else '.med-hack.com' # Replace with actual prod domain
+                cookie_domain = None if not is_production else '.mlai.au'
                 
                 cookie_kwargs = {
                     'httponly': True,

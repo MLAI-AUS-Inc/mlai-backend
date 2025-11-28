@@ -53,20 +53,20 @@ def verify_flow():
         return
 
     # 3. Simulate MagicLinkVerifyView Redirect Logic
-    if app_param == 'esafety':
-        redirect_base = "http://esafety.localhost:5173"
-    elif app_param == 'hospital':
-        redirect_base = "http://localhost:5173" # or settings.MEDHACK_URL
-    else:
-        redirect_base = "http://localhost:3000" # fallback
+    # In the new logic, we use the same base URL for both apps
+    redirect_base = "http://localhost:5173"
 
-    next_url = f"{redirect_base}/dashboard"
+    if app_param == 'esafety':
+        next_url = f"{redirect_base}/esafety/dashboard"
+    else:
+        next_url = f"{redirect_base}/dashboard"
+
     print(f"Calculated Redirect URL: {next_url}")
 
-    if next_url == "http://esafety.localhost:5173/dashboard":
+    if next_url == "http://localhost:5173/esafety/dashboard":
         print("SUCCESS: Redirect logic is correct.")
     else:
-        print("FAIL: Redirect logic is incorrect.")
+        print(f"FAIL: Redirect logic is incorrect. Expected http://localhost:5173/esafety/dashboard, got {next_url}")
 
 if __name__ == '__main__':
     verify_flow()
