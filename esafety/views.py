@@ -86,7 +86,19 @@ class LeaderboardView(APIView):
 
 from rest_framework import generics
 
+import logging
+logger = logging.getLogger(__name__)
+
 class AnnouncementListView(generics.ListAPIView):
     queryset = Announcement.objects.all()
     serializer_class = AnnouncementSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def initial(self, request, *args, **kwargs):
+        logger.info(f"AnnouncementListView initial check. User: {request.user}")
+        logger.info(f"User authenticated: {request.user.is_authenticated}")
+        logger.info(f"Auth: {request.auth}")
+        super().initial(request, *args, **kwargs)
+
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
