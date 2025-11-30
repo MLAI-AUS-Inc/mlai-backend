@@ -33,7 +33,11 @@ def check_leaderboard():
             "accuracy": sub.fine_score, 
             "submitted_at": str(sub.submitted_at),
             "team": team_data,
-            "participant_name": sub.participant_name
+            "participant_name": sub.participant_name,
+            "user_email": sub.user.email,
+            "file_url": sub.file_url,
+            "user_avatar": sub.user.avatar_url,
+            "user_name": sub.user.full_name
         })
     
     print(json.dumps(data, indent=2))
