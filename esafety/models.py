@@ -28,12 +28,22 @@ class Team(models.Model):
 class Submission(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='esafety_submissions')
     team = models.ForeignKey(Team, on_delete=models.CASCADE, null=True, blank=True)
-    file_url = models.URLField(blank=True, null=True) # Assuming file upload or link
+    participant_name = models.CharField(max_length=100, blank=True, null=True)
+    file_url = models.URLField(blank=True, null=True)
     score = models.FloatField(default=0.0)
+    coarse_score = models.FloatField(default=0.0)
+    fine_score = models.FloatField(default=0.0)
     submitted_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Submission by {self.user} at {self.submitted_at}"
+
+class Prediction(models.Model):
+    submission = models.ForeignKey(Submission, related_name='predictions', on_delete=models.CASCADE)
+    record_id = models.CharField(max_length=100)
+    predicted_labels = models.JSONField() # List of predicted labels
+    correct_labels = models.JSONField() # List of correct labels
+
 
 import uuid
 
