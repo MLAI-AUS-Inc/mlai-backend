@@ -309,8 +309,8 @@ class LeaderboardView(APIView):
             
             data.append({
                 "id": sub.id,
-                "score": sub.score,
-                "accuracy": sub.fine_score, # Using fine_score (Persona F1) as accuracy
+                "score": sub.score * 100,
+                "accuracy": sub.fine_score * 100, # Using fine_score (Persona F1) as accuracy
                 "submitted_at": sub.submitted_at,
                 "team": team_data,
                 "participant_name": sub.participant_name,
