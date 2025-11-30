@@ -312,7 +312,8 @@ class LeaderboardView(APIView):
                 "score": sub.score,
                 "accuracy": sub.fine_score, # Using fine_score (Persona F1) as accuracy
                 "submitted_at": sub.submitted_at,
-                "team": team_data
+                "team": team_data,
+                "participant_name": sub.participant_name
             })
         return Response(data)
 
