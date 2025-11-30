@@ -34,6 +34,7 @@ class Submission(models.Model):
     coarse_score = models.FloatField(default=0.0)
     fine_score = models.FloatField(default=0.0)
     submitted_at = models.DateTimeField(auto_now_add=True)
+    logs = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return f"Submission by {self.user} at {self.submitted_at}"
