@@ -177,7 +177,22 @@ def submit_predictions(request):
     
     for i in ids:
         gt = gt_dict[i]
-        pred = pred_dict[i]
+        
+        # Handle 0-based indexing in predictions vs 1-based in GT
+        # GT ID "1" corresponds to Pred ID "0"
+        try:
+            pred_id = str(int(i) - 1)
+            pred = pred_dict.get(pred_id)
+        except ValueError:
+            pred = None
+            
+        if not pred:
+            # Fallback to exact match if shifted ID not found (e.g. if user used 1-based IDs)
+            pred = pred_dict.get(i)
+            
+        if not pred:
+            # Skip if still not found (should be caught by subset check earlier, but safe to skip)
+            continue
         
         # Extract labels
         t_labels = {l for l in LABELS if int(gt.get(l, 0)) == 1}
@@ -310,7 +325,7 @@ class LeaderboardView(APIView):
             data.append({
                 "id": sub.id,
                 "score": sub.score * 100,
-                "accuracy": sub.fine_score * 100, # Using fine_score (Persona F1) as accuracy
+                "accuracy": sub.fine_score, # Using fine_score (Persona F1) as accuracy
                 "submitted_at": sub.submitted_at,
                 "team": team_data,
                 "participant_name": sub.participant_name,
