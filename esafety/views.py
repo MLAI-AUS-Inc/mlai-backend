@@ -96,26 +96,16 @@ import json
 def load_ground_truth():
     gt_rows = []
     try:
-        with open('./esafety/competition_holdout.jsonl', 'r') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                data = json.loads(line)
-                row = {'ID': str(data['id'])}
-                # Initialize all labels to 0
-                for label in LABELS:
-                    row[label] = '0'
-                
-                # Set present labels to 1
-                for label in data.get('category_labels', []):
-                    if label in LABELS:
-                        row[label] = '1'
-                
+        with open('./esafety/solution_multilabel.csv', 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Filter out Usage column if present in row dict, or just keep it
+                # We only need ID and labels
                 gt_rows.append(row)
     except FileNotFoundError:
-        logger.error("Ground truth file not found at ./esafety/competition_holdout.jsonl")
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSONL: {e}")
+        logger.error("Ground truth file not found at ./esafety/solution_multilabel.csv")
+    except Exception as e:
+        logger.error(f"Error loading GT CSV: {e}")
     return gt_rows
 
 @api_view(['POST'])
@@ -156,7 +146,7 @@ def submit_predictions(request):
     gt_dict = {row['ID']: row for row in gt_rows}
     pred_dict = {row['ID']: row for row in pred_rows}
     
-    ids = sorted(gt_dict.keys()) # Use GT IDs to ensure order and subset
+    ids = sorted(gt_dict.keys(), key=lambda x: int(x)) # Use GT IDs to ensure order and subset
     
     true_labels_list = []
     pred_labels_list = []
@@ -177,18 +167,7 @@ def submit_predictions(request):
     
     for i in ids:
         gt = gt_dict[i]
-        
-        # Handle 0-based indexing in predictions vs 1-based in GT
-        # GT ID "1" corresponds to Pred ID "0"
-        try:
-            pred_id = str(int(i) - 1)
-            pred = pred_dict.get(pred_id)
-        except ValueError:
-            pred = None
-            
-        if not pred:
-            # Fallback to exact match if shifted ID not found (e.g. if user used 1-based IDs)
-            pred = pred_dict.get(i)
+        pred = pred_dict.get(i)
             
         if not pred:
             # Skip if still not found (should be caught by subset check earlier, but safe to skip)

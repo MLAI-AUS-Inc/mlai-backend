@@ -1,6 +1,0 @@
-ID,alpha,benign,bullying,conspiracy,ed_risk,extremist,gamergate,hate_speech,incel_misogyny,misinfo,pro_ana,recovery_ed,trad
-0,0,1,0,0,0,0,0,0,0,0,0,0,0
-1,0,0,0,0,0,0,0,0,1,0,0,0,0
-2,0,0,0,0,1,0,0,0,0,0,1,0,0
-3,0,0,0,0,0,0,0,0,0,0,0,1,0
-4,1,0,0,0,0,0,0,0,0,0,0,0,0
