@@ -203,6 +203,27 @@ def submit_predictions(request):
     coarse_score = calculate_f1(true_tiers_list, pred_tiers_list, ['benign', 'recovery', 'risky'])
     final_score = 0.70 * coarse_score + 0.30 * fine_score
     
+    logger.info(f"DEBUG: GT Rows: {len(gt_rows)}, Pred Rows: {len(pred_rows)}, IDs: {len(ids)}")
+    
+    # Log per-class F1 for fine score
+    for cls in LABELS:
+        tp = 0
+        fp = 0
+        fn = 0
+        for t, p in zip(true_labels_list, pred_labels_list):
+            t_has = cls in t
+            p_has = cls in p
+            if t_has and p_has:
+                tp += 1
+            elif p_has and not t_has:
+                fp += 1
+            elif t_has and not p_has:
+                fn += 1
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        logger.info(f"DEBUG Class {cls}: TP={tp}, FP={fp}, FN={fn}, F1={f1}")
+
     logger.info(f"Scoring complete. Final: {final_score}, Coarse: {coarse_score}, Fine: {fine_score}")
     logger.info(f"Participant: {submission.participant_name}")
     
@@ -223,13 +244,28 @@ def submit_predictions(request):
     
     Prediction.objects.bulk_create(predictions_to_create)
     
+    # Construct Team Data
+    team_data = None
+    if team:
+        team_data = {
+            "team_id": team.team_id,
+            "team_name": team.team_name,
+            "team_avatar": team.avatar_url,
+            "members": [
+                {
+                    "full_name": member.full_name,
+                    "avatar_url": member.avatar_url
+                } for member in team.members.all()
+            ]
+        }
+
     return Response({
-        'message': 'Submission scored successfully',
+        'submission_id': submission.id,
         'score': final_score,
         'coarse_score': coarse_score,
         'fine_score': fine_score,
-        'participant_name': participant_name,
-        'team_id': team.team_id if team else None
+        'submitted_at': submission.submitted_at,
+        'team': team_data
     })
 
 @api_view(['GET'])
@@ -237,9 +273,8 @@ def submit_predictions(request):
 def get_submission(request):
     submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
     if not submission:
-        return Response({'error': 'No submission found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'detail': 'No submission found.'}, status=status.HTTP_404_NOT_FOUND)
     
-    # Optional: return details
     return Response({
         'submission_id': submission.id,
         'score': submission.score,
@@ -258,12 +293,26 @@ class LeaderboardView(APIView):
         # For now just all.
         data = []
         for sub in submissions:
+            team_data = None
+            if sub.team:
+                team_data = {
+                    "team_id": sub.team.team_id,
+                    "team_name": sub.team.team_name,
+                    "team_avatar": sub.team.avatar_url,
+                    "members": [
+                        {
+                            "full_name": member.full_name,
+                            "avatar_url": member.avatar_url
+                        } for member in sub.team.members.all()
+                    ]
+                }
+            
             data.append({
-                "team": sub.team.team_name if sub.team else "Individual",
-                "user": sub.user.full_name,
+                "id": sub.id,
                 "score": sub.score,
-                "coarse": sub.coarse_score,
-                "fine": sub.fine_score
+                "accuracy": sub.fine_score, # Using fine_score (Persona F1) as accuracy
+                "submitted_at": sub.submitted_at,
+                "team": team_data
             })
         return Response(data)
 
