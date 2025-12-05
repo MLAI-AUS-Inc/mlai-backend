@@ -74,3 +74,28 @@ class Hackathon(models.Model):
 
     def __str__(self):
         return self.name
+
+from django.core.cache import cache
+
+class GlobalSettings(models.Model):
+    is_obscured = models.BooleanField(default=True, help_text="If set to True, submission scores will be hidden from users.")
+
+    class Meta:
+        verbose_name = "Global Settings"
+        verbose_name_plural = "Global Settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super(GlobalSettings, self).save(*args, **kwargs)
+        cache.set('global_settings', self)
+
+    def delete(self, *args, **kwargs):
+        pass
+
+    @classmethod
+    def load(cls):
+        obj, created = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return "Global Settings"

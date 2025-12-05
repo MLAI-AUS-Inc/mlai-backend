@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.shortcuts import get_object_or_404
 from .models import Team, Submission, Announcement, Prediction
+from core.models import GlobalSettings
 import csv
 import logging
 
@@ -253,11 +254,18 @@ def submit_predictions(request):
             ]
         }
 
+    # Check obscure setting
+    is_obscured = False
+    try:
+        is_obscured = GlobalSettings.load().is_obscured
+    except:
+        pass
+
     return Response({
         'submission_id': submission.id,
-        'score': final_score,
-        'coarse_score': coarse_score,
-        'fine_score': fine_score,
+        'score': "???" if is_obscured else final_score,
+        'coarse_score': "???" if is_obscured else coarse_score,
+        'fine_score': "???" if is_obscured else fine_score,
         'submitted_at': submission.submitted_at,
         'team': team_data
     })
@@ -269,11 +277,18 @@ def get_submission(request):
     if not submission:
         return Response({'detail': 'No submission found.'}, status=status.HTTP_404_NOT_FOUND)
     
+    # Check obscure setting
+    is_obscured = False
+    try:
+        is_obscured = GlobalSettings.load().is_obscured
+    except:
+        pass
+
     return Response({
         'submission_id': submission.id,
-        'score': submission.score,
-        'coarse_score': submission.coarse_score,
-        'fine_score': submission.fine_score,
+        'score': "???" if is_obscured else submission.score,
+        'coarse_score': "???" if is_obscured else submission.coarse_score,
+        'fine_score': "???" if is_obscured else submission.fine_score,
         'submitted_at': submission.submitted_at,
         'team': submission.team.team_name if submission.team else None
     })
@@ -285,6 +300,13 @@ class LeaderboardView(APIView):
         submissions = Submission.objects.all().order_by('-score')
         # Filter to get best score per team/user?
         # For now just all.
+        # Check obscure setting
+        is_obscured = False
+        try:
+            is_obscured = GlobalSettings.load().is_obscured
+        except:
+            pass
+
         data = []
         for sub in submissions:
             team_data = None
@@ -303,8 +325,8 @@ class LeaderboardView(APIView):
             
             data.append({
                 "id": sub.id,
-                "score": sub.score * 100,
-                "accuracy": sub.fine_score, # Using fine_score (Persona F1) as accuracy
+                "score": "???" if is_obscured else sub.score * 100,
+                "accuracy": "???" if is_obscured else sub.fine_score, # Using fine_score (Persona F1) as accuracy
                 "submitted_at": sub.submitted_at,
                 "team": team_data,
                 "participant_name": sub.participant_name,

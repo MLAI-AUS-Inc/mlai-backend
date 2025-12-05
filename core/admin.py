@@ -1,7 +1,8 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import User
+from .models import User, GlobalSettings
+
 
 class UserAdmin(BaseUserAdmin):
     list_display = ('email', 'first_name', 'last_name', 'role', 'is_staff', 'avatar_preview')
@@ -25,5 +26,14 @@ class UserAdmin(BaseUserAdmin):
         return "No Avatar"
     
     avatar_preview.short_description = 'Avatar'
+
+@admin.register(GlobalSettings)
+class GlobalSettingsAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'is_obscured')
+    # Prevent creating more than one instance if possible, though singleton logic is in model save()
+    def has_add_permission(self, request):
+        if GlobalSettings.objects.exists():
+            return False
+        return super().has_add_permission(request)
 
 admin.site.register(User, UserAdmin)
