@@ -7,6 +7,7 @@ from .models import Team, Submission, Announcement, Prediction
 from core.models import GlobalSettings
 import csv
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +267,7 @@ def submit_predictions(request):
         'score': "???" if is_obscured else final_score,
         'coarse_score': "???" if is_obscured else coarse_score,
         'fine_score': "???" if is_obscured else fine_score,
-        'submitted_at': submission.submitted_at,
+        'submitted_at': "???" if is_obscured else submission.submitted_at,
         'team': team_data
     })
 
@@ -289,7 +290,7 @@ def get_submission(request):
         'score': "???" if is_obscured else submission.score,
         'coarse_score': "???" if is_obscured else submission.coarse_score,
         'fine_score': "???" if is_obscured else submission.fine_score,
-        'submitted_at': submission.submitted_at,
+        'submitted_at': "???" if is_obscured else submission.submitted_at,
         'team': submission.team.team_name if submission.team else None
     })
 
@@ -327,13 +328,18 @@ class LeaderboardView(APIView):
                 "id": sub.id,
                 "score": "???" if is_obscured else sub.score * 100,
                 "accuracy": "???" if is_obscured else sub.fine_score, # Using fine_score (Persona F1) as accuracy
-                "submitted_at": sub.submitted_at,
+                "submitted_at": "???" if is_obscured else sub.submitted_at,
                 "team": team_data,
                 "participant_name": sub.participant_name,
                 "file_url": sub.file_url,
                 "user_avatar": sub.user.avatar_url,
                 "user_name": sub.user.full_name
             })
+        
+        # Randomize order if obscured
+        if is_obscured:
+            random.shuffle(data)
+        
         return Response(data)
 
 class AnnouncementListView(generics.ListAPIView):
