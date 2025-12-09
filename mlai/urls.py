@@ -16,8 +16,10 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from esafety.views import TeamNamesListView
+from .views import health_check
 
 urlpatterns = [
+    path('', health_check, name='health_check'),
     path('admin/', admin.site.urls),
     path('api/v1/auth/', include('core.urls')),
     path('api/v1/hackathons/esafety/', include('esafety.urls')),
