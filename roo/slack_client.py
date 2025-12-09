@@ -70,6 +70,46 @@ def post_message(
         raise
 
 
+def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
+    """
+    Retrieve all messages in a Slack thread for context.
+    
+    Args:
+        channel: Channel ID
+        thread_ts: Thread timestamp (parent message ts)
+    
+    Returns:
+        List of message dicts with 'user', 'text', 'ts', and 'bot_id' (if from bot)
+    """
+    client = get_slack_client()
+    
+    try:
+        response = client.conversations_replies(
+            channel=channel,
+            ts=thread_ts,
+            limit=50  # Get up to 50 messages in thread
+        )
+        
+        if response.get("ok"):
+            messages = []
+            for msg in response.get("messages", []):
+                messages.append({
+                    "user": msg.get("user", ""),
+                    "text": msg.get("text", ""),
+                    "ts": msg.get("ts", ""),
+                    "bot_id": msg.get("bot_id"),  # None if from human
+                    "is_bot": bool(msg.get("bot_id"))
+                })
+            print(f"📜 Retrieved {len(messages)} messages from thread {thread_ts}")
+            return messages
+        
+        return []
+        
+    except Exception as e:
+        print(f"❌ Thread history error: {e}")
+        return []
+
+
 def post_ephemeral(
     channel: str,
     user: str,
