@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     'core',
     'esafety',
     "rest_framework",
+    "points",
+    "roo",  # Roo - Agentic Slack Bot
 ]
 
 MIDDLEWARE = [
@@ -115,7 +117,7 @@ else:
             default=database_url,
             # engine='django.db.backends.postgresql',
             conn_max_age=600,
-            ssl_require=False
+            ssl_require=True
         )
     }
 
