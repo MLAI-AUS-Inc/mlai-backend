@@ -101,25 +101,18 @@ default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
 #     'ENGINE': 'django.db.backends.postgresql',
 # })
 
-if 'DYNO' in os.environ:  # Running on Heroku
-    DATABASES = {
-        'default': dj_database_url.config(
-            default=database_url,
-            engine='django.db.backends.postgresql',
-            conn_max_age=600,
-            ssl_require=True
-        )
-    }
-else:
-    # Local settings (macOS) connecting to Heroku DB also need SSL if you use the Heroku DATABASE_URL
-    DATABASES = {
-        'default': dj_database_url.config(
-            default=database_url,
-            # engine='django.db.backends.postgresql',
-            conn_max_age=600,
-            ssl_require=True
-        )
-    }
+
+# Parse database configuration from $DATABASE_URL
+default_config = dj_database_url.config(
+    default=os.environ.get('DATABASE_URL'),
+    conn_max_age=600,
+    ssl_require=os.getenv('DATABASE_SSL_REQUIRE', 'False') == 'True'
+)
+
+DATABASES = {
+    'default': default_config
+}
+
 
 AUTH_USER_MODEL = 'core.User'
 
