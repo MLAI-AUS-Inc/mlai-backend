@@ -67,9 +67,22 @@ class SlackEventsView(View):
                 daemon=True
             )
             thread.start()
-            
-            # Return 200 immediately (Slack requires response within 3 seconds)
             return HttpResponse(status=200)
+
+        # Handle 'message' events (e.g. DMs)
+        if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
+            # If it's a DM or mentions the bot name (fallback)
+            is_dm = event.get("channel_type") == "im"
+            
+            if is_dm:
+                print(f"📨 Received DM from {event.get('user')}")
+                thread = threading.Thread(
+                    target=self._handle_mention,
+                    args=(event,),
+                    daemon=True
+                )
+                thread.start()
+                return HttpResponse(status=200)
         
         # Acknowledge other events
         return HttpResponse(status=200)
