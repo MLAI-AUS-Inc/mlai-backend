@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 
 from .base import BaseTool, ToolResult
 from ..content_factory_client import ContentFactoryClient
-from ..slack_client import post_message, get_thread_messages
+from ..slack_client import post_message, get_thread_messages, get_user_info
 from ..llm import chat
 from ..prompts import (
     get_content_factory_params_prompt,
@@ -211,7 +211,8 @@ class ContentFactoryTool(BaseTool):
                 keywords,
                 additional_context,
                 channel_id,
-                thread_ts
+                thread_ts,
+                user_id
             ),
             daemon=True
         )
@@ -237,7 +238,8 @@ class ContentFactoryTool(BaseTool):
         keywords: Optional[list[str]],
         additional_context: Optional[str],
         channel_id: str,
-        thread_ts: str
+        thread_ts: str,
+        user_id: str
     ):
         """
         Async function to generate article and post result to Slack.
@@ -255,6 +257,12 @@ class ContentFactoryTool(BaseTool):
                 additional_context=additional_context,
                 auto_publish=True
             )
+            
+            # Save to Database
+            try:
+                self._save_result_to_db(user_id, result, domain)
+            except Exception as e:
+                print(f"⚠️ Failed to save article result to DB: {e}")
             
             # Format success message
             message = self._format_success_message(result)
@@ -361,3 +369,57 @@ class ContentFactoryTool(BaseTool):
         except Exception as e:
             print(f"   ⚠️ Param extraction failed: {e}")
             return {}
+
+    def _save_result_to_db(self, slack_user_id: str, result: dict, domain: str):
+        """Save the generated article result to the database."""
+        from django.contrib.auth import get_user_model
+        from roo.models import ArticleGeneration
+        
+        User = get_user_model()
+        
+        # 1. Get user details from Slack
+        user_info = get_user_info(slack_user_id)
+        email = user_info.get("email")
+        
+        if not email:
+            print(f"⚠️ Could not identify user email for Slack ID {slack_user_id}")
+            return
+
+        # 2. Find or create user
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                "slack_id": slack_user_id,
+                "first_name": user_info.get("name", "").split()[0],
+                "last_name": " ".join(user_info.get("name", "").split()[1:]) if " " in user_info.get("name", "") else ""
+            }
+        )
+        
+        if not user.slack_id:
+            user.slack_id = slack_user_id
+            user.save()
+            
+        print(f"👤 Linked article to user: {user.email}")
+
+        # 3. Extract result data
+        # Handle cases where result is nested or flat depending on API response
+        res_data = result.get("result", result)
+        if not res_data:
+            res_data = {}
+            
+        # 4. Create ArticleGeneration record
+        ArticleGeneration.objects.create(
+            user=user,
+            job_id=result.get("job_id"),
+            domain=domain,
+            topic=res_data.get("topic"),
+            slug=res_data.get("slug"),
+            category=res_data.get("category"),
+            title=res_data.get("title"),
+            meta_title=res_data.get("meta_title"),
+            meta_description=res_data.get("meta_description"),
+            keywords=res_data.get("keywords", []),
+            status='completed',
+        )
+        print("💾 Article generation result saved to database")
+

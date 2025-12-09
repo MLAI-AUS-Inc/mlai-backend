@@ -28,6 +28,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('professional', 'Professional'), # Added for flexibility
     )
     email = models.EmailField(unique=True)
+    slack_id = models.CharField(max_length=50, blank=True, null=True, unique=True)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
     
