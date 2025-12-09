@@ -5,9 +5,9 @@ from .models import User, GlobalSettings
 
 
 class UserAdmin(BaseUserAdmin):
-    list_display = ('email', 'first_name', 'last_name', 'role', 'is_staff', 'avatar_preview')
+    list_display = ('email', 'first_name', 'last_name', 'role', 'slack_id', 'is_staff', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
-    search_fields = ('email', 'first_name', 'last_name')
+    search_fields = ('email', 'first_name', 'last_name', 'slack_id')
     ordering = ('email',)
     
     fieldsets = (
@@ -15,7 +15,7 @@ class UserAdmin(BaseUserAdmin):
         ('Personal info', {'fields': ('first_name', 'last_name', 'avatar_url', 'avatar_preview')}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
-        ('Other', {'fields': ('role', 'has_team')}),
+        ('Other', {'fields': ('role', 'has_team', 'slack_id')}),
     )
     
     readonly_fields = ('avatar_preview',)
