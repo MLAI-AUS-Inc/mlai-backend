@@ -20,9 +20,14 @@ AVAILABLE TOOLS:
 2. general_response - Respond conversationally without using tools
    Use when: General questions, greetings, unclear requests, or when no other tool fits
 
+3. content_factory - Generate SEO/AEO articles for a domain
+   Use when: User wants to create content, write an article, generate SEO posts, improve rankings
+   Keywords: "write article", "create content", "SEO for", "generate post", "content factory"
+
 DECISION RULES:
 - If asking about people, experts, or connections → connect_users
 - If asking "who", "anyone", "someone" + expertise → connect_users
+- If asking to write/generate content, articles, or SEO → content_factory
 - If greeting or casual → general_response
 - If unclear → general_response (ask for clarification)
 
@@ -37,6 +42,12 @@ Tool: general_response
 
 User: "Can you connect me with someone in health tech?"
 Tool: connect_users
+
+User: "Write an SEO article for example.com"
+Tool: content_factory
+
+User: "Generate content for my startup domain.com vs competitor.com"
+Tool: content_factory
 
 User: "What's the weather?"
 Tool: general_response
@@ -71,6 +82,37 @@ Input: "Anyone doing computer vision or robotics work?"
 Output: Computer Vision, Robotics
 
 Return ONLY the comma-separated topics, nothing else."""
+
+
+def get_content_factory_params_prompt() -> str:
+    """
+    Prompt for extracting domain and competitors from user request.
+    """
+    return """You are a parameter extractor. Extract the target domain and competitor domains from the user's request.
+
+INPUT: User request string
+
+OUTPUT: JSON with keys:
+- domain: The main URL to write content for (string)
+- competitors: List of competitor URLs (list of strings)
+
+RULES:
+1. Extract full URLs if possible, otherwise plausible domain names (e.g., "google.com")
+2. If no domain is found, return null for domain.
+3. If no competitors found, return empty list.
+4. Infer from context: "vs competitor.com" or "against rival.com" implies competitors.
+
+EXAMPLES:
+Input: "Generate an article for my-site.com"
+Output: {"domain": "my-site.com", "competitors": []}
+
+Input: "Write content for tesla.com against rivian.com and lucid.com"
+Output: {"domain": "tesla.com", "competitors": ["rivian.com", "lucid.com"]}
+
+Input: "SEO for apple.com"
+Output: {"domain": "apple.com", "competitors": []}
+
+Return ONLY the JSON object."""
 
 
 def get_warm_personality_prompt() -> str:

@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List, Type
 
 from .tools.base import BaseTool, ToolResult
 from .tools.connect_users import ConnectUsersTool
+from .tools.content_factory import ContentFactoryTool
 from .llm import chat, get_llm_client
 from .prompts import get_triage_prompt, get_general_response_prompt
 
@@ -48,6 +49,7 @@ class RooAgent:
         # Register available tools
         self.tools: Dict[str, BaseTool] = {
             "connect_users": ConnectUsersTool(),
+            "content_factory": ContentFactoryTool(),
             # Add more tools here as they're implemented:
             # "assign_points": AssignPointsTool(),
             # "welcome_user": WelcomeUserTool(),
