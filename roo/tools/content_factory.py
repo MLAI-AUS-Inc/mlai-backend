@@ -60,7 +60,7 @@ class ContentFactoryTool(BaseTool):
             elif state == "discovery_selection":
                 return self._handle_discovery_selection(thread_messages, user_id, channel_id, thread_ts)
             elif state == "triage_selection":
-                return self._handle_triage_selection(query, thread_messages)
+                return self._handle_triage_selection(query, thread_messages, user_id, channel_id, thread_ts)
             else:
                 # Direct follow-up or general context gathering
                 return self._handle_direct_followup(
@@ -182,7 +182,7 @@ class ContentFactoryTool(BaseTool):
         except:
             return {"intent": "direct"}
 
-    def _handle_triage_selection(self, query: str, thread_messages: list[dict]) -> ToolResult:
+    def _handle_triage_selection(self, query: str, thread_messages: list[dict], user_id: str, channel_id: str, thread_ts: str) -> ToolResult:
         """
         Handle the user's response to the Direct vs Discovery choice.
         """
@@ -192,22 +192,63 @@ class ContentFactoryTool(BaseTool):
         triage = self._triage_intent(query)
         intent = triage.get("intent", "direct")
         
-        # Need domain from previous turn?
-        # Try to find domain in thread
-        domain = "your site"
-        for msg in thread_messages:
-            if "**" in msg.get("text", ""):
-                try:
-                    domain = msg.get("text", "").split("**")[1]
-                    break
-                except:
-                    pass
+        # Extract domain from thread history (look for domain-like patterns in user messages)
+        domain = self._extract_domain_from_thread(thread_messages)
         
         if intent == "discovery":
              return self._start_discovery_flow(query, domain)
         else:
-             # Default to direct
-             return self._start_direct_flow_questions(query, domain)
+            # Direct flow: Check if user already provided topic/keyword in their response
+            # Extract context from the full conversation including their current message
+            conversation = self._format_thread_for_llm(thread_messages)
+            context = self._extract_context_from_thread(conversation)
+            
+            topic = context.get("topic_preference") or triage.get("topic")
+            target_keyword = context.get("keywords", [None])[0] if context.get("keywords") else triage.get("target_keyword")
+            extracted_domain = context.get("domain") or domain
+            
+            # If we have enough info, proceed to generation
+            if topic and extracted_domain and extracted_domain != "your site":
+                # We have what we need, trigger generation
+                return self._trigger_generation(
+                    domain=extracted_domain,
+                    topic=topic,
+                    target_keyword=target_keyword or topic,
+                    context=json.dumps(context),
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id
+                )
+            else:
+                # Need more info, ask questions
+                return self._start_direct_flow_questions(query, extracted_domain)
+    
+    def _extract_domain_from_thread(self, thread_messages: list[dict]) -> str:
+        """Extract domain from thread history by looking at user messages and bot mentions."""
+        import re
+        
+        domain_pattern = r'\b([a-zA-Z0-9-]+\.(au|com|org|net|io|co|ai))\b'
+        
+        # First, check user messages for domain mentions
+        for msg in thread_messages:
+            if not msg.get("is_bot"):
+                text = msg.get("text", "")
+                match = re.search(domain_pattern, text, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        
+        # Fallback: check bot messages for bolded domain
+        for msg in thread_messages:
+            if msg.get("is_bot") and "**" in msg.get("text", ""):
+                try:
+                    bolded = msg.get("text", "").split("**")[1]
+                    # Verify it looks like a domain
+                    if re.search(domain_pattern, bolded, re.IGNORECASE):
+                        return bolded
+                except:
+                    pass
+        
+        return "your site"
 
     def _start_discovery_flow(self, query: str, domain: str) -> ToolResult:
         """
@@ -411,11 +452,12 @@ class ContentFactoryTool(BaseTool):
                 if progress > last_sent_progress:
                     # Map steps to friendly emojis/text
                     step_map = {
+                        "strategy": "Planning the article strategy... 🗺️",
                         "research": "Doing deep research... 📚",
                         "writing": "Drafting the article... ✍️",
                         "seo": "Optimizing for SEO... 🔍",
                         "critique": "Reviewing and refining... 🧐",
-                        "completed": "Finishing up! ✨"
+                        "completed": "Finalizing content... ✨"
                     }
                     step_msg = step_map.get(step, f"Status: {step}")
                     
@@ -427,6 +469,8 @@ class ContentFactoryTool(BaseTool):
             result = client.poll_and_wait(job_id, on_progress=progress_callback)
             
             # New Step: Publish
+            post_message(channel_id, "⏳ **Progress Update:** Publishing to mlai.au... 🚀", thread_ts)
+            
             publish_result = {}
             try:
                 publish_result = client.publish_article(job_id)
