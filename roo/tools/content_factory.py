@@ -27,22 +27,28 @@ class ContentFactoryTool(BaseTool):
     Tool for generating content via the Content Factory pipeline.
     
     Conversational Flow:
-    1. User requests article → Bot asks clarifying questions
-    2. User provides context → Bot acknowledges and starts async generation
-    3. Article complete → Bot posts success message with URLs
+    1. Initial Request: Triggers Triage (Direct vs Discovery vs Ambiguous).
+    2. Ambiguous: Bot asks "Do you have a topic OR want to find gaps?".
+    3. Direct Mode: 
+       - If params missing -> Ask clarifying questions.
+       - If params ready -> Call /generate.
+    4. Discovery Mode:
+       - If competitors missing -> Ask.
+       - Call /discover -> Show opportunities.
+       - User selection -> Call /generate.
     """
     
     name = "content_factory"
-    description = "Generate SEO/AEO articles for a specific domain and competitors"
+    description = "Generate SEO/AEO articles. Supports 'Direct' (topic known) vs 'Discovery' (need ideas) modes."
     
     def execute(self, query: str, user_id: str, channel_id: str, thread_ts: str, **kwargs) -> ToolResult:
         """
-        Execute the content factory flow with conversational state detection.
+        Execute the content factory flow: Triage -> Determine State -> Act.
         """
         print(f"🏭 CONTENT FACTORY TOOL: Executing for query: '{query[:80]}...'")
         
         try:
-            # Step 1: Get thread history to determine state
+            # Step 1: Get thread history
             thread_messages = get_thread_messages(channel_id, thread_ts)
             
             # Step 2: Detect conversation state
@@ -50,11 +56,14 @@ class ContentFactoryTool(BaseTool):
             print(f"   📊 Conversation state: {state}")
             
             if state == "initial":
-                # First message - ask clarifying questions
-                return self._handle_initial_request(query)
+                return self._handle_initial_request(query, user_id)
+            elif state == "discovery_selection":
+                return self._handle_discovery_selection(thread_messages, user_id, channel_id, thread_ts)
+            elif state == "triage_selection":
+                return self._handle_triage_selection(query, thread_messages)
             else:
-                # Follow-up - gather context and create article
-                return self._handle_followup_request(
+                # Direct follow-up or general context gathering
+                return self._handle_direct_followup(
                     query=query,
                     thread_messages=thread_messages,
                     user_id=user_id,
@@ -75,284 +84,365 @@ class ContentFactoryTool(BaseTool):
 
     def _detect_conversation_state(self, thread_messages: list[dict]) -> str:
         """
-        Detect the current state of the conversation.
-        
-        States:
-        - initial: First request, no bot replies yet asking questions
-        - followup: Bot has asked questions, user has replied with context
+        Detects if we are in initial, discovery selection, triage selection, or direct followup state.
         """
         if not thread_messages:
             return "initial"
         
-        # Check if bot has already replied in this thread
-        bot_replied = False
-        for msg in thread_messages:
-            if msg.get("is_bot"):
-                # Check if this was a question-asking message (contains question marks or key phrases)
-                text = msg.get("text", "").lower()
-                if any(phrase in text for phrase in ["competitor", "topic", "angle", "audience", "keywords", "?"]):
-                    bot_replied = True
-                    break
-        
-        if not bot_replied:
+        bot_msgs = [m for m in thread_messages if m.get("is_bot")]
+        if not bot_msgs:
             return "initial"
-        
-        # Bot has asked questions - check if there are human replies after
-        found_bot_question = False
-        for msg in thread_messages:
-            if msg.get("is_bot"):
-                text = msg.get("text", "").lower()
-                if any(phrase in text for phrase in ["competitor", "topic", "angle", "?"]):
-                    found_bot_question = True
-            elif found_bot_question and not msg.get("is_bot"):
-                # Human replied after bot's question
-                return "followup"
-        
-        return "followup"  # Default to followup if bot has engaged
-
-    def _handle_initial_request(self, query: str) -> ToolResult:
-        """
-        Handle the initial request by asking clarifying questions.
-        """
-        print("   📝 Initial request - asking clarifying questions")
-        
-        # Extract domain from query first
-        params = self._extract_params(query)
-        domain = params.get("domain", "your domain")
-        
-        # Generate clarifying questions using LLM
-        try:
-            questions = chat([
-                {"role": "system", "content": get_content_factory_questions_prompt()},
-                {"role": "user", "content": f"User request: {query}\nDomain: {domain}"}
-            ], temperature=0.7, max_tokens=200)
             
+        last_bot_msg = bot_msgs[-1]["text"].lower()
+        
+        # Check if bot presented opportunities to select from
+        if "here are some content opportunities" in last_bot_msg or "reply with the number" in last_bot_msg:
+            return "discovery_selection"
+
+        # Check if bot asked the Triage Question (Choice)
+        if "do you already have an idea" in last_bot_msg and "find some content gaps" in last_bot_msg:
+             return "triage_selection"
+            
+        return "followup"
+
+    def _handle_initial_request(self, query: str, user_id: str) -> ToolResult:
+        """
+        Triages the request into Direct, Discovery, or Ambiguous.
+        """
+        print("   📝 Initial request - triaging...")
+        
+        # Triage using LLM
+        triage = self._triage_intent(query)
+        intent = triage.get("intent", "direct")
+        domain = triage.get("domain", "your domain")
+        
+        print(f"   🎯 Triage result: {intent} for {domain}")
+        
+        if intent == "ambiguous":
             return ToolResult(
                 success=True,
-                data={"state": "asking_questions", "domain": domain},
-                message=questions
-            )
-        except Exception as e:
-            # Fallback to a default question message
-            print(f"   ⚠️ LLM question generation failed: {e}")
-            return ToolResult(
-                success=True,
-                data={"state": "asking_questions", "domain": domain},
+                data={"state": "asking_intent"},
                 message=(
-                    f"G'day! 🦘 Happy to create some content for {domain}! "
-                    f"Quick questions before I get started:\n\n"
-                    f"• Who are your main competitors?\n"
-                    f"• Any particular topic or angle you'd like the article to focus on?\n\n"
-                    f"Just reply here and I'll get cracking!"
+                    f"G'day! 🦘 Happy to help with content for **{domain}**.\n\n"
+                    f"**Do you already have an idea for an article?**\n"
+                    f"If so, I'll research and write it for you.\n\n"
+                    f"**Or should I finding some content gaps?**\n"
+                    f"I can analyze competitors to see what they're ranking for that you aren't.\n\n"
+                    f"Just let me know what you prefer!"
                 )
             )
+        elif intent == "discovery":
+            return self._start_discovery_flow(query, domain)
+        else:
+            # Direct flow: check if we have enough info to start immediately
+            if triage.get("topic") and triage.get("target_keyword"):
+                 return self._start_direct_flow_questions(query, domain)
+            else:
+                return self._start_direct_flow_questions(query, domain)
 
-    def _handle_followup_request(
-        self,
-        query: str,
-        thread_messages: list[dict],
-        user_id: str,
-        channel_id: str,
-        thread_ts: str
-    ) -> ToolResult:
+    def _triage_intent(self, query: str) -> dict:
+        """Determines if user wants ideas (discovery) or has a topic (direct)."""
+        prompt = """
+        Analyze the user's request.
+        Return JSON string:
+        {
+            "intent": "discovery" | "direct" | "ambiguous",
+            "domain": "string (optional)",
+            "topic": "string (optional, if user specifies what to write about)",
+            "target_keyword": "string (optional)"
+        }
+        
+        Rules:
+        - "Write an article" (no topic) -> intent: ambiguous
+        - "Content Factory" (no topic) -> intent: ambiguous
+        - "Write about AI" -> intent: direct
+        - "Find ideas" / "Gaps" -> intent: discovery
         """
-        Handle a follow-up request by extracting context and starting article creation.
+        try:
+            response = chat([
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": query}
+            ], temperature=0.1, max_tokens=150)
+            cleaned = response.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except:
+            return {"intent": "direct"}
+
+    def _handle_triage_selection(self, query: str, thread_messages: list[dict]) -> ToolResult:
         """
-        print("   📝 Follow-up request - extracting context and starting creation")
+        Handle the user's response to the Direct vs Discovery choice.
+        """
+        # Re-run triage on the USER's response (query) combined with their original intent if needed, 
+        # but usually the response "I have an idea" or "Find gaps" is enough.
         
-        # Step 1: Build conversation context
-        conversation = self._format_thread_for_llm(thread_messages)
+        triage = self._triage_intent(query)
+        intent = triage.get("intent", "direct")
         
-        # Step 2: Extract requirements from conversation
-        context = self._extract_context_from_thread(conversation)
+        # Need domain from previous turn?
+        # Try to find domain in thread
+        domain = "your site"
+        for msg in thread_messages:
+            if "**" in msg.get("text", ""):
+                try:
+                    domain = msg.get("text", "").split("**")[1]
+                    break
+                except:
+                    pass
         
-        domain = context.get("domain")
-        if not domain:
-            # Try to extract from the original query
-            params = self._extract_params(query)
-            domain = params.get("domain")
+        if intent == "discovery":
+             return self._start_discovery_flow(query, domain)
+        else:
+             # Default to direct
+             return self._start_direct_flow_questions(query, domain)
+
+    def _start_discovery_flow(self, query: str, domain: str) -> ToolResult:
+        """
+        Starts discovery: extract competitors, run discovery, show options.
+        """
+        # We need competitors. Use extract params to get them if possible.
+        params = self._extract_params(query)
+        competitors = params.get("competitors", [])
         
-        if not domain:
+        if not competitors:
+            return ToolResult(
+                success=True,
+                data={"state": "asking_competitors"},
+                message=f"I can help find content ideas for **{domain}**! 🕵️\n\nWho are your main competitors? (e.g. `competitor1.com, competitor2.com`)"
+            )
+            
+        return self._run_discovery(domain, competitors)
+
+    def _run_discovery(self, domain: str, competitors: list[str]) -> ToolResult:
+        """Calls API to discover opportunities and presents them."""
+        msg = f"🔍 Analyzing {', '.join(competitors)} to find opportunities for {domain}..."
+        
+        try:
+            client = ContentFactoryClient()
+            opportunities = client.discover_opportunities(domain, competitors)
+            
+            if not opportunities:
+                return ToolResult(
+                    success=True, 
+                    data={"state": "discovery_empty"},
+                    message=f"No obvious content gaps found for {domain} against {competitors}. Try different competitors?"
+                )
+            
+            # Format opportunities for display
+            display_msg = f"Here are some content opportunities for **{domain}**:\n\n"
+            for idx, opp in enumerate(opportunities[:5], 1):
+                display_msg += f"*{idx}. {opp['keyword'].title()}*\n"
+                display_msg += f"   Volume: {opp.get('volume', 'N/A')} | Diff: {opp.get('difficulty', 'N/A')} | Intent: {opp.get('intent', 'N/A')}\n\n"
+            
+            display_msg += "Reply with the number (e.g. `1`) to generate that article, or type your own topic!"
+            
+            # Store opportunities in data? The next turn won't have this data object.
+            # We rely on the thread history or we need to re-fetch/cache. 
+            # Ideally the bot reads its own message to map number back to keyword.
+            return ToolResult(
+                success=True,
+                data={"state": "discovery_options_presented", "opportunities": opportunities}, # Not persisted state, but informational
+                message=display_msg
+            )
+            
+        except Exception as e:
             return ToolResult(
                 success=False,
                 data=None,
-                message="I couldn't find a domain name in our conversation. Could you specify one? (e.g., 'example.com')"
+                message=f"Failed to run discovery: {str(e)}"
             )
+
+    def _handle_discovery_selection(self, thread_messages: list[dict], user_id: str, channel_id: str, thread_ts: str) -> ToolResult:
+        """
+        User selected an option from discovery list.
+        """
+        # Get user's selection (last message)
+        last_msg = thread_messages[-1]["text"].strip()
         
-        competitors = context.get("competitors", [])
-        topic_preference = context.get("topic_preference")
-        target_audience = context.get("target_audience")
-        keywords = context.get("keywords", [])
-        additional_context = context.get("additional_context")
+        # Get the bot's previous message with the list
+        bot_msgs = [m for m in thread_messages if m.get("is_bot")]
+        last_bot_msg = bot_msgs[-1]["text"]
         
-        print(f"   🎯 Domain: {domain}")
-        print(f"   ⚔️ Competitors: {competitors}")
-        print(f"   📝 Topic: {topic_preference}")
-        
-        # Step 3: Send acknowledgment message
-        ack_message = (
-            f"🚀 Ripper! I've got everything I need.\n\n"
-            f"Creating an article for **{domain}**"
-        )
-        if competitors:
-            ack_message += f" (analyzing {', '.join(competitors[:2])})"
-        if topic_preference:
-            ack_message += f"\n📝 Focus: {topic_preference}"
-        ack_message += f"\n\nThis usually takes a few minutes. I'll ping you here when it's ready! 🦘"
-        
-        # Step 4: Start async generation
-        thread = threading.Thread(
-            target=self._async_generate_and_respond,
-            args=(
-                domain,
-                competitors,
-                topic_preference,
-                target_audience,
-                keywords,
-                additional_context,
-                channel_id,
-                thread_ts,
-                user_id
-            ),
-            daemon=True
-        )
-        thread.start()
-        
+        # Try to parse number
+        try:
+            selection_idx = int(last_msg) - 1
+            # Extract keyword from bot message
+            # Lines look like: "*1. Keyword Title*"
+            lines = last_bot_msg.split("\n")
+            option_lines = [l for l in lines if l.startswith("*") and "." in l]
+            
+            if 0 <= selection_idx < len(option_lines):
+                target_line = option_lines[selection_idx]
+                target_keyword = target_line.split(".", 1)[1].replace("*", "").strip().lower()
+                topic = target_keyword.title() # Use keyword as topic
+                
+                # We need domain. It should be in bot message "for **domain**"
+                domain = "your site"
+                if "**" in last_bot_msg:
+                    domain = last_bot_msg.split("**")[1]
+
+                return self._trigger_generation(
+                    domain=domain,
+                    topic=topic,
+                    target_keyword=target_keyword,
+                    context=self._format_thread_for_llm(thread_messages),
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id
+                )
+        except ValueError:
+            pass
+            
+        # If not a number, maybe they typed a topic manually? treated as direct
+        return self._handle_direct_followup(last_msg, thread_messages, user_id, channel_id, thread_ts)
+
+    def _start_direct_flow_questions(self, query: str, domain: str) -> ToolResult:
+        """Ask clarifying questions for direct generation."""
+        # Use existing logic but simplifed
         return ToolResult(
             success=True,
-            data={
-                "state": "creating",
-                "domain": domain,
-                "competitors": competitors,
-                "topic_preference": topic_preference
-            },
-            message=ack_message
+            data={"state": "asking_questions", "domain": domain},
+            message=(
+                f"G'day! 🦘 Happy to write for **{domain}**.\n\n"
+                f"What's the specific topic or keyword you'd like to target?\n"
+                f"Any key competitors I should look at for context?"
+            )
         )
 
-    def _async_generate_and_respond(
-        self,
-        domain: str,
-        competitors: list[str],
-        topic_preference: Optional[str],
-        target_audience: Optional[str],
-        keywords: Optional[list[str]],
-        additional_context: Optional[str],
-        channel_id: str,
-        thread_ts: str,
-        user_id: str
-    ):
+    def _handle_direct_followup(self, query: str, thread_messages: list[dict], user_id: str, channel_id: str, thread_ts: str) -> ToolResult:
         """
-        Async function to generate article and post result to Slack.
+        Extracts details and triggers generation.
         """
-        try:
-            print(f"🏭 Starting async article generation for {domain}")
-            
-            client = ContentFactoryClient()
-            result = client.generate_article(
-                domain=domain,
-                competitors=competitors,
-                topic_preference=topic_preference,
-                target_audience=target_audience,
-                keywords=keywords,
-                additional_context=additional_context,
-                auto_publish=True
+        conversation = self._format_thread_for_llm(thread_messages)
+        
+        # We need to distinguish between "providing competitors for discovery" and "providing topic for generation"
+        # Check if the OTHER party (bot) just asked for competitors for discovery
+        bot_msgs = [m for m in thread_messages if m.get("is_bot")]
+        if bot_msgs:
+            last_bot_msg = bot_msgs[-1]["text"]
+            if "Who are your main competitors" in last_bot_msg and "find content ideas" in last_bot_msg:
+                # User just provided competitors for discovery!
+                # Extract competitors from User message
+                # For simplicity, treat the whole message as competitor list string or use LLM extraction
+                params = self._extract_params(query)
+                competitors = params.get("competitors", [query])
+                
+                # Where is the domain? We need to find it from previous context
+                domain_matches = [m for m in thread_messages if "domain" in m.get("text", "").lower()]
+                # Hacky: Try to extract domain from bot's ask message "find content ideas for **domain**"
+                domain = "your site"
+                if "**" in last_bot_msg:
+                    domain = last_bot_msg.split("**")[1]
+                    
+                return self._run_discovery(domain, competitors)
+
+        # Normal Direct article generation flow
+        context = self._extract_context_from_thread(conversation)
+        
+        domain = context.get("domain")
+        topic = context.get("topic_preference")
+        target_keyword = context.get("keywords", [None])[0] if context.get("keywords") else topic
+        
+        if not domain or not topic:
+             return ToolResult(
+                success=False, 
+                data=None,
+                message="I still need a **domain** and a **topic**. Could you clarify?"
             )
             
-            # Save to Database
+        return self._trigger_generation(
+            domain=domain,
+            topic=topic,
+            target_keyword=target_keyword,
+            context=json.dumps(context), # Pass full context object as string
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
+
+    def _trigger_generation(self, domain: str, topic: str, target_keyword: str, context: str, channel_id: str, thread_ts: str, user_id: str) -> ToolResult:
+        """Starts the async generation process."""
+        
+        ack_message = (
+            f"🚀 **On it!**\n\n"
+            f"Generating article for **{domain}**\n"
+            f"📝 **Topic:** {topic}\n"
+            f"🔑 **Keyword:** {target_keyword}\n\n"
+            f"I'll ping you when it's done! 🦘"
+        )
+        
+        # Start Thread
+        t = threading.Thread(
+            target=self._async_generate_job,
+            args=(domain, topic, target_keyword, context, channel_id, thread_ts, user_id),
+            daemon=True
+        )
+        t.start()
+        
+        return ToolResult(success=True, data={"state": "generating_async"}, message=ack_message)
+
+    def _async_generate_job(self, domain, topic, target_keyword, context, channel_id, thread_ts, user_id):
+        try:
+            client = ContentFactoryClient()
+            job_id = client.generate_article(domain, topic, target_keyword, context)
+            
+            # Use poll_and_wait helper
+            result = client.poll_and_wait(job_id)
+            
+            # Auto-publish attempt (client handles auto-publish? No, client logic changed. I removed auto-publish from generate_article)
+            # Wait, I removed auto-publish in generate_article to match the direct API call.
+            # Does the backend auto-publish? The prompt says "Returns a job_id. Poll ... for progress as usual."
+            # The old client did auto-publish. I should probably add publish step here.
+            
+            # New Step: Publish
+            publish_result = {}
+            try:
+                publish_result = client.publish_article(job_id)
+                result["publish"] = publish_result
+            except Exception as pub_e:
+                print(f"Publish failed: {pub_e}")
+                result["publish_error"] = str(pub_e)
+
+            # Save to DB
             try:
                 self._save_result_to_db(user_id, result, domain)
-            except Exception as e:
-                print(f"⚠️ Failed to save article result to DB: {e}")
-            
-            # Format success message
-            message = self._format_success_message(result)
-            
-            # Post to thread
-            post_message(
-                channel=channel_id,
-                text=message,
-                thread_ts=thread_ts
-            )
-            
-            print(f"✅ Article generation complete for {domain}")
-            
+            except Exception as db_e:
+                print(f"DB Save failed: {db_e}")
+
+            # Notify User
+            msg = self._format_success_message(result)
+            post_message(channel_id, msg, thread_ts)
+
         except Exception as e:
-            print(f"❌ Async generation failed: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Post error to thread
-            post_message(
-                channel=channel_id,
-                text=f"😅 Sorry mate, hit a snag creating the article: {str(e)}\n\nGive it another go?",
-                thread_ts=thread_ts
-            )
+            error_msg = f"😅 Failed to generate article: {str(e)}"
+            post_message(channel_id, error_msg, thread_ts)
+
+    # ... Helper methods (_format_success_message, _extract_params, etc) need to be preserved or updated ...
+    # I replaced the whole class, so I need to include them.
 
     def _format_success_message(self, result: dict) -> str:
-        """
-        Format the success message with preview and PR URLs.
-        """
+        """Format success message."""
         topic = result.get("topic", "your article")
         publish_data = result.get("publish", {})
         
         preview_url = publish_data.get("preview_url")
         pr_url = publish_data.get("pr_url")
         
-        # If we have publish data, format nicely
         if publish_data.get("success"):
             if preview_url:
-                message = (
-                    f"🚀 **Ripper! Your content is live!**\n\n"
+                return (
+                    f"🚀 **Ripper! Content is live!**\n\n"
                     f"📱 **Live Preview:** {preview_url}\n"
                     f"📝 **Pull Request:** {pr_url}\n\n"
-                    f"The preview is deployed and ready to view, legend! 🦘"
+                    f"Topic: {topic}"
                 )
             else:
-                message = (
-                    f"🚀 **Beauty! Content created and PR is up!**\n\n"
-                    f"📝 **Pull Request:** {pr_url}\n\n"
-                    f"The preview is still deploying - check the PR for status updates."
+                return (
+                    f"🚀 **Content created and PR is up!**\n\n"
+                    f"📝 **Pull Request:** {pr_url}\n"
+                    f"Topic: {topic}"
                 )
         else:
-            # Fallback if no publish data
-            slug = result.get("slug", "new-article")
-            message = (
-                f"✅ **Content Generated!**\n\n"
-                f"**Topic:** {topic}\n"
-                f"**Slug:** `{slug}`\n\n"
-                f"The article has been generated and is ready for review."
-            )
-            
-            if result.get("publish_error"):
-                message += f"\n\n⚠️ Note: Auto-publish didn't work: {result.get('publish_error')}"
-        
-        return message
-
-    def _format_thread_for_llm(self, thread_messages: list[dict]) -> str:
-        """Format thread messages for LLM context extraction."""
-        lines = []
-        for msg in thread_messages:
-            speaker = "Bot" if msg.get("is_bot") else "User"
-            text = msg.get("text", "").strip()
-            if text:
-                lines.append(f"{speaker}: {text}")
-        return "\n".join(lines)
-
-    def _extract_context_from_thread(self, conversation: str) -> dict:
-        """Extract article requirements from thread conversation using LLM."""
-        try:
-            response = chat([
-                {"role": "system", "content": get_content_factory_context_prompt()},
-                {"role": "user", "content": f"Thread conversation:\n{conversation}"}
-            ], temperature=0.1, max_tokens=300)
-            
-            # Clean and parse JSON
-            cleaned = response.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned)
-            
-        except Exception as e:
-            print(f"   ⚠️ Context extraction failed: {e}")
-            return {}
+             return f"✅ **Content Generated!**\nTopic: {topic}\n(Publish failed: {result.get('publish_error')})"
 
     def _extract_params(self, query: str) -> Dict[str, Any]:
         """Extract domain and competitors using LLM."""
@@ -361,14 +451,31 @@ class ContentFactoryTool(BaseTool):
                 {"role": "system", "content": get_content_factory_params_prompt()},
                 {"role": "user", "content": query}
             ], temperature=0.1, max_tokens=150)
-            
-            # Clean response (sometimes LLMs add markdown code blocks)
             cleaned = response.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned)
-            
-        except Exception as e:
-            print(f"   ⚠️ Param extraction failed: {e}")
+        except Exception:
             return {}
+
+    def _extract_context_from_thread(self, conversation: str) -> dict:
+        """Extract article requirements from thread conversation using LLM."""
+        try:
+            response = chat([
+                {"role": "system", "content": get_content_factory_context_prompt()},
+                {"role": "user", "content": conversation}
+            ], temperature=0.1, max_tokens=300)
+            cleaned = response.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except Exception:
+            return {}
+
+    def _format_thread_for_llm(self, thread_messages: list[dict]) -> str:
+        lines = []
+        for msg in thread_messages:
+            speaker = "Bot" if msg.get("is_bot") else "User"
+            text = msg.get("text", "").strip()
+            if text:
+                lines.append(f"{speaker}: {text}")
+        return "\n".join(lines)
 
     def _save_result_to_db(self, slack_user_id: str, result: dict, domain: str):
         """Save the generated article result to the database."""
@@ -376,38 +483,27 @@ class ContentFactoryTool(BaseTool):
         from roo.models import ArticleGeneration
         
         User = get_user_model()
-        
-        # 1. Get user details from Slack
         user_info = get_user_info(slack_user_id)
         email = user_info.get("email")
         
         if not email:
-            print(f"⚠️ Could not identify user email for Slack ID {slack_user_id}")
+            print(f"⚠️ Could not identify user {slack_user_id}")
             return
 
-        # 2. Find or create user
-        user, created = User.objects.get_or_create(
+        user, _ = User.objects.get_or_create(
             email=email,
             defaults={
                 "slack_id": slack_user_id,
-                "first_name": user_info.get("name", "").split()[0],
-                "last_name": " ".join(user_info.get("name", "").split()[1:]) if " " in user_info.get("name", "") else ""
+                "first_name": user_info.get("name", "").split()[0]
             }
         )
         
         if not user.slack_id:
             user.slack_id = slack_user_id
             user.save()
-            
-        print(f"👤 Linked article to user: {user.email}")
 
-        # 3. Extract result data
-        # Handle cases where result is nested or flat depending on API response
         res_data = result.get("result", result)
-        if not res_data:
-            res_data = {}
-            
-        # 4. Create ArticleGeneration record
+        
         ArticleGeneration.objects.create(
             user=user,
             job_id=result.get("job_id"),
@@ -421,5 +517,4 @@ class ContentFactoryTool(BaseTool):
             keywords=res_data.get("keywords", []),
             status='completed',
         )
-        print("💾 Article generation result saved to database")
 
