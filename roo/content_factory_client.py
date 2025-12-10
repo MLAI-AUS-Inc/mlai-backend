@@ -128,8 +128,14 @@ class ContentFactoryClient:
             print(f"Result fetch failed: {e}")
             raise
 
-    def poll_and_wait(self, job_id: str) -> dict:
-        """Helper to poll a job until completion and return result."""
+    def poll_and_wait(self, job_id: str, on_progress=None) -> dict:
+        """
+        Helper to poll a job until completion and return result.
+        
+        Args:
+            job_id: The ID of the job to poll
+            on_progress: Optional callback function that takes status_data dict
+        """
         while True:
             status_data = self.get_job_status(job_id)
             state = status_data["status"]
@@ -137,6 +143,12 @@ class ContentFactoryClient:
             step = status_data.get("current_step", "unknown")
             
             print(f"Status: {state} ({progress}%) - {step}")
+            
+            if on_progress:
+                try:
+                    on_progress(status_data)
+                except Exception as e:
+                    print(f"Progress callback failed: {e}")
             
             if state == "completed":
                 break

@@ -100,7 +100,8 @@ class ContentFactoryTool(BaseTool):
             return "discovery_selection"
 
         # Check if bot asked the Triage Question (Choice)
-        if "do you already have an idea" in last_bot_msg and "find some content gaps" in last_bot_msg:
+        # Dynamic message likely contains "topic"/"article" AND "gaps"/"opportunities"
+        if ("topic" in last_bot_msg or "article" in last_bot_msg) and ("gap" in last_bot_msg or "opportunit" in last_bot_msg):
              return "triage_selection"
             
         return "followup"
@@ -119,17 +120,30 @@ class ContentFactoryTool(BaseTool):
         print(f"   🎯 Triage result: {intent} for {domain}")
         
         if intent == "ambiguous":
+            # Use LLM to ask this naturally in Roo's voice
+            try:
+                msg = chat([
+                    {"role": "system", "content": (
+                        "You are Roo, a helpful Australian AI assistant 🦘. "
+                        "The user wants content for their site but hasn't specified if they have a topic request "
+                        "or if they want you to find ideas (content gaps).\n"
+                        "Ask them nicely if they already have a specific article in mind, OR if they would like you "
+                        "to analyze competitors to find content opportunities/gaps.\n"
+                        "Keep it short, punchy (2-3 sentences max), and friendly."
+                    )},
+                    {"role": "user", "content": f"I want content for {domain}."}
+                ], temperature=0.7, max_tokens=150)
+            except Exception:
+                # Fallback if LLM fails
+                msg = (
+                    f"G'day! 🦘 Happy to help with {domain}. "
+                    "Do you have a specific topic in mind, or should I look at competitors to find some content gaps for you?"
+                )
+
             return ToolResult(
                 success=True,
                 data={"state": "asking_intent"},
-                message=(
-                    f"G'day! 🦘 Happy to help with content for **{domain}**.\n\n"
-                    f"**Do you already have an idea for an article?**\n"
-                    f"If so, I'll research and write it for you.\n\n"
-                    f"**Or should I finding some content gaps?**\n"
-                    f"I can analyze competitors to see what they're ranking for that you aren't.\n\n"
-                    f"Just let me know what you prefer!"
-                )
+                message=msg
             )
         elif intent == "discovery":
             return self._start_discovery_flow(query, domain)
@@ -385,13 +399,32 @@ class ContentFactoryTool(BaseTool):
             client = ContentFactoryClient()
             job_id = client.generate_article(domain, topic, target_keyword, context)
             
-            # Use poll_and_wait helper
-            result = client.poll_and_wait(job_id)
+            # Track state to avoid spamming Slack
+            last_sent_progress = -1
             
-            # Auto-publish attempt (client handles auto-publish? No, client logic changed. I removed auto-publish from generate_article)
-            # Wait, I removed auto-publish in generate_article to match the direct API call.
-            # Does the backend auto-publish? The prompt says "Returns a job_id. Poll ... for progress as usual."
-            # The old client did auto-publish. I should probably add publish step here.
+            def progress_callback(status_data):
+                nonlocal last_sent_progress
+                progress = status_data.get("progress", 0)
+                step = status_data.get("current_step", "processing")
+                
+                # Only send update if progress has changed
+                if progress > last_sent_progress:
+                    # Map steps to friendly emojis/text
+                    step_map = {
+                        "research": "Doing deep research... 📚",
+                        "writing": "Drafting the article... ✍️",
+                        "seo": "Optimizing for SEO... 🔍",
+                        "critique": "Reviewing and refining... 🧐",
+                        "completed": "Finishing up! ✨"
+                    }
+                    step_msg = step_map.get(step, f"Status: {step}")
+                    
+                    msg = f"⏳ **Progress Update:** {progress}% - {step_msg}"
+                    post_message(channel_id, msg, thread_ts)
+                    last_sent_progress = progress
+
+            # Use poll_and_wait helper with callback
+            result = client.poll_and_wait(job_id, on_progress=progress_callback)
             
             # New Step: Publish
             publish_result = {}
