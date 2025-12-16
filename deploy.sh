@@ -43,7 +43,7 @@ ssh $USER@$DROPLET_IP << EOF
     
     # Run migrations
     echo "🗄️ Running migrations..."
-    docker compose exec web python manage.py migrate
+    docker compose run --rm web python manage.py migrate
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"
