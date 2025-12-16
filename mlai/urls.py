@@ -27,6 +27,6 @@ urlpatterns = [
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/teams/', TeamNamesListView.as_view(), name='team-names-list'),
     path('api/v1/points/', include('points.urls')),
-    path('api/v1/slack/', include('roo.urls')),  # Roo Slack Bot webhooks
+
     path('integrations/', include('integrations.urls')),
 ]

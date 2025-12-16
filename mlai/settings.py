@@ -54,7 +54,7 @@ INSTALLED_APPS = [
     'esafety',
     "rest_framework",
     "points",
-    "roo",  # Roo - Agentic Slack Bot
+
     "integrations",
 ]
 

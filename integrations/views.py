@@ -100,3 +100,28 @@ def google_callback(request):
     # Redirect to some settings page or success page
     # For now, just a simple response
     return HttpResponse(f"Successfully connected Google account: {google_email}")
+
+from django.http import JsonResponse
+from django.contrib.auth import get_user_model
+from .services import fetch_recent_subject_lines
+
+User = get_user_model()
+
+def test_gmail_fetch(request):
+    """
+    Test endpoint to fetch recent Gmail subjects.
+    Allows passing user_id param for easy curl testing without auth cookies.
+    """
+    user_id = request.GET.get("user_id")
+    if user_id:
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({"error": "User not found"}, status=404)
+    else:
+        if not request.user.is_authenticated:
+             return JsonResponse({"error": "Not authenticated or missing user_id"}, status=401)
+        user = request.user
+
+    subjects = fetch_recent_subject_lines(user)
+    return JsonResponse({"subjects": subjects})
