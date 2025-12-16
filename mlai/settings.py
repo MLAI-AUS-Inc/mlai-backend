@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "points",
     "roo",  # Roo - Agentic Slack Bot
+    "integrations",
 ]
 
 MIDDLEWARE = [
@@ -195,3 +196,18 @@ except ImportError:
 # App URLs
 MEDHACK_URL = os.getenv('MEDHACK_URL', 'http://localhost:3000')
 ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://localhost:5173/esafety')
+
+# Google OAuth Settings
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get(
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/google",
+)
+
+GOOGLE_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
