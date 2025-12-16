@@ -77,3 +77,29 @@ def fetch_last_month_emails(connection: GoogleConnection):
             print(f"Failed to fetch message {msg['id']}: {e}")
 
     return detailed_messages
+
+def fetch_recent_subject_lines(user, days=30):
+    try:
+        conn = user.google_connection
+    except GoogleConnection.DoesNotExist:
+        return []
+
+    creds = get_refreshed_credentials(conn)
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    query = f"newer_than:{days}d -in:spam -in:trash"
+    
+    results = service.users().messages().list(userId="me", q=query, maxResults=50).execute()
+    messages = results.get("messages", [])
+    
+    subjects = []
+    if messages:
+        for msg in messages:
+            try:
+                txt = service.users().messages().get(userId="me", id=msg['id'], format='metadata').execute()
+                headers = txt.get("payload", {}).get("headers", [])
+                subject = next((h["value"] for h in headers if h["name"] == "Subject"), "(No Subject)")
+                subjects.append(subject)
+            except Exception as e:
+                print(f"Failed to fetch message {msg['id']}: {e}")
+            
+    return subjects
