@@ -97,9 +97,16 @@ def google_callback(request):
         defaults=defaults,
     )
 
-    # Redirect to some settings page or success page
-    # For now, just a simple response
-    return HttpResponse(f"Successfully connected Google account: {google_email}")
+    # Redirect to frontend
+    return redirect(f"{settings.FRONTEND_URL}/settings?gmail_connected=true")
+
+@login_required
+def get_gmail_emails(request):
+    """
+    API endpoint for frontend to get recent emails.
+    """
+    subjects = fetch_recent_subject_lines(request.user)
+    return JsonResponse({"subjects": subjects})
 
 from django.http import JsonResponse
 from django.contrib.auth import get_user_model
