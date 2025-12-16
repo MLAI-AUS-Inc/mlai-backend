@@ -211,3 +211,11 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+
+# Points System Configuration
+POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]
+DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '10'))
+COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '1'))
+COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
+COWORKING_BOOKING_ADVANCE_DAYS = int(os.getenv('COWORKING_BOOKING_ADVANCE_DAYS', '30'))
+
