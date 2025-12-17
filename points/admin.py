@@ -9,9 +9,9 @@ from .models import (
 
 @admin.register(PointsAdmin)
 class PointsAdminAdmin(admin.ModelAdmin):
-    list_display = ('slack_user_id', 'name', 'role', 'portfolio', 'is_active', 'created_at')
+    list_display = ('slack_user_id', 'role', 'portfolio', 'is_active', 'created_at')
     list_filter = ('role', 'portfolio', 'is_active')
-    search_fields = ('slack_user_id', 'name', 'user__email')
+    search_fields = ('slack_user_id', 'user__email')
     readonly_fields = ('created_at',)
 
 

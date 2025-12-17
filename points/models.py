@@ -23,7 +23,6 @@ class PointsAdmin(models.Model):
 
     slack_user_id = models.CharField(max_length=50, unique=True, help_text="Slack User ID (e.g. U123ABC)")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='points_admin_profile')
-    name = models.CharField(max_length=150, blank=True)
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, default='committee')
     portfolio = models.CharField(max_length=50, choices=PORTFOLIO_CHOICES, blank=True, null=True)
     is_active = models.BooleanField(default=True)
@@ -35,7 +34,11 @@ class PointsAdmin(models.Model):
         verbose_name_plural = "Points Admins"
 
     def __str__(self):
-        return f"{self.name} ({self.slack_user_id}) - {self.role}"
+        # Use linked user's name if available, otherwise fall back to Slack ID
+        display_name = self.user.get_full_name() if self.user else self.slack_user_id
+        if not display_name and self.user:
+             display_name = self.user.email
+        return f"{display_name} ({self.slack_user_id}) - {self.role}"
 
 
 # Keep Minter as an alias for backwards compatibility
