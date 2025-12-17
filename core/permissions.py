@@ -57,3 +57,20 @@ class HasAPIKey(permissions.BasePermission):
             return False
             
         return api_key == internal_key
+
+
+class HasRooApiKey(permissions.BasePermission):
+    """
+    Allows access if the X-API-Key header matches ROO_API_KEY in environment.
+    """
+    def has_permission(self, request, view):
+        import os
+        
+        # Check header
+        api_key = request.META.get('HTTP_X_API_KEY')
+        roo_key = os.environ.get('ROO_API_KEY')
+        
+        if not roo_key:
+            return False
+            
+        return api_key == roo_key

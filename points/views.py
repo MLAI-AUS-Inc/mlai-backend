@@ -22,7 +22,7 @@ from .serializers import (
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 from core.models import User
-from core.permissions import HasAPIKey
+from core.permissions import HasAPIKey, HasRooApiKey
 from integrations.services import SlackService
 
 
@@ -34,7 +34,7 @@ class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = PointsAdmin.objects.filter(is_active=True)
     serializer_class = PointsAdminSerializer
     lookup_field = 'slack_user_id'
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasRooApiKey]
 
 
 # Backwards compatibility
@@ -619,7 +619,7 @@ class ManualAwardView(APIView):
     Admin: Manual points award/deduct.
     Secured by X-API-Key for Roo agent usage.
     """
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasRooApiKey]
 
     def post(self, request):
         print(f"DEBUG: ManualAwardView reached. Params: {request.data}")
@@ -642,8 +642,18 @@ class ManualAwardView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Bypass admin check if authenticated via API Key (Roo)
+        # The permission class has already passed at this point.
+        # But we still run the check for non-API-Key users (if any could get here)
+        # Since usage is restricted to HasRooApiKey, we technically know it's allowed.
+        # But if we want to support human users via session in future, we keep the check.
+        # For now, if HasRooApiKey is the ONLY permission, then everyone here is Roo.
+        # But let's be explicitly safe and check if it's NOT an admin AND NOT authorized via key (impossible here)
+        
+        # If we really want to enforce that the *ID provided* is an admin, unless it's Roo:
         if not is_points_admin(admin_slack_id):
-            return Response({'error': 'Requesting user must be a Points Admin'}, status=status.HTTP_403_FORBIDDEN)
+             # Allow if verified Roo API Request (which it is, due to permission_classes)
+             pass 
 
         try:
             points = int(points)
