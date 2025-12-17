@@ -39,3 +39,21 @@ class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
 
         # Write permissions are only allowed to the owner or superuser.
         return False
+
+
+class HasAPIKey(permissions.BasePermission):
+    """
+    Allows access if the X-API-Key header matches INTERNAL_API_KEY in settings.
+    Used for securing service-to-service endpoints (e.g. Roo agent -> Backend).
+    """
+    def has_permission(self, request, view):
+        from django.conf import settings
+        
+        api_key = request.META.get('HTTP_X_API_KEY')
+        internal_key = getattr(settings, 'INTERNAL_API_KEY', None)
+        
+        if not internal_key:
+            # If no key configured on backend, deny all API access to be safe
+            return False
+            
+        return api_key == internal_key
