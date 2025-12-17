@@ -31,4 +31,5 @@ urlpatterns = [
     path('api/content-factory/', include('core.urls')),
 
     path('integrations/', include('integrations.urls')),
+    path('api/v1/integrations/', include('integrations.api_urls')),
 ]
