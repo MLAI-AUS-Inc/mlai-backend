@@ -622,15 +622,20 @@ class ManualAwardView(APIView):
     permission_classes = [HasAPIKey]
 
     def post(self, request):
-        admin_slack_id = request.data.get('admin_slack_id')
+        admin_slack_id = request.data.get('slack_user_id') or request.data.get('admin_slack_id')
         target_slack_id = request.data.get('target_slack_id')
         points = request.data.get('points')
         reason = request.data.get('reason', 'Manual adjustment')
 
+        if admin_slack_id:
+            admin_slack_id = admin_slack_id.strip()
+        if target_slack_id:
+            target_slack_id = target_slack_id.strip()
+
         # 1. Validation & Admin Check
         if not admin_slack_id or not target_slack_id or points is None:
             return Response(
-                {'error': 'admin_slack_id, target_slack_id and points are required'},
+                {'error': 'slack_user_id (or admin_slack_id), target_slack_id and points are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
