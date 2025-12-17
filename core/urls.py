@@ -12,4 +12,6 @@ urlpatterns = [
     path('update-profile/', views.UpdateProfileView.as_view(), name='update_profile'),
     path('logout/', views.logout_view, name='logout'),
     path('users/<int:pk>/', views.UserDetailView.as_view(), name='user_detail'),
+    # Content Factory endpoints
+    path('content-factory/org/config/', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config'),
 ]

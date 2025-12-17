@@ -17,7 +17,8 @@ from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
-from .permissions import IsOwnerOrTeammateOrSuperuser
+from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey
+from .models import Organization, OrganizationContentConfig
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -598,3 +599,123 @@ class UserDetailView(RetrieveUpdateAPIView):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated, IsOwnerOrTeammateOrSuperuser]
 
+
+class ContentFactoryOrgConfigView(APIView):
+    """
+    GET/PUT org config for Content Factory service.
+    Used by external Content Factory service to read/write organization templates.
+    """
+    permission_classes = [HasAPIKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        """
+        Strip www., https://, http://, and trailing paths from domain.
+        Examples:
+            https://www.mlai.au/about → mlai.au
+            http://mlai.au → mlai.au
+            www.mlai.au → mlai.au
+        """
+        if not domain:
+            return domain
+        
+        # Remove protocol
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        
+        # Remove www.
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # Remove trailing path (everything after first /)
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        
+        return domain
+
+    def get(self, request):
+        """
+        Lookup org config by domain query param.
+        Returns 404 if organization not found.
+        """
+        domain = request.query_params.get('domain')
+        
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        normalized_domain = self._normalize_domain(domain)
+        
+        try:
+            org = Organization.objects.get(domain=normalized_domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get config if exists
+        config = getattr(org, 'content_config', None)
+        
+        response_data = {
+            'org_id': org.id,
+            'org_name': org.name,
+            'domain': org.domain,
+            'article_template': config.article_template if config else None,
+            'design_guide': config.design_guide if config else None,
+            'github_repo': config.github_repo if config else None,
+            'brand_name': config.brand_name if config else None,
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        """
+        Create org if not exists, then upsert config.
+        """
+        data = request.data
+        domain = data.get('domain')
+        name = data.get('name')
+        
+        if not domain:
+            return Response(
+                {'error': 'domain is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        normalized_domain = self._normalize_domain(domain)
+        
+        # Get or create organization
+        org, org_created = Organization.objects.get_or_create(
+            domain=normalized_domain,
+            defaults={'name': name or normalized_domain}
+        )
+        
+        # Update org name if provided and org already existed
+        if not org_created and name and org.name != name:
+            org.name = name
+            org.save()
+        
+        # Upsert config
+        config, config_created = OrganizationContentConfig.objects.update_or_create(
+            organization=org,
+            defaults={
+                'article_template': data.get('article_template'),
+                'design_guide': data.get('design_guide'),
+                'github_repo': data.get('github_repo'),
+                'brand_name': data.get('brand_name'),
+            }
+        )
+        
+        status_text = 'created' if org_created else 'updated'
+        
+        return Response({
+            'status': status_text,
+            'org_id': org.id,
+            'org_name': org.name,
+            'domain': org.domain,
+        }, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)

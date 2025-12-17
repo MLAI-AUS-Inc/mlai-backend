@@ -100,3 +100,32 @@ class GlobalSettings(models.Model):
 
     def __str__(self):
         return "Global Settings"
+
+class Organization(models.Model):
+    """Organization that uses content factory."""
+    name = models.CharField(max_length=255)
+    domain = models.CharField(max_length=255, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'content_factory_organization'
+
+class OrganizationContentConfig(models.Model):
+    """Content factory configuration per organization."""
+    organization = models.OneToOneField(
+        Organization, on_delete=models.CASCADE, related_name='content_config'
+    )
+    article_template = models.TextField(blank=True, null=True)
+    design_guide = models.TextField(blank=True, null=True)
+    github_repo = models.CharField(max_length=255, blank=True, null=True)
+    github_token_encrypted = models.TextField(blank=True, null=True)
+    article_path_pattern = models.CharField(
+        max_length=255, default="app/articles/content/{category}/{slug}.tsx"
+    )
+    registry_path = models.CharField(max_length=255, default="app/articles/registry.ts")
+    brand_name = models.CharField(max_length=100, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'content_factory_org_config'
