@@ -35,7 +35,7 @@ class PointsAdmin(models.Model):
 
     def __str__(self):
         # Use linked user's name if available, otherwise fall back to Slack ID
-        display_name = self.user.get_full_name() if self.user else self.slack_user_id
+        display_name = self.user.full_name if self.user else self.slack_user_id
         if not display_name and self.user:
              display_name = self.user.email
         return f"{display_name} ({self.slack_user_id}) - {self.role}"
