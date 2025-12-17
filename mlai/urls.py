@@ -27,6 +27,8 @@ urlpatterns = [
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/teams/', TeamNamesListView.as_view(), name='team-names-list'),
     path('api/v1/points/', include('points.urls')),
+    # Content Factory API
+    path('api/content-factory/', include('core.urls')),
 
     path('integrations/', include('integrations.urls')),
 ]

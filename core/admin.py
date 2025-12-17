@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import User, GlobalSettings
+from .models import User, GlobalSettings, Organization, OrganizationContentConfig
 
 
 class UserAdmin(BaseUserAdmin):
@@ -37,3 +37,17 @@ class GlobalSettingsAdmin(admin.ModelAdmin):
         return super().has_add_permission(request)
 
 admin.site.register(User, UserAdmin)
+
+
+@admin.register(Organization)
+class OrganizationAdmin(admin.ModelAdmin):
+    list_display = ('name', 'domain', 'created_at')
+    search_fields = ('name', 'domain')
+    ordering = ('name',)
+
+
+@admin.register(OrganizationContentConfig)
+class OrganizationContentConfigAdmin(admin.ModelAdmin):
+    list_display = ('organization', 'brand_name', 'github_repo', 'updated_at')
+    search_fields = ('organization__name', 'organization__domain', 'brand_name')
+    list_select_related = ('organization',)

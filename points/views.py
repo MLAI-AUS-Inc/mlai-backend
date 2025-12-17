@@ -1,4 +1,5 @@
 from rest_framework import viewsets, status, mixins
+from rest_framework.permissions import AllowAny
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -22,6 +23,7 @@ from .services import PointsService, CoworkingService, TaskService, RewardsServi
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 from core.models import User
 from core.permissions import HasAPIKey
+from integrations.services import SlackService
 
 
 class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
@@ -613,8 +615,11 @@ class RewardsViewSet(viewsets.ViewSet):
 
 
 class ManualAwardView(APIView):
-    """Admin: Manual points award/deduct."""
-    permission_classes = [AllowAny]
+    """
+    Admin: Manual points award/deduct.
+    Secured by X-API-Key for Roo agent usage.
+    """
+    permission_classes = [HasAPIKey]
 
     def post(self, request):
         admin_slack_id = request.data.get('admin_slack_id')
@@ -622,20 +627,79 @@ class ManualAwardView(APIView):
         points = request.data.get('points')
         reason = request.data.get('reason', 'Manual adjustment')
 
-        if not is_points_admin(admin_slack_id):
-            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
-
-        if not target_slack_id or points is None:
+        # 1. Validation & Admin Check
+        if not admin_slack_id or not target_slack_id or points is None:
             return Response(
-                {'error': 'target_slack_id and points required'},
+                {'error': 'admin_slack_id, target_slack_id and points are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        if not is_points_admin(admin_slack_id):
+            return Response({'error': 'Requesting user must be a Points Admin'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            points = int(points)
+        except (ValueError, TypeError):
+            return Response({'error': 'Points must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # New Rule: Admins cannot award points to themselves
+        if points > 0 and admin_slack_id == target_slack_id:
+            return Response(
+                {'error': 'Admins cannot award points to themselves'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 2. User Lookup & Auto-Creation
         user = PointsService.get_user_by_slack_id(target_slack_id)
         if not user:
-            return Response({'error': 'Target user not found'}, status=status.HTTP_404_NOT_FOUND)
+            # Attempt to fetch from Slack
+            profile = SlackService.get_user_profile(target_slack_id)
+            
+            if profile:
+                # Create user from Slack profile
+                email = profile.get('email')
+                real_name = profile.get('real_name', 'Unknown')
+                
+                # Handle email collisions or missing email
+                if not email:
+                    email = f"{target_slack_id}@slack.placeholder.com"
+                
+                # Check if email already exists (e.g. linked to another slack ID or no slack ID)
+                if User.objects.filter(email=email).exists():
+                    user = User.objects.get(email=email)
+                    if not user.slack_id:
+                        user.slack_id = target_slack_id
+                        user.save()
+                    elif user.slack_id != target_slack_id:
+                         # Edge case: Email collision with different Slack ID
+                         # Fallback to stub email
+                         email = f"{target_slack_id}@slack.placeholder.com"
+                         user = User.objects.create(
+                            email=email,
+                            slack_id=target_slack_id,
+                            first_name=real_name.split()[0],
+                            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+                            role='participant'
+                        )
+                else:
+                    user = User.objects.create(
+                        email=email,
+                        slack_id=target_slack_id,
+                        first_name=real_name.split()[0],
+                        last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+                        avatar_url=profile.get('image_url'),
+                        role='participant'
+                    )
+            else:
+                # Fallback: Create stub user
+                user = User.objects.create(
+                    email=f"{target_slack_id}@slack.placeholder.com",
+                    slack_id=target_slack_id,
+                    first_name="Unknown Slack User",
+                    role='participant'
+                )
 
-        points = int(points)
+        # 3. Transaction Execution
         idempotency_key = f"manual:{admin_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
 
         try:
@@ -648,7 +712,7 @@ class ManualAwardView(APIView):
                     created_by_slack_id=admin_slack_id,
                     idempotency_key=idempotency_key,
                 )
-            else:
+            elif points < 0:
                 ledger, created = PointsService.spend(
                     user=user,
                     delta=abs(points),
@@ -657,11 +721,20 @@ class ManualAwardView(APIView):
                     created_by_slack_id=admin_slack_id,
                     idempotency_key=idempotency_key,
                 )
+            else:
+                return Response({'error': 'Points cannot be zero'}, status=status.HTTP_400_BAD_REQUEST)
 
             balance = PointsService.get_balance(user)
+            
+            # 4. Response
             return Response({
-                'ledger': LedgerSerializer(ledger).data,
-                'new_balance': balance['balance'],
+                "success": True,
+                "new_balance": balance['balance'],
+                "ledger_id": ledger.id,
+                "message": f"{'Awarded' if points > 0 else 'Deducted'} {abs(points)} points {'to' if points > 0 else 'from'} {user.full_name or user.email}"
             })
+
         except InsufficientBalanceError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+             return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
