@@ -1,7 +1,6 @@
 from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from django.utils import timezone
 from django.db.models import Sum
@@ -22,6 +21,7 @@ from .serializers import (
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 from core.models import User
+from core.permissions import HasAPIKey
 
 
 class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
@@ -32,7 +32,7 @@ class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = PointsAdmin.objects.filter(is_active=True)
     serializer_class = PointsAdminSerializer
     lookup_field = 'slack_user_id'
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
 
 # Backwards compatibility
@@ -45,7 +45,7 @@ class TaskViewSet(viewsets.ModelViewSet):
     """
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -301,7 +301,7 @@ class TaskViewSet(viewsets.ModelViewSet):
 
 class UserBalanceViewSet(viewsets.ViewSet):
     """Get points balance for a user by Slack ID."""
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
     def retrieve(self, request, pk=None):
         slack_user_id = pk
@@ -343,7 +343,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only view of ledger entries."""
     queryset = Ledger.objects.all()
     serializer_class = LedgerSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -371,7 +371,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
 
 class CoworkingViewSet(viewsets.ViewSet):
     """Coworking booking management."""
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
     @action(detail=False, methods=['get'])
     def availability(self, request):
@@ -519,7 +519,7 @@ class CoworkingViewSet(viewsets.ViewSet):
 
 class RewardsViewSet(viewsets.ViewSet):
     """Rewards catalog and redemption management."""
-    permission_classes = [AllowAny]
+    permission_classes = [HasAPIKey]
 
     def list(self, request):
         """List available rewards."""
