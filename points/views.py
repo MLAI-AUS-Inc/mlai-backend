@@ -48,6 +48,23 @@ class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [HasRooApiKey]
 
 
+class AdminAllowanceView(APIView):
+    """
+    Get admin's weekly point allowance status.
+    Returns allowance, used, and remaining points.
+    """
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get(self, request):
+        slack_id = request.query_params.get('slack_id')
+        if not slack_id:
+            return Response({'error': 'slack_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        result = PointsService.get_admin_allowance_status(slack_id)
+        if 'error' in result:
+            return Response(result, status=status.HTTP_404_NOT_FOUND)
+        return Response(result)
+
 # Backwards compatibility
 MinterViewSet = PointsAdminViewSet
 
@@ -71,6 +88,27 @@ class TaskViewSet(viewsets.ModelViewSet):
             qs = qs.filter(portfolio=portfolio_param)
         
         return qs.order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        """Create a new task. Only Points Admins can create tasks."""
+        # Extract the creator's Slack ID
+        creator_slack_id = request.data.get('created_by_user_id') or request.data.get('slack_user_id')
+        
+        if not creator_slack_id:
+            return Response(
+                {'error': 'created_by_user_id or slack_user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if creator is a Points Admin
+        if not is_points_admin(creator_slack_id):
+            return Response(
+                {'error': 'Only Points Admins can create tasks'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Proceed with normal creation
+        return super().create(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     def claim(self, request, pk=None):

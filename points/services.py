@@ -78,6 +78,43 @@ class PointsService:
             return None
     
     @staticmethod
+    def get_admin_allowance_status(slack_id: str) -> dict:
+        """
+        Get the admin's weekly allowance status.
+        
+        Week resets on Monday (ISO week).
+        
+        Args:
+            slack_id: Admin's Slack ID
+            
+        Returns:
+            Dict with allowance, used, remaining, or error
+        """
+        from django.db import models as db_models
+        
+        try:
+            admin = PointsAdmin.objects.get(slack_user_id=slack_id, is_active=True)
+        except PointsAdmin.DoesNotExist:
+            return {'error': 'Not a points admin'}
+        
+        # Calculate start of current ISO week (Monday)
+        today = timezone.now().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        
+        # Sum points awarded by this admin this week
+        used = Ledger.objects.filter(
+            kind='EARN',
+            created_by_slack_id=slack_id,
+            created_at__date__gte=start_of_week
+        ).aggregate(total=db_models.Sum('delta'))['total'] or 0
+        
+        return {
+            'allowance': admin.weekly_allowance,
+            'used': used,
+            'remaining': admin.weekly_allowance - used,
+        }
+    
+    @staticmethod
     @transaction.atomic
     def award(
         user: User,

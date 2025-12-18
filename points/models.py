@@ -27,6 +27,7 @@ class PointsAdmin(models.Model):
     portfolio = models.CharField(max_length=50, choices=PORTFOLIO_CHOICES, blank=True, null=True)
     is_active = models.BooleanField(default=True)
     added_by_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    weekly_allowance = models.IntegerField(default=100, help_text="Max points this admin can award per week")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
