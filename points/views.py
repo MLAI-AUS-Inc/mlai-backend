@@ -91,8 +91,25 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """Create a new task. Only Points Admins can create tasks."""
-        # Extract the creator's Slack ID
-        creator_slack_id = request.data.get('created_by_user_id') or request.data.get('slack_user_id')
+        
+        # Make data mutable to handle bot inconsistencies
+        data = request.data.copy()
+        
+        # 1. Map 'task_title' to 'title' if needed
+        if 'task_title' in data and 'title' not in data:
+            data['title'] = data['task_title']
+
+        # 2. Map 'slack_user_id' to 'created_by_user_id' if needed
+        # The bot sends 'slack_user_id' as the authenticated user/actor
+        if 'created_by_user_id' not in data and 'slack_user_id' in data:
+            data['created_by_user_id'] = data['slack_user_id']
+
+        # Use the modified data
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Extract the creator's Slack ID for permission check
+        creator_slack_id = data.get('created_by_user_id')
         
         if not creator_slack_id:
             return Response(
@@ -108,7 +125,9 @@ class TaskViewSet(viewsets.ModelViewSet):
             )
         
         # Proceed with normal creation
-        return super().create(request, *args, **kwargs)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=True, methods=['post'])
     def claim(self, request, pk=None):
