@@ -320,6 +320,20 @@ class CoworkingService:
     """
     
     @staticmethod
+    def get_coworking_cost() -> int:
+        """
+        Get the cost for a coworking day.
+        
+        Prioritizes 'COWORKING_DAY' reward from catalog.
+        Falls back to settings or default of 4 points.
+        """
+        try:
+            reward = RewardsCatalog.objects.get(code='COWORKING_DAY', is_active=True)
+            return reward.cost_points
+        except RewardsCatalog.DoesNotExist:
+            return getattr(settings, 'COWORKING_DAY_COST_POINTS', 4)
+    
+    @staticmethod
     def get_capacity(booking_date: date) -> int:
         """
         Get capacity for a specific date.
@@ -424,7 +438,7 @@ class CoworkingService:
             raise ValueError(f"No availability for {booking_date} (capacity: {capacity})")
         
         # Get cost
-        cost = getattr(settings, 'COWORKING_DAY_COST_POINTS', 1)
+        cost = CoworkingService.get_coworking_cost()
         
         # Create idempotency key
         idempotency_key = f"coworking_book:{user.id}:{booking_date}"
