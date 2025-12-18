@@ -587,6 +587,7 @@ class RewardsService:
                 'description': reward.description,
                 'cost_points': reward.cost_points,
                 'fulfillment': reward.fulfillment,
+                'stock_remaining': reward.stock_remaining,
             }
             
             if user:
@@ -629,12 +630,18 @@ class RewardsService:
             ValueError: If reward not found or not active
             InsufficientBalanceError: If user can't afford the reward (AUTO only)
         """
+        # Lock reward for update to handle stock concurrency
         try:
-            reward = RewardsCatalog.objects.get(code=reward_code, is_active=True)
+            reward = RewardsCatalog.objects.select_for_update().get(code=reward_code, is_active=True)
         except RewardsCatalog.DoesNotExist:
             raise ValueError(f"Reward {reward_code} not found or not available")
         
         total_cost = reward.cost_points * quantity
+        
+        # Check stock if applicable
+        if reward.stock_remaining is not None:
+            if reward.stock_remaining < quantity:
+                raise ValueError(f"Insufficient stock (remaining: {reward.stock_remaining})")
         
         # Check max per user limit
         if reward.max_per_user:
@@ -658,6 +665,11 @@ class RewardsService:
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
         )
+
+        # Decrement stock
+        if reward.stock_remaining is not None:
+            reward.stock_remaining -= quantity
+            reward.save()
         
         # For AUTO fulfillment, deduct points immediately
         if reward.fulfillment == 'auto':

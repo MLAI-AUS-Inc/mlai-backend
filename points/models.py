@@ -326,6 +326,7 @@ class RewardsCatalog(models.Model):
     fulfillment = models.CharField(max_length=10, choices=FULFILLMENT_CHOICES, default='manual')
     is_active = models.BooleanField(default=True)
     max_per_user = models.IntegerField(null=True, blank=True, help_text="Max redemptions per user (null=unlimited)")
+    stock_remaining = models.IntegerField(null=True, blank=True, help_text="Total stock available. Null = infinite")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
