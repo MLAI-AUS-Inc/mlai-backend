@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption
+    RewardsCatalog, RewardRedemption, TaskTemplate
 )
 
 
@@ -45,6 +45,14 @@ class TaskSerializer(serializers.ModelSerializer):
         model = Task
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at', 'closed_at')
+
+
+class TaskTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TaskTemplate
+        fields = [
+            'name', 'alias', 'points', 'description', 'is_active'
+        ]
 
 
 class TaskSubmissionSerializer(serializers.ModelSerializer):

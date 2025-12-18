@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
-    LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView
+    LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
+    RateCardView
 )
 
 router = DefaultRouter()
@@ -31,6 +32,9 @@ urlpatterns = [
     path('rewards/pending/', RewardsViewSet.as_view({'get': 'pending'}), name='rewards-pending'),
     path('rewards/my-redemptions/', RewardsViewSet.as_view({'get': 'my_redemptions'}), name='rewards-my-redemptions'),
     
+    # Rate Card
+    path('rate-card/', RateCardView.as_view({'get': 'list'}), name='rate-card'),
+
     # Admin manual award
     path('admin/award/', ManualAwardView.as_view(), name='manual-award'),
 ]
