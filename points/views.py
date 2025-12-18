@@ -686,10 +686,8 @@ class ManualAwardView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        print(f"DEBUG: ManualAwardView reached. Params: {request.data}")
         admin_slack_id = request.data.get('slack_user_id') or request.data.get('admin_slack_id')
         target_slack_id = request.data.get('target_slack_id')
-        print(f"DEBUG: admin_slack_id extracted: '{admin_slack_id}'")
         
         points = request.data.get('points')
         reason = request.data.get('reason', 'Manual adjustment')
