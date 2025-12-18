@@ -3,7 +3,7 @@ from django.utils.html import format_html
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption
+    RewardsCatalog, RewardRedemption, TaskTemplate
 )
 
 
@@ -94,9 +94,18 @@ class CoworkingBookingAdmin(admin.ModelAdmin):
     ordering = ('-date',)
 
 
+@admin.register(TaskTemplate)
+class TaskTemplateAdmin(admin.ModelAdmin):
+    list_display = ('name', 'alias', 'points', 'is_active', 'description')
+    list_editable = ('points', 'is_active')
+    search_fields = ('name', 'alias', 'description')
+    ordering = ('name',)
+
+
 @admin.register(RewardsCatalog)
 class RewardsCatalogAdmin(admin.ModelAdmin):
-    list_display = ('code', 'name', 'cost_points', 'fulfillment', 'is_active', 'max_per_user')
+    list_display = ('code', 'name', 'cost_points', 'stock_remaining', 'fulfillment', 'is_active', 'max_per_user')
+    list_editable = ('cost_points', 'stock_remaining', 'is_active')
     list_filter = ('fulfillment', 'is_active')
     search_fields = ('code', 'name', 'description')
     ordering = ('cost_points',)

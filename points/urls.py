@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
-    RateCardView
+    RateCardView, AdminAllowanceView
 )
 
 router = DefaultRouter()
@@ -35,6 +35,7 @@ urlpatterns = [
     # Rate Card
     path('rate-card/', RateCardView.as_view({'get': 'list'}), name='rate-card'),
 
-    # Admin manual award
+    # Admin
     path('admin/award/', ManualAwardView.as_view(), name='manual-award'),
+    path('admin/allowance/', AdminAllowanceView.as_view(), name='admin-allowance'),
 ]

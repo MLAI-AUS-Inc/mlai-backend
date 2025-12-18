@@ -78,6 +78,43 @@ class PointsService:
             return None
     
     @staticmethod
+    def get_admin_allowance_status(slack_id: str) -> dict:
+        """
+        Get the admin's weekly allowance status.
+        
+        Week resets on Monday (ISO week).
+        
+        Args:
+            slack_id: Admin's Slack ID
+            
+        Returns:
+            Dict with allowance, used, remaining, or error
+        """
+        from django.db import models as db_models
+        
+        try:
+            admin = PointsAdmin.objects.get(slack_user_id=slack_id, is_active=True)
+        except PointsAdmin.DoesNotExist:
+            return {'error': 'Not a points admin'}
+        
+        # Calculate start of current ISO week (Monday)
+        today = timezone.now().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        
+        # Sum points awarded by this admin this week
+        used = Ledger.objects.filter(
+            kind='EARN',
+            created_by_slack_id=slack_id,
+            created_at__date__gte=start_of_week
+        ).aggregate(total=db_models.Sum('delta'))['total'] or 0
+        
+        return {
+            'allowance': admin.weekly_allowance,
+            'used': used,
+            'remaining': admin.weekly_allowance - used,
+        }
+    
+    @staticmethod
     @transaction.atomic
     def award(
         user: User,
@@ -587,6 +624,7 @@ class RewardsService:
                 'description': reward.description,
                 'cost_points': reward.cost_points,
                 'fulfillment': reward.fulfillment,
+                'stock_remaining': reward.stock_remaining,
             }
             
             if user:
@@ -629,12 +667,18 @@ class RewardsService:
             ValueError: If reward not found or not active
             InsufficientBalanceError: If user can't afford the reward (AUTO only)
         """
+        # Lock reward for update to handle stock concurrency
         try:
-            reward = RewardsCatalog.objects.get(code=reward_code, is_active=True)
+            reward = RewardsCatalog.objects.select_for_update().get(code=reward_code, is_active=True)
         except RewardsCatalog.DoesNotExist:
             raise ValueError(f"Reward {reward_code} not found or not available")
         
         total_cost = reward.cost_points * quantity
+        
+        # Check stock if applicable
+        if reward.stock_remaining is not None:
+            if reward.stock_remaining < quantity:
+                raise ValueError(f"Insufficient stock (remaining: {reward.stock_remaining})")
         
         # Check max per user limit
         if reward.max_per_user:
@@ -658,6 +702,11 @@ class RewardsService:
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
         )
+
+        # Decrement stock
+        if reward.stock_remaining is not None:
+            reward.stock_remaining -= quantity
+            reward.save()
         
         # For AUTO fulfillment, deduct points immediately
         if reward.fulfillment == 'auto':

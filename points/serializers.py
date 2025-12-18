@@ -111,7 +111,8 @@ class RewardsCatalogSerializer(serializers.ModelSerializer):
         model = RewardsCatalog
         fields = [
             'code', 'name', 'description', 'cost_points',
-            'fulfillment', 'is_active', 'max_per_user', 'can_afford'
+            'fulfillment', 'is_active', 'max_per_user', 'can_afford',
+            'stock_remaining'
         ]
     
     def get_can_afford(self, obj):
