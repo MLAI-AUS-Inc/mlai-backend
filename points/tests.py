@@ -30,7 +30,6 @@ class PointsServiceTests(TestCase):
         self.admin_slack_id = 'UADMIN123'
         PointsAdmin.objects.create(
             slack_user_id=self.admin_slack_id,
-            name='Test Admin',
             role='admin',
             is_active=True
         )
