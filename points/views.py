@@ -454,7 +454,7 @@ class CoworkingViewSet(viewsets.ViewSet):
             start_date = date.fromisoformat(date_param)
         
         results = []
-        cost_points = getattr(settings, 'COWORKING_DAY_COST_POINTS', 1)
+        cost_points = CoworkingService.get_coworking_cost()
         
         for i in range(days_ahead):
             check_date = start_date + timedelta(days=i)
