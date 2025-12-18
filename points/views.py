@@ -403,14 +403,30 @@ class CoworkingViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def book(self, request):
-        """Book a coworking day."""
+        """Book a coworking day. Users can only book for today."""
         slack_user_id = request.data.get('slack_user_id')
-        booking_date = request.data.get('date')
+        booking_date_str = request.data.get('date')
         slack_channel_id = request.data.get('slack_channel_id')
 
-        if not slack_user_id or not booking_date:
+        if not slack_user_id or not booking_date_str:
             return Response(
                 {'error': 'slack_user_id and date are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Parse and validate date is today
+        try:
+            booking_date = date.fromisoformat(booking_date_str)
+        except ValueError:
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        today = timezone.now().date()
+        if booking_date != today:
+            return Response(
+                {'error': f'Coworking can only be booked for today ({today.isoformat()}). You requested: {booking_date.isoformat()}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -422,7 +438,6 @@ class CoworkingViewSet(viewsets.ViewSet):
             )
 
         try:
-            booking_date = date.fromisoformat(booking_date)
             booking = CoworkingService.book(
                 user=user,
                 booking_date=booking_date,
