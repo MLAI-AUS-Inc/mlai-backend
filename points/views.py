@@ -11,19 +11,30 @@ from datetime import date, timedelta
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption
+    RewardsCatalog, RewardRedemption, TaskTemplate
 )
 from .serializers import (
     PointsAdminSerializer, MinterSerializer, TaskSerializer, LedgerSerializer,
     PointsAccountSerializer, PointsBalanceSerializer, TaskSubmissionSerializer,
     CoworkingBookingSerializer, CoworkingAvailabilitySerializer,
-    CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer
+    CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer,
+    TaskTemplateSerializer
 )
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey
 from integrations.services import SlackService
+
+
+class RateCardView(viewsets.ReadOnlyModelViewSet):
+    """
+    Public (authenticated) rate card of standard tasks.
+    """
+    queryset = TaskTemplate.objects.filter(is_active=True)
+    serializer_class = TaskTemplateSerializer
+    # Allow either API Key (for Roo/bots) or IsAuthenticated (for frontend users)
+    permission_classes = [HasAPIKey | settings.REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'][0]]
 
 
 class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
@@ -47,7 +58,7 @@ class TaskViewSet(viewsets.ModelViewSet):
     """
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -303,7 +314,7 @@ class TaskViewSet(viewsets.ModelViewSet):
 
 class UserBalanceViewSet(viewsets.ViewSet):
     """Get points balance for a user by Slack ID."""
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     def retrieve(self, request, pk=None):
         slack_user_id = pk
@@ -345,7 +356,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only view of ledger entries."""
     queryset = Ledger.objects.all()
     serializer_class = LedgerSerializer
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -373,7 +384,7 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
 
 class CoworkingViewSet(viewsets.ViewSet):
     """Coworking booking management."""
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     @action(detail=False, methods=['get'])
     def availability(self, request):
@@ -536,7 +547,7 @@ class CoworkingViewSet(viewsets.ViewSet):
 
 class RewardsViewSet(viewsets.ViewSet):
     """Rewards catalog and redemption management."""
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     def list(self, request):
         """List available rewards."""

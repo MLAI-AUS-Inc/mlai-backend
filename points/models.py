@@ -70,6 +70,27 @@ class PointsAccount(models.Model):
         return f"{self.user.email}: {self.balance} pts (earned: {self.lifetime_earned}, spent: {self.lifetime_spent})"
 
 
+class TaskTemplate(models.Model):
+    """
+    Standard templates for tasks with fixed point values (Rate Card).
+    """
+    name = models.CharField(max_length=255)
+    alias = models.SlugField(max_length=100, unique=True, help_text="Unique identifier for lookup e.g. 'newsletter'")
+    points = models.IntegerField()
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Task Template"
+        verbose_name_plural = "Task Templates (Rate Card)"
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.points} pts)"
+
+
 class Task(models.Model):
     """
     Tasks with points attached.
