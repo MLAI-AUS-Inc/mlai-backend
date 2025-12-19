@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .models import ChannelFirstPost
-from core.permissions import HasRooApiKey
+from core.permissions import HasAPIKey
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ class ChannelActivityView(APIView):
     """
     # Override global authentication to allow API key access
     authentication_classes = []
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasAPIKey]
 
     def get(self, request, slack_user_id=None, channel_id=None):
         """
