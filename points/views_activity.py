@@ -11,6 +11,8 @@ class ChannelActivityView(APIView):
     """
     Track first posts in channels.
     """
+    # Override global authentication to allow API key access
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def get(self, request, slack_user_id=None, channel_id=None):
@@ -46,5 +48,30 @@ class ChannelActivityView(APIView):
                 status=status.HTTP_409_CONFLICT
             )
         
+        # Create record
         ChannelFirstPost.objects.create(slack_user_id=slack_user_id, channel_id=channel_id)
-        return Response({"status": "recorded"}, status=status.HTTP_201_CREATED)
+
+        # Award points if user is linked
+        from .services import PointsService
+        user = PointsService.get_user_by_slack_id(slack_user_id)
+        
+        points_awarded = False
+        if user:
+            try:
+                idempotency_key = f"first_post_award:{slack_user_id}:{channel_id}"
+                PointsService.award(
+                    user=user,
+                    delta=1,
+                    source='COMMUNITY',
+                    description=f"First post in channel {channel_id}",
+                    created_by_slack_id="SYSTEM",
+                    idempotency_key=idempotency_key
+                )
+                points_awarded = True
+            except Exception as e:
+                logger.error(f"Failed to award points for first post: {e}")
+
+        return Response({
+            "status": "recorded", 
+            "points_awarded": points_awarded
+        }, status=status.HTTP_201_CREATED)

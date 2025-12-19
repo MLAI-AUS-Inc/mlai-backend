@@ -58,12 +58,17 @@ class EndpointTests(TestCase):
         self.assertIsNone(UserIntegration.objects.get(slack_user_id="U456").pending_intent)
 
     def test_channel_activity_endpoints(self):
+        # Setup: Link user to Slack ID
+        self.user.slack_id = "U789"
+        self.user.save()
+
         # 1. Record First Post
         url = reverse('first_post_record')
         data = {"slack_user_id": "U789", "channel_id": "C123"}
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(ChannelFirstPost.objects.filter(slack_user_id="U789", channel_id="C123").exists())
+        self.assertTrue(response.data['points_awarded'])
 
         # 2. Duplicate Check
         response = self.client.post(url, data, format='json')
