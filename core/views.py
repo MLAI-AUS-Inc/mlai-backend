@@ -17,7 +17,7 @@ from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
-from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey
+from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
 from .models import Organization, OrganizationContentConfig
 
 logger = logging.getLogger(__name__)
@@ -719,3 +719,27 @@ class ContentFactoryOrgConfigView(APIView):
             'org_name': org.name,
             'domain': org.domain,
         }, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)
+
+
+class LinkSlackView(APIView):
+    """
+    Link a Slack ID to an existing user found by email.
+    Path: POST /api/v1/users/link-slack/
+    """
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        slack_id = request.data.get('slack_id')
+        email = request.data.get('email')
+
+        if not slack_id or not email:
+            return Response({"error": "slack_id and email are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Case-insensitive lookup
+        try:
+            user = User.objects.get(email__iexact=email)
+            user.slack_id = slack_id
+            user.save()
+            return Response({"user_id": user.id, "linked": True}, status=status.HTTP_200_OK)
+        except User.DoesNotExist:
+            return Response({"error": "User not found by email"}, status=status.HTTP_404_NOT_FOUND)

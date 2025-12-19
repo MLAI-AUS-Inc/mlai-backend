@@ -10,6 +10,8 @@ services:
       - "80:8000"
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgres://mlai_user:mlai_password@db:5432/mlai_db
     depends_on:
       - db
 
@@ -19,6 +21,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     env_file:
       - .env
+    environment:
+      - POSTGRES_USER=mlai_user
+      - POSTGRES_PASSWORD=mlai_password
+      - POSTGRES_DB=mlai_db
 
 volumes:
   postgres_data:
