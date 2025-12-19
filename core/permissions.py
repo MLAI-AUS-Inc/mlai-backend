@@ -1,3 +1,4 @@
+import os
 from rest_framework import permissions
 
 class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
@@ -52,7 +53,7 @@ class HasAPIKey(permissions.BasePermission):
         api_key = request.META.get('HTTP_X_API_KEY')
         internal_key = getattr(settings, 'INTERNAL_API_KEY', None)
         
-        if not internal_key:
+        if not api_key or not internal_key:
             # If no key configured on backend, deny all API access to be safe
             return False
             
@@ -61,17 +62,26 @@ class HasAPIKey(permissions.BasePermission):
 
 class HasRooApiKey(permissions.BasePermission):
     """
-    Allows access if the X-API-Key header matches ROO_API_KEY in environment
-    (or INTERNAL_API_KEY in settings).
+    Allows access if the X-API-Key header matches the Roo API key.
+    Accepts either ROO_API_KEY or INTERNAL_API_KEY to cover existing deployments.
     """
     def has_permission(self, request, view):
         from django.conf import settings
         
         # Check header
         api_key = request.META.get('HTTP_X_API_KEY')
-        roo_key = getattr(settings, 'INTERNAL_API_KEY', None)
-        
-        if not roo_key:
+        allowed_keys = [
+            getattr(settings, 'ROO_API_KEY', None),
+            getattr(settings, 'INTERNAL_API_KEY', None),
+            # Fallback to env in case settings weren't refreshed after env changes
+            os.environ.get('ROO_API_KEY'),
+            os.environ.get('INTERNAL_API_KEY'),
+        ]
+
+        # Filter out any missing keys
+        allowed_keys = [key for key in allowed_keys if key]
+
+        if not api_key or not allowed_keys:
             return False
-            
-        return api_key == roo_key
+
+        return api_key in allowed_keys

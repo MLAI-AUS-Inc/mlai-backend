@@ -220,4 +220,5 @@ COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
-INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or os.environ.get('ROO_API_KEY')
+ROO_API_KEY = os.environ.get('ROO_API_KEY')
+INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY

@@ -17,6 +17,7 @@ class EndpointTests(TestCase):
         os.environ['INTERNAL_API_KEY'] = self.api_key
         from django.conf import settings
         settings.INTERNAL_API_KEY = self.api_key
+        settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
         
         # Create a test user
@@ -82,6 +83,26 @@ class EndpointTests(TestCase):
         response = self.client.get(url_check)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['has_posted'])
+
+    def test_channel_activity_allows_roo_api_key_when_internal_differs(self):
+        """
+        Roo should be able to call channel activity endpoints even if
+        INTERNAL_API_KEY is different from ROO_API_KEY.
+        """
+        from django.conf import settings
+
+        os.environ['ROO_API_KEY'] = 'roo_only_key'
+        os.environ['INTERNAL_API_KEY'] = 'internal_only_key'
+        settings.ROO_API_KEY = 'roo_only_key'
+        settings.INTERNAL_API_KEY = 'internal_only_key'
+
+        client = APIClient()
+        client.credentials(HTTP_X_API_KEY='roo_only_key')
+
+        url_check = reverse('first_post_check', args=["U000", "C000"])
+        response = client.get(url_check)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['has_posted'])
 
     def test_user_linking_endpoint(self):
         # 1. Link Valid User
