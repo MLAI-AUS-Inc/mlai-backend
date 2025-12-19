@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .models import ChannelFirstPost
-from core.permissions import HasAPIKey
+from core.permissions import HasAPIKey, HasRooApiKey
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ class ChannelActivityView(APIView):
     """
     # Override global authentication to allow API key access
     authentication_classes = []
-    permission_classes = [HasAPIKey]
+    permission_classes = [HasAPIKey | HasRooApiKey]
 
     def get(self, request, slack_user_id=None, channel_id=None):
         """
@@ -40,7 +40,7 @@ class ChannelActivityView(APIView):
         channel_id = request.data.get('channel_id')
 
         if not slack_user_id or not channel_id:
-             return Response({"error": "slack_user_id and channel_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "slack_user_id and channel_id are required"}, status=status.HTTP_400_BAD_REQUEST)
 
         if ChannelFirstPost.objects.filter(slack_user_id=slack_user_id, channel_id=channel_id).exists():
             return Response(
