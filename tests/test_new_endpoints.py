@@ -14,6 +14,9 @@ class EndpointTests(TestCase):
         self.client = APIClient()
         self.api_key = "test_api_key"
         os.environ['ROO_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = self.api_key
+        from django.conf import settings
+        settings.INTERNAL_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
         
         # Create a test user
