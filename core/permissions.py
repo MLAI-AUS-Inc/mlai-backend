@@ -61,14 +61,15 @@ class HasAPIKey(permissions.BasePermission):
 
 class HasRooApiKey(permissions.BasePermission):
     """
-    Allows access if the X-API-Key header matches ROO_API_KEY in environment.
+    Allows access if the X-API-Key header matches ROO_API_KEY in environment
+    (or INTERNAL_API_KEY in settings).
     """
     def has_permission(self, request, view):
-        import os
+        from django.conf import settings
         
         # Check header
         api_key = request.META.get('HTTP_X_API_KEY')
-        roo_key = os.environ.get('ROO_API_KEY')
+        roo_key = getattr(settings, 'INTERNAL_API_KEY', None)
         
         if not roo_key:
             return False
