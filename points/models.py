@@ -378,3 +378,20 @@ class RewardRedemption(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.reward.name} x{self.quantity} ({self.status})"
+
+
+class ChannelFirstPost(models.Model):
+    """
+    Track first posts in channels for point awards.
+    """
+    slack_user_id = models.CharField(max_length=50)
+    channel_id = models.CharField(max_length=50)
+    posted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Channel First Post"
+        verbose_name_plural = "Channel First Posts"
+        unique_together = ('slack_user_id', 'channel_id')
+
+    def __str__(self):
+        return f"{self.slack_user_id} in {self.channel_id}"

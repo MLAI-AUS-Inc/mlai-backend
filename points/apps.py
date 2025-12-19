@@ -29,7 +29,6 @@ class PointsConfig(AppConfig):
                 PointsAdmin.objects.get_or_create(
                     slack_user_id=slack_id,
                     defaults={
-                        'name': f'Bootstrap Admin ({slack_id})',
                         'role': 'admin',
                         'is_active': True,
                     }
