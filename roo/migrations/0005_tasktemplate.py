@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0004_seed_rewards'),
+        ('roo', '0004_seed_rewards'),
     ]
 
     operations = [

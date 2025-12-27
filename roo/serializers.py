@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate
+    RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress
 )
 
 
@@ -146,3 +146,25 @@ class PointsBalanceSerializer(serializers.Serializer):
     slack_user_id = serializers.CharField()
     annual_balance = serializers.IntegerField()
     lifetime_balance = serializers.IntegerField()
+
+
+class QuestProgressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestProgress
+        fields = [
+            'slack_user_id', 'quest_id', 'current_count', 
+            'completed', 'first_progress_at', 'completed_at'
+        ]
+        read_only_fields = ['first_progress_at', 'created_at', 'updated_at']
+
+
+class QuestProgressInputSerializer(serializers.Serializer):
+    slack_user_id = serializers.CharField(max_length=50)
+    quest_id = serializers.CharField(max_length=50)
+    increment_by = serializers.IntegerField(min_value=1, default=1, required=False)
+
+
+class QuestCompleteInputSerializer(serializers.Serializer):
+    slack_user_id = serializers.CharField(max_length=50)
+    quest_id = serializers.CharField(max_length=50)
+

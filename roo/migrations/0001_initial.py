@@ -54,7 +54,7 @@ class Migration(migrations.Migration):
                 ('reason', models.TextField(blank=True)),
                 ('created_by_user_id', models.CharField(help_text='Slack ID of who awarded points', max_length=50)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='ledger_entries', to='points.task')),
+                ('task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='ledger_entries', to='roo.task')),
             ],
         ),
     ]

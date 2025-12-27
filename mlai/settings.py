@@ -53,7 +53,7 @@ INSTALLED_APPS = [
     'core',
     'esafety',
     "rest_framework",
-    "points",
+    "roo",
 
     "integrations",
 ]

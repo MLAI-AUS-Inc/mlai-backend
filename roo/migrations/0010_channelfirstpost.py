@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0009_add_weekly_allowance'),
+        ('roo', '0009_add_weekly_allowance'),
     ]
 
     operations = [

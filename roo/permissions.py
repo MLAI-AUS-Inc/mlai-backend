@@ -2,6 +2,7 @@
 Points permissions helper module.
 Provides authorization checks for points system operations.
 """
+from typing import Optional
 from functools import wraps
 from django.conf import settings
 from .models import PointsAdmin
@@ -32,7 +33,7 @@ def is_points_admin(slack_id: str) -> bool:
     ).exists()
 
 
-def get_admin_role(slack_id: str) -> str | None:
+def get_admin_role(slack_id: str) -> Optional[str]:
     """
     Get the role of a Points Admin by Slack ID.
     

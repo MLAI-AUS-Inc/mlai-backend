@@ -1,0 +1,76 @@
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import (
+    PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
+    LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
+    RateCardView, AdminAllowanceView,
+    # Activity views
+    ChannelActivityView,
+    # Quest views
+    QuestProgressView, UserQuestProgressView, QuestIncrementView,
+    QuestCompleteView, QuestCompletionStatusView,
+)
+
+router = DefaultRouter()
+router.register(r'admins', PointsAdminViewSet, basename='points-admin')
+router.register(r'minters', MinterViewSet, basename='minter')  # Backwards compat
+router.register(r'tasks', TaskViewSet)
+router.register(r'ledger', LedgerViewSet, basename='ledger')
+
+urlpatterns = [
+    path('', include(router.urls)),
+    
+    # ============================================================
+    # User Balance (by Slack ID)
+    # ============================================================
+    path('users/<str:pk>/balance/', UserBalanceViewSet.as_view({'get': 'retrieve'}), name='user-balance'),
+    
+    # ============================================================
+    # Coworking
+    # ============================================================
+    path('coworking/availability/', CoworkingViewSet.as_view({'get': 'availability'}), name='coworking-availability'),
+    path('coworking/book/', CoworkingViewSet.as_view({'post': 'book'}), name='coworking-book'),
+    path('coworking/cancel/', CoworkingViewSet.as_view({'post': 'cancel'}), name='coworking-cancel'),
+    path('coworking/my-bookings/', CoworkingViewSet.as_view({'get': 'my_bookings'}), name='coworking-my-bookings'),
+    path('coworking/set-capacity/', CoworkingViewSet.as_view({'post': 'set_capacity'}), name='coworking-set-capacity'),
+    
+    # ============================================================
+    # Rewards
+    # ============================================================
+    path('rewards/', RewardsViewSet.as_view({'get': 'list'}), name='rewards-list'),
+    path('rewards/request/', RewardsViewSet.as_view({'post': 'request'}), name='rewards-request'),
+    path('rewards/approve/', RewardsViewSet.as_view({'post': 'approve'}), name='rewards-approve'),
+    path('rewards/pending/', RewardsViewSet.as_view({'get': 'pending'}), name='rewards-pending'),
+    path('rewards/my-redemptions/', RewardsViewSet.as_view({'get': 'my_redemptions'}), name='rewards-my-redemptions'),
+    
+    # ============================================================
+    # Rate Card
+    # ============================================================
+    path('rate-card/', RateCardView.as_view({'get': 'list'}), name='rate-card'),
+
+    # ============================================================
+    # Admin
+    # ============================================================
+    path('admin/award/', ManualAwardView.as_view(), name='manual-award'),
+    path('admin/allowance/', AdminAllowanceView.as_view(), name='admin-allowance'),
+    
+    # ============================================================
+    # Activity Tracking
+    # ============================================================
+    path('activity/first-post/', ChannelActivityView.as_view(), name='first_post_record'),
+    path('activity/first-post/<str:slack_user_id>/<str:channel_id>/', ChannelActivityView.as_view(), name='first_post_check'),
+    
+    # ============================================================
+    # Quests
+    # ============================================================
+    # Increment progress
+    path('quests/progress/', QuestIncrementView.as_view(), name='quest_increment'),
+    # Mark as completed
+    path('quests/complete/', QuestCompleteView.as_view(), name='quest_complete'),
+    # Quick completion check
+    path('quests/<str:slack_user_id>/<str:quest_id>/completed/', QuestCompletionStatusView.as_view(), name='quest_completed'),
+    # Get specific quest progress
+    path('quests/<str:slack_user_id>/<str:quest_id>/', QuestProgressView.as_view(), name='quest_progress'),
+    # Get all quests for a user
+    path('quests/<str:slack_user_id>/', UserQuestProgressView.as_view(), name='user_quests'),
+]

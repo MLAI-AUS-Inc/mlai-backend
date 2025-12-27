@@ -4,7 +4,7 @@ from django.db import migrations
 
 
 def populate_rate_card(apps, schema_editor):
-    TaskTemplate = apps.get_model('points', 'TaskTemplate')
+    TaskTemplate = apps.get_model('roo', 'TaskTemplate')
     items = [
         # A) Governance & Committee Ops
         {'alias': 'gov_attend_committee', 'name': 'Attend committee meeting', 'points': 6, 'description': 'Governance & Committee Ops (60 min)'},
@@ -109,7 +109,7 @@ def populate_rate_card(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0007_populate_pilot_rules'),
+        ('roo', '0007_populate_pilot_rules'),
     ]
 
     operations = [

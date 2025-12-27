@@ -2,7 +2,7 @@ import logging
 from django.core.management.base import BaseCommand
 from django.db import transaction, IntegrityError
 from core.models import User
-from points.models import (
+from roo.models import (
     PointsAccount, Ledger, Task, TaskSubmission, 
     CoworkingBooking, RewardRedemption, PointsAdmin
 )

@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('core', '0010_user_slack_id_alter_globalsettings_is_obscured'),
-        ('points', '0001_initial'),
+        ('roo', '0001_initial'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -146,7 +146,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='ledger',
             name='task',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='legacy_ledger_entries', to='points.task'),
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='legacy_ledger_entries', to='roo.task'),
         ),
         migrations.AlterField(
             model_name='task',
@@ -163,8 +163,8 @@ class Migration(migrations.Migration):
                 ('slack_channel_id', models.CharField(blank=True, max_length=50, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('cancelled_at', models.DateTimeField(blank=True, null=True)),
-                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='coworking_booking', to='points.ledger')),
-                ('refund_ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='coworking_refund', to='points.ledger')),
+                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='coworking_booking', to='roo.ledger')),
+                ('refund_ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='coworking_refund', to='roo.ledger')),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='coworking_bookings', to=settings.AUTH_USER_MODEL)),
             ],
             options={
@@ -204,9 +204,9 @@ class Migration(migrations.Migration):
                 ('notes', models.TextField(blank=True, help_text='User notes or admin fulfillment notes', null=True)),
                 ('slack_channel_id', models.CharField(blank=True, max_length=50, null=True)),
                 ('slack_thread_ts', models.CharField(blank=True, max_length=50, null=True)),
-                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='reward_redemption', to='points.ledger')),
+                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='reward_redemption', to='roo.ledger')),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='reward_redemptions', to=settings.AUTH_USER_MODEL)),
-                ('reward', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='redemptions', to='points.rewardscatalog')),
+                ('reward', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='redemptions', to='roo.rewardscatalog')),
             ],
             options={
                 'verbose_name': 'Reward Redemption',
@@ -225,8 +225,8 @@ class Migration(migrations.Migration):
                 ('approved_at', models.DateTimeField(blank=True, null=True)),
                 ('rejection_reason', models.TextField(blank=True, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='task_submission', to='points.ledger')),
-                ('task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='submissions', to='points.task')),
+                ('ledger_entry', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='task_submission', to='roo.ledger')),
+                ('task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='submissions', to='roo.task')),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='task_submissions', to=settings.AUTH_USER_MODEL)),
             ],
             options={
