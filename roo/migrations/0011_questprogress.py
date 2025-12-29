@@ -26,7 +26,7 @@ class Migration(migrations.Migration):
             options={
                 'verbose_name': 'Quest Progress',
                 'verbose_name_plural': 'Quest Progress',
-                'indexes': [models.Index(fields=['slack_user_id'], name='points_ques_slack_u_d877f8_idx'), models.Index(fields=['slack_user_id', 'completed'], name='points_ques_slack_u_be5112_idx')],
+                'indexes': [models.Index(fields=['slack_user_id'], name='roo_questpr_slack_u_9c005b_idx'), models.Index(fields=['slack_user_id', 'completed'], name='roo_questpr_slack_u_eebc69_idx')],
                 'unique_together': {('slack_user_id', 'quest_id')},
             },
         ),
