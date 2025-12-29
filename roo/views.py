@@ -23,7 +23,7 @@ from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey
 from integrations.services import SlackService
 
-# Additional imports for Activity and Quests
+# Additional imports for Activity & Quests
 import logging
 from django.db import transaction
 from .models import (
