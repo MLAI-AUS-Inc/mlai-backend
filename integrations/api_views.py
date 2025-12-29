@@ -177,3 +177,79 @@ class GithubAuthUrlView(APIView):
             "auth_url": auth_url,
             "message": "Send this URL to the user to authorize GitHub."
         })
+
+
+class GithubScanView(APIView):
+    """
+    Trigger a repository scan via Content Factory.
+    POST /api/v1/integrations/github/scan
+    """
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        import requests as http_requests  # Avoid conflict with rest_framework
+        
+        slack_user_id = request.data.get('slack_user_id')
+        if not slack_user_id:
+            return Response(
+                {"error": "slack_user_id is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Look up user integration
+        try:
+            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+        except UserIntegration.DoesNotExist:
+            return Response(
+                {"error": "No integration found for this user. Please connect GitHub first."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check for GitHub token
+        if not integration.github_access_token:
+            return Response(
+                {"error": "No GitHub token found. Please authenticate with GitHub first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check for connected repo
+        if not integration.github_repo:
+            return Response(
+                {"error": "No GitHub repository configured for this user."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Call Content Factory scan endpoint
+        content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+        scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
+        
+        try:
+            cf_response = http_requests.post(
+                scan_endpoint,
+                json={
+                    "slack_user_id": slack_user_id,
+                    "github_repo": integration.github_repo,
+                    "github_token": integration.github_access_token,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            cf_response.raise_for_status()
+            cf_data = cf_response.json()
+        except http_requests.exceptions.RequestException as e:
+            logger.error(f"Content Factory scan request failed: {e}")
+            return Response(
+                {"error": f"Failed to trigger scan: {str(e)}"},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        # Update project_scanned status
+        integration.project_scanned = True
+        integration.save()
+
+        return Response({
+            "status": "scan_triggered",
+            "slack_user_id": slack_user_id,
+            "github_repo": integration.github_repo,
+            "content_factory_response": cf_data,
+        }, status=status.HTTP_200_OK)

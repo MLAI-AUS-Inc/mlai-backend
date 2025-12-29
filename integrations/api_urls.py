@@ -6,6 +6,7 @@ urlpatterns = [
     path('github/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_list'),  # POST create/update
     path('github/<str:slack_user_id>/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_detail'), # GET, PATCH
     path('github/auth-url', api_views.GithubAuthUrlView.as_view(), name='github_auth_url'),
+    path('github/scan', api_views.GithubScanView.as_view(), name='github_scan'),
     
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save
