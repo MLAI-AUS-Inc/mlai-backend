@@ -227,6 +227,11 @@ def github_callback(request):
         }
     )
 
+    # Trigger background scan if repo is selected
+    if selected_repo:
+        from integrations.services.github import trigger_scan_async
+        trigger_scan_async(slack_user_id)
+
     # Build success message
     if selected_repo:
         repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
@@ -265,6 +270,10 @@ def github_select_repo(request):
         integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
         integration.github_repo = github_repo
         integration.save()
+        
+        # Trigger background scan
+        from integrations.services.github import trigger_scan_async
+        trigger_scan_async(slack_user_id)
         
         return HttpResponse(f"""
         <html>
