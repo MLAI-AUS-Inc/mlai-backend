@@ -20,7 +20,7 @@ class ManualAwardViewTests(APITestCase):
             is_active=True
         )
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_award_with_slack_user_id_success(self, mock_permission):
         """Test award works with slack_user_id parameter."""
         data = {
@@ -34,7 +34,7 @@ class ManualAwardViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['success'], True)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_award_with_whitespace_stripped(self, mock_permission):
         """Test that whitespace is stripped from IDs."""
         data = {
@@ -48,7 +48,7 @@ class ManualAwardViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_award_with_legacy_admin_slack_id(self, mock_permission):
         """Test that legacy admin_slack_id still works."""
         data = {

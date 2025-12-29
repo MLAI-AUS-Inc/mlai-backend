@@ -4,7 +4,7 @@ certifi==2025.1.31
 charset-normalizer==3.4.1
 customerio==2.1
 dj-database-url==2.3.0
-Django==5.1.5
+Django==4.2.16
 django-cors-headers==4.6.0
 djangorestframework==3.15.2
 djangorestframework_simplejwt==5.4.0
@@ -25,6 +25,7 @@ urllib3==2.3.0
 whitenoise==6.9.0
 firebase-admin==6.6.0
 Pillow==11.0.0
+PyGithub>=2.0.0
 
 # Roo - Agentic Slack Bot dependencies
 slack-sdk>=3.21.0

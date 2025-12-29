@@ -3,8 +3,8 @@ from django.apps import AppConfig
 
 class PointsConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'points'
-    verbose_name = 'Points System'
+    name = 'roo'
+    verbose_name = 'Roo Points System'
 
     def ready(self):
         """Bootstrap admin users from environment on startup."""

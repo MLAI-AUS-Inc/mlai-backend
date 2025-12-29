@@ -1,5 +1,8 @@
 from rest_framework import viewsets, status, mixins
 from rest_framework.permissions import AllowAny
+# Removed mixins as they are not used in new code usually, but kept if needed for legacy.
+# Also added logging
+
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,18 +16,34 @@ from .models import (
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate
 )
-from .serializers import (
-    PointsAdminSerializer, MinterSerializer, TaskSerializer, LedgerSerializer,
-    PointsAccountSerializer, PointsBalanceSerializer, TaskSubmissionSerializer,
-    CoworkingBookingSerializer, CoworkingAvailabilitySerializer,
-    CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer,
-    TaskTemplateSerializer
-)
+
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey
 from integrations.services import SlackService
+
+# Additional imports for Activity and Quests
+import logging
+from django.db import transaction
+from .models import (
+    PointsAdmin, Minter, Task, Ledger, PointsAccount,
+    TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
+    RewardsCatalog, RewardRedemption, TaskTemplate,
+    # Activity & Quests
+    ChannelFirstPost, QuestProgress
+)
+from .serializers import (
+    PointsAdminSerializer, MinterSerializer, TaskSerializer, LedgerSerializer,
+    PointsAccountSerializer, PointsBalanceSerializer, TaskSubmissionSerializer,
+    CoworkingBookingSerializer, CoworkingAvailabilitySerializer,
+    CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer,
+    TaskTemplateSerializer,
+    # Quests
+    QuestProgressSerializer, QuestProgressInputSerializer, QuestCompleteInputSerializer
+)
+
+logger = logging.getLogger(__name__)
 
 
 class RateCardView(viewsets.ReadOnlyModelViewSet):
@@ -833,7 +852,245 @@ class ManualAwardView(APIView):
                 "message": f"{'Awarded' if points > 0 else 'Deducted'} {abs(points)} points {'to' if points > 0 else 'from'} {user.full_name or user.email}"
             })
 
+
         except InsufficientBalanceError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
              return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================================
+# Activity Tracking Views
+# ============================================================
+
+class ChannelActivityView(APIView):
+    """
+    Track first posts in channels.
+    """
+    # Override global authentication to allow API key access
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get(self, request, slack_user_id=None, channel_id=None):
+        """
+        Check if posted.
+        Path: GET /api/v1/activity/first-post/{slack_user_id}/{channel_id}/
+        """
+        if not slack_user_id or not channel_id:
+            return Response({"error": "slack_user_id and channel_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        has_posted = ChannelFirstPost.objects.filter(
+            slack_user_id=slack_user_id, 
+            channel_id=channel_id
+        ).exists()
+        
+        return Response({"has_posted": has_posted})
+
+    def post(self, request):
+        """
+        Record first post.
+        Path: POST /api/v1/activity/first-post/
+        Body: {"slack_user_id": "...", "channel_id": "..."}
+        """
+        slack_user_id = request.data.get('slack_user_id')
+        channel_id = request.data.get('channel_id')
+
+        if not slack_user_id or not channel_id:
+            return Response({"error": "slack_user_id and channel_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if ChannelFirstPost.objects.filter(slack_user_id=slack_user_id, channel_id=channel_id).exists():
+            return Response(
+                {"error": "Activity already recorded", "has_posted": True}, 
+                status=status.HTTP_409_CONFLICT
+            )
+        
+        # Create record
+        ChannelFirstPost.objects.create(slack_user_id=slack_user_id, channel_id=channel_id)
+
+        # Award points if user is linked
+        # Note: PointsService is imported at top of file, so we can use it directly
+        # However, to avoid circular imports if any, we use the local import pattern from the original file if needed.
+        # But PointsService is already imported at module level in views.py, so it should be fine.
+        user = PointsService.get_user_by_slack_id(slack_user_id)
+        
+        points_awarded = False
+        if user:
+            try:
+                idempotency_key = f"first_post_award:{slack_user_id}:{channel_id}"
+                PointsService.award(
+                    user=user,
+                    delta=1,
+                    source='COMMUNITY',
+                    description=f"First post in channel {channel_id}",
+                    created_by_slack_id="SYSTEM",
+                    idempotency_key=idempotency_key
+                )
+                points_awarded = True
+            except Exception as e:
+                logger.error(f"Failed to award points for first post: {e}")
+
+        return Response({
+            "status": "recorded", 
+            "points_awarded": points_awarded
+        }, status=status.HTTP_201_CREATED)
+
+
+# ============================================================
+# Quests Views
+# ============================================================
+
+class QuestProgressView(APIView):
+    """Get quest progress for a user."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get(self, request, slack_user_id, quest_id):
+        """GET /api/v1/quests/{slack_user_id}/{quest_id}/"""
+        try:
+            progress = QuestProgress.objects.get(
+                slack_user_id=slack_user_id, 
+                quest_id=quest_id
+            )
+            return Response(QuestProgressSerializer(progress).data)
+        except QuestProgress.DoesNotExist:
+            return Response(
+                {"detail": "No progress found for this quest"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+
+class UserQuestProgressView(APIView):
+    """Get all quest progress for a user."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get(self, request, slack_user_id):
+        """GET /api/v1/quests/{slack_user_id}/"""
+        queryset = QuestProgress.objects.filter(slack_user_id=slack_user_id)
+        
+        # Optional filter by completion status
+        completed_param = request.query_params.get('completed')
+        if completed_param is not None:
+            completed = completed_param.lower() == 'true'
+            queryset = queryset.filter(completed=completed)
+        
+        quests_data = QuestProgressSerializer(queryset, many=True).data
+        return Response({
+            "slack_user_id": slack_user_id,
+            "quests": quests_data
+        })
+
+
+class QuestIncrementView(APIView):
+    """Increment quest progress."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def post(self, request):
+        """POST /api/v1/quests/progress/"""
+        serializer = QuestProgressInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        slack_user_id = serializer.validated_data['slack_user_id']
+        quest_id = serializer.validated_data['quest_id']
+        increment_by = serializer.validated_data.get('increment_by', 1)
+        
+        with transaction.atomic():
+            progress, created = QuestProgress.objects.select_for_update().get_or_create(
+                slack_user_id=slack_user_id,
+                quest_id=quest_id,
+                defaults={'current_count': 0}
+            )
+            
+            # Check if already completed
+            if progress.completed:
+                return Response({
+                    "detail": "Quest already completed",
+                    "completed_at": progress.completed_at.isoformat() if progress.completed_at else None
+                }, status=status.HTTP_409_CONFLICT)
+            
+            # Increment count
+            progress.current_count += increment_by
+            progress.save()
+        
+        return Response({
+            "slack_user_id": slack_user_id,
+            "quest_id": quest_id,
+            "current_count": progress.current_count,
+            "completed": progress.completed,
+            "message": "Progress incremented"
+        })
+
+
+class QuestCompleteView(APIView):
+    """Mark a quest as completed."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def post(self, request):
+        """POST /api/v1/quests/complete/"""
+        serializer = QuestCompleteInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        slack_user_id = serializer.validated_data['slack_user_id']
+        quest_id = serializer.validated_data['quest_id']
+        
+        with transaction.atomic():
+            progress, created = QuestProgress.objects.select_for_update().get_or_create(
+                slack_user_id=slack_user_id,
+                quest_id=quest_id,
+                defaults={'current_count': 0}
+            )
+            
+            # Check if already completed
+            if progress.completed:
+                return Response({
+                    "detail": "Quest already completed",
+                    "completed_at": progress.completed_at.isoformat() if progress.completed_at else None
+                }, status=status.HTTP_409_CONFLICT)
+            
+            # Mark as completed
+            progress.completed = True
+            progress.completed_at = timezone.now()
+            progress.save()
+        
+        return Response({
+            "slack_user_id": slack_user_id,
+            "quest_id": quest_id,
+            "current_count": progress.current_count,
+            "completed": True,
+            "completed_at": progress.completed_at.isoformat(),
+            "message": "Quest marked as completed"
+        })
+
+
+class QuestCompletionStatusView(APIView):
+    """Quick check if a quest is completed."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get(self, request, slack_user_id, quest_id):
+        """GET /api/v1/quests/{slack_user_id}/{quest_id}/completed/"""
+        try:
+            progress = QuestProgress.objects.get(
+                slack_user_id=slack_user_id,
+                quest_id=quest_id
+            )
+            if progress.completed:
+                return Response({
+                    "completed": True,
+                    "completed_at": progress.completed_at.isoformat() if progress.completed_at else None
+                })
+            else:
+                return Response({
+                    "completed": False,
+                    "current_count": progress.current_count
+                })
+        except QuestProgress.DoesNotExist:
+            return Response({
+                "completed": False,
+                "current_count": 0
+            })
+

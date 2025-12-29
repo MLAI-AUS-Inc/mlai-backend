@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0002_points_system_v2'),
+        ('roo', '0002_points_system_v2'),
     ]
 
     operations = [

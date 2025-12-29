@@ -2,8 +2,8 @@
 from unittest import TestCase
 from unittest.mock import patch, MagicMock
 from datetime import date
-from points.services import CoworkingService
-from points.models import RewardsCatalog
+from roo.services import CoworkingService
+from roo.models import RewardsCatalog
 
 class CoworkingCostTest(TestCase):
     def setUp(self):
@@ -11,9 +11,9 @@ class CoworkingCostTest(TestCase):
         self.user.id = 1
         self.user.email = 'test@example.com'
 
-    @patch('points.models.RewardsCatalog.objects.get')
+    @patch('roo.models.RewardsCatalog.objects.get')
     # Use string for settings to avoid import issues if needed, but patch object is fine
-    @patch('points.services.settings') 
+    @patch('roo.services.settings') 
     def test_get_coworking_cost_with_reward(self, mock_settings, mock_get):
         # Setup mock reward
         mock_reward = MagicMock()
@@ -27,8 +27,8 @@ class CoworkingCostTest(TestCase):
         self.assertEqual(cost, 10)
         mock_get.assert_called_with(code='COWORKING_DAY', is_active=True)
 
-    @patch('points.models.RewardsCatalog.objects.get')
-    @patch('points.services.settings') 
+    @patch('roo.models.RewardsCatalog.objects.get')
+    @patch('roo.services.settings') 
     def test_get_coworking_cost_no_reward_fallback(self, mock_settings, mock_get):
         # Setup no reward
         mock_get.side_effect = RewardsCatalog.DoesNotExist

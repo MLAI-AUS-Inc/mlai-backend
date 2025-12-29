@@ -53,7 +53,7 @@ INSTALLED_APPS = [
     'core',
     'esafety',
     "rest_framework",
-    "points",
+    "roo",
 
     "integrations",
 ]
@@ -211,6 +211,14 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+
+# GitHub OAuth Settings
+GITHUB_OAUTH_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID")
+GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET")
+GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
+    "GITHUB_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/github",
+)
 
 # Points System Configuration
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]

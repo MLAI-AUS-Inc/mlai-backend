@@ -26,12 +26,12 @@ urlpatterns = [
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/teams/', TeamNamesListView.as_view(), name='team-names-list'),
-    path('api/v1/points/', include('points.urls')),
+    path('api/v1/points/', include('roo.urls')),
     # Content Factory API
     path('api/content-factory/', include('core.urls')),
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),
-    path('api/v1/activity/', include('points.urls_activity')),
     path('api/v1/users/', include('core.urls_users')),
 ]
+

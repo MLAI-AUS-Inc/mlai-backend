@@ -4,7 +4,7 @@ from django.db import migrations
 
 
 def populate_rate_card(apps, schema_editor):
-    TaskTemplate = apps.get_model('points', 'TaskTemplate')
+    TaskTemplate = apps.get_model('roo', 'TaskTemplate')
     items = [
         # Community Actions
         {'alias': 'intro', 'name': 'Introduce yourself in #_start-here', 'points': 2, 'description': 'Community Action (Low friction)'},
@@ -21,7 +21,7 @@ def populate_rate_card(apps, schema_editor):
 
 
 def populate_rewards(apps, schema_editor):
-    RewardsCatalog = apps.get_model('points', 'RewardsCatalog')
+    RewardsCatalog = apps.get_model('roo', 'RewardsCatalog')
     items = [
         # Coworking
         {'code': 'COWORKING_DAY', 'name': '1 Day Hot-desk', 'cost_points': 4, 'fulfillment': 'auto', 'stock_remaining': None, 'description': 'Coworking'},
@@ -45,7 +45,7 @@ def populate_rewards(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0006_rewardscatalog_stock_remaining'),
+        ('roo', '0006_rewardscatalog_stock_remaining'),
     ]
 
     operations = [

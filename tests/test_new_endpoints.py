@@ -3,7 +3,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from integrations.models import UserIntegration
-from points.models import ChannelFirstPost
+from roo.models import ChannelFirstPost
 from django.urls import reverse
 import os
 

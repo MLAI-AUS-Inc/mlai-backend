@@ -3,7 +3,7 @@ from django.utils.html import format_html
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate
+    RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress
 )
 
 
@@ -118,3 +118,13 @@ class RewardRedemptionAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'reward__name', 'notes')
     readonly_fields = ('id', 'requested_at', 'ledger_entry')
     ordering = ('-requested_at',)
+
+
+@admin.register(QuestProgress)
+class QuestProgressAdmin(admin.ModelAdmin):
+    list_display = ('slack_user_id', 'quest_id', 'current_count', 'completed', 'completed_at', 'first_progress_at')
+    list_filter = ('quest_id', 'completed')
+    search_fields = ('slack_user_id', 'quest_id')
+    readonly_fields = ('first_progress_at', 'created_at', 'updated_at')
+    ordering = ('-updated_at',)
+

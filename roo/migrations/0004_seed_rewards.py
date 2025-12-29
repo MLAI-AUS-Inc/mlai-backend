@@ -4,7 +4,7 @@ from django.db import migrations
 
 def create_rewards(apps, schema_editor):
     """Create sample rewards in the catalog."""
-    RewardsCatalog = apps.get_model('points', 'RewardsCatalog')
+    RewardsCatalog = apps.get_model('roo', 'RewardsCatalog')
     rewards = [
         {
             'code': 'STICKER',
@@ -40,14 +40,14 @@ def create_rewards(apps, schema_editor):
 
 def remove_rewards(apps, schema_editor):
     """Remove the seeded rewards."""
-    RewardsCatalog = apps.get_model('points', 'RewardsCatalog')
+    RewardsCatalog = apps.get_model('roo', 'RewardsCatalog')
     RewardsCatalog.objects.filter(code__in=['STICKER', 'COFFEE', 'TSHIRT']).delete()
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0003_remove_pointsadmin_name'),
+        ('roo', '0003_remove_pointsadmin_name'),
     ]
 
     operations = [

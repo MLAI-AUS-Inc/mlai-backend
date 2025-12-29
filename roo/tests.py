@@ -234,10 +234,10 @@ class CoworkingServiceTests(TestCase):
         )
         
         self.assertEqual(booking.status, 'booked')
-        self.assertEqual(booking.points_cost, 1)  # Default cost
+        self.assertEqual(booking.points_cost, 4)  # Cost from COWORKING_DAY reward catalog
         
         account = PointsAccount.objects.get(user=self.user)
-        self.assertEqual(account.balance, 9)  # 10 - 1
+        self.assertEqual(account.balance, 6)  # 10 - 4
     
     def test_book_respects_capacity(self):
         """Test that booking respects capacity limits."""
@@ -274,7 +274,7 @@ class CoworkingServiceTests(TestCase):
             )
         self.assertIn('No availability', str(context.exception))
     
-    @patch('points.services.settings')
+    @patch('roo.services.settings')
     def test_cancel_refunds_if_before_cutoff(self, mock_settings):
         """Test that cancellation refunds points if before cutoff."""
         # Note: This test is simplified; actual cutoff logic depends on current time
@@ -300,9 +300,10 @@ class CoworkingServiceTests(TestCase):
         
         self.assertEqual(booking.status, 'cancelled')
         # Refund should have happened (booking is far in future)
+        # Cost is 4 points from COWORKING_DAY reward catalog, not 1
         if refunded:
             account = PointsAccount.objects.get(user=self.user)
-            self.assertEqual(account.balance, initial_balance + 1)
+            self.assertEqual(account.balance, initial_balance + 4)
 
 
 class PermissionTests(TestCase):
@@ -333,7 +334,7 @@ class PermissionTests(TestCase):
         )
         self.assertFalse(is_points_admin('UINACTIVE'))
     
-    @patch('points.permissions.settings')
+    @patch('roo.permissions.settings')
     def test_bootstrap_admin_is_always_admin(self, mock_settings):
         """Test that bootstrap admins are always recognized."""
         mock_settings.POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = ['UBOOTSTRAP']

@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('points', '0008_populate_comprehensive_rate_card'),
+        ('roo', '0008_populate_comprehensive_rate_card'),
     ]
 
     operations = [

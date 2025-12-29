@@ -395,3 +395,31 @@ class ChannelFirstPost(models.Model):
 
     def __str__(self):
         return f"{self.slack_user_id} in {self.channel_id}"
+
+
+class QuestProgress(models.Model):
+    """
+    Track quest progress for gamification.
+    One row per user per quest.
+    """
+    slack_user_id = models.CharField(max_length=50)
+    quest_id = models.CharField(max_length=50)
+    current_count = models.IntegerField(default=0)
+    completed = models.BooleanField(default=False)
+    first_progress_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Quest Progress"
+        verbose_name_plural = "Quest Progress"
+        unique_together = ('slack_user_id', 'quest_id')
+        indexes = [
+            models.Index(fields=['slack_user_id']),
+            models.Index(fields=['slack_user_id', 'completed']),
+        ]
+
+    def __str__(self):
+        status = "✓" if self.completed else f"{self.current_count}"
+        return f"{self.slack_user_id} - {self.quest_id}: {status}"
