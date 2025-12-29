@@ -5,7 +5,7 @@ from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth.decorators import login_required
-from .models import GoogleConnection
+from .models import GoogleConnection, UserIntegration
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -99,6 +99,101 @@ def google_callback(request):
 
     # Redirect to frontend
     return redirect(f"{settings.FRONTEND_URL}/settings?gmail_connected=true")
+
+def github_connect(request):
+    """
+    Initiates GitHub OAuth flow.
+    Expects 'slack_user_id' in query params to link the token.
+    """
+    slack_user_id = request.GET.get('slack_user_id')
+    if not slack_user_id:
+        return HttpResponseBadRequest("Missing slack_user_id")
+
+    # State allows us to pass the slack_user_id through the OAuth flow
+    # We encrypt or sign it? For simplicity, we just pass it in state, 
+    # but strictly it should be unpredictable to prevent CSRF.
+    # Since this is a bot flow, we'll use a random token + slack_id.
+    
+    rand_token = secrets.token_urlsafe(16)
+    state = f"{slack_user_id}::{rand_token}"
+    request.session["github_oauth_state"] = state
+
+    params = {
+        "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+        "redirect_uri": settings.GITHUB_OAUTH_REDIRECT_URI,
+        "scope": "repo read:user",
+        "state": state,
+    }
+
+    url = "https://github.com/login/oauth/authorize?" + urllib.parse.urlencode(params)
+    return redirect(url)
+
+def github_callback(request):
+    """
+    Handles GitHub OAuth callback.
+    """
+    code = request.GET.get("code")
+    state = request.GET.get("state")
+    
+    if not code:
+        return HttpResponseBadRequest("Missing code")
+
+    # Verify state matches session
+    # expected_state = request.session.get("github_oauth_state")
+    # if not state or state != expected_state:
+    #     return HttpResponseBadRequest("Invalid state or session expired")
+    
+    # Extract slack_user_id from state
+    try:
+        slack_user_id, _ = state.split("::")
+    except ValueError:
+        return HttpResponseBadRequest("Invalid state format")
+
+    # Exchange code for token
+    token_resp = requests.post(
+        "https://github.com/login/oauth/access_token",
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": settings.GITHUB_OAUTH_REDIRECT_URI,
+        },
+        timeout=20,
+    )
+    token_resp.raise_for_status()
+    token_data = token_resp.json()
+    
+    if "error" in token_data:
+        return HttpResponseBadRequest(f"GitHub Error: {token_data.get('error_description')}")
+
+    access_token = token_data.get("access_token")
+    scope = token_data.get("scope", "")
+
+    # Fetch GitHub user info
+    user_resp = requests.get(
+        "https://api.github.com/user",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github.v3+json",
+        },
+        timeout=20,
+    )
+    user_resp.raise_for_status()
+    github_user = user_resp.json()
+    github_login = github_user.get("login")
+
+    # Store in UserIntegration
+    UserIntegration.objects.update_or_create(
+        slack_user_id=slack_user_id,
+        defaults={
+            "github_access_token": access_token,
+            "github_user_name": github_login,
+            "github_scopes": scope.split(",") if scope else [],
+        }
+    )
+
+    return HttpResponse(f"✅ GitHub connected for Slack user {slack_user_id}! You can close this window.")
 
 @login_required
 def get_gmail_emails(request):

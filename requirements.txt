@@ -25,6 +25,7 @@ urllib3==2.3.0
 whitenoise==6.9.0
 firebase-admin==6.6.0
 Pillow==11.0.0
+PyGithub>=2.0.0
 
 # Roo - Agentic Slack Bot dependencies
 slack-sdk>=3.21.0
