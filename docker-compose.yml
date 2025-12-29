@@ -3,7 +3,7 @@
 services:
   web:
     build: .
-    command: gunicorn --bind 0.0.0.0:8000 --timeout 120 mlai.wsgi:application
+    command: sh -c "python manage.py collectstatic --noinput && gunicorn --bind 0.0.0.0:8000 --timeout 120 mlai.wsgi:application"
     volumes:
       - .:/app
     ports:
