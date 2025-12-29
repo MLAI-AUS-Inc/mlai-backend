@@ -214,7 +214,8 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
-# GitHub OAuth Settings
+# GitHub App Settings (for GitHub App installation flow)
+GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID")
 GITHUB_OAUTH_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID")
 GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET")
 GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
