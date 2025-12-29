@@ -4,6 +4,7 @@ import requests
 from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
+from django.middleware.csrf import get_token
 from django.contrib.auth.decorators import login_required
 from .models import GoogleConnection, UserIntegration
 
@@ -193,7 +194,97 @@ def github_callback(request):
         }
     )
 
-    return HttpResponse(f"✅ GitHub connected for Slack user {slack_user_id}! You can close this window.")
+    # ------------------------------------------------------------------
+    # Repository Selection Step
+    # ------------------------------------------------------------------
+    # Fetch user's repositories (limit 100 recent)
+    try:
+        repos_resp = requests.get(
+            "https://api.github.com/user/repos",
+            params={"sort": "updated", "per_page": "100", "type": "all"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=10,
+        )
+        repos_resp.raise_for_status()
+        repos = repos_resp.json()
+    except Exception as e:
+        # Fallback if fetching repos fails: just show connected message
+        return HttpResponse(f"✅ GitHub connected for Slack user {slack_user_id}! (Could not list repos: {e}) You can close this window.")
+
+    # Render simple Selection UI
+    csrf_token = get_token(request)
+    repo_options = ""
+    for repo in repos:
+        full_name = repo['full_name']
+        private_badge = "🔒" if repo['private'] else "🌍"
+        repo_options += f"""
+        <div style="margin-bottom: 8px; padding: 8px; border: 1px solid #eee; border-radius: 4px;">
+            <label style="display: flex; align-items: center; cursor: pointer;">
+                <input type="radio" name="github_repo" value="{full_name}" style="margin-right: 10px;">
+                <span style="font-weight: bold;">{full_name}</span>
+                <span style="font-size: 0.8em; color: #666; margin-left: auto;">{private_badge}</span>
+            </label>
+        </div>
+        """
+
+    html = f"""
+    <html>
+    <body style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2>Select Repository</h2>
+        <p>GitHub connected successfully as <strong>{github_login}</strong>.</p>
+        <p>Please select the repository you want to link to this project:</p>
+        
+        <form action="/integrations/connect/github/select" method="POST">
+            <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
+            <input type="hidden" name="slack_user_id" value="{slack_user_id}">
+            
+            <div style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
+                {repo_options}
+            </div>
+            
+            <button type="submit" style="background: #007bff; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 4px; cursor: pointer;">
+                Link Repository
+            </button>
+        </form>
+    </body>
+    </html>
+    """
+    
+    return HttpResponse(html)
+
+
+def github_select_repo(request):
+    """
+    Handle repository selection from the list.
+    """
+    if request.method != 'POST':
+        return HttpResponseBadRequest("Method not allowed")
+        
+    slack_user_id = request.POST.get('slack_user_id')
+    github_repo = request.POST.get('github_repo')
+    
+    if not slack_user_id or not github_repo:
+        return HttpResponseBadRequest("Missing slack_user_id or selection")
+
+    try:
+        integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+        integration.github_repo = github_repo
+        integration.save()
+        
+        return HttpResponse(f"""
+        <html>
+        <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+            <h1 style="color: green;">✅ Success!</h1>
+            <p>Repository <strong>{github_repo}</strong> has been linked.</p>
+            <p>You can now close this window and return to Slack.</p>
+        </body>
+        </html>
+        """)
+    except UserIntegration.DoesNotExist:
+        return HttpResponseBadRequest("Integration not found. Please try connecting again.")
 
 @login_required
 def get_gmail_emails(request):
