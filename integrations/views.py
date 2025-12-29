@@ -103,54 +103,61 @@ def google_callback(request):
 
 def github_connect(request):
     """
-    Initiates GitHub OAuth flow.
+    Initiates GitHub App installation flow.
     Expects 'slack_user_id' in query params to link the token.
+    
+    This uses the GitHub App installation flow which shows the native
+    repository selection UI on GitHub's side.
     """
     slack_user_id = request.GET.get('slack_user_id')
     if not slack_user_id:
         return HttpResponseBadRequest("Missing slack_user_id")
 
     # State allows us to pass the slack_user_id through the OAuth flow
-    # We encrypt or sign it? For simplicity, we just pass it in state, 
-    # but strictly it should be unpredictable to prevent CSRF.
-    # Since this is a bot flow, we'll use a random token + slack_id.
-    
     rand_token = secrets.token_urlsafe(16)
     state = f"{slack_user_id}::{rand_token}"
     request.session["github_oauth_state"] = state
 
+    # GitHub App installation URL - this shows the native repo selector
+    # App slug is "mlai-tools" based on the public link https://github.com/apps/mlai-tools
+    app_slug = "mlai-tools"
+    install_url = f"https://github.com/apps/{app_slug}/installations/new"
+    
     params = {
-        "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-        "redirect_uri": settings.GITHUB_OAUTH_REDIRECT_URI,
-        "scope": "repo read:user",
         "state": state,
     }
-
-    url = "https://github.com/login/oauth/authorize?" + urllib.parse.urlencode(params)
+    
+    url = install_url + "?" + urllib.parse.urlencode(params)
     return redirect(url)
 
 def github_callback(request):
     """
-    Handles GitHub OAuth callback.
+    Handles GitHub App installation callback.
+    
+    When a user installs the GitHub App, GitHub redirects here with:
+    - installation_id: The ID of the GitHub App installation
+    - setup_action: "install" or "update"
+    - code: Authorization code to exchange for user access token
+    - state: Our state parameter with slack_user_id
     """
     code = request.GET.get("code")
     state = request.GET.get("state")
+    installation_id = request.GET.get("installation_id")
+    setup_action = request.GET.get("setup_action")
     
     if not code:
         return HttpResponseBadRequest("Missing code")
-
-    # Verify state matches session
-    # expected_state = request.session.get("github_oauth_state")
-    # if not state or state != expected_state:
-    #     return HttpResponseBadRequest("Invalid state or session expired")
+    
+    if not installation_id:
+        return HttpResponseBadRequest("Missing installation_id - this endpoint requires GitHub App installation")
     
     # Extract slack_user_id from state
     try:
         slack_user_id, _ = state.split("::")
-    except ValueError:
+    except (ValueError, AttributeError):
         return HttpResponseBadRequest("Invalid state format")
 
-    # Exchange code for token
+    # Exchange code for user access token
     token_resp = requests.post(
         "https://github.com/login/oauth/access_token",
         headers={"Accept": "application/json"},
@@ -158,7 +165,6 @@ def github_callback(request):
             "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
             "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             "code": code,
-            "redirect_uri": settings.GITHUB_OAUTH_REDIRECT_URI,
         },
         timeout=20,
     )
@@ -169,8 +175,7 @@ def github_callback(request):
         return HttpResponseBadRequest(f"GitHub Error: {token_data.get('error_description')}")
 
     access_token = token_data.get("access_token")
-    scope = token_data.get("scope", "")
-
+    
     # Fetch GitHub user info
     user_resp = requests.get(
         "https://api.github.com/user",
@@ -184,76 +189,63 @@ def github_callback(request):
     github_user = user_resp.json()
     github_login = github_user.get("login")
 
+    # Fetch repositories accessible via this installation
+    # This returns only the repos the user selected during installation
+    try:
+        repos_resp = requests.get(
+            f"https://api.github.com/user/installations/{installation_id}/repositories",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=20,
+        )
+        repos_resp.raise_for_status()
+        repos_data = repos_resp.json()
+        repos = repos_data.get("repositories", [])
+    except Exception as e:
+        repos = []
+    
+    # If user selected exactly one repo, auto-link it
+    # Otherwise, show selection UI or list what they selected
+    selected_repo = None
+    if len(repos) == 1:
+        selected_repo = repos[0]["full_name"]
+    elif len(repos) > 1:
+        # Multiple repos selected - pick the first one or show selection
+        # For now, we'll use the first one but show a message
+        selected_repo = repos[0]["full_name"]
+
     # Store in UserIntegration
     UserIntegration.objects.update_or_create(
         slack_user_id=slack_user_id,
         defaults={
             "github_access_token": access_token,
             "github_user_name": github_login,
-            "github_scopes": scope.split(",") if scope else [],
+            "github_repo": selected_repo,
+            "github_scopes": [],  # GitHub Apps use permissions, not scopes
         }
     )
 
-    # ------------------------------------------------------------------
-    # Repository Selection Step
-    # ------------------------------------------------------------------
-    # Fetch user's repositories (limit 100 recent)
-    try:
-        repos_resp = requests.get(
-            "https://api.github.com/user/repos",
-            params={"sort": "updated", "per_page": "100", "type": "all"},
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/vnd.github.v3+json",
-            },
-            timeout=10,
-        )
-        repos_resp.raise_for_status()
-        repos = repos_resp.json()
-    except Exception as e:
-        # Fallback if fetching repos fails: just show connected message
-        return HttpResponse(f"✅ GitHub connected for Slack user {slack_user_id}! (Could not list repos: {e}) You can close this window.")
+    # Build success message
+    if selected_repo:
+        repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
+        if len(repos) > 1:
+            other_repos = [r["full_name"] for r in repos[1:]]
+            repo_list_html += f"<p style='color: #666; font-size: 0.9em;'>Other selected repos: {', '.join(other_repos)}</p>"
+    else:
+        repo_list_html = "<p style='color: orange;'>⚠️ No repositories were selected. Please reinstall the app and select at least one repository.</p>"
 
-    # Render simple Selection UI
-    csrf_token = get_token(request)
-    repo_options = ""
-    for repo in repos:
-        full_name = repo['full_name']
-        private_badge = "🔒" if repo['private'] else "🌍"
-        repo_options += f"""
-        <div style="margin-bottom: 8px; padding: 8px; border: 1px solid #eee; border-radius: 4px;">
-            <label style="display: flex; align-items: center; cursor: pointer;">
-                <input type="radio" name="github_repo" value="{full_name}" style="margin-right: 10px;">
-                <span style="font-weight: bold;">{full_name}</span>
-                <span style="font-size: 0.8em; color: #666; margin-left: auto;">{private_badge}</span>
-            </label>
-        </div>
-        """
-
-    html = f"""
+    return HttpResponse(f"""
     <html>
-    <body style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2>Select Repository</h2>
-        <p>GitHub connected successfully as <strong>{github_login}</strong>.</p>
-        <p>Please select the repository you want to link to this project:</p>
-        
-        <form action="/integrations/connect/github/select" method="POST">
-            <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
-            <input type="hidden" name="slack_user_id" value="{slack_user_id}">
-            
-            <div style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
-                {repo_options}
-            </div>
-            
-            <button type="submit" style="background: #007bff; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 4px; cursor: pointer;">
-                Link Repository
-            </button>
-        </form>
+    <body style="font-family: sans-serif; text-align: center; padding-top: 50px; max-width: 600px; margin: 0 auto;">
+        <h1 style="color: green;">✅ GitHub App Installed!</h1>
+        <p>Connected as <strong>{github_login}</strong></p>
+        {repo_list_html}
+        <p>You can now close this window and return to Slack.</p>
     </body>
     </html>
-    """
-    
-    return HttpResponse(html)
+    """)
 
 
 def github_select_repo(request):
