@@ -53,3 +53,31 @@ class SlackService:
         except Exception as e:
             logger.error(f"Exception fetching Slack user {slack_user_id}: {str(e)}")
             return None
+    @classmethod
+    def send_dm(cls, slack_user_id: str, text: str, blocks: list = None) -> bool:
+        """
+        Send a direct message to a user.
+        """
+        client = cls.get_client()
+        try:
+            # Open DM channel
+            response = client.conversations_open(users=[slack_user_id])
+            if not response['ok']:
+                logger.error(f"Failed to open DM with {slack_user_id}: {response.get('error')}")
+                return False
+            
+            channel_id = response['channel']['id']
+            
+            # Post message
+            client.chat_postMessage(
+                channel=channel_id,
+                text=text,
+                blocks=blocks
+            )
+            return True
+        except SlackApiError as e:
+            logger.error(f"Slack API error sending DM to {slack_user_id}: {e.response['error']}")
+            return False
+        except Exception as e:
+            logger.error(f"Exception sending DM to {slack_user_id}: {str(e)}")
+            return False

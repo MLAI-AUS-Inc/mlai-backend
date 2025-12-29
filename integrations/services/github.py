@@ -47,6 +47,11 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     # Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
+    
+    api_key = getattr(settings, 'INTERNAL_API_KEY', None) or getattr(settings, 'ROO_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
 
     try:
         cf_response = http_requests.post(
@@ -56,7 +61,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
                 "github_repo": integration.github_repo,
                 "github_token": integration.github_access_token,
             },
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=30,
         )
         cf_response.raise_for_status()
@@ -85,15 +90,28 @@ def trigger_scan_async(slack_user_id: str):
     Logs errors instead of raising them (fire-and-forget).
     """
     import threading
+    from integrations.services.slack import SlackService
 
     def _run_scan():
+        # Notify start
+        SlackService.send_dm(slack_user_id, "🔍 GitHub connected! I'm starting a scan of your repository to understand the project structure...")
+        
         try:
             result = scan_github_project(slack_user_id)
+            repo_name = result.get('github_repo', 'your repo')
             logger.info(f"Background scan completed: {result}")
+            
+            # Notify success
+            SlackService.send_dm(
+                slack_user_id, 
+                f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content."
+            )
         except ScanError as e:
             logger.error(f"Background scan failed for {slack_user_id}: {e}")
+            SlackService.send_dm(slack_user_id, f"❌ Scan failed: {str(e)}")
         except Exception as e:
             logger.exception(f"Unexpected error in background scan for {slack_user_id}: {e}")
+            SlackService.send_dm(slack_user_id, "❌ An unexpected error occurred while scanning your repository.")
 
     thread = threading.Thread(target=_run_scan, daemon=True)
     thread.start()

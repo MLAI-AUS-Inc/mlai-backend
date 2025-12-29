@@ -21,8 +21,10 @@ class GithubServiceTest(TestCase):
         mock_response.json.return_value = {"status": "started", "job_id": "job_123"}
         mock_post.return_value = mock_response
 
-        # Call service
-        result = scan_github_project(self.slack_user_id)
+        # Call service with setting override
+        from django.test.utils import override_settings
+        with override_settings(INTERNAL_API_KEY="test-secret-key"):
+            result = scan_github_project(self.slack_user_id)
 
         # Verify result
         self.assertEqual(result['status'], 'scan_triggered')
@@ -37,6 +39,10 @@ class GithubServiceTest(TestCase):
         args, kwargs = mock_post.call_args
         self.assertIn('/api/pipeline/scan', args[0])
         self.assertEqual(kwargs['json']['slack_user_id'], self.slack_user_id)
+        
+        # Verify Headers
+        headers = kwargs['headers']
+        self.assertEqual(headers['X-API-KEY'], "test-secret-key")
 
     @patch('integrations.services.github.http_requests.post')
     def test_scan_github_project_failure(self, mock_post):
