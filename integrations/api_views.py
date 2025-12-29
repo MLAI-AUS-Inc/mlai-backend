@@ -62,6 +62,7 @@ class GithubTokenIdentityView(APIView):
                 "token": integration.github_access_token,
                 "user_name": integration.github_user_name,
                 "scopes": integration.github_scopes,
+                "github_repo": integration.github_repo,
                 "project_scanned": integration.project_scanned,
                 "pending_intent": integration.pending_intent,
             })
@@ -187,7 +188,7 @@ class GithubScanView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        import requests as http_requests  # Avoid conflict with rest_framework
+        from integrations.services.github import scan_github_project, ScanError
         
         slack_user_id = request.data.get('slack_user_id')
         if not slack_user_id:
@@ -196,60 +197,15 @@ class GithubScanView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Look up user integration
         try:
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-        except UserIntegration.DoesNotExist:
-            return Response(
-                {"error": "No integration found for this user. Please connect GitHub first."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+            result = scan_github_project(slack_user_id)
+            return Response(result, status=status.HTTP_200_OK)
+        except ScanError as e:
+            error_msg = str(e)
+            if "No integration found" in error_msg:
+                return Response({"error": error_msg}, status=status.HTTP_404_NOT_FOUND)
+            elif "No GitHub token" in error_msg or "No GitHub repository" in error_msg:
+                return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({"error": error_msg}, status=status.HTTP_502_BAD_GATEWAY)
 
-        # Check for GitHub token
-        if not integration.github_access_token:
-            return Response(
-                {"error": "No GitHub token found. Please authenticate with GitHub first."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Check for connected repo
-        if not integration.github_repo:
-            return Response(
-                {"error": "No GitHub repository configured for this user."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Call Content Factory scan endpoint
-        content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
-        scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
-        
-        try:
-            cf_response = http_requests.post(
-                scan_endpoint,
-                json={
-                    "slack_user_id": slack_user_id,
-                    "github_repo": integration.github_repo,
-                    "github_token": integration.github_access_token,
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=30,
-            )
-            cf_response.raise_for_status()
-            cf_data = cf_response.json()
-        except http_requests.exceptions.RequestException as e:
-            logger.error(f"Content Factory scan request failed: {e}")
-            return Response(
-                {"error": f"Failed to trigger scan: {str(e)}"},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-        # Update project_scanned status
-        integration.project_scanned = True
-        integration.save()
-
-        return Response({
-            "status": "scan_triggered",
-            "slack_user_id": slack_user_id,
-            "github_repo": integration.github_repo,
-            "content_factory_response": cf_data,
-        }, status=status.HTTP_200_OK)
