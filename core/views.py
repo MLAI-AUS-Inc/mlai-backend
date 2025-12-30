@@ -669,6 +669,9 @@ class ContentFactoryOrgConfigView(APIView):
             'design_guide': config.design_guide if config else None,
             'github_repo': config.github_repo if config else None,
             'brand_name': config.brand_name if config else None,
+            'scan_summary': config.scan_summary if config else None,
+            'tech_stack': config.tech_stack if config else {},
+            'article_path_pattern': config.article_path_pattern if config else None,
         }
         
         return Response(response_data, status=status.HTTP_200_OK)
@@ -700,15 +703,24 @@ class ContentFactoryOrgConfigView(APIView):
             org.name = name
             org.save()
         
+        # Prepare defaults
+        defaults = {
+            'article_template': data.get('article_template'),
+            'design_guide': data.get('design_guide'),
+            'github_repo': data.get('github_repo'),
+            'brand_name': data.get('brand_name'),
+            'scan_summary': data.get('scan_summary'),
+            'tech_stack': data.get('tech_stack', {}),
+        }
+        
+        # Only update article_path_pattern if provided (it's not nullable)
+        if 'article_path_pattern' in data:
+            defaults['article_path_pattern'] = data['article_path_pattern']
+
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
             organization=org,
-            defaults={
-                'article_template': data.get('article_template'),
-                'design_guide': data.get('design_guide'),
-                'github_repo': data.get('github_repo'),
-                'brand_name': data.get('brand_name'),
-            }
+            defaults=defaults
         )
         
         status_text = 'created' if org_created else 'updated'

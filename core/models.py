@@ -123,6 +123,8 @@ class OrganizationContentConfig(models.Model):
         max_length=255, default="app/articles/content/{category}/{slug}.tsx"
     )
     registry_path = models.CharField(max_length=255, default="app/articles/registry.ts")
+    scan_summary = models.TextField(blank=True, null=True)
+    tech_stack = models.JSONField(default=dict, blank=True)
     brand_name = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -59,6 +59,64 @@ class OrganizationAdmin(admin.ModelAdmin):
 
 @admin.register(OrganizationContentConfig)
 class OrganizationContentConfigAdmin(admin.ModelAdmin):
-    list_display = ('organization', 'brand_name', 'github_repo', 'updated_at')
-    search_fields = ('organization__name', 'organization__domain', 'brand_name')
+    list_display = ('organization', 'brand_name', 'github_repo', 'has_scan', 'updated_at')
+    search_fields = ('organization__name', 'organization__domain', 'brand_name', 'github_repo')
     list_select_related = ('organization',)
+    list_filter = ('updated_at',)
+    readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'article_template_preview', 'design_guide_preview')
+    
+    fieldsets = (
+        ('Organization', {
+            'fields': ('organization', 'brand_name')
+        }),
+        ('GitHub Integration', {
+            'fields': ('github_repo', 'github_token_encrypted', 'article_path_pattern', 'registry_path')
+        }),
+        ('Scan Results', {
+            'fields': ('scan_summary', 'tech_stack_display'),
+            'description': 'Data returned from the content-factory scanner agent'
+        }),
+        ('Templates (LLM Generated)', {
+            'fields': ('article_template_preview', 'design_guide_preview'),
+            'classes': ('collapse',),  # Collapsible since these are large
+        }),
+        ('Raw Template Data', {
+            'fields': ('article_template', 'design_guide'),
+            'classes': ('collapse',),
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )
+    
+    def has_scan(self, obj):
+        """Check if scan has been run (has scan_summary or tech_stack)."""
+        if obj.scan_summary or obj.tech_stack:
+            return format_html('<span style="color: green;">✅ Yes</span>')
+        return format_html('<span style="color: gray;">❌ No</span>')
+    has_scan.short_description = 'Scanned'
+    
+    def tech_stack_display(self, obj):
+        """Pretty display of tech_stack JSON."""
+        if not obj.tech_stack:
+            return "No tech stack data"
+        import json
+        formatted = json.dumps(obj.tech_stack, indent=2)
+        return format_html('<pre style="background: #f4f4f4; padding: 10px; border-radius: 4px; max-height: 200px; overflow: auto;">{}</pre>', formatted)
+    tech_stack_display.short_description = 'Tech Stack'
+    
+    def article_template_preview(self, obj):
+        """Preview of article template (truncated)."""
+        if not obj.article_template:
+            return "No template"
+        preview = obj.article_template[:500] + "..." if len(obj.article_template) > 500 else obj.article_template
+        return format_html('<pre style="background: #f9f9f9; padding: 10px; border-radius: 4px; max-height: 300px; overflow: auto; white-space: pre-wrap;">{}</pre>', preview)
+    article_template_preview.short_description = 'Article Template Preview'
+    
+    def design_guide_preview(self, obj):
+        """Preview of design guide (truncated)."""
+        if not obj.design_guide:
+            return "No design guide"
+        preview = obj.design_guide[:500] + "..." if len(obj.design_guide) > 500 else obj.design_guide
+        return format_html('<pre style="background: #f9f9f9; padding: 10px; border-radius: 4px; max-height: 300px; overflow: auto; white-space: pre-wrap;">{}</pre>', preview)
+    design_guide_preview.short_description = 'Design Guide Preview'
