@@ -233,4 +233,5 @@ COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_D
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 ROO_API_KEY = os.environ.get('ROO_API_KEY')
-INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY
+MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
+INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
