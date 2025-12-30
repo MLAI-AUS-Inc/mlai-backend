@@ -67,7 +67,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
                 "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             },
             headers=headers,
-            timeout=600,
+            timeout=1200,
         )
         cf_response.raise_for_status()
         cf_data = cf_response.json()
