@@ -48,13 +48,13 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
     
-    api_key = getattr(settings, 'INTERNAL_API_KEY', None) or getattr(settings, 'ROO_API_KEY', None)
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
-        logger.info(f"Using API key: {api_key[:4]}***")
+        logger.info(f"Using Content Factory API key: {api_key[:4]}***")
     else:
-        logger.warning("No INTERNAL_API_KEY or ROO_API_KEY found in settings!")
+        logger.warning("No CONTENT_FACTORY_API_KEY found in settings! Scan request may fail.")
 
     try:
         cf_response = http_requests.post(

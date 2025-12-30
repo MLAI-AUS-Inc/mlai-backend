@@ -73,9 +73,11 @@ class HasRooApiKey(permissions.BasePermission):
         allowed_keys = [
             getattr(settings, 'ROO_API_KEY', None),
             getattr(settings, 'INTERNAL_API_KEY', None),
+            getattr(settings, 'MLAI_API_KEY', None),
             # Fallback to env in case settings weren't refreshed after env changes
             os.environ.get('ROO_API_KEY'),
             os.environ.get('INTERNAL_API_KEY'),
+            os.environ.get('MLAI_API_KEY'),
         ]
 
         # Filter out any missing keys
