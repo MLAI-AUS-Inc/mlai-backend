@@ -23,7 +23,7 @@ class GithubServiceTest(TestCase):
 
         # Call service with setting override
         from django.test.utils import override_settings
-        with override_settings(INTERNAL_API_KEY="test-secret-key"):
+        with override_settings(CONTENT_FACTORY_API_KEY="test-content-factory-key"):
             result = scan_github_project(self.slack_user_id)
 
         # Verify result
@@ -42,7 +42,7 @@ class GithubServiceTest(TestCase):
         
         # Verify Headers
         headers = kwargs['headers']
-        self.assertEqual(headers['X-API-KEY'], "test-secret-key")
+        self.assertEqual(headers['X-API-KEY'], "test-content-factory-key")
 
     @patch('integrations.services.github.http_requests.post')
     def test_scan_github_project_failure(self, mock_post):
