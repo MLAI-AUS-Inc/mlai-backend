@@ -52,6 +52,9 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
+        logger.info(f"Using API key: {api_key[:4]}***")
+    else:
+        logger.warning("No INTERNAL_API_KEY or ROO_API_KEY found in settings!")
 
     try:
         cf_response = http_requests.post(
@@ -60,6 +63,8 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
                 "slack_user_id": slack_user_id,
                 "github_repo": integration.github_repo,
                 "github_token": integration.github_access_token,
+                "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+                "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             },
             headers=headers,
             timeout=30,
@@ -68,6 +73,9 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
         cf_data = cf_response.json()
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Content Factory scan request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+             logger.error(f"Response status: {e.response.status_code}")
+             logger.error(f"Response body: {e.response.text}")
         raise ScanError(f"Failed to trigger scan: {str(e)}")
 
     # Update project_scanned status
