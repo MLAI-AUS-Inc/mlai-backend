@@ -1,6 +1,4 @@
-"""
-GitHub integration services.
-"""
+import time
 import logging
 import requests as http_requests
 from django.conf import settings
@@ -15,13 +13,14 @@ class ScanError(Exception):
     pass
 
 
-def scan_github_project(slack_user_id: str, integration: UserIntegration = None) -> dict:
+def scan_github_project(slack_user_id: str, integration: UserIntegration = None, progress_callback=None) -> dict:
     """
     Trigger a repository scan via Content Factory.
 
     Args:
         slack_user_id: The Slack user ID to scan for.
         integration: Optional pre-fetched UserIntegration instance.
+        progress_callback: Optional function(msg: str) to report progress.
 
     Returns:
         dict: Response data from Content Factory.
@@ -77,6 +76,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     except Exception as e:
         logger.warning(f"Failed to fetch existing artifacts for payload: {e}")
 
+    cf_data = None
     try:
         cf_response = http_requests.post(
             scan_endpoint,
@@ -89,16 +89,72 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
                 "existing_artifacts": existing_artifacts,
             },
             headers=headers,
-            timeout=1200,
+            # Fallback: Support legacy sync (long timeout) AND async (short response).
+            # If the backend is synchronous, this thread will block for up to 60 mins.
+            # If the backend is async (returns 202), it returns immediately.
+            timeout=3600, 
         )
-        cf_response.raise_for_status()
-        cf_data = cf_response.json()
+        
+        # Handle Async Response (202 Accepted)
+        if cf_response.status_code == 202:
+            data = cf_response.json()
+            job_id = data.get('job_id')
+            if not job_id:
+                raise ScanError("Received 202 but no job_id provided.")
+                
+            status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/scan/{job_id}"
+            
+            # Start Polling Loop
+            last_progress = ""
+            max_retries = 720 # 720 * 5s = 60 minutes max
+            
+            for _ in range(max_retries):
+                time.sleep(5) 
+                try:
+                    status_resp = http_requests.get(status_url, headers=headers, timeout=10)
+                    if status_resp.status_code == 200:
+                        status_data = status_resp.json()
+                        state = status_data.get('status')
+                        progress_msg = status_data.get('progress')
+                        
+                        # Report progress if changed
+                        if progress_msg and progress_msg != last_progress:
+                            last_progress = progress_msg
+                            if progress_callback:
+                                progress_callback(f"⏳ {progress_msg}")
+                        
+                        if state == 'completed':
+                            cf_data = status_data.get('result')
+                            break # Done!
+                        elif state == 'failed':
+                            error_detail = status_data.get('error', 'Unknown error')
+                            raise ScanError(f"Remote scan job failed: {error_detail}")
+                        # else: processing/queued, continue loop
+                    else:
+                        logger.warning(f"Status check returned {status_resp.status_code}")
+                except http_requests.exceptions.RequestException as req_err:
+                     logger.warning(f"Transient error checking status: {req_err}")
+                     
+            if not cf_data:
+                raise ScanError("Scan timed out or did not complete successfully.")
+
+        # Handle Synchronous Response (200 OK)
+        elif cf_response.status_code == 200:
+            cf_data = cf_response.json()
+            
+        else:
+            cf_response.raise_for_status()
+
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Content Factory scan request failed: {e}")
         if hasattr(e, 'response') and e.response is not None:
              logger.error(f"Response status: {e.response.status_code}")
              logger.error(f"Response body: {e.response.text}")
         raise ScanError(f"Failed to trigger scan: {str(e)}")
+    except ScanError:
+        raise
+    except Exception as e:
+        raise ScanError(f"Unexpected error during scan: {e}")
 
     # Update project_scanned status and tracking info
     from django.utils import timezone
@@ -158,7 +214,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, SHA: {current_sha}")
 
     return {
-        "status": "scan_triggered",
+        "status": "scan_completed",
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
         "scanned_sha": current_sha,
@@ -172,8 +228,6 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     """
     if not token or not repo_name:
         raise ValueError("Token and repo_name required")
-
-    url = f"https://api.github.com/repos/{repo_name}/commits/main" # default to main, fallback to master if needed
     
     # Check simple HEAD first or branch? 
     # Let's try fetching branches first to be safe, or just commits/HEAD
@@ -205,12 +259,18 @@ def trigger_scan_async(slack_user_id: str):
     import threading
     from integrations.services.slack import SlackService
 
+    def _progress_listener(msg):
+        # Helper to send concise progress updates
+        SlackService.send_dm(slack_user_id, msg)
+
     def _run_scan():
         # Notify start
         SlackService.send_dm(slack_user_id, "🔍 I'm starting a deeper scan of your repository to understand the project structure...")
         
         try:
-            result = scan_github_project(slack_user_id)
+            # Pass the listener to report progress
+            result = scan_github_project(slack_user_id, progress_callback=_progress_listener)
+            
             repo_name = result.get('github_repo', 'your repo')
             logger.info(f"Background scan completed: {result}")
             
