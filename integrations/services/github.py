@@ -63,6 +63,20 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     except Exception as e:
         logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
 
+    # Prepare existing artifacts if available
+    existing_artifacts = {}
+    try:
+        from core.models import OrganizationContentConfig
+        # Try to find config by repo name (stored as github_repo in Config)
+        config = OrganizationContentConfig.objects.filter(github_repo=integration.github_repo).first()
+        if config:
+            if config.article_template: existing_artifacts['article_template'] = config.article_template
+            if config.design_guide: existing_artifacts['design_guide'] = config.design_guide
+            if config.resource_prompt: existing_artifacts['resource_prompt'] = config.resource_prompt
+            if config.tech_stack: existing_artifacts['tech_stack'] = config.tech_stack
+    except Exception as e:
+        logger.warning(f"Failed to fetch existing artifacts for payload: {e}")
+
     try:
         cf_response = http_requests.post(
             scan_endpoint,
@@ -72,6 +86,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
                 "github_token": integration.github_access_token,
                 "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
                 "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+                "existing_artifacts": existing_artifacts,
             },
             headers=headers,
             timeout=1200,
@@ -92,6 +107,53 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
         integration.last_scanned_sha = current_sha
         integration.last_scanned_at = timezone.now()
     integration.save()
+
+    # Save scan artifacts to OrganizationContentConfig
+    try:
+        from core.models import Organization, OrganizationContentConfig
+        
+        # Ensure Organization exists (idempotent, keyed by domain/repo name)
+        # We use repo name as domain for now since we don't have a better unique ID
+        org_name = integration.github_user_name or "Unknown User"
+        org_domain = integration.github_repo
+        
+        org, _ = Organization.objects.get_or_create(
+            domain=org_domain,
+            defaults={"name": org_name}
+        )
+
+        # Ensure Config exists
+        config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+
+        # Update fields from scan response
+        cf_config = cf_data.get('config', {})
+        
+        config.github_repo = integration.github_repo
+        config.github_token_encrypted = integration.github_access_token 
+        
+        # Save artifacts if present
+        if 'article_template' in cf_config:
+            config.article_template = cf_config['article_template']
+        
+        if 'design_guide' in cf_config:
+            config.design_guide = cf_config['design_guide']
+            
+        if 'resource_prompt' in cf_config:
+            config.resource_prompt = cf_config['resource_prompt']
+            
+        if 'scan_summary' in cf_data:
+            config.scan_summary = cf_data['scan_summary']
+        elif 'scan_summary' in cf_config:
+             config.scan_summary = cf_config['scan_summary']
+             
+        if 'tech_stack' in cf_config:
+            config.tech_stack = cf_config['tech_stack']
+            
+        config.save()
+        logger.info(f"Updated OrganizationContentConfig for {org_domain}")
+
+    except Exception as e:
+        logger.error(f"Failed to save scan artifacts to OrganizationContentConfig: {e}")
 
     logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, SHA: {current_sha}")
 
