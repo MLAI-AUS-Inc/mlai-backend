@@ -61,12 +61,32 @@ class GithubTokenIdentityView(APIView):
             # Check for updates on GitHub
             has_updates = False
             latest_sha = None
+            auth_url = None
+            error_message = None
+
             try:
                 from integrations.services.github import get_latest_repo_sha
+                import requests
                 if integration.github_access_token and integration.github_repo:
                     latest_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
                     if latest_sha and latest_sha != integration.last_scanned_sha:
                         has_updates = True
+            except requests.exceptions.HTTPError as e:
+                # Handle expired token (401)
+                if e.response.status_code == 401:
+                    logger.warning(f"GitHub Token Expired for {slack_user_id}")
+                    error_message = "GitHub token expired"
+                    
+                    # Generate Re-Auth URL
+                    try:
+                        connect_path = reverse('github_connect')
+                        full_connect_url = request.build_absolute_uri(connect_path)
+                        auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+                    except Exception as url_err:
+                        logger.error(f"Failed to build auth url: {url_err}")
+                else:
+                    # Other HTTP errors
+                    logger.warning(f"Status check failed to fetch GH SHA: {e}")
             except Exception as e:
                 logger.warning(f"Status check failed to fetch GH SHA: {e}")
 
@@ -106,6 +126,8 @@ class GithubTokenIdentityView(APIView):
                 "current_sha": latest_sha,
                 "last_article": last_article,
                 "pending_intent": integration.pending_intent,
+                "error": error_message,
+                "auth_url": auth_url,
             })
         except UserIntegration.DoesNotExist:
             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
