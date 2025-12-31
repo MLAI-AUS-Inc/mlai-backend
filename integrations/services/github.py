@@ -207,7 +207,7 @@ def trigger_scan_async(slack_user_id: str):
 
     def _run_scan():
         # Notify start
-        SlackService.send_dm(slack_user_id, "🔍 GitHub connected! I'm starting a scan of your repository to understand the project structure...")
+        SlackService.send_dm(slack_user_id, "🔍 I'm starting a deeper scan of your repository to understand the project structure...")
         
         try:
             result = scan_github_project(slack_user_id)
