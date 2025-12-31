@@ -128,3 +128,32 @@ class SmartScanTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data['has_updates'])
+
+    @patch('integrations.services.github.get_latest_repo_sha')
+    def test_status_endpoint_token_expired(self, mock_get_sha):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+        import requests
+
+        # Setup: Last scan was old
+        self.integration.last_scanned_sha = 'old_sha_111'
+        self.integration.save()
+
+        # Mock: GitHub raises 401
+        error_response = MagicMock()
+        error_response.status_code = 401
+        
+        # requests.exceptions.HTTPError requires (msg, response=response)
+        mock_get_sha.side_effect = requests.exceptions.HTTPError("Unauthorized", response=error_response)
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/')
+        
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+             response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['error'], "GitHub token expired")
+        self.assertTrue("auth-url" in response.data or "auth_url" in response.data)
+        self.assertIn(f"?slack_user_id={self.user_id}", response.data['auth_url'])
