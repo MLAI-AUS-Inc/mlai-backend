@@ -251,7 +251,9 @@ class GithubScanView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        from integrations.services.github import scan_github_project, ScanError
+        from integrations.services.github import trigger_scan_async, ScanError
+        # Also import UserIntegration to check existence quickly (optional, but good UX)
+        from integrations.models import UserIntegration
         
         slack_user_id = request.data.get('slack_user_id')
         if not slack_user_id:
@@ -260,15 +262,15 @@ class GithubScanView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            result = scan_github_project(slack_user_id)
-            return Response(result, status=status.HTTP_200_OK)
-        except ScanError as e:
-            error_msg = str(e)
-            if "No integration found" in error_msg:
-                return Response({"error": error_msg}, status=status.HTTP_404_NOT_FOUND)
-            elif "No GitHub token" in error_msg or "No GitHub repository" in error_msg:
-                return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
-            else:
-                return Response({"error": error_msg}, status=status.HTTP_502_BAD_GATEWAY)
+        # Quick check if integration exists to fail fast
+        if not UserIntegration.objects.filter(slack_user_id=slack_user_id).exists():
+             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Trigger in background
+        trigger_scan_async(slack_user_id)
+        
+        return Response({
+            "status": "scan_initiated",
+            "message": "Scan running in background. You will be notified via Slack when complete."
+        }, status=status.HTTP_202_ACCEPTED)
 
