@@ -56,6 +56,13 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
     else:
         logger.warning("No CONTENT_FACTORY_API_KEY found in settings! Scan request may fail.")
 
+    # Get latest commit SHA BEFORE scan to ensure we track what we scanned
+    current_sha = None
+    try:
+        current_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
+    except Exception as e:
+        logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
+
     try:
         cf_response = http_requests.post(
             scan_endpoint,
@@ -78,18 +85,54 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None)
              logger.error(f"Response body: {e.response.text}")
         raise ScanError(f"Failed to trigger scan: {str(e)}")
 
-    # Update project_scanned status
+    # Update project_scanned status and tracking info
+    from django.utils import timezone
     integration.project_scanned = True
+    if current_sha:
+        integration.last_scanned_sha = current_sha
+        integration.last_scanned_at = timezone.now()
     integration.save()
 
-    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}")
+    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, SHA: {current_sha}")
 
     return {
         "status": "scan_triggered",
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
+        "scanned_sha": current_sha,
         "content_factory_response": cf_data,
     }
+
+
+def get_latest_repo_sha(token: str, repo_name: str) -> str:
+    """
+    Fetch the latest commit SHA for the default branch (usually main/master).
+    """
+    if not token or not repo_name:
+        raise ValueError("Token and repo_name required")
+
+    url = f"https://api.github.com/repos/{repo_name}/commits/main" # default to main, fallback to master if needed
+    
+    # Check simple HEAD first or branch? 
+    # Let's try fetching branches first to be safe, or just commits/HEAD
+    # Actually, /repos/:owner/:repo/commits/HEAD works for default branch
+    url = f"https://api.github.com/repos/{repo_name}/commits/HEAD"
+
+    resp = http_requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+        },
+        timeout=10
+    )
+    if resp.status_code == 404:
+        # Fallback to master if HEAD fails (unlikely)
+        pass
+        
+    resp.raise_for_status()
+    data = resp.json()
+    return data['sha']
 
 
 def trigger_scan_async(slack_user_id: str):

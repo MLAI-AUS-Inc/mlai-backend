@@ -57,6 +57,42 @@ class GithubTokenIdentityView(APIView):
 
         try:
             integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+            
+            # Check for updates on GitHub
+            has_updates = False
+            latest_sha = None
+            try:
+                from integrations.services.github import get_latest_repo_sha
+                if integration.github_access_token and integration.github_repo:
+                    latest_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
+                    if latest_sha and latest_sha != integration.last_scanned_sha:
+                        has_updates = True
+            except Exception as e:
+                logger.warning(f"Status check failed to fetch GH SHA: {e}")
+
+            # Get last generated article (Task)
+            last_article = None
+            # Assuming 'Task' model is in roo.models and has a clear way to identify "articles" for this user
+            # For now, we'll fetch the most recent completed task for this user
+            try:
+                from roo.models import Task
+                from roo.services import PointsService
+                user = PointsService.get_user_by_slack_id(slack_user_id)
+                if user:
+                    recent_task = Task.objects.filter(
+                        assigned_user=user, 
+                        status='approved'
+                    ).order_by('-closed_at').first()
+                    
+                    if recent_task:
+                        last_article = {
+                            "title": recent_task.title,
+                            "date": recent_task.closed_at,
+                            "points": recent_task.points
+                        }
+            except Exception as e:
+                logger.warning(f"Failed to fetch last article: {e}")
+
             return Response({
                 "slack_user_id": integration.slack_user_id,
                 "token": integration.github_access_token,
@@ -64,6 +100,11 @@ class GithubTokenIdentityView(APIView):
                 "scopes": integration.github_scopes,
                 "github_repo": integration.github_repo,
                 "project_scanned": integration.project_scanned,
+                "last_scanned_at": integration.last_scanned_at,
+                "last_scanned_sha": integration.last_scanned_sha,
+                "has_updates": has_updates,
+                "current_sha": latest_sha,
+                "last_article": last_article,
                 "pending_intent": integration.pending_intent,
             })
         except UserIntegration.DoesNotExist:

@@ -21,6 +21,8 @@ class UserIntegration(models.Model):
     github_repo = models.CharField(max_length=255, null=True, blank=True)  # e.g. "owner/repo"
     github_scopes = models.JSONField(default=list, blank=True)
     project_scanned = models.BooleanField(default=False)
+    last_scanned_sha = models.CharField(max_length=40, null=True, blank=True)
+    last_scanned_at = models.DateTimeField(null=True, blank=True)
     pending_intent = models.JSONField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
