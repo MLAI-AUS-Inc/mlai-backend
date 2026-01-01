@@ -667,11 +667,13 @@ class ContentFactoryOrgConfigView(APIView):
             'domain': org.domain,
             'article_template': config.article_template if config else None,
             'design_guide': config.design_guide if config else None,
+            'resource_prompt': config.resource_prompt if config else None,
             'github_repo': config.github_repo if config else None,
             'brand_name': config.brand_name if config else None,
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
+            'registry_path': config.registry_path if config else None,
         }
         
         return Response(response_data, status=status.HTTP_200_OK)
@@ -679,6 +681,7 @@ class ContentFactoryOrgConfigView(APIView):
     def put(self, request):
         """
         Create org if not exists, then upsert config.
+        Supports partial updates (only fields present in request are updated).
         """
         data = request.data
         domain = data.get('domain')
@@ -703,19 +706,24 @@ class ContentFactoryOrgConfigView(APIView):
             org.name = name
             org.save()
         
-        # Prepare defaults
-        defaults = {
-            'article_template': data.get('article_template'),
-            'design_guide': data.get('design_guide'),
-            'github_repo': data.get('github_repo'),
-            'brand_name': data.get('brand_name'),
-            'scan_summary': data.get('scan_summary'),
-            'tech_stack': data.get('tech_stack', {}),
-        }
+        # Prepare defaults dynamically to allow partial updates
+        # Only include fields that are present in the request data
+        defaults = {}
+        target_fields = [
+            'article_template',
+            'design_guide',
+            'resource_prompt',
+            'github_repo',
+            'brand_name',
+            'scan_summary',
+            'tech_stack',
+            'article_path_pattern',
+            'registry_path',
+        ]
         
-        # Only update article_path_pattern if provided (it's not nullable)
-        if 'article_path_pattern' in data:
-            defaults['article_path_pattern'] = data['article_path_pattern']
+        for field in target_fields:
+            if field in data:
+                defaults[field] = data[field]
 
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
