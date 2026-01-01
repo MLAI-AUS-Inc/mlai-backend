@@ -73,18 +73,26 @@ class ContentPublishView(APIView):
     """
     Publish a generated article.
     POST /api/v1/content/publish/{job_id}
+    
+    Request Body:
+        { "slack_user_id": "U12345678" }  // Required for GitHub credential lookup
     """
     permission_classes = [HasRooApiKey]
 
     def post(self, request, job_id):
         if not job_id:
             return Response({"error": "job_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        slack_user_id = request.data.get('slack_user_id')
+        if not slack_user_id:
+            return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            result = publish_article(job_id)
+            result = publish_article(job_id, slack_user_id)
             return Response(result, status=status.HTTP_200_OK)
         except ArticleGenerationError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in publish view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

@@ -169,13 +169,36 @@ def check_generation_status(job_id: str) -> dict:
         raise ArticleGenerationError(f"Failed to check status: {str(e)}")
 
 
-def publish_article(job_id: str) -> dict:
+def publish_article(job_id: str, slack_user_id: str) -> dict:
     """
     Trigger publication (PR creation) for a job.
+    
+    Args:
+        job_id: The Content Factory job ID.
+        slack_user_id: The Slack user ID (used to lookup GitHub credentials).
     
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
+    # 1. Fetch UserIntegration for GitHub credentials
+    try:
+        integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+    except UserIntegration.DoesNotExist:
+        raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
+
+    if not integration.github_access_token:
+        raise ArticleGenerationError("No GitHub token found. Please authenticate with GitHub first.")
+    
+    if not integration.github_repo:
+        raise ArticleGenerationError("No GitHub repository configured for this user.")
+
+    # 2. Prepare payload with GitHub credentials
+    payload = {
+        "github_token": integration.github_access_token,
+        "github_repo": integration.github_repo,
+    }
+
+    # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     publish_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/{job_id}"
     
@@ -187,8 +210,9 @@ def publish_article(job_id: str) -> dict:
     try:
         response = http_requests.post(
             publish_endpoint,
+            json=payload,
             headers=headers,
-            timeout=60 # Publishing might take a moment (git ops)
+            timeout=120  # Publishing might take a moment (git ops)
         )
         
         if response.status_code == 200:
@@ -200,3 +224,4 @@ def publish_article(job_id: str) -> dict:
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to publish: {str(e)}")
+
