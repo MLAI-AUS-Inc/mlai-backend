@@ -29,6 +29,7 @@ urlpatterns = [
     path('api/v1/points/', include('roo.urls')),
     # Content Factory API
     path('api/content-factory/', include('core.urls_content_factory')),
+    path('api/v1/content/', include('core.urls_content_generation')),
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),
