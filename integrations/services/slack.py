@@ -54,9 +54,19 @@ class SlackService:
             logger.error(f"Exception fetching Slack user {slack_user_id}: {str(e)}")
             return None
     @classmethod
-    def send_dm(cls, slack_user_id: str, text: str, blocks: list = None) -> bool:
+    def send_dm(cls, slack_user_id: str, text: str, blocks: list = None, thread_ts: str = None) -> tuple[bool, Optional[str]]:
         """
         Send a direct message to a user.
+        
+        Args:
+            slack_user_id: The Slack user ID to DM.
+            text: The message text.
+            blocks: Optional Slack blocks for rich formatting.
+            thread_ts: Optional thread timestamp to reply in a thread.
+            
+        Returns:
+            Tuple of (success: bool, message_ts: Optional[str]).
+            message_ts is the timestamp of the sent message, useful for starting threads.
         """
         client = cls.get_client()
         try:
@@ -64,20 +74,26 @@ class SlackService:
             response = client.conversations_open(users=[slack_user_id])
             if not response['ok']:
                 logger.error(f"Failed to open DM with {slack_user_id}: {response.get('error')}")
-                return False
+                return False, None
             
             channel_id = response['channel']['id']
             
+            # Build message kwargs
+            msg_kwargs = {
+                "channel": channel_id,
+                "text": text,
+            }
+            if blocks:
+                msg_kwargs["blocks"] = blocks
+            if thread_ts:
+                msg_kwargs["thread_ts"] = thread_ts
+            
             # Post message
-            client.chat_postMessage(
-                channel=channel_id,
-                text=text,
-                blocks=blocks
-            )
-            return True
+            msg_response = client.chat_postMessage(**msg_kwargs)
+            return True, msg_response.get('ts')
         except SlackApiError as e:
             logger.error(f"Slack API error sending DM to {slack_user_id}: {e.response['error']}")
-            return False
+            return False, None
         except Exception as e:
             logger.error(f"Exception sending DM to {slack_user_id}: {str(e)}")
-            return False
+            return False, None

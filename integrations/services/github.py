@@ -182,28 +182,43 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
 
         # Update fields from scan response
+        # Support both nested 'config' key (legacy) and top-level keys (current)
         cf_config = cf_data.get('config', {})
         
         config.github_repo = integration.github_repo
         config.github_token_encrypted = integration.github_access_token 
         
-        # Save artifacts if present
-        if 'article_template' in cf_config:
+        # Save artifacts if present (check top-level first, then nested 'config')
+        if 'article_template' in cf_data:
+            config.article_template = cf_data['article_template']
+        elif 'article_template' in cf_config:
             config.article_template = cf_config['article_template']
         
-        if 'design_guide' in cf_config:
+        if 'design_guide' in cf_data:
+            config.design_guide = cf_data['design_guide']
+        elif 'design_guide' in cf_config:
             config.design_guide = cf_config['design_guide']
             
-        if 'resource_prompt' in cf_config:
+        if 'resource_prompt' in cf_data:
+            config.resource_prompt = cf_data['resource_prompt']
+        elif 'resource_prompt' in cf_config:
             config.resource_prompt = cf_config['resource_prompt']
             
         if 'scan_summary' in cf_data:
             config.scan_summary = cf_data['scan_summary']
         elif 'scan_summary' in cf_config:
-             config.scan_summary = cf_config['scan_summary']
+            config.scan_summary = cf_config['scan_summary']
              
-        if 'tech_stack' in cf_config:
+        if 'tech_stack' in cf_data:
+            config.tech_stack = cf_data['tech_stack']
+        elif 'tech_stack' in cf_config:
             config.tech_stack = cf_config['tech_stack']
+        
+        # Save additional metadata if present
+        if 'article_path_pattern' in cf_data:
+            config.article_path_pattern = cf_data.get('article_path_pattern')
+        if 'registry_path' in cf_data:
+            config.registry_path = cf_data.get('registry_path')
             
         config.save()
         logger.info(f"Updated OrganizationContentConfig for {org_domain}")
@@ -255,17 +270,25 @@ def trigger_scan_async(slack_user_id: str):
     """
     Trigger a scan in a background thread.
     Logs errors instead of raising them (fire-and-forget).
+    All progress updates are sent as threaded replies to the initial message.
     """
     import threading
     from integrations.services.slack import SlackService
 
-    def _progress_listener(msg):
-        # Helper to send concise progress updates
-        SlackService.send_dm(slack_user_id, msg)
-
     def _run_scan():
-        # Notify start
-        SlackService.send_dm(slack_user_id, "🔍 I'm starting a deeper scan of your repository to understand the project structure...")
+        # Notify start and capture thread_ts
+        success, thread_ts = SlackService.send_dm(
+            slack_user_id, 
+            "🔍 I'm starting a deeper scan of your repository to understand the project structure..."
+        )
+        
+        if not success:
+            logger.error(f"Failed to send initial scan DM for {slack_user_id}")
+            return
+        
+        def _progress_listener(msg):
+            # Helper to send concise progress updates as threaded replies
+            SlackService.send_dm(slack_user_id, msg, thread_ts=thread_ts)
         
         try:
             # Pass the listener to report progress
@@ -274,18 +297,20 @@ def trigger_scan_async(slack_user_id: str):
             repo_name = result.get('github_repo', 'your repo')
             logger.info(f"Background scan completed: {result}")
             
-            # Notify success
+            # Notify success (threaded)
             SlackService.send_dm(
                 slack_user_id, 
-                f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content."
+                f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content.",
+                thread_ts=thread_ts
             )
         except ScanError as e:
             logger.error(f"Background scan failed for {slack_user_id}: {e}")
-            SlackService.send_dm(slack_user_id, f"❌ Scan failed: {str(e)}")
+            SlackService.send_dm(slack_user_id, f"❌ Scan failed: {str(e)}", thread_ts=thread_ts)
         except Exception as e:
             logger.exception(f"Unexpected error in background scan for {slack_user_id}: {e}")
-            SlackService.send_dm(slack_user_id, "❌ An unexpected error occurred while scanning your repository.")
+            SlackService.send_dm(slack_user_id, "❌ An unexpected error occurred while scanning your repository.", thread_ts=thread_ts)
 
     thread = threading.Thread(target=_run_scan, daemon=True)
     thread.start()
     logger.info(f"Triggered background scan for {slack_user_id}")
+
