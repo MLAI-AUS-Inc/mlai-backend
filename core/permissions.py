@@ -80,10 +80,23 @@ class HasRooApiKey(permissions.BasePermission):
             os.environ.get('MLAI_API_KEY'),
         ]
 
-        # Filter out any missing keys
-        allowed_keys = [key for key in allowed_keys if key]
+    destructured_keys = [key for key in allowed_keys if key]
+        allowed_keys = list(set(destructured_keys)) # Deduplicate
 
-        if not api_key or not allowed_keys:
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not api_key:
+            logger.warning("HasRooApiKey: No HTTP_X_API_KEY header found.")
             return False
 
-        return api_key in allowed_keys
+        if not allowed_keys:
+            logger.error("HasRooApiKey: No allowed keys configured on backend.")
+            return False
+
+        if api_key in allowed_keys:
+            return True
+        else:
+            masked_key = api_key[:4] + "***" if len(api_key) > 4 else "***"
+            logger.warning(f"HasRooApiKey: Invalid API Key received: {masked_key}. Allowed count: {len(allowed_keys)}")
+            return False
