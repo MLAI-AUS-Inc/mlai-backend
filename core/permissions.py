@@ -68,8 +68,14 @@ class HasRooApiKey(permissions.BasePermission):
     def has_permission(self, request, view):
         from django.conf import settings
         
-        # Check header
+        # Check header (Support both X-API-KEY and Authorization: Api-Key <key>)
         api_key = request.META.get('HTTP_X_API_KEY')
+        
+        if not api_key:
+            auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+            if auth_header.startswith('Api-Key '):
+                api_key = auth_header.split('Api-Key ')[1].strip()
+
         allowed_keys = [
             getattr(settings, 'ROO_API_KEY', None),
             getattr(settings, 'INTERNAL_API_KEY', None),
@@ -87,7 +93,7 @@ class HasRooApiKey(permissions.BasePermission):
         logger = logging.getLogger(__name__)
 
         if not api_key:
-            logger.warning("HasRooApiKey: No HTTP_X_API_KEY header found.")
+            logger.warning("HasRooApiKey: No HTTP_X_API_KEY or Authorization: Api-Key header found.")
             return False
 
         if not allowed_keys:
