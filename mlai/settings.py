@@ -197,7 +197,7 @@ except ImportError:
 # App URLs
 MEDHACK_URL = os.getenv('MEDHACK_URL', 'http://localhost:3000')
 ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://localhost:5173/esafety')
-CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://localhost:8001')
+CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
 
 # Google OAuth Settings
