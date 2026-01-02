@@ -207,6 +207,12 @@ def publish_article(job_id: str, slack_user_id: str) -> dict:
     if api_key:
         headers["X-API-KEY"] = api_key
 
+    # Debug logging for troubleshooting
+    masked_payload = payload.copy()
+    if 'github_token' in masked_payload:
+        masked_payload['github_token'] = '***'
+    logger.info(f"Publishing article to: {publish_endpoint} with payload: {masked_payload}")
+
     try:
         response = http_requests.post(
             publish_endpoint,
