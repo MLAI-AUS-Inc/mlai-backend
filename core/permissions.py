@@ -80,7 +80,7 @@ class HasRooApiKey(permissions.BasePermission):
             os.environ.get('MLAI_API_KEY'),
         ]
 
-    destructured_keys = [key for key in allowed_keys if key]
+        destructured_keys = [key for key in allowed_keys if key]
         allowed_keys = list(set(destructured_keys)) # Deduplicate
 
         import logging
