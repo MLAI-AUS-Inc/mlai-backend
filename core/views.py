@@ -605,7 +605,8 @@ class ContentFactoryOrgConfigView(APIView):
     GET/PUT org config for Content Factory service.
     Used by external Content Factory service to read/write organization templates.
     """
-    permission_classes = [HasAPIKey]
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
 
     def _normalize_domain(self, domain: str) -> str:
         """
