@@ -12,6 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 class GithubTokenIdentityView(APIView):
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
@@ -157,6 +158,7 @@ class GithubTokenIdentityView(APIView):
 
 
 class IntentView(APIView):
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
@@ -198,6 +200,7 @@ class IntentView(APIView):
 
 
 class StatusView(APIView):
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def patch(self, request):
@@ -209,6 +212,7 @@ class StatusView(APIView):
 
 
 class GithubAuthUrlView(APIView):
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def get(self, request):
@@ -248,6 +252,7 @@ class GithubScanView(APIView):
     Trigger a repository scan via Content Factory.
     POST /api/v1/integrations/github/scan
     """
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request):

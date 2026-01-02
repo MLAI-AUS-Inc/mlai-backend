@@ -18,6 +18,7 @@ class ContentGenerateView(APIView):
     Trigger content generation pipeline.
     POST /api/v1/content/generate
     """
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
@@ -51,6 +52,7 @@ class ContentStatusView(APIView):
     Get generation job status.
     GET /api/v1/content/jobs/{job_id}
     """
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def get(self, request, job_id):
@@ -77,6 +79,7 @@ class ContentPublishView(APIView):
     Request Body:
         { "slack_user_id": "U12345678" }  // Required for GitHub credential lookup
     """
+    authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     def post(self, request, job_id):
