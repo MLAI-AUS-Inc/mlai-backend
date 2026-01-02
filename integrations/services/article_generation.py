@@ -96,7 +96,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     }
 
     # 4. Call Content Factory
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     generate_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/generate"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
@@ -141,7 +141,8 @@ def check_generation_status(job_id: str) -> dict:
     Returns:
         dict: { "job_id": "...", "status": "...", "progress": int, "current_step": "...", "error": ... }
     """
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+    """
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     status_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/status/{job_id}"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
@@ -199,7 +200,7 @@ def publish_article(job_id: str, slack_user_id: str) -> dict:
     }
 
     # 3. Call Content Factory
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     publish_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/{job_id}"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
