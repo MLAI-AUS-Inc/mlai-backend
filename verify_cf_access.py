@@ -13,7 +13,7 @@ def check_publish_endpoint():
     
     headers = {"Content-Type": "application/json"}
     if API_KEY:
-        headers["X-API-KEY"] = "FOUND"
+        headers["X-API-KEY"] = API_KEY
     
     try:
         # We expect 404 or 422 or 500, but NOT a connection error
