@@ -638,28 +638,39 @@ class ContentFactoryOrgConfigView(APIView):
 
     def get(self, request):
         """
-        Lookup org config by domain query param.
+        Lookup org config by domain OR github_repo query param.
         Returns 404 if organization not found.
         """
         domain = request.query_params.get('domain')
+        github_repo = request.query_params.get('github_repo')
         
-        if not domain:
+        org = None
+
+        # 1. Try lookup by github_repo if provided
+        if github_repo:
+            try:
+                # Find the config that matches this repo
+                config = OrganizationContentConfig.objects.filter(github_repo=github_repo).first()
+                if config:
+                    org = config.organization
+            except Exception as e:
+                logger.warning(f"Error looking up org by repo {github_repo}: {e}")
+
+        # 2. Try lookup by domain if no org found yet
+        if not org and domain:
+            normalized_domain = self._normalize_domain(domain)
+            try:
+                org = Organization.objects.get(domain=normalized_domain)
+            except Organization.DoesNotExist:
+                pass
+
+        if not org:
             return Response(
-                {'error': 'domain query parameter is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        normalized_domain = self._normalize_domain(domain)
-        
-        try:
-            org = Organization.objects.get(domain=normalized_domain)
-        except Organization.DoesNotExist:
-            return Response(
-                {'error': 'Organization not found'},
+                {'error': 'Organization not found. Please provide valid domain or github_repo.'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get config if exists
+        # Get config if exists (might have already fetched it, but get fresh ref)
         config = getattr(org, 'content_config', None)
         
         response_data = {
