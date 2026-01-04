@@ -143,7 +143,7 @@ def check_generation_status(job_id: str) -> dict:
     """
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    status_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/status/{job_id}"
+    status_endpoint = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
