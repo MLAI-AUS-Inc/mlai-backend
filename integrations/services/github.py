@@ -95,12 +95,37 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
             timeout=3600, 
         )
         
-        # Handle Async Response (202 Accepted)
-        if cf_response.status_code == 202:
+        # Handle both 202 Accepted (standard async) and 200 OK with job_id (potential new behavior)
+        # If we get a job_id, we treat it as an async task that needs polling.
+        start_polling = False
+        cf_data = None
+        
+        if cf_response.status_code in [200, 202]:
+            data = cf_response.json()
+            # If it has a job_id and status is queued/processing, or just has job_id and we are in 202
+            if 'job_id' in data:
+                # Check if it's already done (unlikely for 202, possible for 200)
+                if data.get('status') in ['completed', 'failed']:
+                     # It's already done, just use the result
+                     if data.get('status') == 'completed':
+                         cf_data = data.get('result')
+                     else:
+                         raise ScanError(f"Scan failed immediately: {data.get('error')}")
+                else:
+                    # It's queued or processing, start polling
+                    start_polling = True
+            elif cf_response.status_code == 200:
+                # Legacy synchronous response (no job_id, just data)
+                cf_data = data
+
+        else:
+             cf_response.raise_for_status()
+
+        if start_polling:
             data = cf_response.json()
             job_id = data.get('job_id')
             if not job_id:
-                raise ScanError("Received 202 but no job_id provided.")
+                raise ScanError("Async response received but no job_id provided.")
                 
             status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/scan/{job_id}"
             
@@ -137,13 +162,6 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
                      
             if not cf_data:
                 raise ScanError("Scan timed out or did not complete successfully.")
-
-        # Handle Synchronous Response (200 OK)
-        elif cf_response.status_code == 200:
-            cf_data = cf_response.json()
-            
-        else:
-            cf_response.raise_for_status()
 
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Content Factory scan request failed: {e}")
