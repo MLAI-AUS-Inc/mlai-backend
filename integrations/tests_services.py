@@ -54,3 +54,24 @@ class GithubServiceTest(TestCase):
             scan_github_project(self.slack_user_id)
         
         self.assertIn("Failed to trigger scan", str(context.exception))
+
+    @patch('integrations.services.github.http_requests.post')
+    def test_scan_github_project_with_thread_context(self, mock_post):
+        """Test that thread context is passed to Content Factory."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        # Return a legacy synchronous response without job_id to skip polling
+        mock_response.json.return_value = {"status": "completed", "article_template": "test"}
+        mock_post.return_value = mock_response
+
+        # Call with thread params
+        scan_github_project(
+            self.slack_user_id, 
+            slack_channel_id="C123", 
+            slack_thread_ts="123.456"
+        )
+
+        args, kwargs = mock_post.call_args
+        payload = kwargs['json']
+        self.assertEqual(payload['slack_channel_id'], "C123")
+        self.assertEqual(payload['slack_thread_ts'], "123.456")

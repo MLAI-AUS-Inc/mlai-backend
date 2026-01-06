@@ -13,7 +13,7 @@ class ScanError(Exception):
     pass
 
 
-def scan_github_project(slack_user_id: str, integration: UserIntegration = None, progress_callback=None) -> dict:
+def scan_github_project(slack_user_id: str, integration: UserIntegration = None, progress_callback=None, slack_channel_id: str = None, slack_thread_ts: str = None) -> dict:
     """
     Trigger a repository scan via Content Factory.
 
@@ -21,6 +21,8 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
         slack_user_id: The Slack user ID to scan for.
         integration: Optional pre-fetched UserIntegration instance.
         progress_callback: Optional function(msg: str) to report progress.
+        slack_channel_id: Optional Slack channel ID to maintain thread context.
+        slack_thread_ts: Optional Slack thread timestamp to maintain thread context.
 
     Returns:
         dict: Response data from Content Factory.
@@ -78,16 +80,24 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
 
     cf_data = None
     try:
+        payload = {
+            "slack_user_id": slack_user_id,
+            "github_repo": integration.github_repo,
+            "github_token": integration.github_access_token,
+            "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+            "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+            "existing_artifacts": existing_artifacts,
+        }
+
+        # Add thread context if available
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+
         cf_response = http_requests.post(
             scan_endpoint,
-            json={
-                "slack_user_id": slack_user_id,
-                "github_repo": integration.github_repo,
-                "github_token": integration.github_access_token,
-                "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-                "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-                "existing_artifacts": existing_artifacts,
-            },
+            json=payload,
             headers=headers,
             # Fallback: Support legacy sync (long timeout) AND async (short response).
             # If the backend is synchronous, this thread will block for up to 60 mins.
@@ -284,7 +294,7 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     return data['sha']
 
 
-def trigger_scan_async(slack_user_id: str):
+def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None):
     """
     Trigger a scan in a background thread.
     Logs errors instead of raising them (fire-and-forget).
@@ -295,38 +305,64 @@ def trigger_scan_async(slack_user_id: str):
 
     def _run_scan():
         # Notify start and capture thread_ts
-        success, thread_ts = SlackService.send_dm(
-            slack_user_id, 
-            "🔍 I'm starting a deeper scan of your repository to understand the project structure..."
-        )
+        thread_ts = slack_thread_ts
         
-        if not success:
-            logger.error(f"Failed to send initial scan DM for {slack_user_id}")
-            return
+        # If we have context, use it
+        if slack_channel_id and thread_ts:
+            SlackService.send_message(
+                slack_channel_id,
+                "🔍 I'm starting a deeper scan of your repository...",
+                thread_ts=thread_ts
+            )
+        else:
+            # Fallback to DM if no context provided (legacy behavior)
+            success, thread_ts = SlackService.send_dm(
+                slack_user_id, 
+                "🔍 I'm starting a deeper scan of your repository to understand the project structure..."
+            )
+            if not success:
+                logger.error(f"Failed to send initial scan DM for {slack_user_id}")
+                return
         
         def _progress_listener(msg):
             # Helper to send concise progress updates as threaded replies
-            SlackService.send_dm(slack_user_id, msg, thread_ts=thread_ts)
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, msg, thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, msg, thread_ts=thread_ts)
         
         try:
             # Pass the listener to report progress
-            result = scan_github_project(slack_user_id, progress_callback=_progress_listener)
+            result = scan_github_project(
+                slack_user_id, 
+                progress_callback=_progress_listener,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=thread_ts
+            )
             
             repo_name = result.get('github_repo', 'your repo')
             logger.info(f"Background scan completed: {result}")
             
             # Notify success (threaded)
-            SlackService.send_dm(
-                slack_user_id, 
-                f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content.",
-                thread_ts=thread_ts
-            )
+            success_msg = f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content."
+            
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, success_msg, thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, success_msg, thread_ts=thread_ts)
+            
         except ScanError as e:
             logger.error(f"Background scan failed for {slack_user_id}: {e}")
-            SlackService.send_dm(slack_user_id, f"❌ Scan failed: {str(e)}", thread_ts=thread_ts)
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, f"❌ Scan failed: {str(e)}", thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, f"❌ Scan failed: {str(e)}", thread_ts=thread_ts)
         except Exception as e:
             logger.exception(f"Unexpected error in background scan for {slack_user_id}: {e}")
-            SlackService.send_dm(slack_user_id, "❌ An unexpected error occurred while scanning your repository.", thread_ts=thread_ts)
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, "❌ An unexpected error occurred while scanning your repository.", thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, "❌ An unexpected error occurred while scanning your repository.", thread_ts=thread_ts)
 
     thread = threading.Thread(target=_run_scan, daemon=True)
     thread.start()
