@@ -638,13 +638,25 @@ class ContentFactoryOrgConfigView(APIView):
 
     def get(self, request):
         """
-        Lookup org config by domain OR github_repo query param.
+        Lookup org config by domain, github_repo, or slack_user_id query param.
         Returns 404 if organization not found.
         """
         domain = request.query_params.get('domain')
         github_repo = request.query_params.get('github_repo')
+        slack_user_id = request.query_params.get('slack_user_id')
         
         org = None
+
+        # 0. Try lookup via slack_user_id -> UserIntegration -> github_repo
+        if slack_user_id and not github_repo:
+            try:
+                from integrations.models import UserIntegration
+                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                if integration and integration.github_repo:
+                    github_repo = integration.github_repo
+                    logger.info(f"Resolved github_repo={github_repo} from slack_user_id={slack_user_id}")
+            except Exception as e:
+                logger.warning(f"Error looking up integration by slack_user_id {slack_user_id}: {e}")
 
         # 1. Try lookup by github_repo if provided
         if github_repo:
