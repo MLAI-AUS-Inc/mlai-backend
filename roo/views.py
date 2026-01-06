@@ -501,7 +501,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Parse and validate date is today
+        # Parse and validate date
         try:
             booking_date = date.fromisoformat(booking_date_str)
         except ValueError:
@@ -511,9 +511,17 @@ class CoworkingViewSet(viewsets.ViewSet):
             )
         
         today = timezone.now().date()
-        if booking_date != today:
+        max_date = today + timedelta(days=7)
+
+        if booking_date < today:
+             return Response(
+                {'error': f'Cannot book dates in the past. Today is {today.isoformat()}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if booking_date > max_date:
             return Response(
-                {'error': f'Coworking can only be booked for today ({today.isoformat()}). You requested: {booking_date.isoformat()}'},
+                {'error': f'Cannot book for more than 7 days in advance. Max date is {max_date.isoformat()}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
