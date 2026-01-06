@@ -261,6 +261,9 @@ class GithubScanView(APIView):
         from integrations.models import UserIntegration
         
         slack_user_id = request.data.get('slack_user_id')
+        slack_channel_id = request.data.get('slack_channel_id')
+        slack_thread_ts = request.data.get('slack_thread_ts')
+
         if not slack_user_id:
             return Response(
                 {"error": "slack_user_id is required"}, 
@@ -272,7 +275,7 @@ class GithubScanView(APIView):
              return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
 
         # Trigger in background
-        trigger_scan_async(slack_user_id)
+        trigger_scan_async(slack_user_id, slack_channel_id=slack_channel_id, slack_thread_ts=slack_thread_ts)
         
         return Response({
             "status": "scan_initiated",

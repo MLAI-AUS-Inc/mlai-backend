@@ -97,3 +97,38 @@ class SlackService:
         except Exception as e:
             logger.error(f"Exception sending DM to {slack_user_id}: {str(e)}")
             return False, None
+    @classmethod
+    def send_message(cls, channel_id: str, text: str, blocks: list = None, thread_ts: str = None) -> tuple[bool, Optional[str]]:
+        """
+        Send a message to a specific channel.
+        
+        Args:
+            channel_id: The Slack channel ID.
+            text: The message text.
+            blocks: Optional Slack blocks for rich formatting.
+            thread_ts: Optional thread timestamp to reply in a thread.
+            
+        Returns:
+            Tuple of (success: bool, message_ts: Optional[str]).
+        """
+        client = cls.get_client()
+        try:
+            # Build message kwargs
+            msg_kwargs = {
+                "channel": channel_id,
+                "text": text,
+            }
+            if blocks:
+                msg_kwargs["blocks"] = blocks
+            if thread_ts:
+                msg_kwargs["thread_ts"] = thread_ts
+            
+            # Post message
+            msg_response = client.chat_postMessage(**msg_kwargs)
+            return True, msg_response.get('ts')
+        except SlackApiError as e:
+            logger.error(f"Slack API error sending message to {channel_id}: {e.response['error']}")
+            return False, None
+        except Exception as e:
+            logger.error(f"Exception sending message to {channel_id}: {str(e)}")
+            return False, None
