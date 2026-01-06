@@ -64,6 +64,7 @@ class GithubTokenIdentityView(APIView):
             latest_sha = None
             auth_url = None
             error_message = None
+            access_revoked = False
 
             try:
                 from integrations.services.github import get_latest_repo_sha
@@ -73,21 +74,26 @@ class GithubTokenIdentityView(APIView):
                     if latest_sha and latest_sha != integration.last_scanned_sha:
                         has_updates = True
             except requests.exceptions.HTTPError as e:
-                # Handle expired token (401)
+                # Handle expired token (401) or revoked access (404)
                 if e.response.status_code == 401:
                     logger.warning(f"GitHub Token Expired for {slack_user_id}")
                     error_message = "GitHub token expired"
-                    
-                    # Generate Re-Auth URL
+                    access_revoked = True
+                elif e.response.status_code in [403, 404]:
+                    logger.warning(f"GitHub Access Revoked for {slack_user_id}: {e.response.status_code}")
+                    error_message = "GitHub access revoked or repository not found"
+                    access_revoked = True
+                else:
+                    logger.warning(f"Status check failed to fetch GH SHA: {e}")
+                
+                # Generate Re-Auth URL for any access issue
+                if access_revoked:
                     try:
                         connect_path = reverse('github_connect')
                         full_connect_url = request.build_absolute_uri(connect_path)
                         auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
                     except Exception as url_err:
                         logger.error(f"Failed to build auth url: {url_err}")
-                else:
-                    # Other HTTP errors
-                    logger.warning(f"Status check failed to fetch GH SHA: {e}")
             except Exception as e:
                 logger.warning(f"Status check failed to fetch GH SHA: {e}")
 
@@ -129,6 +135,7 @@ class GithubTokenIdentityView(APIView):
                 "pending_intent": integration.pending_intent,
                 "error": error_message,
                 "auth_url": auth_url,
+                "access_revoked": access_revoked,
             })
         except UserIntegration.DoesNotExist:
             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
