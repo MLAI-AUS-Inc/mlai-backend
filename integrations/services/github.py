@@ -57,10 +57,18 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
     else:
         logger.warning("No CONTENT_FACTORY_API_KEY found in settings! Scan request may fail.")
 
-    # Get latest commit SHA BEFORE scan to ensure we track what we scanned
+    # Early validation: Verify GitHub access before calling Content Factory
+    import requests as http_requests_lib
     current_sha = None
     try:
         current_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
+    except http_requests_lib.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            raise ScanError("GitHub token expired. Please reconnect your GitHub account.")
+        elif e.response.status_code in [403, 404]:
+            raise ScanError("GitHub access revoked or repository not found. Please reconnect your GitHub account.")
+        else:
+            logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
     except Exception as e:
         logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
 
