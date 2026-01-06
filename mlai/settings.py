@@ -38,6 +38,9 @@ DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,0.0.0.0').split(',')
 ALLOWED_HOSTS.extend(['.localhost'])
 
+# Disable trailing slash redirect for API endpoints
+APPEND_SLASH = False
+
 
 # Application definition
 
