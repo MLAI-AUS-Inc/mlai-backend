@@ -132,3 +132,90 @@ class OrganizationContentConfig(models.Model):
     
     class Meta:
         db_table = 'content_factory_org_config'
+
+
+class GeneratedComponent(models.Model):
+    """
+    Stores a generated/adapted React component for an organization.
+    
+    Components are created by content-factory's component generation pipeline
+    during codebase scanning.
+    """
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='generated_components'
+    )
+    
+    # Component identity
+    name = models.CharField(max_length=100)  # e.g., "ArticleHeroHeader"
+    
+    # Component content
+    content = models.TextField()  # Full TSX code
+    
+    # Source tracking
+    SOURCE_CHOICES = [
+        ('generated', 'Generated'),
+        ('adapted', 'Adapted'),
+    ]
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
+    original_path = models.CharField(max_length=500, blank=True, null=True)  # If adapted
+    
+    # Matching metadata
+    similarity_score = models.FloatField(default=0.0)  # 0.0 - 1.0
+    matched_component = models.CharField(max_length=100, blank=True, null=True)  # Their component name
+    adaptation_notes = models.TextField(blank=True, default='')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'content_factory_generated_component'
+        unique_together = ['organization', 'name']  # One component per name per org
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.organization.domain} / {self.name} ({self.source})"
+
+
+class ComponentMapping(models.Model):
+    """
+    Stores the component mapping results from a scan.
+    
+    This is a JSON field containing the full mapping of:
+    - our_component -> matched/unmatched status
+    - similarity scores
+    - adaptation notes
+    """
+    organization = models.OneToOneField(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='component_mapping'
+    )
+    
+    # Full mapping as JSON (Dict[str, ComponentMatch])
+    mapping_data = models.JSONField(default=dict)
+    
+    # Summary stats
+    total_components = models.IntegerField(default=0)
+    matched_count = models.IntegerField(default=0)
+    generated_count = models.IntegerField(default=0)
+    
+    # Generation pipeline result summary
+    generation_status = models.CharField(max_length=20, blank=True, null=True)  # success/partial/failed
+    design_guide_path = models.CharField(max_length=500, blank=True, null=True)
+    storage_local_path = models.CharField(max_length=500, blank=True, null=True)
+    storage_pr_url = models.URLField(blank=True, null=True)
+    storage_branch_url = models.URLField(blank=True, null=True)
+    failed_components = models.JSONField(default=list)  # List of failed component names
+    
+    # Last scan info
+    last_scan_commit = models.CharField(max_length=40, blank=True, null=True)
+    last_scan_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'content_factory_component_mapping'
+    
+    def __str__(self):
+        return f"{self.organization.domain} mapping ({self.matched_count}/{self.total_components} matched)"

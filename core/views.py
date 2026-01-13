@@ -18,7 +18,8 @@ from esafety.models import Team as EsafetyTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
-from .models import Organization, OrganizationContentConfig
+from .models import Organization, OrganizationContentConfig, GeneratedComponent, ComponentMapping
+from .serializers import GeneratedComponentSerializer, GeneratedComponentListSerializer
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -706,6 +707,10 @@ class ContentFactoryOrgConfigView(APIView):
         """
         Create org if not exists, then upsert config.
         Supports partial updates (only fields present in request are updated).
+        Also handles component generation data:
+        - generated_components: array of component objects to upsert
+        - component_generation: summary of generation pipeline result
+        - component_mapping: dict of component name -> match result
         """
         data = request.data
         domain = data.get('domain')
@@ -755,14 +760,235 @@ class ContentFactoryOrgConfigView(APIView):
             defaults=defaults
         )
         
+        # Handle generated_components array
+        generated_components_data = data.get('generated_components', [])
+        components_created = 0
+        components_updated = 0
+        
+        for comp_data in generated_components_data:
+            comp_name = comp_data.get('name')
+            if not comp_name:
+                continue
+            
+            comp_defaults = {
+                'content': comp_data.get('content', ''),
+                'source': comp_data.get('source', 'generated'),
+                'original_path': comp_data.get('original_path'),
+                'similarity_score': comp_data.get('similarity_score', 0.0),
+                'matched_component': comp_data.get('matched_component'),
+                'adaptation_notes': comp_data.get('adaptation_notes', ''),
+            }
+            
+            _, created = GeneratedComponent.objects.update_or_create(
+                organization=org,
+                name=comp_name,
+                defaults=comp_defaults
+            )
+            
+            if created:
+                components_created += 1
+            else:
+                components_updated += 1
+        
+        # Handle component_generation summary and component_mapping
+        component_generation = data.get('component_generation', {})
+        component_mapping_data = data.get('component_mapping', {})
+        
+        if component_generation or component_mapping_data:
+            mapping_defaults = {
+                'mapping_data': component_mapping_data,
+            }
+            
+            # Extract stats from component_generation
+            if component_generation:
+                mapping_defaults['generation_status'] = component_generation.get('status')
+                mapping_defaults['design_guide_path'] = component_generation.get('design_guide_path')
+                mapping_defaults['failed_components'] = component_generation.get('failed_components', [])
+                
+                # Calculate totals from component_generation
+                generated = component_generation.get('components_generated', 0)
+                adapted = component_generation.get('components_adapted', 0)
+                mapping_defaults['generated_count'] = generated
+                mapping_defaults['matched_count'] = adapted
+                mapping_defaults['total_components'] = generated + adapted
+                
+                # Storage info
+                storage = component_generation.get('storage', {})
+                if storage:
+                    mapping_defaults['storage_local_path'] = storage.get('local_path')
+                    mapping_defaults['storage_pr_url'] = storage.get('pr_url')
+                    mapping_defaults['storage_branch_url'] = storage.get('branch_url')
+            
+            ComponentMapping.objects.update_or_create(
+                organization=org,
+                defaults=mapping_defaults
+            )
+        
         status_text = 'created' if org_created else 'updated'
         
-        return Response({
+        response_data = {
             'status': status_text,
             'org_id': org.id,
             'org_name': org.name,
             'domain': org.domain,
-        }, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)
+        }
+        
+        # Include component stats if components were processed
+        if generated_components_data:
+            response_data['components'] = {
+                'created': components_created,
+                'updated': components_updated,
+                'total': len(generated_components_data)
+            }
+        
+        return Response(response_data, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)
+
+
+class ContentFactoryComponentsView(APIView):
+    """
+    GET components for an organization.
+    Path: GET /api/content-factory/org/components?domain=mlai.au
+    Optional filters: name (partial match), source (generated/adapted)
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        """Same domain normalization as ContentFactoryOrgConfigView."""
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        name_filter = request.query_params.get('name')
+        source_filter = request.query_params.get('source')
+        
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        normalized_domain = self._normalize_domain(domain)
+        
+        try:
+            org = Organization.objects.get(domain=normalized_domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found', 'domain': domain},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Build component queryset with filters
+        components = GeneratedComponent.objects.filter(organization=org)
+        
+        if name_filter:
+            components = components.filter(name__icontains=name_filter)
+        
+        if source_filter:
+            components = components.filter(source=source_filter)
+        
+        # Get mapping stats if exists
+        mapping_stats = {
+            'matched_count': 0,
+            'generated_count': 0,
+            'total': 0
+        }
+        
+        try:
+            mapping = org.component_mapping
+            mapping_stats = {
+                'matched_count': mapping.matched_count,
+                'generated_count': mapping.generated_count,
+                'total': mapping.total_components
+            }
+        except ComponentMapping.DoesNotExist:
+            pass
+        
+        # Get last updated timestamp from most recently updated component
+        last_updated = None
+        latest_component = components.order_by('-updated_at').first()
+        if latest_component:
+            last_updated = latest_component.updated_at.isoformat()
+        
+        # Serialize components (lightweight, without content)
+        serializer = GeneratedComponentListSerializer(components, many=True)
+        
+        return Response({
+            'domain': org.domain,
+            'org_id': org.id,
+            'component_count': components.count(),
+            'last_updated': last_updated,
+            'components': serializer.data,
+            'mapping': mapping_stats
+        }, status=status.HTTP_200_OK)
+
+
+class ContentFactoryComponentDetailView(APIView):
+    """
+    GET a single component by name for an organization.
+    Path: GET /api/content-factory/org/components/<name>?domain=mlai.au
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        """Same domain normalization as ContentFactoryOrgConfigView."""
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def get(self, request, name):
+        domain = request.query_params.get('domain')
+        
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        normalized_domain = self._normalize_domain(domain)
+        
+        try:
+            org = Organization.objects.get(domain=normalized_domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found', 'domain': domain},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        try:
+            component = GeneratedComponent.objects.get(organization=org, name=name)
+        except GeneratedComponent.DoesNotExist:
+            return Response(
+                {'error': 'Component not found', 'name': name, 'domain': domain},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Serialize with full content
+        serializer = GeneratedComponentSerializer(component)
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
 
 
 class LinkSlackView(APIView):
