@@ -47,3 +47,41 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'about', 'role', 'avatar_url', 'is_superuser', 'team_avatar']
         read_only_fields = ['email', 'role', 'is_superuser']
+
+
+from .models import GeneratedComponent, ComponentMapping
+
+
+class GeneratedComponentSerializer(serializers.ModelSerializer):
+    """Serializer for individual generated components."""
+    
+    class Meta:
+        model = GeneratedComponent
+        fields = [
+            'id', 'name', 'content', 'source', 'original_path',
+            'similarity_score', 'matched_component', 'adaptation_notes',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class GeneratedComponentListSerializer(serializers.ModelSerializer):
+    """Lighter serializer for component listings (without full content)."""
+    
+    class Meta:
+        model = GeneratedComponent
+        fields = ['name', 'source', 'similarity_score', 'updated_at']
+
+
+class ComponentMappingSerializer(serializers.ModelSerializer):
+    """Serializer for component mapping summary."""
+    
+    class Meta:
+        model = ComponentMapping
+        fields = [
+            'mapping_data', 'total_components', 'matched_count', 'generated_count',
+            'generation_status', 'design_guide_path', 'storage_local_path',
+            'storage_pr_url', 'storage_branch_url', 'failed_components',
+            'last_scan_commit', 'last_scan_at'
+        ]
+        read_only_fields = ['last_scan_at']

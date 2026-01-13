@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import User, GlobalSettings, Organization, OrganizationContentConfig
+from .models import User, GlobalSettings, Organization, OrganizationContentConfig, GeneratedComponent, ComponentMapping
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 
 
@@ -120,3 +120,127 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
         preview = obj.design_guide[:500] + "..." if len(obj.design_guide) > 500 else obj.design_guide
         return format_html('<pre style="background: #f9f9f9; padding: 10px; border-radius: 4px; max-height: 300px; overflow: auto; white-space: pre-wrap;">{}</pre>', preview)
     design_guide_preview.short_description = 'Design Guide Preview'
+
+
+@admin.register(GeneratedComponent)
+class GeneratedComponentAdmin(admin.ModelAdmin):
+    """Admin for viewing/managing generated components."""
+    list_display = ('name', 'organization_domain', 'source', 'similarity_score_display', 'matched_component', 'updated_at')
+    list_filter = ('source', 'organization', 'updated_at')
+    search_fields = ('name', 'organization__domain', 'organization__name', 'matched_component')
+    list_select_related = ('organization',)
+    ordering = ('organization', 'name')
+    readonly_fields = ('created_at', 'updated_at', 'content_preview')
+    
+    fieldsets = (
+        ('Component Identity', {
+            'fields': ('organization', 'name', 'source')
+        }),
+        ('Matching Info', {
+            'fields': ('matched_component', 'original_path', 'similarity_score', 'adaptation_notes')
+        }),
+        ('Content Preview', {
+            'fields': ('content_preview',),
+        }),
+        ('Full Content', {
+            'fields': ('content',),
+            'classes': ('collapse',),
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )
+    
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+    organization_domain.admin_order_field = 'organization__domain'
+    
+    def similarity_score_display(self, obj):
+        """Display similarity score as percentage with color coding."""
+        score = obj.similarity_score or 0
+        percentage = int(score * 100)
+        if score >= 0.8:
+            color = 'green'
+        elif score >= 0.5:
+            color = 'orange'
+        else:
+            color = 'gray'
+        return format_html('<span style="color: {}; font-weight: bold;">{}%</span>', color, percentage)
+    similarity_score_display.short_description = 'Match %'
+    similarity_score_display.admin_order_field = 'similarity_score'
+    
+    def content_preview(self, obj):
+        """Preview of component code (first 1000 chars)."""
+        if not obj.content:
+            return "No content"
+        preview = obj.content[:1000] + "..." if len(obj.content) > 1000 else obj.content
+        return format_html('<pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; max-height: 400px; overflow: auto; white-space: pre-wrap; font-family: monospace; font-size: 12px;">{}</pre>', preview)
+    content_preview.short_description = 'Component Preview (TSX)'
+
+
+@admin.register(ComponentMapping)
+class ComponentMappingAdmin(admin.ModelAdmin):
+    """Admin for viewing component mapping summaries."""
+    list_display = ('organization_domain', 'status_badge', 'matched_count', 'generated_count', 'total_components', 'last_scan_at')
+    list_filter = ('generation_status', 'last_scan_at')
+    search_fields = ('organization__domain', 'organization__name')
+    list_select_related = ('organization',)
+    readonly_fields = ('last_scan_at', 'mapping_data_display', 'failed_components_display')
+    
+    fieldsets = (
+        ('Organization', {
+            'fields': ('organization',)
+        }),
+        ('Stats', {
+            'fields': ('total_components', 'matched_count', 'generated_count')
+        }),
+        ('Generation Info', {
+            'fields': ('generation_status', 'design_guide_path', 'storage_local_path', 'storage_pr_url', 'storage_branch_url')
+        }),
+        ('Failed Components', {
+            'fields': ('failed_components_display',),
+        }),
+        ('Mapping Data', {
+            'fields': ('mapping_data_display',),
+            'classes': ('collapse',),
+        }),
+        ('Scan Info', {
+            'fields': ('last_scan_commit', 'last_scan_at'),
+        }),
+    )
+    
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+    organization_domain.admin_order_field = 'organization__domain'
+    
+    def status_badge(self, obj):
+        """Show generation status as a colored badge."""
+        status = obj.generation_status or 'unknown'
+        colors = {
+            'success': 'green',
+            'partial': 'orange',
+            'failed': 'red',
+            'unknown': 'gray'
+        }
+        color = colors.get(status, 'gray')
+        return format_html('<span style="background: {}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px;">{}</span>', color, status.upper())
+    status_badge.short_description = 'Status'
+    
+    def mapping_data_display(self, obj):
+        """Pretty display of mapping_data JSON."""
+        if not obj.mapping_data:
+            return "No mapping data"
+        import json
+        formatted = json.dumps(obj.mapping_data, indent=2)
+        return format_html('<pre style="background: #f4f4f4; padding: 10px; border-radius: 4px; max-height: 400px; overflow: auto;">{}</pre>', formatted)
+    mapping_data_display.short_description = 'Mapping Data (JSON)'
+    
+    def failed_components_display(self, obj):
+        """Display failed components list."""
+        if not obj.failed_components:
+            return format_html('<span style="color: green;">None ✓</span>')
+        return format_html('<span style="color: red;">{}</span>', ', '.join(obj.failed_components))
+    failed_components_display.short_description = 'Failed Components'
+
