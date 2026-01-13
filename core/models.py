@@ -118,6 +118,7 @@ class OrganizationContentConfig(models.Model):
     article_template = models.TextField(blank=True, null=True)
     design_guide = models.TextField(blank=True, null=True)
     resource_prompt = models.TextField(blank=True, null=True)
+    company_context = models.TextField(blank=True, null=True, help_text="Auto-generated company overview for article generation context")
     github_repo = models.CharField(max_length=255, blank=True, null=True)
     github_token_encrypted = models.TextField(blank=True, null=True)
     article_path_pattern = models.CharField(

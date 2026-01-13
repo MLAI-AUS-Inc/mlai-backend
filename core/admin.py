@@ -81,7 +81,7 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
             'classes': ('collapse',),  # Collapsible since these are large
         }),
         ('Raw Template Data', {
-            'fields': ('article_template', 'design_guide'),
+            'fields': ('article_template', 'design_guide', 'company_context'),
             'classes': ('collapse',),
         }),
         ('Timestamps', {
