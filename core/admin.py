@@ -52,7 +52,7 @@ admin.site.register(User, UserAdmin)
 
 @admin.register(Organization)
 class OrganizationAdmin(admin.ModelAdmin):
-    list_display = ('name', 'domain', 'created_at')
+    list_display = ('name', 'domain', 'competitors', 'created_at')
     search_fields = ('name', 'domain')
     ordering = ('name',)
 
