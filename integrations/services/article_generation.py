@@ -10,6 +10,44 @@ class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
 
+def discover_opportunities(domain: str, competitors: list) -> list:
+    """
+    Call Content Factory to discover content opportunities.
+    POST /api/pipeline/discover
+    """
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    discover_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/discover"
+    
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+        
+    payload = {
+        "domain": domain,
+        "competitors": competitors or []
+    }
+    
+    logger.info(f"Discovering opportunities for {domain} with competitors: {competitors}")
+    
+    try:
+        response = http_requests.post(
+            discover_endpoint,
+            json=payload,
+            headers=headers,
+            timeout=120 # Discovery might take time
+        )
+        
+        if response.status_code == 200:
+            return response.json().get('opportunities', [])
+        else:
+            logger.error(f"Discovery failed: {response.text}")
+            raise ArticleGenerationError(f"Discovery failed: {response.status_code} {response.text}")
+            
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Failed to connect to Content Factory for discovery: {e}")
+        raise ArticleGenerationError(f"Discovery connection failed: {str(e)}")
+
 def trigger_article_generation(slack_user_id: str, article_request: dict) -> dict:
     """
     Trigger article generation via Content Factory.
@@ -57,37 +95,53 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     target_keyword = article_request.get('target_keyword')
     context = article_request.get('context')
 
-    if not domain or not topic:
-         raise ArticleGenerationError("Domain and Topic are required.")
+    if not domain:
+         raise ArticleGenerationError("Domain is required.")
+
+    # Retrieve competitors early for Auto-Write or Payload
+    competitors = []
+    if config and hasattr(config, 'organization'):
+        competitors = config.organization.competitors or []
+
+    # Auto-Write Mode: If topic is missing, discover one
+    if not topic:
+        logger.info(f"Auto-Write Mode enabled for {domain}. Competitors: {competitors}")
+        
+        try:
+            opportunities = discover_opportunities(domain, competitors)
+            if not opportunities:
+                raise ArticleGenerationError("Auto-discovery returned no opportunities.")
+                
+            # Select best opportunity (assuming sorted by score desc)
+            best_opp = opportunities[0]
+            # Handle potential different key names from CF
+            topic = best_opp.get('topic') or best_opp.get('title')
+            target_keyword = best_opp.get('keyword') or best_opp.get('target_keyword')
+            
+            logger.info(f"Auto-selected topic: '{topic}' with keyword: '{target_keyword}'")
+            
+        except Exception as e:
+             logger.exception(f"Auto-Write discovery failed: {e}")
+             raise ArticleGenerationError(f"Auto-Write Mode failed: {str(e)}")
+
+    # Auto-fill target_keyword from topic if missing
+    if not target_keyword and topic:
+        target_keyword = topic
 
     # 3. Prepare Payload (Strict Interface)
+    # competitors is already set above
+
     payload = {
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
         "github_token": integration.github_access_token,
-        # Flattened fields as per user request example? 
-        # The user request showed:
-        # {
-        #   "slack_user_id": "...",
-        #   "domain": "...",
-        #   "topic": "...",
-        #   ...
-        # }
-        # AND check behavior: "Call content-factory... using retrieved integration details"
-        # I'll construct the payload that CONTENT FACTORY expects.
-        # Assuming Content Factory expects the structure I planned before BUT including specific fields.
         
-        # Let's map the user request specific fields to what CF likely needs.
-        # If CF endpoint is /api/pipeline/generate, I should adhere to its schema.
-        # User request to ME (mlai-backend) has specific fields.
-        # Logic says: "Call content-factory's /api/pipeline/generate endpoint"
-        # I will send a superset payload to CF to be safe, or structure it nicely.
-        
-        # Payload for Content Factory:
+        # Generated Content Parameters
         "domain": domain,
-        "topic": topic,
+        "topic": topic, # Can be None/Empty for research mode
         "target_keyword": target_keyword,
         "context": context,
+        "competitors": competitors,
         
         # Backend injected data
         "existing_artifacts": existing_artifacts,
@@ -103,6 +157,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
+
+    # Debug logging
+    masked_payload = payload.copy()
+    if 'github_token' in masked_payload:
+        masked_payload['github_token'] = '***'
+    logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
 
     try:
         response = http_requests.post(
