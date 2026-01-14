@@ -35,7 +35,7 @@ def discover_opportunities(domain: str, competitors: list) -> list:
             discover_endpoint,
             json=payload,
             headers=headers,
-            timeout=120 # Discovery might take time
+            timeout=600  # Discovery can be long-running; let CF queue and return
         )
         
         if response.status_code == 200:
@@ -180,21 +180,22 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             generate_endpoint,
             json=payload,
             headers=headers,
-            timeout=30 
+            timeout=600  # allow CF to enqueue/return job id without premature timeout
         )
         
         if response.status_code in [200, 202]:
             data = response.json()
-            job_id = data.get('job_id')
+            job_id = data.get('job_id') or data.get('task_id')
             if not job_id:
                 logger.warning("Content Factory returned success but no job_id")
                 # If CF returns completed result immediately
                 return {"job_id": "unknown", "status": "completed", "message": "Generation completed immediately (unexpected)"}
-            
+            status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
             return {
                 "job_id": job_id,
                 "status": "queued",
-                "message": "Generation started"
+                "message": "Generation started",
+                "job_status_url": status_url
             }
         else:
             logger.error(f"Content Factory generate failed: {response.text}")
@@ -214,7 +215,8 @@ def check_generation_status(job_id: str) -> dict:
     """
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    status_endpoint = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
+    status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
+    status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -223,11 +225,18 @@ def check_generation_status(job_id: str) -> dict:
 
     try:
         response = http_requests.get(
-            status_endpoint,
+            status_endpoint_primary,
             headers=headers,
-            timeout=10
+            timeout=30
         )
-        
+        if response.status_code == 200:
+            return response.json()
+        # Fallback to legacy endpoint if primary fails (e.g., older CF deployment)
+        response = http_requests.get(
+            status_endpoint_legacy,
+            headers=headers,
+            timeout=30
+        )
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:

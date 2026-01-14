@@ -178,6 +178,7 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], "job-123")
+        self.assertIn("/api/pipeline/publish/status/job-123", response.data.get('job_status_url', ''))
         self.assertEqual(mock_post.call_count, 2)
 
         discovery_call = mock_post.call_args_list[0]
