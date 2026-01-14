@@ -690,6 +690,7 @@ class ContentFactoryOrgConfigView(APIView):
             'org_id': org.id,
             'org_name': org.name,
             'domain': org.domain,
+            'competitors': org.competitors,
             'article_template': config.article_template if config else None,
             'design_guide': config.design_guide if config else None,
             'resource_prompt': config.resource_prompt if config else None,
@@ -731,9 +732,19 @@ class ContentFactoryOrgConfigView(APIView):
             defaults={'name': name or normalized_domain}
         )
         
-        # Update org name if provided and org already existed
+        # Update org fields if provided
+        org_updated = False
+        competitors = data.get('competitors')
+
         if not org_created and name and org.name != name:
             org.name = name
+            org_updated = True
+            
+        if competitors is not None:
+            org.competitors = competitors
+            org_updated = True
+            
+        if org_updated:
             org.save()
         
         # Prepare defaults dynamically to allow partial updates

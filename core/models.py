@@ -105,6 +105,7 @@ class Organization(models.Model):
     """Organization that uses content factory."""
     name = models.CharField(max_length=255)
     domain = models.CharField(max_length=255, unique=True, db_index=True)
+    competitors = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
