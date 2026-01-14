@@ -11,25 +11,26 @@ class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
 
-def discover_opportunities(domain: str, competitors: list) -> list:
+def discover_opportunities(domain: str, competitors: list, seed_keywords: list = None) -> list:
     """
     Call Content Factory to discover content opportunities.
     POST /api/pipeline/discover
     """
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     discover_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/discover"
-    
+
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
-        
+
     payload = {
         "domain": domain,
-        "competitors": competitors or []
+        "competitors": competitors or [],
+        "seed_keywords": seed_keywords or []
     }
-    
-    logger.info(f"Discovering opportunities for {domain} with competitors: {competitors}")
+
+    logger.info(f"Discovering opportunities for {domain} with competitors: {competitors}, seed_keywords: {seed_keywords}")
     
     try:
         response = http_requests.post(
@@ -109,18 +110,20 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
-    # Retrieve competitors early for Auto-Write or Payload
+    # Retrieve competitors and seed_keywords early for Auto-Write or Payload
     competitors = []
+    seed_keywords = []
     if config and hasattr(config, 'organization'):
         competitors = config.organization.competitors or []
+        seed_keywords = config.organization.seed_keywords or []
 
     # Auto-Write Mode: If topic is missing, discover one
     if not topic:
-        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Competitors: {competitors}")
+        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Competitors: {competitors}, Seed Keywords: {seed_keywords}")
 
         opportunities = []
         try:
-            opportunities = discover_opportunities(resolved_domain, competitors)
+            opportunities = discover_opportunities(resolved_domain, competitors, seed_keywords)
         except ArticleGenerationError as e:
             logger.warning(f"Auto-Write discovery failed ({e}). Proceeding without discovered topic.")
         except Exception as e:
@@ -157,14 +160,15 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
         "github_token": integration.github_access_token,
-        
+
         # Generated Content Parameters
         "domain": resolved_domain,
         "topic": topic, # Can be None/Empty for research mode
         "target_keyword": target_keyword,
         "context": context,
         "competitors": competitors,
-        
+        "seed_keywords": seed_keywords,
+
         # Backend injected data
         "existing_artifacts": existing_artifacts,
         "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
