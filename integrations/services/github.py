@@ -4,6 +4,7 @@ import requests as http_requests
 from django.conf import settings
 
 from integrations.models import UserIntegration
+from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,14 @@ class ScanError(Exception):
     pass
 
 
-def scan_github_project(slack_user_id: str, integration: UserIntegration = None, progress_callback=None, slack_channel_id: str = None, slack_thread_ts: str = None) -> dict:
+def scan_github_project(
+    slack_user_id: str,
+    integration: UserIntegration = None,
+    progress_callback=None,
+    slack_channel_id: str = None,
+    slack_thread_ts: str = None,
+    domain: str = None
+) -> dict:
     """
     Trigger a repository scan via Content Factory.
 
@@ -23,6 +31,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
         progress_callback: Optional function(msg: str) to report progress.
         slack_channel_id: Optional Slack channel ID to maintain thread context.
         slack_thread_ts: Optional Slack thread timestamp to maintain thread context.
+        domain: The company's website domain (required for company context scraping).
 
     Returns:
         dict: Response data from Content Factory.
@@ -72,19 +81,38 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
     except Exception as e:
         logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
 
-    # Prepare existing artifacts if available
+    # Prepare existing artifacts if available and resolve domain
+    config = None
     existing_artifacts = {}
+    resolved_domain = normalize_domain(domain)
     try:
         from core.models import OrganizationContentConfig
         # Try to find config by repo name (stored as github_repo in Config)
-        config = OrganizationContentConfig.objects.filter(github_repo=integration.github_repo).first()
+        config = (
+            OrganizationContentConfig.objects
+            .select_related('organization')
+            .filter(github_repo=integration.github_repo)
+            .first()
+        )
         if config:
-            if config.article_template: existing_artifacts['article_template'] = config.article_template
-            if config.design_guide: existing_artifacts['design_guide'] = config.design_guide
-            if config.resource_prompt: existing_artifacts['resource_prompt'] = config.resource_prompt
-            if config.tech_stack: existing_artifacts['tech_stack'] = config.tech_stack
+            if config.article_template:
+                existing_artifacts['article_template'] = config.article_template
+            if config.design_guide:
+                existing_artifacts['design_guide'] = config.design_guide
+            if config.resource_prompt:
+                existing_artifacts['resource_prompt'] = config.resource_prompt
+            if config.tech_stack:
+                existing_artifacts['tech_stack'] = config.tech_stack
+            if config.company_context:
+                existing_artifacts['company_context'] = config.company_context
+            if config.organization and config.organization.domain:
+                resolved_domain = resolved_domain or normalize_domain(config.organization.domain)
     except Exception as e:
         logger.warning(f"Failed to fetch existing artifacts for payload: {e}")
+
+    resolved_domain = normalize_domain(resolved_domain)
+    if not resolved_domain:
+        raise ScanError("Domain is required for repository scan. Please provide the company's website domain when queueing the scan.")
 
     cf_data = None
     try:
@@ -92,6 +120,7 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
             "slack_user_id": slack_user_id,
             "github_repo": integration.github_repo,
             "github_token": integration.github_access_token,
+            "domain": resolved_domain,
             "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
             "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             "existing_artifacts": existing_artifacts,
@@ -204,10 +233,9 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
     try:
         from core.models import Organization, OrganizationContentConfig
         
-        # Ensure Organization exists (idempotent, keyed by domain/repo name)
-        # We use repo name as domain for now since we don't have a better unique ID
-        org_name = integration.github_user_name or "Unknown User"
-        org_domain = integration.github_repo
+        # Ensure Organization exists (idempotent, keyed by real domain when provided)
+        org_name = integration.github_user_name or (resolved_domain or "Unknown User")
+        org_domain = resolved_domain or integration.github_repo
         
         org, _ = Organization.objects.get_or_create(
             domain=org_domain,
@@ -249,6 +277,10 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
             config.tech_stack = cf_data['tech_stack']
         elif 'tech_stack' in cf_config:
             config.tech_stack = cf_config['tech_stack']
+        if 'company_context' in cf_data:
+            config.company_context = cf_data['company_context']
+        elif 'company_context' in cf_config:
+            config.company_context = cf_config['company_context']
         
         # Save additional metadata if present
         if 'article_path_pattern' in cf_data:
@@ -262,12 +294,13 @@ def scan_github_project(slack_user_id: str, integration: UserIntegration = None,
     except Exception as e:
         logger.error(f"Failed to save scan artifacts to OrganizationContentConfig: {e}")
 
-    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, SHA: {current_sha}")
+    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, domain: {org_domain}, SHA: {current_sha}")
 
     return {
         "status": "scan_completed",
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
+        "domain": org_domain,
         "scanned_sha": current_sha,
         "content_factory_response": cf_data,
     }
@@ -302,7 +335,7 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     return data['sha']
 
 
-def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None):
+def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None, domain: str = None):
     """
     Trigger a scan in a background thread.
     Logs errors instead of raising them (fire-and-forget).
@@ -344,6 +377,7 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
             result = scan_github_project(
                 slack_user_id, 
                 progress_callback=_progress_listener,
+                domain=domain,
                 slack_channel_id=slack_channel_id,
                 slack_thread_ts=thread_ts
             )
@@ -375,4 +409,3 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
     thread = threading.Thread(target=_run_scan, daemon=True)
     thread.start()
     logger.info(f"Triggered background scan for {slack_user_id}")
-

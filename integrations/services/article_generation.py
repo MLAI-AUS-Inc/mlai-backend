@@ -3,6 +3,7 @@ import requests as http_requests
 from django.conf import settings
 from integrations.models import UserIntegration
 from core.models import OrganizationContentConfig
+from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     # 2. Fetch OrganizationContentConfig for artifacts
     # We match config by github_repo
-    config = OrganizationContentConfig.objects.filter(github_repo=integration.github_repo).first()
+    config = (
+        OrganizationContentConfig.objects
+        .select_related('organization')
+        .filter(github_repo=integration.github_repo)
+        .first()
+    )
     
     existing_artifacts = {}
     if config:
@@ -88,14 +94,19 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         if config.brand_name: existing_artifacts['brand_name'] = config.brand_name
         if config.article_path_pattern: existing_artifacts['article_path_pattern'] = config.article_path_pattern
         if config.registry_path: existing_artifacts['registry_path'] = config.registry_path
+        if config.company_context: existing_artifacts['company_context'] = config.company_context
 
     # extract specific fields
-    domain = article_request.get('domain')
+    resolved_domain = normalize_domain(
+        article_request.get('domain') or (
+            config.organization.domain if config and getattr(config, "organization", None) else None
+        )
+    )
     topic = article_request.get('topic')
     target_keyword = article_request.get('target_keyword')
     context = article_request.get('context')
 
-    if not domain:
+    if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
     # Retrieve competitors early for Auto-Write or Payload
@@ -105,11 +116,11 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     # Auto-Write Mode: If topic is missing, discover one
     if not topic:
-        logger.info(f"Auto-Write Mode enabled for {domain}. Competitors: {competitors}")
+        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Competitors: {competitors}")
 
         opportunities = []
         try:
-            opportunities = discover_opportunities(domain, competitors)
+            opportunities = discover_opportunities(resolved_domain, competitors)
         except ArticleGenerationError as e:
             logger.warning(f"Auto-Write discovery failed ({e}). Proceeding without discovered topic.")
         except Exception as e:
@@ -148,7 +159,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "github_token": integration.github_access_token,
         
         # Generated Content Parameters
-        "domain": domain,
+        "domain": resolved_domain,
         "topic": topic, # Can be None/Empty for research mode
         "target_keyword": target_keyword,
         "context": context,

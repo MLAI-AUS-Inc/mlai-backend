@@ -6,6 +6,7 @@ from integrations.services.github import scan_github_project, get_latest_repo_sh
 class SmartScanTests(TestCase):
     def setUp(self):
         self.user_id = "U12345"
+        self.domain = "mlai.au"
         self.integration = UserIntegration.objects.create(
             slack_user_id=self.user_id,
             github_access_token="gh_token",
@@ -45,7 +46,7 @@ class SmartScanTests(TestCase):
         mock_post.return_value = mock_cf_response
 
         # Run scan
-        scan_github_project(self.user_id)
+        scan_github_project(self.user_id, domain=self.domain)
 
         # Reload and check
         self.integration.refresh_from_db()
@@ -66,7 +67,7 @@ class SmartScanTests(TestCase):
         mock_post.return_value = mock_cf_response
 
         # Run scan
-        scan_github_project(self.user_id)
+        scan_github_project(self.user_id, domain=self.domain)
 
         # Reload
         self.integration.refresh_from_db()

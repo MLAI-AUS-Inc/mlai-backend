@@ -44,6 +44,7 @@ class TestAsyncScanClient(unittest.TestCase):
     def setUp(self):
         self.slack_user_id = "U_TEST_ASYNC"
         self.repo_name = "test-owner/test-async-repo"
+        self.domain = "mlai.au"
         
         # Ensure clean state
         UserIntegration.objects.filter(slack_user_id=self.slack_user_id).delete()
@@ -100,7 +101,7 @@ class TestAsyncScanClient(unittest.TestCase):
             print(f"Callback received: {msg}")
 
         # 4. Run Scan
-        result = scan_github_project(self.slack_user_id, progress_callback=on_progress)
+        result = scan_github_project(self.slack_user_id, progress_callback=on_progress, domain=self.domain)
 
         # 5. Assertions
         self.assertEqual(result['content_factory_response']['article_template'], "ASYNC_TEMPLATE")
@@ -136,7 +137,7 @@ class TestAsyncScanClient(unittest.TestCase):
         mock_get.side_effect = [r1]
 
         # 3. Run Scan
-        result = scan_github_project(self.slack_user_id)
+        result = scan_github_project(self.slack_user_id, domain=self.domain)
 
         # 4. Assertions
         self.assertEqual(result['status'], 'scan_completed')
@@ -159,7 +160,7 @@ class TestAsyncScanClient(unittest.TestCase):
         }
         mock_post.return_value = post_resp
 
-        result = scan_github_project(self.slack_user_id)
+        result = scan_github_project(self.slack_user_id, domain=self.domain)
         
         self.assertEqual(result['content_factory_response']['article_template'], "SYNC_TEMPLATE")
         print("✅ Synchronous legacy response handled correctly.")

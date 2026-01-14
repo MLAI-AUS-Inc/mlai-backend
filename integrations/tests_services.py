@@ -6,6 +6,7 @@ from integrations.services.github import scan_github_project, ScanError
 class GithubServiceTest(TestCase):
     def setUp(self):
         self.slack_user_id = "U123456"
+        self.domain = "mlai.au"
         self.integration = UserIntegration.objects.create(
             slack_user_id=self.slack_user_id,
             github_repo="owner/repo",
@@ -18,17 +19,18 @@ class GithubServiceTest(TestCase):
         # Mock Content Factory response
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "started", "job_id": "job_123"}
+        mock_response.json.return_value = {"status": "completed", "article_template": "tpl"}
         mock_post.return_value = mock_response
 
         # Call service with setting override
         from django.test.utils import override_settings
         with override_settings(CONTENT_FACTORY_API_KEY="test-content-factory-key"):
-            result = scan_github_project(self.slack_user_id)
+            result = scan_github_project(self.slack_user_id, domain=self.domain)
 
         # Verify result
-        self.assertEqual(result['status'], 'scan_triggered')
-        self.assertEqual(result['content_factory_response']['status'], 'started')
+        self.assertEqual(result['status'], 'scan_completed')
+        self.assertEqual(result['content_factory_response']['status'], 'completed')
+        self.assertEqual(result['domain'], self.domain)
 
         # Verify DB update
         self.integration.refresh_from_db()
@@ -39,6 +41,7 @@ class GithubServiceTest(TestCase):
         args, kwargs = mock_post.call_args
         self.assertIn('/api/pipeline/scan', args[0])
         self.assertEqual(kwargs['json']['slack_user_id'], self.slack_user_id)
+        self.assertEqual(kwargs['json']['domain'], self.domain)
         
         # Verify Headers
         headers = kwargs['headers']
@@ -51,7 +54,7 @@ class GithubServiceTest(TestCase):
         mock_post.side_effect = requests.exceptions.RequestException("Connection refused")
 
         with self.assertRaises(ScanError) as context:
-            scan_github_project(self.slack_user_id)
+            scan_github_project(self.slack_user_id, domain=self.domain)
         
         self.assertIn("Failed to trigger scan", str(context.exception))
 
@@ -67,6 +70,7 @@ class GithubServiceTest(TestCase):
         # Call with thread params
         scan_github_project(
             self.slack_user_id, 
+            domain=self.domain,
             slack_channel_id="C123", 
             slack_thread_ts="123.456"
         )
@@ -75,3 +79,4 @@ class GithubServiceTest(TestCase):
         payload = kwargs['json']
         self.assertEqual(payload['slack_channel_id'], "C123")
         self.assertEqual(payload['slack_thread_ts'], "123.456")
+        self.assertEqual(payload['domain'], self.domain)

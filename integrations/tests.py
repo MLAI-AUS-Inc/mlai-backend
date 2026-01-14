@@ -11,6 +11,7 @@ class GithubScanEndpointTest(TestCase):
         self.url = reverse('github_scan')
         self.api_key = "test-api-key"
         self.slack_user_id = "U123456"
+        self.domain = "mlai.au"
         
         # Create a user integration record
         self.integration = UserIntegration.objects.create(
@@ -20,11 +21,9 @@ class GithubScanEndpointTest(TestCase):
             project_scanned=False
         )
 
-    @patch('requests.post')
-    def test_scan_success(self, mock_post):
-        # Mock Content Factory response
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"status": "started", "job_id": "job_123"}
+    @patch('integrations.api_views.trigger_scan_async')
+    def test_scan_success(self, mock_trigger_scan):
+        mock_trigger_scan.return_value = None
 
         # Configure headers for auth
         headers = {'HTTP_X_API_KEY': self.api_key}
@@ -33,31 +32,27 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': self.slack_user_id}, 
+                {'slack_user_id': self.slack_user_id, 'domain': self.domain}, 
                 format='json',
                 **headers
             )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['status'], 'scan_triggered')
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['status'], 'scan_initiated')
         self.assertEqual(response.data['github_repo'], 'owner/repo')
+        self.assertEqual(response.data['domain'], self.domain)
         
-        # Verify DB update
-        self.integration.refresh_from_db()
-        self.assertTrue(self.integration.project_scanned)
-        
-        # Verify external call
-        mock_post.assert_called_once()
-        args, kwargs = mock_post.call_args
-        self.assertIn('/api/pipeline/scan', args[0])
-        self.assertEqual(kwargs['json']['slack_user_id'], self.slack_user_id)
-        self.assertEqual(kwargs['json']['github_repo'], "owner/repo")
-        self.assertEqual(kwargs['json']['github_token'], "gh_token_123")
+        mock_trigger_scan.assert_called_once_with(
+            self.slack_user_id,
+            slack_channel_id=None,
+            slack_thread_ts=None,
+            domain=self.domain,
+        )
 
     def test_scan_unauthorized(self):
         response = self.client.post(
             self.url, 
-            {'slack_user_id': self.slack_user_id}, 
+            {'slack_user_id': self.slack_user_id, 'domain': self.domain}, 
             format='json'
         )
         self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
@@ -67,7 +62,7 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': 'unknown_user'}, 
+                {'slack_user_id': 'unknown_user', 'domain': self.domain}, 
                 format='json',
                 **headers
             )
@@ -82,7 +77,7 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': self.slack_user_id}, 
+                {'slack_user_id': self.slack_user_id, 'domain': self.domain}, 
                 format='json',
                 **headers
             )
