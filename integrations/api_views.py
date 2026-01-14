@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from .models import UserIntegration
 from core.permissions import HasRooApiKey
 import logging
+from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +271,7 @@ class GithubScanView(APIView):
         slack_user_id = request.data.get('slack_user_id')
         slack_channel_id = request.data.get('slack_channel_id')
         slack_thread_ts = request.data.get('slack_thread_ts')
+        domain = request.data.get('domain') or request.query_params.get('domain')
 
         if not slack_user_id:
             return Response(
@@ -278,16 +280,62 @@ class GithubScanView(APIView):
             )
 
         # Quick check if integration exists to fail fast
-        if not UserIntegration.objects.filter(slack_user_id=slack_user_id).exists():
+        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+        if not integration:
              return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        if not integration.github_repo:
+            return Response({"error": "github_repo is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not integration.github_access_token:
+            return Response({"error": "github_access_token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Resolve domain - prefer request, then existing org config
+        normalized_domain = normalize_domain(domain)
+        if not normalized_domain:
+            try:
+                from core.models import OrganizationContentConfig
+                config = (
+                    OrganizationContentConfig.objects
+                    .select_related('organization')
+                    .filter(github_repo=integration.github_repo)
+                    .first()
+                )
+                if config and config.organization and config.organization.domain:
+                    normalized_domain = normalize_domain(config.organization.domain)
+            except Exception as e:
+                logger.warning(f"Error resolving domain for scan: {e}")
+
+        if not normalized_domain:
+            return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Persist org mapping for future lookups
+        try:
+            from core.models import Organization, OrganizationContentConfig
+            org, _ = Organization.objects.get_or_create(
+                domain=normalized_domain,
+                defaults={"name": normalized_domain}
+            )
+            config, created = OrganizationContentConfig.objects.get_or_create(organization=org)
+            update_fields = []
+            if integration.github_repo and config.github_repo != integration.github_repo:
+                config.github_repo = integration.github_repo
+                update_fields.append('github_repo')
+            if update_fields:
+                config.save(update_fields=update_fields)
+        except Exception as e:
+            logger.warning(f"Failed to persist organization mapping for scan: {e}")
+
         # Trigger in background
-        trigger_scan_async(slack_user_id, slack_channel_id=slack_channel_id, slack_thread_ts=slack_thread_ts)
+        trigger_scan_async(
+            slack_user_id,
+            slack_channel_id=slack_channel_id,
+            slack_thread_ts=slack_thread_ts,
+            domain=normalized_domain,
+        )
         
         return Response({
             "status": "scan_initiated",
-            "message": "Scan running in background. You will be notified via Slack when complete."
+            "message": "Scan running in background. You will be notified via Slack when complete.",
+            "domain": normalized_domain,
+            "github_repo": integration.github_repo,
         }, status=status.HTTP_202_ACCEPTED)
-
-
-
