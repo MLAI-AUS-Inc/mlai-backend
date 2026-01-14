@@ -125,10 +125,19 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             logger.info(f"Auto-selected topic: '{topic}' with keyword: '{target_keyword}'")
         else:
             logger.info("Auto-Write discovery returned no opportunities. Proceeding with research mode.")
+            # Keep strings (not None) for CF validation while allowing research mode downstream
+            topic = topic or ""
+            target_keyword = target_keyword or ""
 
     # Auto-fill target_keyword from topic if missing
     if not target_keyword and topic:
         target_keyword = topic
+
+    # Ensure CF receives strings, not nulls (CF requires string fields even in research mode)
+    if topic is None:
+        topic = ""
+    if target_keyword is None:
+        target_keyword = ""
 
     # 3. Prepare Payload (Strict Interface)
     # competitors is already set above
