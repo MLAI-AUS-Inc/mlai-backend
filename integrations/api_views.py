@@ -1,13 +1,14 @@
+import secrets
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.conf import settings
 from django.urls import reverse
-import urllib.parse
-from django.shortcuts import get_object_or_404
+
 from .models import UserIntegration
 from core.permissions import HasRooApiKey
-import logging
 from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,26 @@ class GithubTokenIdentityView(APIView):
             auth_url = None
             error_message = None
             access_revoked = False
+            token_refreshed = False
 
             try:
-                from integrations.services.github import get_latest_repo_sha
+                from integrations.services.github import get_latest_repo_sha, is_token_expired, refresh_github_token, TokenRefreshError
                 import requests
-                if integration.github_access_token and integration.github_repo:
+
+                # Auto-refresh token if expired
+                if integration.github_access_token and is_token_expired(integration):
+                    if integration.github_refresh_token:
+                        try:
+                            logger.info(f"Auto-refreshing expired token for {slack_user_id}")
+                            refresh_github_token(slack_user_id)
+                            integration.refresh_from_db()  # Reload to get new token
+                            token_refreshed = True
+                        except TokenRefreshError as e:
+                            logger.warning(f"Auto-refresh failed for {slack_user_id}: {e}")
+                            error_message = "Token expired, refresh failed"
+                            access_revoked = True
+
+                if integration.github_access_token and integration.github_repo and not access_revoked:
                     latest_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
                     if latest_sha and latest_sha != integration.last_scanned_sha:
                         has_updates = True
@@ -86,7 +102,7 @@ class GithubTokenIdentityView(APIView):
                     access_revoked = True
                 else:
                     logger.warning(f"Status check failed to fetch GH SHA: {e}")
-                
+
                 # Generate Re-Auth URL for any access issue
                 if access_revoked:
                     try:
@@ -124,9 +140,12 @@ class GithubTokenIdentityView(APIView):
             return Response({
                 "slack_user_id": integration.slack_user_id,
                 "token": integration.github_access_token,
+                "token_expires_at": integration.github_token_expires_at,
+                "token_refreshed": token_refreshed,
                 "user_name": integration.github_user_name,
                 "scopes": integration.github_scopes,
                 "github_repo": integration.github_repo,
+                "github_installation_id": integration.github_installation_id,
                 "project_scanned": integration.project_scanned,
                 "last_scanned_at": integration.last_scanned_at,
                 "last_scanned_sha": integration.last_scanned_sha,
@@ -252,6 +271,109 @@ class GithubAuthUrlView(APIView):
         return Response({
             "auth_url": auth_url,
             "message": "Send this URL to the user to authorize GitHub."
+        })
+
+
+class GithubTokenRefreshView(APIView):
+    """
+    Silently refresh GitHub access token using stored refresh token.
+    POST /api/v1/integrations/github/refresh
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from integrations.services.github import refresh_github_token, TokenRefreshError
+
+        slack_user_id = request.data.get('slack_user_id')
+        if not slack_user_id:
+            return Response(
+                {"error": "slack_user_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            result = refresh_github_token(slack_user_id)
+            return Response({
+                "status": "success",
+                "message": "Token refreshed successfully",
+                "expires_at": result["expires_at"],
+            }, status=status.HTTP_200_OK)
+        except TokenRefreshError as e:
+            return Response({
+                "error": str(e),
+                "requires_reauth": True,
+                "reauth_url": self._build_reauth_url(request, slack_user_id),
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        except Exception as e:
+            logger.error(f"Token refresh error for {slack_user_id}: {e}")
+            return Response(
+                {"error": "Token refresh failed"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def _build_reauth_url(self, request, slack_user_id):
+        try:
+            connect_path = reverse('github_connect')
+            full_connect_url = request.build_absolute_uri(connect_path)
+            return f"{full_connect_url}?slack_user_id={slack_user_id}"
+        except Exception:
+            return None
+
+
+class GithubReauthUrlView(APIView):
+    """
+    Get a quick re-authentication URL (doesn't require app reinstall).
+    GET /api/v1/integrations/github/reauth-url?slack_user_id=...
+
+    This returns a URL that will re-authorize the user without requiring
+    them to uninstall and reinstall the GitHub App.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        slack_user_id = request.query_params.get('slack_user_id')
+        if not slack_user_id:
+            return Response(
+                {"error": "slack_user_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if user has an existing integration with installation_id
+        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+
+        # Build the OAuth authorization URL (not the app installation URL)
+        # This allows re-authorization without reinstalling the app
+        rand_token = secrets.token_urlsafe(16)
+        state = f"{slack_user_id}::{rand_token}"
+
+        # Store state in response for client to handle (stateless approach)
+        # Or we can use the existing github_connect flow
+
+        # Option 1: Direct OAuth URL (faster, no session needed)
+        if integration and integration.github_installation_id:
+            # If already installed, we can use a simpler re-auth flow
+            oauth_url = (
+                f"https://github.com/login/oauth/authorize?"
+                f"client_id={settings.GITHUB_OAUTH_CLIENT_ID}&"
+                f"state={state}"
+            )
+            return Response({
+                "reauth_url": oauth_url,
+                "message": "Use this URL to quickly re-authorize without reinstalling the app.",
+                "has_existing_installation": True,
+            })
+
+        # Option 2: Full connect flow (if no installation exists)
+        connect_path = reverse('github_connect')
+        full_connect_url = request.build_absolute_uri(connect_path)
+        auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+
+        return Response({
+            "reauth_url": auth_url,
+            "message": "Use this URL to connect GitHub (will show app installation flow).",
+            "has_existing_installation": False,
         })
 
 

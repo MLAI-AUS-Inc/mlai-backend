@@ -6,6 +6,8 @@ urlpatterns = [
     path('github/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_list'),  # POST create/update
     path('github/<str:slack_user_id>/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_detail'), # GET, PATCH
     path('github/auth-url', api_views.GithubAuthUrlView.as_view(), name='github_auth_url'),
+    path('github/refresh', api_views.GithubTokenRefreshView.as_view(), name='github_token_refresh'),  # POST refresh token
+    path('github/reauth-url', api_views.GithubReauthUrlView.as_view(), name='github_reauth_url'),  # GET quick re-auth URL
     path('github/scan', api_views.GithubScanView.as_view(), name='github_scan'),
     
     # Pending Intents

@@ -14,6 +14,132 @@ class ScanError(Exception):
     pass
 
 
+class TokenRefreshError(Exception):
+    """Exception raised when token refresh fails."""
+    pass
+
+
+def refresh_github_token(slack_user_id: str) -> dict:
+    """
+    Refresh the GitHub access token using the stored refresh token.
+
+    Args:
+        slack_user_id: The Slack user ID to refresh token for.
+
+    Returns:
+        dict with keys: access_token, refresh_token, expires_at
+
+    Raises:
+        TokenRefreshError: If refresh fails or no refresh token available.
+    """
+    from datetime import timedelta
+    from django.utils import timezone
+
+    try:
+        integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+    except UserIntegration.DoesNotExist:
+        raise TokenRefreshError("No integration found for this user.")
+
+    if not integration.github_refresh_token:
+        raise TokenRefreshError("No refresh token available. Please re-authenticate with GitHub.")
+
+    # Call GitHub's token refresh endpoint
+    token_resp = http_requests.post(
+        "https://github.com/login/oauth/access_token",
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": integration.github_refresh_token,
+        },
+        timeout=20,
+    )
+
+    if token_resp.status_code != 200:
+        logger.error(f"GitHub token refresh failed with status {token_resp.status_code}: {token_resp.text}")
+        raise TokenRefreshError(f"GitHub token refresh failed: {token_resp.status_code}")
+
+    token_data = token_resp.json()
+
+    if "error" in token_data:
+        error_desc = token_data.get('error_description', token_data.get('error'))
+        logger.error(f"GitHub token refresh error: {error_desc}")
+        raise TokenRefreshError(f"GitHub token refresh failed: {error_desc}")
+
+    new_access_token = token_data.get("access_token")
+    new_refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in")
+
+    if not new_access_token:
+        raise TokenRefreshError("No access token in refresh response.")
+
+    # Calculate new expiry time
+    token_expires_at = None
+    if expires_in:
+        token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+
+    # Update the integration with new tokens
+    integration.github_access_token = new_access_token
+    if new_refresh_token:
+        integration.github_refresh_token = new_refresh_token
+    integration.github_token_expires_at = token_expires_at
+    integration.save()
+
+    logger.info(f"Successfully refreshed GitHub token for {slack_user_id}")
+
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "expires_at": token_expires_at,
+    }
+
+
+def is_token_expired(integration: UserIntegration) -> bool:
+    """
+    Check if the GitHub token is expired or about to expire (within 5 minutes).
+    """
+    from django.utils import timezone
+
+    if not integration.github_token_expires_at:
+        # If we don't have expiry info, assume it might be expired
+        return True
+
+    # Consider token expired if it expires within 5 minutes
+    buffer_time = timezone.timedelta(minutes=5)
+    return timezone.now() >= (integration.github_token_expires_at - buffer_time)
+
+
+def ensure_valid_token(slack_user_id: str) -> str:
+    """
+    Ensure we have a valid GitHub token, refreshing if necessary.
+
+    Returns the valid access token.
+
+    Raises:
+        TokenRefreshError: If token refresh fails.
+        ScanError: If no integration exists.
+    """
+    try:
+        integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+    except UserIntegration.DoesNotExist:
+        raise ScanError("No integration found for this user.")
+
+    if not integration.github_access_token:
+        raise ScanError("No GitHub token found. Please authenticate with GitHub first.")
+
+    # Check if token needs refresh
+    if is_token_expired(integration):
+        if integration.github_refresh_token:
+            logger.info(f"Token expired for {slack_user_id}, attempting refresh...")
+            result = refresh_github_token(slack_user_id)
+            return result["access_token"]
+        else:
+            raise TokenRefreshError("Token expired and no refresh token available. Please re-authenticate.")
+
+    return integration.github_access_token
+
+
 def scan_github_project(
     slack_user_id: str,
     integration: UserIntegration = None,

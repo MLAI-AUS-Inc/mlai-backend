@@ -17,9 +17,12 @@ class GoogleConnection(models.Model):
 class UserIntegration(models.Model):
     slack_user_id = models.TextField(primary_key=True, unique=True)
     github_access_token = EncryptedTextField(null=True, blank=True)
+    github_refresh_token = EncryptedTextField(null=True, blank=True)
+    github_token_expires_at = models.DateTimeField(null=True, blank=True)
     github_user_name = models.TextField(null=True, blank=True)
     github_repo = models.CharField(max_length=255, null=True, blank=True)  # e.g. "owner/repo"
     github_scopes = models.JSONField(default=list, blank=True)
+    github_installation_id = models.CharField(max_length=50, null=True, blank=True)
     project_scanned = models.BooleanField(default=False)
     last_scanned_sha = models.CharField(max_length=40, null=True, blank=True)
     last_scanned_at = models.DateTimeField(null=True, blank=True)
