@@ -1,11 +1,13 @@
 import secrets
 import urllib.parse
 import requests
+from datetime import timedelta
 from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
 from django.middleware.csrf import get_token
 from django.contrib.auth.decorators import login_required
+from django.utils import timezone
 from .models import GoogleConnection, UserIntegration
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -170,11 +172,18 @@ def github_callback(request):
     )
     token_resp.raise_for_status()
     token_data = token_resp.json()
-    
+
     if "error" in token_data:
         return HttpResponseBadRequest(f"GitHub Error: {token_data.get('error_description')}")
 
     access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in")  # seconds until expiry (8 hours = 28800)
+
+    # Calculate token expiry time
+    token_expires_at = None
+    if expires_in:
+        token_expires_at = timezone.now() + timedelta(seconds=expires_in)
     
     # Fetch GitHub user info
     user_resp = requests.get(
@@ -221,8 +230,11 @@ def github_callback(request):
         slack_user_id=slack_user_id,
         defaults={
             "github_access_token": access_token,
+            "github_refresh_token": refresh_token,
+            "github_token_expires_at": token_expires_at,
             "github_user_name": github_login,
             "github_repo": selected_repo,
+            "github_installation_id": installation_id,
             "github_scopes": [],  # GitHub Apps use permissions, not scopes
         }
     )
