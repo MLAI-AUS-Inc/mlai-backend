@@ -96,7 +96,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     context = article_request.get('context')
 
     if not domain:
-         raise ArticleGenerationError("Domain is required.")
+        raise ArticleGenerationError("Domain is required.")
 
     # Retrieve competitors early for Auto-Write or Payload
     competitors = []
@@ -106,23 +106,25 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     # Auto-Write Mode: If topic is missing, discover one
     if not topic:
         logger.info(f"Auto-Write Mode enabled for {domain}. Competitors: {competitors}")
-        
+
+        opportunities = []
         try:
             opportunities = discover_opportunities(domain, competitors)
-            if not opportunities:
-                raise ArticleGenerationError("Auto-discovery returned no opportunities.")
-                
+        except ArticleGenerationError as e:
+            logger.warning(f"Auto-Write discovery failed ({e}). Proceeding without discovered topic.")
+        except Exception as e:
+            logger.exception(f"Auto-Write discovery encountered an unexpected error: {e}")
+
+        if opportunities:
             # Select best opportunity (assuming sorted by score desc)
             best_opp = opportunities[0]
             # Handle potential different key names from CF
             topic = best_opp.get('topic') or best_opp.get('title')
             target_keyword = best_opp.get('keyword') or best_opp.get('target_keyword')
-            
+
             logger.info(f"Auto-selected topic: '{topic}' with keyword: '{target_keyword}'")
-            
-        except Exception as e:
-             logger.exception(f"Auto-Write discovery failed: {e}")
-             raise ArticleGenerationError(f"Auto-Write Mode failed: {str(e)}")
+        else:
+            logger.info("Auto-Write discovery returned no opportunities. Proceeding with research mode.")
 
     # Auto-fill target_keyword from topic if missing
     if not target_keyword and topic:
@@ -291,4 +293,3 @@ def publish_article(job_id: str, slack_user_id: str) -> dict:
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to publish: {str(e)}")
-
