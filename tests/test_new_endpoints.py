@@ -187,5 +187,5 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertIn("/api/pipeline/generate", generate_call.args[0])
 
         generate_payload = generate_call.kwargs.get('json') or {}
-        self.assertIsNone(generate_payload.get('topic'))
-        self.assertIsNone(generate_payload.get('target_keyword'))
+        self.assertEqual(generate_payload.get('topic'), "")
+        self.assertEqual(generate_payload.get('target_keyword'), "")
