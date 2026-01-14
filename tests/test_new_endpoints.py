@@ -1,11 +1,17 @@
+import json
+import os
+from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
-from django.contrib.auth import get_user_model
+from django.urls import reverse
+from requests import Response
+
+from core.models import Organization, OrganizationContentConfig
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost
-from django.urls import reverse
-import os
 
 User = get_user_model()
 
@@ -117,3 +123,69 @@ class EndpointTests(TestCase):
         data = {"slack_id": "U888", "email": "notfound@example.com"}
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ContentGenerateAutoWriteTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = self.api_key
+
+        from django.conf import settings
+        settings.ROO_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = self.api_key
+        settings.CONTENT_FACTORY_URL = "http://content-factory.test"
+
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+        self.integration = UserIntegration.objects.create(
+            slack_user_id="U-AUTO",
+            github_access_token="gh_token",
+            github_repo="owner/repo",
+        )
+        self.organization = Organization.objects.create(
+            name="MLAI",
+            domain="mlai.au",
+        )
+        OrganizationContentConfig.objects.create(
+            organization=self.organization,
+            github_repo="owner/repo",
+        )
+
+    def _mock_response(self, status_code, body):
+        response = Response()
+        response.status_code = status_code
+        response._content = json.dumps(body).encode()
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    def test_generate_falls_back_when_discovery_returns_no_opportunities(self):
+        url = reverse('content_generate')
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "topic": None,
+        }
+
+        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
+            mock_post.side_effect = [
+                self._mock_response(200, {"opportunities": []}),  # discovery
+                self._mock_response(202, {"job_id": "job-123"}),  # generate
+            ]
+
+            response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['job_id'], "job-123")
+        self.assertEqual(mock_post.call_count, 2)
+
+        discovery_call = mock_post.call_args_list[0]
+        generate_call = mock_post.call_args_list[1]
+
+        self.assertIn("/api/pipeline/discover", discovery_call.args[0])
+        self.assertIn("/api/pipeline/generate", generate_call.args[0])
+
+        generate_payload = generate_call.kwargs.get('json') or {}
+        self.assertIsNone(generate_payload.get('topic'))
+        self.assertIsNone(generate_payload.get('target_keyword'))
