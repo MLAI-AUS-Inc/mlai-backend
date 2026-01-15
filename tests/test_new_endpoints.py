@@ -202,7 +202,8 @@ class ContentFactoryCallbackTests(TestCase):
         settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
 
-    def test_topic_selection_callback(self):
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_topic_selection_callback(self, mock_send_dm):
         url = reverse('content_factory_callback')
         data = {
             "event_type": "topic_selection",
@@ -212,7 +213,11 @@ class ContentFactoryCallbackTests(TestCase):
             "selection": {
                 "selected_keyword": "ai agents",
                 "selection_reason": "High volume",
-                "total_opportunities": 5
+                "total_opportunities": 5,
+                "volume": 2400,
+                "difficulty": 35,
+                "tier": "tier_1",
+                "opportunity_index": 85.2
             }
         }
         
@@ -225,8 +230,14 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, 'awaiting_confirmation')
         self.assertEqual(job.selected_keyword, "ai agents")
         self.assertEqual(job.slack_user_id, "U123")
+        
+        mock_send_dm.assert_called_once()
+        call_args = mock_send_dm.call_args
+        self.assertEqual(call_args[0][0], "U123")
+        self.assertIn("Topic selection ready", call_args[0][1])
 
-    def test_article_complete_callback(self):
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_complete_callback(self, mock_send_dm):
         # Create job first
         ContentFactoryJob.objects.create(job_id="job-456", domain="mlai.au", status="generating")
         
@@ -235,6 +246,7 @@ class ContentFactoryCallbackTests(TestCase):
             "event_type": "article_complete",
             "job_id": "job-456",
             "domain": "mlai.au",
+            "slack_user_id": "U123",
             "article_url": "https://mlai.au/article",
             "pr_url": "https://github.com/pr/1",
         }
@@ -245,6 +257,9 @@ class ContentFactoryCallbackTests(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job-456")
         self.assertEqual(job.status, 'completed')
         self.assertEqual(job.pr_url, "https://github.com/pr/1")
+        
+        mock_send_dm.assert_called_once()
+        self.assertEqual(mock_send_dm.call_args[0][0], "U123")
 
     def test_error_callback(self):
         url = reverse('content_factory_callback')
