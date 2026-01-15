@@ -30,6 +30,8 @@ urlpatterns = [
     # Content Factory API
     path('api/content-factory/', include('core.urls_content_factory')),
     path('api/v1/content/', include('core.urls_content_generation')),
+    # SEO Research API
+    path('api/seo/', include('core.urls_seo')),
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),
