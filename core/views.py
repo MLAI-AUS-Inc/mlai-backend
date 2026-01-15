@@ -1094,6 +1094,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
         from .models import ContentFactoryJob
+        from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -1115,8 +1116,64 @@ class ContentFactoryCallbackView(APIView):
         
         logger.info(f"Topic selection recorded for job {job_id}: keyword='{selection.get('selected_keyword')}'")
         
-        # TODO: Send notification to Slack via roo-slackbot
-        # This will be implemented when roo-slackbot integration is ready
+        if slack_user_id:
+            keyword = selection.get('selected_keyword', 'Unknown Topic')
+            volume = selection.get('volume', 'N/A')
+            difficulty = selection.get('difficulty', 'N/A')
+            tier = selection.get('tier', 'N/A')
+            score = selection.get('opportunity_index', 'N/A')
+            
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📊 Article Topic Selected",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"I've researched content opportunities for *{domain}* and found:"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Recommended:* `{keyword}`\n• Volume: {volume}/mo • Difficulty: {difficulty}/100\n• Tier: {tier}\n• Score: {score}"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "✅ Write This Article",
+                                "emoji": True
+                            },
+                            "value": f"confirm_topic:{job_id}",
+                            "action_id": "confirm_topic_btn"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "❌ Cancel",
+                                "emoji": True
+                            },
+                            "value": f"cancel_topic:{job_id}",
+                            "action_id": "cancel_topic_btn"
+                        }
+                    ]
+                }
+            ]
+            
+            SlackService.send_dm(slack_user_id, "Topic selection ready for review", blocks=blocks)
         
         return Response({
             'status': 'received',
@@ -1128,6 +1185,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_article_complete(self, data):
         """Handle article_complete event from content-factory."""
         from .models import ContentFactoryJob
+        from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
         article_url = data.get('article_url')
@@ -1148,6 +1206,25 @@ class ContentFactoryCallbackView(APIView):
         )
         
         logger.info(f"Article complete for job {job_id}: pr_url={pr_url}")
+        
+        if slack_user_id:
+             blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"✅ *Article Published!* for {domain}"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"The article has been generated and a Pull Request is ready.\n\n📄 *< {article_url} | View Article >*\n🔗 *< {pr_url} | View Pull Request >*"
+                    }
+                }
+            ]
+             SlackService.send_dm(slack_user_id, "Article generation complete!", blocks=blocks)
         
         return Response({
             'status': 'received',
