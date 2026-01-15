@@ -1235,12 +1235,12 @@ class ContentFactoryCallbackView(APIView):
     def _handle_error(self, data):
         """Handle error event from content-factory."""
         from .models import ContentFactoryJob
-        
+
         job_id = data.get('job_id')
         error_message = data.get('error_message', 'Unknown error')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
-        
+
         # Update or create job record
         job, created = ContentFactoryJob.objects.update_or_create(
             job_id=job_id,
@@ -1251,11 +1251,518 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': error_message,
             }
         )
-        
+
         logger.error(f"Error callback for job {job_id}: {error_message}")
-        
+
         return Response({
             'status': 'received',
             'message': 'Error callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# SEO Research API Views
+# =============================================================================
+
+from .models import (
+    ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
+    SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession,
+    KeywordStatus
+)
+from .serializers import (
+    ResearchedKeywordListSerializer, ResearchedKeywordDetailSerializer,
+    KeywordBulkUpsertSerializer, SemanticClusterSerializer,
+    ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
+    WrittenArticleCreateSerializer, ResearchSessionSerializer,
+    KeywordStatusUpdateSerializer, SEODashboardSerializer
+)
+
+
+class SEOKeywordListView(APIView):
+    """
+    GET /api/seo/keywords/?domain=example.com&status=pending&tier=tier_1_blue_ocean
+
+    List keywords with filtering and sorting.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        qs = ResearchedKeyword.objects.filter(
+            organization=org
+        ).prefetch_related(
+            'velocity_snapshots', 'ai_saturation_snapshots', 'paa_questions'
+        )
+
+        # Apply filters
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        tier_filter = request.query_params.get('tier')
+        if tier_filter:
+            qs = qs.filter(tier=tier_filter)
+
+        source_filter = request.query_params.get('source')
+        if source_filter:
+            qs = qs.filter(source=source_filter)
+
+        # Sorting
+        sort_by = request.query_params.get('sort', '-opportunity_index')
+        qs = qs.order_by(sort_by)
+
+        # Limit
+        limit = request.query_params.get('limit', 100)
+        try:
+            limit = int(limit)
+        except ValueError:
+            limit = 100
+        qs = qs[:limit]
+
+        serializer = ResearchedKeywordListSerializer(qs, many=True)
+        return Response({
+            'domain': domain,
+            'count': len(serializer.data),
+            'keywords': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class SEOKeywordDetailView(APIView):
+    """
+    GET /api/seo/keywords/<uuid>/
+
+    Get detailed keyword data including velocity/saturation history.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, pk):
+        try:
+            keyword = ResearchedKeyword.objects.prefetch_related(
+                'velocity_snapshots', 'ai_saturation_snapshots',
+                'paa_questions', 'cluster_memberships__cluster'
+            ).get(pk=pk)
+        except ResearchedKeyword.DoesNotExist:
+            return Response(
+                {'error': 'Keyword not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = ResearchedKeywordDetailSerializer(keyword)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SEOKeywordBulkUpsertView(APIView):
+    """
+    POST /api/seo/keywords/bulk/
+
+    Bulk upsert keywords from content-factory research results.
+    This is the main endpoint called by content-factory after research.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        serializer = KeywordBulkUpsertSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = serializer.validated_data['domain']
+        keywords_data = serializer.validated_data['keywords']
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        created_count = 0
+        updated_count = 0
+
+        with transaction.atomic():
+            for kw_data in keywords_data:
+                keyword_text = kw_data.get('keyword', '').strip()
+                if not keyword_text:
+                    continue
+
+                keyword_normalized = keyword_text.lower().strip()
+
+                defaults = {
+                    'keyword': keyword_text,
+                    'volume': kw_data.get('volume', 0),
+                    'difficulty': kw_data.get('difficulty', 50),
+                    'intent': kw_data.get('intent', 'informational'),
+                    'tier': kw_data.get('tier', 'tier_4_discard'),
+                    'opportunity_index': kw_data.get('opportunity_index', 0.0),
+                    'source': kw_data.get('source', 'seed'),
+                    'source_detail': kw_data.get('source_detail'),
+                    'competitor_urls': kw_data.get('competitor_urls', []),
+                }
+
+                keyword_obj, created = ResearchedKeyword.objects.update_or_create(
+                    organization=org,
+                    keyword_normalized=keyword_normalized,
+                    defaults=defaults
+                )
+
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
+
+                # Create velocity snapshot if provided
+                velocity = kw_data.get('velocity_data')
+                if velocity:
+                    KeywordVelocity.objects.create(
+                        keyword=keyword_obj,
+                        absolute_volume=velocity.get('absolute_volume', 0),
+                        velocity_score=velocity.get('velocity_score', 0.0),
+                        trend_status=velocity.get('trend_status', 'stable'),
+                        daily_volumes=velocity.get('daily_volumes', []),
+                    )
+
+                # Create AI saturation snapshot if provided
+                ai_sat = kw_data.get('ai_saturation')
+                if ai_sat:
+                    AISaturation.objects.create(
+                        keyword=keyword_obj,
+                        ai_overview_present=ai_sat.get('ai_overview_present', False),
+                        ai_overview_quality=ai_sat.get('ai_overview_quality', 'none'),
+                        featured_snippet_present=ai_sat.get('featured_snippet_present', False),
+                        video_carousel_present=ai_sat.get('video_carousel_present', False),
+                        knowledge_panel_present=ai_sat.get('knowledge_panel_present', False),
+                        saturation_score=ai_sat.get('saturation_score', 0.0),
+                        hostility_score=ai_sat.get('hostility_score', 0.0),
+                        hostility_recommendation=ai_sat.get('hostility_recommendation', 'high_priority'),
+                        serp_features=ai_sat.get('serp_features', []),
+                    )
+
+                # Create PAA questions if provided
+                paa_questions = kw_data.get('paa_questions', [])
+                for i, paa in enumerate(paa_questions):
+                    question_text = paa.get('question', '').strip()
+                    if not question_text:
+                        continue
+                    PAQuestion.objects.get_or_create(
+                        keyword=keyword_obj,
+                        question_normalized=question_text.lower().strip()[:500],
+                        defaults={
+                            'question': question_text,
+                            'answer_snippet': paa.get('answer_snippet', ''),
+                            'source_url': paa.get('source_url'),
+                            'depth': paa.get('depth', 1),
+                            'has_ai_overview': paa.get('has_ai_overview', False),
+                            'order': i,
+                        }
+                    )
+
+        return Response({
+            'created': created_count,
+            'updated': updated_count,
+            'total': len(keywords_data)
+        }, status=status.HTTP_200_OK)
+
+
+class SEOKeywordStatusUpdateView(APIView):
+    """
+    PATCH /api/seo/keywords/<uuid>/status/
+
+    Update keyword status (pending -> approved -> written, etc.)
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def patch(self, request, pk):
+        try:
+            keyword = ResearchedKeyword.objects.get(pk=pk)
+        except ResearchedKeyword.DoesNotExist:
+            return Response(
+                {'error': 'Keyword not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = KeywordStatusUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        new_status = serializer.validated_data['status']
+        written_article_id = serializer.validated_data.get('written_article_id')
+
+        keyword.status = new_status
+        keyword.status_changed_at = timezone.now()
+
+        if written_article_id:
+            try:
+                article = WrittenArticle.objects.get(pk=written_article_id)
+                keyword.written_article = article
+            except WrittenArticle.DoesNotExist:
+                pass
+
+        keyword.save()
+
+        return Response({
+            'id': str(keyword.id),
+            'status': keyword.status,
+            'updated_at': keyword.status_changed_at
+        }, status=status.HTTP_200_OK)
+
+
+class SEOClusterListView(APIView):
+    """
+    GET /api/seo/clusters/?domain=example.com
+
+    List semantic clusters for an organization.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        clusters = SemanticCluster.objects.filter(
+            organization=org
+        ).prefetch_related('member_keywords__keyword')
+
+        serializer = SemanticClusterSerializer(clusters, many=True)
+        return Response({
+            'domain': domain,
+            'count': len(serializer.data),
+            'clusters': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class SEOClusterBulkUpsertView(APIView):
+    """
+    POST /api/seo/clusters/bulk/
+
+    Bulk create/update clusters from content-factory topic map.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        serializer = ClusterBulkUpsertSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = serializer.validated_data['domain']
+        clusters_data = serializer.validated_data['clusters']
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        created_count = 0
+        updated_count = 0
+
+        with transaction.atomic():
+            for cluster_data in clusters_data:
+                cluster_id = cluster_data.get('cluster_id')
+                pillar_keyword = cluster_data.get('pillar_keyword', '')
+                member_keywords = cluster_data.get('keywords', [])
+
+                if cluster_id is None:
+                    continue
+
+                defaults = {
+                    'pillar_keyword': pillar_keyword,
+                    'average_similarity': cluster_data.get('average_similarity', 0.0),
+                    'total_volume': cluster_data.get('total_volume', 0),
+                    'avg_difficulty': cluster_data.get('avg_difficulty', 0.0),
+                    'avg_velocity': cluster_data.get('avg_velocity', 0.0),
+                    'topic_tier': cluster_data.get('topic_tier', 'tier_4_discard'),
+                }
+
+                cluster_obj, created = SemanticCluster.objects.update_or_create(
+                    organization=org,
+                    cluster_id=cluster_id,
+                    defaults=defaults
+                )
+
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
+
+                # Link member keywords to cluster
+                for kw_text in member_keywords:
+                    keyword_normalized = kw_text.lower().strip()
+                    try:
+                        keyword_obj = ResearchedKeyword.objects.get(
+                            organization=org,
+                            keyword_normalized=keyword_normalized
+                        )
+                        ClusterMembership.objects.update_or_create(
+                            keyword=keyword_obj,
+                            cluster=cluster_obj,
+                            defaults={
+                                'is_pillar': keyword_normalized == pillar_keyword.lower().strip(),
+                            }
+                        )
+                    except ResearchedKeyword.DoesNotExist:
+                        # Keyword not found, skip membership creation
+                        pass
+
+        return Response({
+            'created': created_count,
+            'updated': updated_count,
+            'total': len(clusters_data)
+        }, status=status.HTTP_200_OK)
+
+
+class SEOWrittenArticleCreateView(APIView):
+    """
+    POST /api/seo/articles/
+
+    Create a written article record and update keyword status.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        serializer = WrittenArticleCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = serializer.validated_data['domain']
+        primary_keyword = serializer.validated_data['primary_keyword']
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Get job reference if provided
+        job = None
+        job_id = serializer.validated_data.get('job_id')
+        if job_id:
+            from .models import ContentFactoryJob
+            try:
+                job = ContentFactoryJob.objects.get(job_id=job_id)
+            except ContentFactoryJob.DoesNotExist:
+                pass
+
+        # Create written article
+        article = WrittenArticle.objects.create(
+            organization=org,
+            title=serializer.validated_data['title'],
+            slug=serializer.validated_data['slug'],
+            category=serializer.validated_data['category'],
+            primary_keyword=primary_keyword,
+            article_url=serializer.validated_data.get('article_url'),
+            pr_url=serializer.validated_data.get('pr_url'),
+            job=job,
+            published_at=timezone.now(),
+        )
+
+        # Update keyword status to written if it exists
+        keyword_normalized = primary_keyword.lower().strip()
+        try:
+            keyword = ResearchedKeyword.objects.get(
+                organization=org,
+                keyword_normalized=keyword_normalized
+            )
+            keyword.status = KeywordStatus.WRITTEN
+            keyword.written_article = article
+            keyword.status_changed_at = timezone.now()
+            keyword.save()
+        except ResearchedKeyword.DoesNotExist:
+            pass
+
+        return Response({
+            'id': str(article.id),
+            'slug': article.slug,
+            'status': 'created'
+        }, status=status.HTTP_201_CREATED)
+
+
+class SEODashboardView(APIView):
+    """
+    GET /api/seo/dashboard/?domain=example.com
+
+    Aggregate dashboard data for SEO research.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        keywords = ResearchedKeyword.objects.filter(organization=org)
+
+        data = {
+            'domain': domain,
+            'total_keywords': keywords.count(),
+            'by_status': {
+                'pending': keywords.filter(status='pending').count(),
+                'approved': keywords.filter(status='approved').count(),
+                'in_progress': keywords.filter(status='in_progress').count(),
+                'written': keywords.filter(status='written').count(),
+                'skipped': keywords.filter(status='skipped').count(),
+            },
+            'by_tier': {
+                'blue_ocean': keywords.filter(tier='tier_1_blue_ocean').count(),
+                'authority': keywords.filter(tier='tier_2_authority').count(),
+                'long_tail': keywords.filter(tier='tier_3_long_tail').count(),
+                'discard': keywords.filter(tier='tier_4_discard').count(),
+            },
+            'top_opportunities': ResearchedKeywordListSerializer(
+                keywords.filter(status='pending').order_by('-opportunity_index')[:10],
+                many=True
+            ).data,
+            'clusters': SemanticCluster.objects.filter(organization=org).count(),
+            'articles_written': WrittenArticle.objects.filter(organization=org).count(),
+        }
+
+        return Response(data, status=status.HTTP_200_OK)

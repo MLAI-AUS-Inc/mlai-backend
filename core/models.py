@@ -227,7 +227,7 @@ class ComponentMapping(models.Model):
 class ContentFactoryJob(models.Model):
     """
     Tracks content-factory pipeline jobs for callback routing.
-    
+
     When content-factory sends callbacks (topic_selection, article_complete, error),
     this model maintains the mapping between job IDs and Slack users to enable
     proper notification routing.
@@ -235,7 +235,7 @@ class ContentFactoryJob(models.Model):
     job_id = models.CharField(max_length=100, unique=True, db_index=True)
     slack_user_id = models.CharField(max_length=50, db_index=True)
     domain = models.CharField(max_length=255)
-    
+
     # Job state
     STATUS_CHOICES = [
         ('queued', 'Queued'),
@@ -246,23 +246,537 @@ class ContentFactoryJob(models.Model):
         ('error', 'Error'),
     ]
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='queued')
-    
+
     # Topic selection data (populated on topic_selection callback)
     selected_keyword = models.CharField(max_length=255, blank=True, null=True)
     selection_reason = models.TextField(blank=True, null=True)
     selection_data = models.JSONField(default=dict, blank=True)  # Full selection payload
-    
+
     # Result data (populated on article_complete callback)
     article_url = models.URLField(blank=True, null=True)
     pr_url = models.URLField(blank=True, null=True)
     error_message = models.TextField(blank=True, null=True)
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'content_factory_job'
         ordering = ['-created_at']
-    
+
     def __str__(self):
         return f"{self.job_id} ({self.status}) - {self.domain}"
+
+
+# =============================================================================
+# SEO Research Models
+# =============================================================================
+
+import uuid
+
+
+class KeywordTier(models.TextChoices):
+    """GEO-based topic prioritization tiers."""
+    TIER_1_BLUE_OCEAN = "tier_1_blue_ocean", "Blue Ocean"
+    TIER_2_AUTHORITY = "tier_2_authority", "Authority Builder"
+    TIER_3_LONG_TAIL = "tier_3_long_tail", "Long Tail Gem"
+    TIER_4_DISCARD = "tier_4_discard", "Discard"
+
+
+class KeywordSource(models.TextChoices):
+    """How the keyword was discovered."""
+    SEED = "seed", "Seed Keyword"
+    COMPETITOR = "competitor", "Competitor Analysis"
+    RELATED = "related", "Related/Semantic"
+    PAA = "paa", "People Also Ask"
+
+
+class KeywordStatus(models.TextChoices):
+    """Keyword writing status."""
+    PENDING = "pending", "Pending"
+    APPROVED = "approved", "Approved"
+    IN_PROGRESS = "in_progress", "In Progress"
+    WRITTEN = "written", "Written"
+    SKIPPED = "skipped", "Skipped"
+
+
+class TrendStatus(models.TextChoices):
+    """Trend velocity status."""
+    BREAKOUT = "breakout", "Breakout"
+    RISING = "rising", "Rising"
+    STABLE = "stable", "Stable"
+    DECLINING = "declining", "Declining"
+
+
+class WrittenArticle(models.Model):
+    """
+    Links researched keywords to published articles.
+
+    Tracks the output of the content-factory pipeline.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='written_articles'
+    )
+
+    # Article identity
+    title = models.CharField(max_length=500)
+    slug = models.CharField(max_length=255, db_index=True)
+    category = models.CharField(max_length=100)
+
+    # URLs
+    article_url = models.URLField(blank=True, null=True)
+    pr_url = models.URLField(blank=True, null=True)
+
+    # Primary keyword (denormalized for quick access)
+    primary_keyword = models.CharField(max_length=500)
+
+    # Content factory job reference
+    job = models.ForeignKey(
+        ContentFactoryJob,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='articles'
+    )
+
+    # Timestamps
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seo_written_article'
+        unique_together = ['organization', 'slug']
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['organization', 'primary_keyword']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} ({self.slug})"
+
+
+class ResearchedKeyword(models.Model):
+    """
+    Core SEO keyword with metrics from content-factory research.
+
+    This is the central table linking keywords to organizations
+    with full GEO metrics and writing status tracking.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='researched_keywords',
+        db_index=True
+    )
+
+    # Keyword identity
+    keyword = models.CharField(max_length=500, db_index=True)
+    keyword_normalized = models.CharField(
+        max_length=500,
+        db_index=True,
+        help_text="Lowercase, trimmed version for deduplication"
+    )
+
+    # Core metrics (refreshable)
+    volume = models.IntegerField(default=0, help_text="Monthly search volume")
+    difficulty = models.IntegerField(default=50, help_text="SEO difficulty 0-100")
+    intent = models.CharField(max_length=50, default="informational")
+
+    # GEO metrics
+    tier = models.CharField(
+        max_length=30,
+        choices=KeywordTier.choices,
+        default=KeywordTier.TIER_4_DISCARD
+    )
+    opportunity_index = models.FloatField(default=0.0, db_index=True)
+
+    # Provenance
+    source = models.CharField(
+        max_length=20,
+        choices=KeywordSource.choices,
+        default=KeywordSource.SEED
+    )
+    source_detail = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="E.g., competitor domain or seed keyword"
+    )
+    competitor_urls = models.JSONField(default=list, blank=True)
+
+    # Writing status
+    status = models.CharField(
+        max_length=20,
+        choices=KeywordStatus.choices,
+        default=KeywordStatus.PENDING,
+        db_index=True
+    )
+
+    # Link to written article
+    written_article = models.ForeignKey(
+        WrittenArticle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='source_keywords'
+    )
+
+    # Timestamps
+    discovered_at = models.DateTimeField(default=timezone.now)
+    metrics_updated_at = models.DateTimeField(auto_now=True)
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'seo_researched_keyword'
+        unique_together = ['organization', 'keyword_normalized']
+        ordering = ['-opportunity_index']
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['organization', 'tier']),
+            models.Index(fields=['organization', 'opportunity_index']),
+            models.Index(fields=['organization', 'status', 'opportunity_index']),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Auto-generate normalized keyword
+        self.keyword_normalized = self.keyword.lower().strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.keyword} ({self.organization.domain}) - {self.tier}"
+
+
+class KeywordVelocity(models.Model):
+    """
+    Trend velocity metrics for a keyword.
+
+    Separate table to:
+    1. Allow historical tracking (multiple snapshots)
+    2. Store the daily_volumes array without bloating the main table
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    keyword = models.ForeignKey(
+        ResearchedKeyword,
+        on_delete=models.CASCADE,
+        related_name='velocity_snapshots'
+    )
+
+    # Velocity metrics
+    absolute_volume = models.IntegerField(default=0)
+    velocity_score = models.FloatField(default=0.0, help_text="-1.0 to 1.0+")
+    trend_status = models.CharField(
+        max_length=20,
+        choices=TrendStatus.choices,
+        default=TrendStatus.STABLE
+    )
+    daily_volumes = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Raw daily volume data from Glimpse/pytrends"
+    )
+
+    # Snapshot timestamp
+    captured_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'seo_keyword_velocity'
+        ordering = ['-captured_at']
+        indexes = [
+            models.Index(fields=['keyword', 'captured_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.keyword.keyword} velocity: {self.velocity_score:.2f} ({self.trend_status})"
+
+
+class AISaturation(models.Model):
+    """
+    AI saturation metrics for a keyword.
+
+    Tracks SERP features that compete with organic clicks.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    keyword = models.ForeignKey(
+        ResearchedKeyword,
+        on_delete=models.CASCADE,
+        related_name='ai_saturation_snapshots'
+    )
+
+    # AI Overview detection
+    ai_overview_present = models.BooleanField(default=False)
+    ai_overview_quality = models.CharField(
+        max_length=20,
+        choices=[
+            ('comprehensive', 'Comprehensive'),
+            ('partial', 'Partial'),
+            ('none', 'None'),
+        ],
+        default='none'
+    )
+
+    # Other SERP features
+    featured_snippet_present = models.BooleanField(default=False)
+    video_carousel_present = models.BooleanField(default=False)
+    knowledge_panel_present = models.BooleanField(default=False)
+
+    # Calculated score
+    saturation_score = models.FloatField(
+        default=0.0,
+        help_text="0.0 (no AI) to 1.0 (fully saturated)"
+    )
+
+    # SERP hostility (combined metric)
+    hostility_score = models.FloatField(default=0.0)
+    hostility_recommendation = models.CharField(
+        max_length=20,
+        choices=[
+            ('high_priority', 'High Priority'),
+            ('pivot_angle', 'Pivot Angle'),
+            ('low_priority', 'Low Priority'),
+        ],
+        default='high_priority'
+    )
+    organic_positions_above_fold = models.IntegerField(default=0)
+
+    # Additional SERP features as flags
+    serp_features = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of SERP feature types present"
+    )
+
+    # Snapshot timestamp
+    captured_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'seo_ai_saturation'
+        ordering = ['-captured_at']
+        indexes = [
+            models.Index(fields=['keyword', 'captured_at']),
+            models.Index(fields=['saturation_score']),
+        ]
+
+    def __str__(self):
+        ai_status = "AI Overview" if self.ai_overview_present else "No AI"
+        return f"{self.keyword.keyword}: {ai_status}, score={self.saturation_score:.2f}"
+
+
+class PAQuestion(models.Model):
+    """
+    'People Also Ask' question with depth tracking.
+
+    Normalized to support nested question relationships
+    and efficient querying by keyword or question text.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    keyword = models.ForeignKey(
+        ResearchedKeyword,
+        on_delete=models.CASCADE,
+        related_name='paa_questions'
+    )
+
+    # Question content
+    question = models.TextField()
+    question_normalized = models.CharField(
+        max_length=500,
+        db_index=True,
+        help_text="Lowercase version for dedup"
+    )
+    answer_snippet = models.TextField(blank=True, default='')
+    source_url = models.URLField(blank=True, null=True)
+
+    # Depth tracking (1 = top-level, 2-4 = nested)
+    depth = models.IntegerField(default=1)
+
+    # AI presence in this specific PAA
+    has_ai_overview = models.BooleanField(default=False)
+
+    # Parent question (for nested structure)
+    parent_question = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='child_questions'
+    )
+
+    # Order within parent
+    order = models.IntegerField(default=0)
+
+    # Timestamps
+    discovered_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'seo_paa_question'
+        ordering = ['depth', 'order']
+        indexes = [
+            models.Index(fields=['keyword', 'depth']),
+            models.Index(fields=['question_normalized']),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.question_normalized = self.question.lower().strip()[:500]
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        depth_indicator = "  " * (self.depth - 1)
+        return f"{depth_indicator}Q: {self.question[:80]}..."
+
+
+class SemanticCluster(models.Model):
+    """
+    A cluster of semantically related keywords (pillar structure).
+
+    Maps to content-factory's TopicMap.pillars structure.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='semantic_clusters'
+    )
+
+    # Cluster identity
+    cluster_id = models.IntegerField(help_text="Local ID within the topic map")
+    pillar_keyword = models.CharField(max_length=500, db_index=True)
+
+    # Cluster metrics (aggregated from members)
+    average_similarity = models.FloatField(default=0.0)
+    total_volume = models.IntegerField(default=0)
+    avg_difficulty = models.FloatField(default=0.0)
+    avg_velocity = models.FloatField(default=0.0)
+
+    # Assigned tier for the cluster
+    topic_tier = models.CharField(
+        max_length=30,
+        choices=KeywordTier.choices,
+        default=KeywordTier.TIER_4_DISCARD
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_semantic_cluster'
+        unique_together = ['organization', 'cluster_id']
+        ordering = ['-total_volume']
+        indexes = [
+            models.Index(fields=['organization', 'topic_tier']),
+            models.Index(fields=['pillar_keyword']),
+        ]
+
+    def __str__(self):
+        return f"Cluster {self.cluster_id}: {self.pillar_keyword} ({self.topic_tier})"
+
+
+class ClusterMembership(models.Model):
+    """
+    Many-to-many relationship between keywords and clusters.
+
+    A keyword can belong to one cluster per organization.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    keyword = models.ForeignKey(
+        ResearchedKeyword,
+        on_delete=models.CASCADE,
+        related_name='cluster_memberships'
+    )
+    cluster = models.ForeignKey(
+        SemanticCluster,
+        on_delete=models.CASCADE,
+        related_name='member_keywords'
+    )
+
+    # Whether this keyword is the pillar
+    is_pillar = models.BooleanField(default=False)
+
+    # Similarity to cluster centroid
+    similarity_score = models.FloatField(default=0.0)
+
+    class Meta:
+        db_table = 'seo_cluster_membership'
+        unique_together = ['keyword', 'cluster']
+        indexes = [
+            models.Index(fields=['cluster', 'is_pillar']),
+        ]
+
+    def __str__(self):
+        pillar_marker = " (PILLAR)" if self.is_pillar else ""
+        return f"{self.keyword.keyword} -> {self.cluster.pillar_keyword}{pillar_marker}"
+
+
+class TopicMap(models.Model):
+    """
+    Complete topic map snapshot for an organization.
+
+    Represents a research session's clustering results.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='topic_maps'
+    )
+
+    # Clustering parameters
+    clustering_threshold = models.FloatField(default=0.85)
+    total_keywords = models.IntegerField(default=0)
+
+    # Unclustered keywords (JSON list of keyword IDs or text)
+    unclustered_keywords = models.JSONField(default=list, blank=True)
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'seo_topic_map'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"TopicMap for {self.organization.domain} ({self.created_at.date()})"
+
+
+class ResearchSession(models.Model):
+    """
+    Tracks a research session for provenance and refresh tracking.
+
+    Each time content-factory runs research, it creates a session.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='research_sessions'
+    )
+
+    # Session metadata
+    seed_keywords_used = models.JSONField(default=list)
+    competitors_analyzed = models.JSONField(default=list)
+
+    # Statistics
+    keywords_discovered = models.IntegerField(default=0)
+    keywords_updated = models.IntegerField(default=0)
+    clusters_created = models.IntegerField(default=0)
+
+    # GEO settings used
+    geo_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="GEO flags/thresholds used in this session"
+    )
+
+    # Timestamps
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'seo_research_session'
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f"Research {self.organization.domain} @ {self.started_at.date()}"
