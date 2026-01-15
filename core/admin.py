@@ -1,7 +1,13 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import User, GlobalSettings, Organization, OrganizationContentConfig, GeneratedComponent, ComponentMapping
+from .models import (
+    User, GlobalSettings, Organization, OrganizationContentConfig,
+    GeneratedComponent, ComponentMapping, ContentFactoryJob,
+    # SEO Research Models
+    ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
+    SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession
+)
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 
 
@@ -243,4 +249,219 @@ class ComponentMappingAdmin(admin.ModelAdmin):
             return format_html('<span style="color: green;">None ✓</span>')
         return format_html('<span style="color: red;">{}</span>', ', '.join(obj.failed_components))
     failed_components_display.short_description = 'Failed Components'
+
+
+# =============================================================================
+# SEO Research Admin Classes
+# =============================================================================
+
+@admin.register(ContentFactoryJob)
+class ContentFactoryJobAdmin(admin.ModelAdmin):
+    """Admin for content factory job tracking."""
+    list_display = ('job_id', 'domain', 'status', 'selected_keyword', 'slack_user_id', 'created_at')
+    list_filter = ('status', 'created_at')
+    search_fields = ('job_id', 'domain', 'selected_keyword', 'slack_user_id')
+    ordering = ('-created_at',)
+    readonly_fields = ('created_at', 'updated_at')
+
+
+class KeywordVelocityInline(admin.TabularInline):
+    """Inline for velocity snapshots on keyword detail."""
+    model = KeywordVelocity
+    extra = 0
+    readonly_fields = ('velocity_score', 'trend_status', 'absolute_volume', 'captured_at')
+    can_delete = False
+    max_num = 5
+    ordering = ('-captured_at',)
+
+
+class AISaturationInline(admin.TabularInline):
+    """Inline for AI saturation snapshots on keyword detail."""
+    model = AISaturation
+    extra = 0
+    readonly_fields = ('saturation_score', 'ai_overview_present', 'hostility_score', 'captured_at')
+    can_delete = False
+    max_num = 5
+    ordering = ('-captured_at',)
+
+
+class PAQuestionInline(admin.TabularInline):
+    """Inline for PAA questions on keyword detail."""
+    model = PAQuestion
+    extra = 0
+    readonly_fields = ('question', 'depth', 'has_ai_overview')
+    can_delete = False
+    max_num = 10
+
+
+@admin.register(ResearchedKeyword)
+class ResearchedKeywordAdmin(admin.ModelAdmin):
+    """Admin for researched keywords - the core SEO research table."""
+    list_display = (
+        'keyword', 'organization_domain', 'volume', 'difficulty',
+        'tier_badge', 'opportunity_index', 'status_badge', 'source', 'discovered_at'
+    )
+    list_filter = ('status', 'tier', 'source', 'organization', 'discovered_at')
+    search_fields = ('keyword', 'organization__domain', 'organization__name')
+    list_select_related = ('organization', 'written_article')
+    ordering = ('-opportunity_index',)
+    readonly_fields = ('keyword_normalized', 'discovered_at', 'metrics_updated_at', 'status_changed_at')
+    inlines = [KeywordVelocityInline, AISaturationInline, PAQuestionInline]
+
+    fieldsets = (
+        ('Keyword', {
+            'fields': ('organization', 'keyword', 'keyword_normalized')
+        }),
+        ('Metrics', {
+            'fields': ('volume', 'difficulty', 'intent', 'tier', 'opportunity_index')
+        }),
+        ('Provenance', {
+            'fields': ('source', 'source_detail', 'competitor_urls')
+        }),
+        ('Status', {
+            'fields': ('status', 'written_article', 'status_changed_at')
+        }),
+        ('Timestamps', {
+            'fields': ('discovered_at', 'metrics_updated_at')
+        }),
+    )
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+    organization_domain.admin_order_field = 'organization__domain'
+
+    def tier_badge(self, obj):
+        """Display tier as colored badge."""
+        colors = {
+            'tier_1_blue_ocean': '#0066cc',
+            'tier_2_authority': '#ff9900',
+            'tier_3_long_tail': '#666666',
+            'tier_4_discard': '#cc0000',
+        }
+        labels = {
+            'tier_1_blue_ocean': 'Blue Ocean',
+            'tier_2_authority': 'Authority',
+            'tier_3_long_tail': 'Long Tail',
+            'tier_4_discard': 'Discard',
+        }
+        color = colors.get(obj.tier, '#999')
+        label = labels.get(obj.tier, obj.tier)
+        return format_html(
+            '<span style="background: {}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px;">{}</span>',
+            color, label
+        )
+    tier_badge.short_description = 'Tier'
+
+    def status_badge(self, obj):
+        """Display status as colored badge."""
+        colors = {
+            'pending': '#999',
+            'approved': '#0066cc',
+            'in_progress': '#ff9900',
+            'written': '#00cc00',
+            'skipped': '#cc0000',
+        }
+        color = colors.get(obj.status, '#999')
+        return format_html(
+            '<span style="background: {}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px;">{}</span>',
+            color, obj.status.upper()
+        )
+    status_badge.short_description = 'Status'
+
+
+@admin.register(WrittenArticle)
+class WrittenArticleAdmin(admin.ModelAdmin):
+    """Admin for tracking written articles."""
+    list_display = ('title', 'organization_domain', 'slug', 'primary_keyword', 'published_at', 'created_at')
+    list_filter = ('organization', 'published_at', 'created_at')
+    search_fields = ('title', 'slug', 'primary_keyword', 'organization__domain')
+    list_select_related = ('organization', 'job')
+    ordering = ('-created_at',)
+    readonly_fields = ('created_at',)
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+
+
+@admin.register(SemanticCluster)
+class SemanticClusterAdmin(admin.ModelAdmin):
+    """Admin for semantic clusters (pillar topics)."""
+    list_display = ('pillar_keyword', 'organization_domain', 'cluster_id', 'total_volume', 'avg_difficulty', 'topic_tier', 'member_count')
+    list_filter = ('topic_tier', 'organization')
+    search_fields = ('pillar_keyword', 'organization__domain')
+    list_select_related = ('organization',)
+    ordering = ('-total_volume',)
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+
+    def member_count(self, obj):
+        return obj.member_keywords.count()
+    member_count.short_description = 'Members'
+
+
+@admin.register(TopicMap)
+class TopicMapAdmin(admin.ModelAdmin):
+    """Admin for topic map snapshots."""
+    list_display = ('organization_domain', 'total_keywords', 'clustering_threshold', 'created_at')
+    list_filter = ('organization', 'created_at')
+    list_select_related = ('organization',)
+    ordering = ('-created_at',)
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+
+
+@admin.register(ResearchSession)
+class ResearchSessionAdmin(admin.ModelAdmin):
+    """Admin for research session tracking."""
+    list_display = ('organization_domain', 'keywords_discovered', 'keywords_updated', 'clusters_created', 'started_at', 'completed_at')
+    list_filter = ('organization', 'started_at')
+    list_select_related = ('organization',)
+    ordering = ('-started_at',)
+    readonly_fields = ('started_at',)
+
+    def organization_domain(self, obj):
+        return obj.organization.domain
+    organization_domain.short_description = 'Domain'
+
+
+# Register remaining models with basic admin
+@admin.register(ClusterMembership)
+class ClusterMembershipAdmin(admin.ModelAdmin):
+    list_display = ('keyword', 'cluster', 'is_pillar', 'similarity_score')
+    list_filter = ('is_pillar', 'cluster__organization')
+    search_fields = ('keyword__keyword', 'cluster__pillar_keyword')
+
+
+@admin.register(KeywordVelocity)
+class KeywordVelocityAdmin(admin.ModelAdmin):
+    list_display = ('keyword', 'velocity_score', 'trend_status', 'absolute_volume', 'captured_at')
+    list_filter = ('trend_status', 'captured_at')
+    search_fields = ('keyword__keyword',)
+    ordering = ('-captured_at',)
+
+
+@admin.register(AISaturation)
+class AISaturationAdmin(admin.ModelAdmin):
+    list_display = ('keyword', 'saturation_score', 'ai_overview_present', 'hostility_score', 'captured_at')
+    list_filter = ('ai_overview_present', 'captured_at')
+    search_fields = ('keyword__keyword',)
+    ordering = ('-captured_at',)
+
+
+@admin.register(PAQuestion)
+class PAQuestionAdmin(admin.ModelAdmin):
+    list_display = ('question_truncated', 'keyword', 'depth', 'has_ai_overview', 'discovered_at')
+    list_filter = ('depth', 'has_ai_overview', 'discovered_at')
+    search_fields = ('question', 'keyword__keyword')
+    ordering = ('-discovered_at',)
+
+    def question_truncated(self, obj):
+        return obj.question[:80] + '...' if len(obj.question) > 80 else obj.question
+    question_truncated.short_description = 'Question'
 
