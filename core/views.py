@@ -1179,15 +1179,84 @@ class ContentFactoryCallbackView(APIView):
 
         SlackService.send_dm(slack_user_id, text, blocks=blocks)
 
+    def _generate_topic_explanation(self, option_data, company_context=None, competitors=None):
+        """Generate a user-friendly explanation for why this topic was chosen."""
+        volume = option_data.get('volume', 0)
+        difficulty = option_data.get('difficulty', 50)
+        tier = option_data.get('tier', 'tier_4_discard')
+        opportunity_index = option_data.get('opportunity_index', 0.0)
+        
+        parts = []
+        
+        # Volume assessment
+        try:
+            volume_val = int(volume)
+        except (ValueError, TypeError):
+            volume_val = 0
+            
+        if volume_val >= 2000:
+            parts.append(f"High search volume ({volume_val:,}/mo)")
+        elif volume_val >= 500:
+            parts.append(f"Moderate search volume ({volume_val:,}/mo)")
+        else:
+            parts.append(f"Niche search volume ({volume_val:,}/mo)")
+        
+        # Difficulty assessment  
+        try:
+            diff_val = int(difficulty)
+        except (ValueError, TypeError):
+            diff_val = 50
+            
+        if diff_val <= 35:
+            parts.append("with low competition.")
+        elif diff_val <= 60:
+            parts.append("with moderate competition.")
+        else:
+            parts.append("but highly competitive.")
+        
+        # Tier-based reasoning
+        tier_reasons = {
+            'tier_1_blue_ocean': "This is an untapped opportunity where AI overviews haven't saturated the search results.",
+            'tier_2_authority': "This topic helps establish your authority in the space.",
+            'tier_3_long_tail': "A focused long-tail opportunity that can drive targeted traffic.",
+        }
+        if tier in tier_reasons:
+            parts.append(tier_reasons[tier])
+        
+        # Company relevance (if context available)
+        if company_context and len(str(company_context)) > 10:
+            parts.append("This aligns with your company's focus areas.")
+        
+        # Competitor gap (if competitors listed)
+        if competitors and isinstance(competitors, list) and len(competitors) > 0:
+            existing_presence = False
+            # Check if competitors are targeting this (simplified check based on provided competitor list in option, if any)
+            # But here we just mention the competitors context generally if we knew more.
+            # Since content factory returns specific competitor data per keyword, we could use that if available.
+            # For now, just a generic statement if it's a gap analysis result
+            pass
+        
+        return " ".join(parts)
+
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
-        from .models import ContentFactoryJob
+        from .models import ContentFactoryJob, Organization
         from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         selection = data.get('selection', {})
+        
+        # Extract options (or wrap single selection if new format not sent)
+        options = selection.get('options', [])
+        if not options and selection.get('selected_keyword'):
+            # Backwards compatibility
+            options = [selection.copy()]
+            selection['options'] = options
+            
+        # Limit to top 4 options
+        options = options[:4]
         
         # Get or create job tracking record
         job, created = ContentFactoryJob.objects.update_or_create(
@@ -1202,21 +1271,35 @@ class ContentFactoryCallbackView(APIView):
             }
         )
         
-        logger.info(f"Topic selection recorded for job {job_id}: keyword='{selection.get('selected_keyword')}'")
+        logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
         
-        if slack_user_id:
-            keyword = selection.get('selected_keyword', 'Unknown Topic')
-            volume = selection.get('volume', 'N/A')
-            difficulty = selection.get('difficulty', 'N/A')
-            tier = selection.get('tier', 'N/A')
-            score = selection.get('opportunity_index', 'N/A')
-            
+        if slack_user_id and options:
+            # Fetch organization context for explanations
+            company_context = None
+            competitors = []
+            try:
+                # Simple normalization (should ideally match what other views do)
+                normalized_domain = domain.lower().strip()
+                if normalized_domain.startswith('https://'): normalized_domain = normalized_domain[8:]
+                if normalized_domain.startswith('http://'): normalized_domain = normalized_domain[7:]
+                if normalized_domain.startswith('www.'): normalized_domain = normalized_domain[4:]
+                if '/' in normalized_domain: normalized_domain = normalized_domain.split('/')[0]
+                
+                org = Organization.objects.filter(domain__icontains=normalized_domain).first()
+                if org:
+                    config = getattr(org, 'content_config', None)
+                    if config:
+                        company_context = config.company_context
+                    competitors = org.competitors or []
+            except Exception as e:
+                logger.warning(f"Could not fetch org context for explanations: {e}")
+
             blocks = [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": "📊 Article Topic Selected",
+                        "text": "📊 Article Topics Selected",
                         "emoji": True
                     }
                 },
@@ -1224,42 +1307,77 @@ class ContentFactoryCallbackView(APIView):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"I've researched content opportunities for *{domain}* and found:"
+                        "text": f"I've researched content opportunities for *{domain}* and found {len(options)} great topics. Choose one to write:"
                     }
-                },
-                {
+                }
+            ]
+            
+            # Action buttons accumulator
+            action_elements = []
+            
+            for idx, option in enumerate(options):
+                keyword = option.get('keyword', option.get('selected_keyword', 'Unknown Topic'))
+                volume = option.get('volume', 'N/A')
+                difficulty = option.get('difficulty', 'N/A')
+                score = option.get('opportunity_index', 'N/A')
+                
+                # Format score
+                try:
+                    score_val = float(score)
+                    score_str = f"{score_val:.1f}"
+                except (ValueError, TypeError):
+                    score_str = str(score)
+
+                # Use provided explanation or generate one
+                explanation = option.get('explanation')
+                if not explanation:
+                    explanation = self._generate_topic_explanation(option, company_context, competitors)
+                
+                # Add section for this option
+                blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*Recommended:* `{keyword}`\n• Volume: {volume}/mo • Difficulty: {difficulty}/100\n• Tier: {tier}\n• Score: {score}"
+                        "text": f"*{idx + 1}. {keyword}*\n"
+                                f"📈 {volume}/mo • 🎯 Difficulty: {difficulty}/100 • Score: {score_str}\n"
+                                f"_{explanation}_"
                     }
+                })
+                
+                # Create button for this option
+                action_elements.append({
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"Op {idx + 1}: {keyword[:15]}..." if len(keyword) > 18 else f"Op {idx + 1}: {keyword}",
+                        "emoji": True
+                    },
+                    "value": f"confirm_topic:{job_id}:{idx}",  # Include index in value
+                    "action_id": f"confirm_topic_btn_{idx}"
+                })
+
+            # Add buttons row
+            # Split into chunks of 5 if cleaner, but Slack allows 5 buttons per action block.
+            # We add cancel at the end.
+            
+            # Add Cancel button
+            action_elements.append({
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": "❌ Cancel",
+                    "emoji": True
                 },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "✅ Write This Article",
-                                "emoji": True
-                            },
-                            "value": f"confirm_topic:{job_id}",
-                            "action_id": "confirm_topic_btn"
-                        },
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "❌ Cancel",
-                                "emoji": True
-                            },
-                            "value": f"cancel_topic:{job_id}",
-                            "action_id": "cancel_topic_btn"
-                        }
-                    ]
-                }
-            ]
+                "style": "danger",
+                "value": f"cancel_topic:{job_id}",
+                "action_id": "cancel_topic_btn"
+            })
+            
+            # Add action block
+            blocks.append({
+                "type": "actions",
+                "elements": action_elements
+            })
             
             SlackService.send_dm(slack_user_id, "Topic selection ready for review", blocks=blocks)
         

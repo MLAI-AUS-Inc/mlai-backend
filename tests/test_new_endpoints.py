@@ -235,6 +235,51 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertIn("Topic selection ready", call_args[0][1])
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_topic_selection_multi_options(self, mock_send_dm):
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "topic_selection",
+            "job_id": "job-multi",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "selection": {
+                "selected_keyword": "top pick",
+                "options": [
+                    {"keyword": "option 1", "volume": 1000},
+                    {"keyword": "option 2", "volume": 2000},
+                ]
+            }
+        }
+        
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        
+        # Verify job stores options
+        job = ContentFactoryJob.objects.get(job_id="job-multi")
+        self.assertEqual(len(job.selection_data['options']), 2)
+        
+        # Verify Slack message contains buttons for options
+        # We need to find the blocks argument. It might be in kwargs 'blocks' or positional arg
+        call_args = mock_send_dm.call_args
+        blocks = call_args[1].get('blocks')
+        if not blocks and len(call_args[0]) > 2:
+            blocks = call_args[0][2]
+        
+        # Check action elements
+        found_actions = False
+        if blocks:
+            for block in blocks:
+                if block['type'] == 'actions':
+                    found_actions = True
+                    elements = block['elements']
+                    # Should have 2 options + 1 cancel
+                    self.assertEqual(len(elements), 3)
+                    self.assertEqual(elements[0]['action_id'], "confirm_topic_btn_0")
+                    self.assertEqual(elements[1]['action_id'], "confirm_topic_btn_1")
+                    self.assertEqual(elements[2]['action_id'], "cancel_topic_btn")
+        self.assertTrue(found_actions, "Action block not found in Slack message")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_complete_callback(self, mock_send_dm):
         # Create job first
         ContentFactoryJob.objects.create(job_id="job-456", domain="mlai.au", status="generating")
@@ -322,3 +367,39 @@ class TopicConfirmTests(TestCase):
         self.assertIn("/api/pipeline/confirm-topic", call_args[0][0])
         payload = call_args[1]['json']
         self.assertEqual(payload['confirmed_keyword'], "ai agents")
+
+    def test_confirm_topic_with_index(self):
+        # Setup job with options
+        job = ContentFactoryJob.objects.create(
+            job_id="job-index",
+            domain="mlai.au",
+            slack_user_id="U-CONFIRM",
+            status="awaiting_confirmation",
+            selection_data={
+                "options": [
+                    {"keyword": "keyword 0"},
+                    {"keyword": "keyword 1"}
+                ]
+            }
+        )
+        
+        url = reverse('content_job_confirm', args=["job-index"])
+        data = {
+            "slack_user_id": "U-CONFIRM",
+            "option_index": 1
+        }
+        
+        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
+            mock_post.return_value = self._mock_response(200, {"job_id": "job-index", "status": "queued"})
+            
+            response = self.client.post(url, data, format='json')
+            
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job.refresh_from_db()
+        self.assertEqual(job.selected_keyword, "keyword 1")
+        self.assertEqual(job.status, "confirmed")
+        
+        # Verify API called with correct keyword
+        call_args = mock_post.call_args
+        payload = call_args[1]['json']
+        self.assertEqual(payload['confirmed_keyword'], "keyword 1")
