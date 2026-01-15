@@ -222,3 +222,47 @@ class ComponentMapping(models.Model):
     
     def __str__(self):
         return f"{self.organization.domain} mapping ({self.matched_count}/{self.total_components} matched)"
+
+
+class ContentFactoryJob(models.Model):
+    """
+    Tracks content-factory pipeline jobs for callback routing.
+    
+    When content-factory sends callbacks (topic_selection, article_complete, error),
+    this model maintains the mapping between job IDs and Slack users to enable
+    proper notification routing.
+    """
+    job_id = models.CharField(max_length=100, unique=True, db_index=True)
+    slack_user_id = models.CharField(max_length=50, db_index=True)
+    domain = models.CharField(max_length=255)
+    
+    # Job state
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),
+        ('researching', 'Researching'),
+        ('awaiting_confirmation', 'Awaiting Confirmation'),
+        ('generating', 'Generating'),
+        ('completed', 'Completed'),
+        ('error', 'Error'),
+    ]
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='queued')
+    
+    # Topic selection data (populated on topic_selection callback)
+    selected_keyword = models.CharField(max_length=255, blank=True, null=True)
+    selection_reason = models.TextField(blank=True, null=True)
+    selection_data = models.JSONField(default=dict, blank=True)  # Full selection payload
+    
+    # Result data (populated on article_complete callback)
+    article_url = models.URLField(blank=True, null=True)
+    pr_url = models.URLField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'content_factory_job'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.job_id} ({self.status}) - {self.domain}"

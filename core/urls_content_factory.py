@@ -9,4 +9,8 @@ urlpatterns = [
     path('org/components', views.ContentFactoryComponentsView.as_view(), name='content_factory_components_no_slash'),
     path('org/components/<str:name>/', views.ContentFactoryComponentDetailView.as_view(), name='content_factory_component_detail'),
     path('org/components/<str:name>', views.ContentFactoryComponentDetailView.as_view(), name='content_factory_component_detail_no_slash'),
+    # Callback endpoint for content-factory events
+    path('callback/', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback'),
+    path('callback', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback_no_slash'),
 ]
+

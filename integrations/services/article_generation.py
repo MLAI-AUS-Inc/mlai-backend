@@ -326,3 +326,73 @@ def publish_article(job_id: str, slack_user_id: str) -> dict:
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to publish: {str(e)}")
+
+
+def confirm_topic(domain: str, confirmed_keyword: str, slack_user_id: str, custom_title: str = None) -> dict:
+    """
+    Confirm topic selection and trigger Phase 2 generation.
+    POST /api/pipeline/confirm-topic
+    
+    Args:
+        domain: The organization domain.
+        confirmed_keyword: The selected keyword (or alternative) to generate.
+        slack_user_id: The Slack user confirming the topic.
+        custom_title: Optional custom title override.
+        
+    Returns:
+        dict: { "job_id": "...", "status": "queued", ... }
+    """
+    # 1. Fetch UserIntegration for GitHub credentials
+    try:
+        integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+    except UserIntegration.DoesNotExist:
+        raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
+
+    if not integration.github_access_token:
+        raise ArticleGenerationError("No GitHub token found. Please authenticate with GitHub first.")
+    
+    if not integration.github_repo:
+        raise ArticleGenerationError("No GitHub repository configured for this user.")
+
+    # 2. Prepare payload
+    payload = {
+        "domain": domain,
+        "confirmed_keyword": confirmed_keyword,
+        "slack_user_id": slack_user_id,
+        "github_token": integration.github_access_token,
+        "github_repo": integration.github_repo,
+        "custom_title": custom_title
+    }
+
+    # 3. Call Content Factory
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/confirm-topic"
+    
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    # Debug logging
+    masked_payload = payload.copy()
+    if 'github_token' in masked_payload:
+        masked_payload['github_token'] = '***'
+    logger.info(f"Confirming topic at {confirm_endpoint} with payload: {masked_payload}")
+
+    try:
+        response = http_requests.post(
+            confirm_endpoint,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 202]:
+            return response.json()
+        else:
+            logger.error(f"Content Factory confirm topic failed: {response.text}")
+            raise ArticleGenerationError(f"Topic confirmation failed: {response.text}")
+            
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Failed to connect to Content Factory: {e}")
+        raise ArticleGenerationError(f"Failed to confirm topic: {str(e)}")

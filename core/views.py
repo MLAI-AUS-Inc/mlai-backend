@@ -1032,3 +1032,153 @@ class LinkSlackView(APIView):
             return Response({"user_id": user.id, "linked": True}, status=status.HTTP_200_OK)
         except User.DoesNotExist:
             return Response({"error": "User not found by email"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ContentFactoryCallbackView(APIView):
+    """
+    Receives callbacks from content-factory for various pipeline events.
+    
+    POST /api/content-factory/callback
+    
+    Event types:
+    - topic_selection: Research complete, topic selected, awaiting confirmation
+    - article_complete: Article generated and published successfully
+    - error: Pipeline failed with error
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from .models import ContentFactoryJob
+        
+        data = request.data
+        event_type = data.get('event_type')
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id')
+        
+        if not event_type:
+            return Response(
+                {'error': 'event_type is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not job_id:
+            return Response(
+                {'error': 'job_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        logger.info(f"Content Factory callback received: event={event_type}, job_id={job_id}, domain={domain}")
+        
+        try:
+            if event_type == 'topic_selection':
+                return self._handle_topic_selection(data)
+            elif event_type == 'article_complete':
+                return self._handle_article_complete(data)
+            elif event_type == 'error':
+                return self._handle_error(data)
+            else:
+                logger.warning(f"Unknown event_type: {event_type}")
+                return Response(
+                    {'status': 'ignored', 'message': f'Unknown event_type: {event_type}'},
+                    status=status.HTTP_200_OK
+                )
+        except Exception as e:
+            logger.exception(f"Error processing callback: {e}")
+            return Response(
+                {'error': 'Internal server error processing callback'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def _handle_topic_selection(self, data):
+        """Handle topic_selection event from content-factory."""
+        from .models import ContentFactoryJob
+        
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        selection = data.get('selection', {})
+        
+        # Get or create job tracking record
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'awaiting_confirmation',
+                'selected_keyword': selection.get('selected_keyword', ''),
+                'selection_reason': selection.get('selection_reason', ''),
+                'selection_data': selection,
+            }
+        )
+        
+        logger.info(f"Topic selection recorded for job {job_id}: keyword='{selection.get('selected_keyword')}'")
+        
+        # TODO: Send notification to Slack via roo-slackbot
+        # This will be implemented when roo-slackbot integration is ready
+        
+        return Response({
+            'status': 'received',
+            'message': 'Topic selection callback processed',
+            'job_id': job_id,
+            'awaiting_confirmation': True,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_article_complete(self, data):
+        """Handle article_complete event from content-factory."""
+        from .models import ContentFactoryJob
+        
+        job_id = data.get('job_id')
+        article_url = data.get('article_url')
+        pr_url = data.get('pr_url')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        
+        # Update or create job record
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'completed',
+                'article_url': article_url,
+                'pr_url': pr_url,
+            }
+        )
+        
+        logger.info(f"Article complete for job {job_id}: pr_url={pr_url}")
+        
+        return Response({
+            'status': 'received',
+            'message': 'Article complete callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_error(self, data):
+        """Handle error event from content-factory."""
+        from .models import ContentFactoryJob
+        
+        job_id = data.get('job_id')
+        error_message = data.get('error_message', 'Unknown error')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        
+        # Update or create job record
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'error',
+                'error_message': error_message,
+            }
+        )
+        
+        logger.error(f"Error callback for job {job_id}: {error_message}")
+        
+        return Response({
+            'status': 'received',
+            'message': 'Error callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
