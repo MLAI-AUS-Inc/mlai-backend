@@ -130,3 +130,64 @@ class ContentConfirmView(APIView):
             logger.exception(f"Unexpected error in confirm view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class ContentJobConfirmView(APIView):
+    """
+    Confirm topic for a specific job and trigger generation.
+    POST /api/v1/content/jobs/{job_id}/confirm
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, job_id):
+        from core.models import ContentFactoryJob
+        # Importing task inside method to avoid import error if module is missing/loaded later
+        try:
+            from content_factory.tasks import run_article_generation
+        except ImportError:
+            logger.error("Could not import content_factory.tasks.run_article_generation")
+            return Response({"error": "Configuration error: Task module not found"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        keyword = request.data.get('keyword')
+        action = request.data.get('action')
+        slack_user_id = request.data.get('slack_user_id')
+        domain = request.data.get('domain')
+        custom_title = request.data.get('custom_title')
+
+        if not all([job_id, slack_user_id]):
+             return Response({"error": "job_id and slack_user_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            job = ContentFactoryJob.objects.get(job_id=job_id)
+        except ContentFactoryJob.DoesNotExist:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Update job
+        job.status = 'confirmed'
+        if keyword:
+            job.selected_keyword = keyword
+        
+        # Ensure we have the slack_user_id associated (update if missing or different?)
+        # Requirement says: "Ensure the slack_user_id is used to associate the action with the correct user."
+        # We can update it on the job or just verify it matches. Updating seems safer for tracking who confirmed.
+        job.slack_user_id = slack_user_id
+        
+        # Save other fields if needed, e.g. custom_title? Model doesn't have custom_title explicitly shown in previous `view_file` of models.py
+        # core/models.py had `selection_data` JSONField, maybe store it there? 
+        # But instructions say "Save the selected_keyword to the job." which we did.
+        
+        job.save()
+
+        # Trigger Celery task
+        # "Trigger the Celery task (e.g., content_factory.tasks.run_article_generation) to proceed with writing the article."
+        try:
+            run_article_generation.delay(job_id)
+        except Exception as e:
+            logger.exception(f"Failed to trigger task for job {job_id}: {e}")
+            return Response({"error": "Failed to trigger generation task"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            "status": "confirmed",
+            "job_id": job.job_id,
+            "message": "Topic confirmed, article generation started."
+        }, status=status.HTTP_200_OK)
