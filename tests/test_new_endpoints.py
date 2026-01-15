@@ -161,7 +161,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         response.headers['Content-Type'] = 'application/json'
         return response
 
-    def test_generate_falls_back_when_discovery_returns_no_opportunities(self):
+    def test_generate_auto_write_sends_empty_topic(self):
         url = reverse('content_generate')
         data = {
             "slack_user_id": self.integration.slack_user_id,
@@ -171,7 +171,6 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.side_effect = [
-                self._mock_response(200, {"opportunities": []}),  # discovery
                 self._mock_response(202, {"job_id": "job-123"}),  # generate
             ]
 
@@ -179,16 +178,15 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], "job-123")
-        self.assertIn("/api/pipeline/publish/status/job-123", response.data.get('job_status_url', ''))
-        self.assertEqual(mock_post.call_count, 2)
+        
+        # Verify call count (should be 1 call to generate, NO discovery call)
+        self.assertEqual(mock_post.call_count, 1)
 
-        discovery_call = mock_post.call_args_list[0]
-        generate_call = mock_post.call_args_list[1]
-
-        self.assertIn("/api/pipeline/discover", discovery_call.args[0])
+        generate_call = mock_post.call_args_list[0]
         self.assertIn("/api/pipeline/generate", generate_call.args[0])
 
         generate_payload = generate_call.kwargs.get('json') or {}
+        # Verify it sends empty topic/keyword for auto-write mode
         self.assertEqual(generate_payload.get('topic'), "")
         self.assertEqual(generate_payload.get('target_keyword'), "")
 

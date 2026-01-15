@@ -11,45 +11,6 @@ class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
 
-def discover_opportunities(domain: str, competitors: list, seed_keywords: list = None) -> list:
-    """
-    Call Content Factory to discover content opportunities.
-    POST /api/pipeline/discover
-    """
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    discover_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/discover"
-
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
-
-    payload = {
-        "domain": domain,
-        "competitors": competitors or [],
-        "seed_keywords": seed_keywords or []
-    }
-
-    logger.info(f"Discovering opportunities for {domain} with competitors: {competitors}, seed_keywords: {seed_keywords}")
-    
-    try:
-        response = http_requests.post(
-            discover_endpoint,
-            json=payload,
-            headers=headers,
-            timeout=600  # Discovery can be long-running; let CF queue and return
-        )
-        
-        if response.status_code == 200:
-            return response.json().get('opportunities', [])
-        else:
-            logger.error(f"Discovery failed: {response.text}")
-            raise ArticleGenerationError(f"Discovery failed: {response.status_code} {response.text}")
-            
-    except http_requests.exceptions.RequestException as e:
-        logger.error(f"Failed to connect to Content Factory for discovery: {e}")
-        raise ArticleGenerationError(f"Discovery connection failed: {str(e)}")
-
 def trigger_article_generation(slack_user_id: str, article_request: dict) -> dict:
     """
     Trigger article generation via Content Factory.
@@ -117,31 +78,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         competitors = config.organization.competitors or []
         seed_keywords = config.organization.seed_keywords or []
 
-    # Auto-Write Mode: If topic is missing, discover one
+    # Auto-Write Mode: If topic is missing, we send empty topic/keyword
+    # Content Factory will handle the research phase and callback with topic_selection
     if not topic:
-        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Competitors: {competitors}, Seed Keywords: {seed_keywords}")
-
-        opportunities = []
-        try:
-            opportunities = discover_opportunities(resolved_domain, competitors, seed_keywords)
-        except ArticleGenerationError as e:
-            logger.warning(f"Auto-Write discovery failed ({e}). Proceeding without discovered topic.")
-        except Exception as e:
-            logger.exception(f"Auto-Write discovery encountered an unexpected error: {e}")
-
-        if opportunities:
-            # Select best opportunity (assuming sorted by score desc)
-            best_opp = opportunities[0]
-            # Handle potential different key names from CF
-            topic = best_opp.get('topic') or best_opp.get('title')
-            target_keyword = best_opp.get('keyword') or best_opp.get('target_keyword')
-
-            logger.info(f"Auto-selected topic: '{topic}' with keyword: '{target_keyword}'")
-        else:
-            logger.info("Auto-Write discovery returned no opportunities. Proceeding with research mode.")
-            # Keep strings (not None) for CF validation while allowing research mode downstream
-            topic = topic or ""
-            target_keyword = target_keyword or ""
+        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Content Factory will perform research.")
+        topic = ""
+        target_keyword = ""
 
     # Auto-fill target_keyword from topic if missing
     if not target_keyword and topic:
