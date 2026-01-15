@@ -12,6 +12,7 @@ from requests import Response
 from core.models import Organization, OrganizationContentConfig
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost
+from core.models import ContentFactoryJob
 
 User = get_user_model()
 
@@ -190,3 +191,121 @@ class ContentGenerateAutoWriteTests(TestCase):
         generate_payload = generate_call.kwargs.get('json') or {}
         self.assertEqual(generate_payload.get('topic'), "")
         self.assertEqual(generate_payload.get('target_keyword'), "")
+
+
+class ContentFactoryCallbackTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        from django.conf import settings
+        settings.ROO_API_KEY = self.api_key
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+    def test_topic_selection_callback(self):
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "topic_selection",
+            "job_id": "job-123",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "selection": {
+                "selected_keyword": "ai agents",
+                "selection_reason": "High volume",
+                "total_opportunities": 5
+            }
+        }
+        
+        response = self.client.post(url, data, format='json')
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(ContentFactoryJob.objects.filter(job_id="job-123").exists())
+        
+        job = ContentFactoryJob.objects.get(job_id="job-123")
+        self.assertEqual(job.status, 'awaiting_confirmation')
+        self.assertEqual(job.selected_keyword, "ai agents")
+        self.assertEqual(job.slack_user_id, "U123")
+
+    def test_article_complete_callback(self):
+        # Create job first
+        ContentFactoryJob.objects.create(job_id="job-456", domain="mlai.au", status="generating")
+        
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "article_complete",
+            "job_id": "job-456",
+            "domain": "mlai.au",
+            "article_url": "https://mlai.au/article",
+            "pr_url": "https://github.com/pr/1",
+        }
+        
+        response = self.client.post(url, data, format='json')
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-456")
+        self.assertEqual(job.status, 'completed')
+        self.assertEqual(job.pr_url, "https://github.com/pr/1")
+
+    def test_error_callback(self):
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "error",
+            "job_id": "job-error",
+            "domain": "mlai.au",
+            "error_message": "Generation failed"
+        }
+        
+        response = self.client.post(url, data, format='json')
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-error")
+        self.assertEqual(job.status, 'error')
+        self.assertEqual(job.error_message, "Generation failed")
+
+
+class TopicConfirmTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        
+        from django.conf import settings
+        settings.ROO_API_KEY = self.api_key
+        settings.CONTENT_FACTORY_URL = "http://content-factory.test"
+        
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        
+        self.integration = UserIntegration.objects.create(
+            slack_user_id="U-CONFIRM",
+            github_access_token="gh_token",
+            github_repo="owner/repo",
+        )
+
+    def _mock_response(self, status_code, body):
+        response = Response()
+        response.status_code = status_code
+        response._content = json.dumps(body).encode()
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    def test_confirm_topic_success(self):
+        url = reverse('content_confirm')
+        data = {
+            "domain": "mlai.au",
+            "confirmed_keyword": "ai agents",
+            "slack_user_id": "U-CONFIRM",
+        }
+        
+        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
+            mock_post.return_value = self._mock_response(200, {"job_id": "job-new", "status": "queued"})
+            
+            response = self.client.post(url, data, format='json')
+            
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['job_id'], "job-new")
+        
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        self.assertIn("/api/pipeline/confirm-topic", call_args[0][0])
+        payload = call_args[1]['json']
+        self.assertEqual(payload['confirmed_keyword'], "ai agents")

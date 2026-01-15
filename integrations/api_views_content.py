@@ -8,6 +8,7 @@ from integrations.services.article_generation import (
     trigger_article_generation, 
     check_generation_status, 
     publish_article,
+    confirm_topic,
     ArticleGenerationError
 )
 
@@ -97,5 +98,35 @@ class ContentPublishView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in publish view: {e}")
+            return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContentConfirmView(APIView):
+    """
+    Confirm topic selection and trigger Phase 2 generation.
+    POST /api/v1/content/confirm
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        domain = request.data.get('domain')
+        confirmed_keyword = request.data.get('confirmed_keyword')
+        slack_user_id = request.data.get('slack_user_id')
+        custom_title = request.data.get('custom_title')
+        
+        if not all([domain, confirmed_keyword, slack_user_id]):
+            return Response(
+                {"error": "domain, confirmed_keyword, and slack_user_id are required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        try:
+            result = confirm_topic(domain, confirmed_keyword, slack_user_id, custom_title)
+            return Response(result, status=status.HTTP_202_ACCEPTED)
+        except ArticleGenerationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception(f"Unexpected error in confirm view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
