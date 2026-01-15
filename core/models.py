@@ -244,8 +244,12 @@ class ContentFactoryJob(models.Model):
         ('generating', 'Generating'),
         ('completed', 'Completed'),
         ('error', 'Error'),
+        ('auth_required', 'Auth Required'),
     ]
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='queued')
+
+    # Request metadata for retry (populated on creation)
+    request_meta = models.JSONField(default=dict, blank=True, help_text="Original request parameters for retry")
 
     # Topic selection data (populated on topic_selection callback)
     selected_keyword = models.CharField(max_length=255, blank=True, null=True)

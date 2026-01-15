@@ -115,9 +115,10 @@ def github_connect(request):
     if not slack_user_id:
         return HttpResponseBadRequest("Missing slack_user_id")
 
-    # State allows us to pass the slack_user_id through the OAuth flow
+    # State allows us to pass the slack_user_id and optional job_id through the OAuth flow
     rand_token = secrets.token_urlsafe(16)
-    state = f"{slack_user_id}::{rand_token}"
+    job_id = request.GET.get('job_id', '')
+    state = f"{slack_user_id}::{rand_token}::{job_id}"
     request.session["github_oauth_state"] = state
 
     # GitHub App installation URL - this shows the native repo selector
@@ -153,9 +154,15 @@ def github_callback(request):
     if not installation_id:
         return HttpResponseBadRequest("Missing installation_id - this endpoint requires GitHub App installation")
     
-    # Extract slack_user_id from state
+    # Extract slack_user_id and job_id from state
+    job_id = None
     try:
-        slack_user_id, _ = state.split("::")
+        parts = state.split("::")
+        slack_user_id = parts[0]
+        # parts[1] is rand_token
+        if len(parts) >= 3:
+            job_id = parts[2]
+            if job_id == 'None': job_id = None # handle potential str conversion artifacts
     except (ValueError, AttributeError):
         return HttpResponseBadRequest("Invalid state format")
 
@@ -244,6 +251,26 @@ def github_callback(request):
         from integrations.services.github import trigger_scan_async
         trigger_scan_async(slack_user_id)
 
+    # Trigger RETRY if job_id was present
+    retry_message = ""
+    if job_id and selected_repo:
+        try:
+            from core.models import ContentFactoryJob
+            from integrations.services.article_generation import trigger_article_generation
+            
+            job = ContentFactoryJob.objects.get(job_id=job_id)
+            if job.request_meta:
+                 # Re-trigger the generation with original request
+                 # We don't need to specify domain/topic/keyword again if request_meta has it
+                 # But trigger_article_generation expects them in article_request dict
+                 trigger_article_generation(slack_user_id, job.request_meta)
+                 retry_message = "<p>🔄 <strong>Successfully retried your article generation!</strong> You'll get a notification in Slack shortly.</p>"
+            else:
+                 logger.warning(f"Could not retry job {job_id}: No request_meta found")
+        except Exception as e:
+            logger.error(f"Failed to auto-retry job {job_id}: {e}")
+            retry_message = f"<p style='color:orange'>⚠️ Could not auto-retry: {e}</p>"
+
     # Build success message
     if selected_repo:
         repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
@@ -259,6 +286,7 @@ def github_callback(request):
         <h1 style="color: green;">✅ GitHub App Installed!</h1>
         <p>Connected as <strong>{github_login}</strong></p>
         {repo_list_html}
+        {retry_message}
         <p>You can now close this window and return to Slack.</p>
     </body>
     </html>

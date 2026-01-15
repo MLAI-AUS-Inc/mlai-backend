@@ -1078,6 +1078,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_article_complete(data)
             elif event_type == 'error':
                 return self._handle_error(data)
+            elif event_type == 'auth_required':
+                return self._handle_auth_required(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -1090,6 +1092,92 @@ class ContentFactoryCallbackView(APIView):
                 {'error': 'Internal server error processing callback'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _handle_auth_required(self, data):
+        """
+        Handle 'auth_required' event: notify user to re-authenticate.
+        """
+        job_id = data.get('job_id')
+        slack_user_id = data.get('slack_user_id')
+        domain = data.get('domain')
+        error_message = data.get('error_message')
+
+        logger.info(f"Received auth_required callback for job {job_id} (user {slack_user_id})")
+
+        # Update job status
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'auth_required',
+                'error_message': error_message,
+            }
+        )
+        
+        # Notify user via Slack
+        self._send_auth_required_notification(slack_user_id, domain, error_message, job_id)
+
+        return Response({'status': 'processed', 'job_id': job_id}, status=status.HTTP_200_OK)
+
+    def _send_auth_required_notification(self, slack_user_id, domain, error_message, job_id):
+        from integrations.services.slack import SlackService
+        from django.urls import reverse
+        from django.conf import settings
+
+        # Construct Re-Auth URL with job_id in state
+        # We point to our backend's connect endpoint, passing job_id as a query param
+        # The backend view will embed it into the OAuth state
+        base_url = settings.MEDHACK_URL.rstrip('/') # Use configured base URL
+        connect_path = reverse('github_connect')
+        auth_url = f"{base_url}{connect_path}?slack_user_id={slack_user_id}&job_id={job_id}"
+
+        text = f"⚠️ GitHub Authentication Failed for {domain}"
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "⚠️ GitHub Authentication Failed",
+                    "emoji": True
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"The content pipeline could not access your repository for *{domain}*.\n\n*Error:* {error_message}"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "🔐 Re-authenticate GitHub",
+                            "emoji": True
+                        },
+                        "style": "primary",
+                        "url": auth_url
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "❌ Cancel",
+                            "emoji": True
+                        },
+                        "style": "danger",
+                        "action_id": "cancel_auth_required", # We might not handle this yet, but good practice
+                        "value": job_id
+                    }
+                ]
+            }
+        ]
+
+        SlackService.send_dm(slack_user_id, text, blocks=blocks)
 
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""

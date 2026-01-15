@@ -147,6 +147,16 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 logger.warning("Content Factory returned success but no job_id")
                 # If CF returns completed result immediately
                 return {"job_id": "unknown", "status": "completed", "message": "Generation completed immediately (unexpected)"}
+            # Create job record with request metadata for retry
+            from core.models import ContentFactoryJob
+            ContentFactoryJob.objects.create(
+                job_id=job_id,
+                domain=resolved_domain,
+                slack_user_id=slack_user_id,
+                status='queued',
+                request_meta=article_request,  # Store original request
+            )
+
             status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
             return {
                 "job_id": job_id,
