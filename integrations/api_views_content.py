@@ -144,6 +144,7 @@ class ContentJobConfirmView(APIView):
         from integrations.services.article_generation import confirm_topic, ArticleGenerationError
 
         keyword = request.data.get('keyword')
+        option_index = request.data.get('option_index')
         slack_user_id = request.data.get('slack_user_id')
         domain = request.data.get('domain')
         custom_title = request.data.get('custom_title')
@@ -156,8 +157,22 @@ class ContentJobConfirmView(APIView):
         except ContentFactoryJob.DoesNotExist:
             return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Handle option_index selection
+        confirmed_keyword = None
+        if option_index is not None:
+            try:
+                idx = int(option_index)
+                options = job.selection_data.get('options', [])
+                if 0 <= idx < len(options):
+                    option = options[idx]
+                    confirmed_keyword = option.get('keyword') or option.get('selected_keyword')
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid option_index for job {job_id}: {option_index}")
+
         # Use keyword from request, or fall back to job's selected_keyword
-        confirmed_keyword = keyword or job.selected_keyword
+        if not confirmed_keyword:
+            confirmed_keyword = keyword or job.selected_keyword
+            
         # Use domain from request, or fall back to job's domain
         resolved_domain = domain or job.domain
 
@@ -168,8 +183,7 @@ class ContentJobConfirmView(APIView):
 
         # Update job status
         job.status = 'confirmed'
-        if keyword:
-            job.selected_keyword = keyword
+        job.selected_keyword = confirmed_keyword
         job.slack_user_id = slack_user_id
         job.save()
 

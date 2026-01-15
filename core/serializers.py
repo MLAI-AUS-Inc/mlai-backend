@@ -19,7 +19,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             'email': {'required': True},
             'first_name': {'required': False},
             'last_name': {'required': False},
-        }
+        } 
 
     def create(self, validated_data):
         email = validated_data['email']
