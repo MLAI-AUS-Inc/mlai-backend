@@ -287,17 +287,25 @@ def publish_article(job_id: str, slack_user_id: str) -> dict:
         raise ArticleGenerationError(f"Failed to publish: {str(e)}")
 
 
-def confirm_topic(domain: str, confirmed_keyword: str, slack_user_id: str, custom_title: str = None) -> dict:
+def confirm_topic(
+    domain: str,
+    confirmed_keyword: str,
+    slack_user_id: str,
+    custom_title: str = None,
+    skip_alternatives: list = None
+) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
     POST /api/pipeline/confirm-topic
-    
+
     Args:
         domain: The organization domain.
         confirmed_keyword: The selected keyword (or alternative) to generate.
         slack_user_id: The Slack user confirming the topic.
         custom_title: Optional custom title override.
-        
+        skip_alternatives: List of keywords to mark as 'skipped' in content-factory.
+                          These are the alternatives that were not selected.
+
     Returns:
         dict: { "job_id": "...", "status": "queued", ... }
     """
@@ -326,8 +334,12 @@ def confirm_topic(domain: str, confirmed_keyword: str, slack_user_id: str, custo
         "slack_user_id": slack_user_id,
         "github_token": fresh_token,  # Use the refreshed token
         "github_repo": integration.github_repo,
-        "custom_title": custom_title
+        "custom_title": custom_title,
     }
+
+    # Include skip_alternatives if provided (for keyword exclusion)
+    if skip_alternatives:
+        payload["skip_alternatives"] = skip_alternatives
 
     # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
