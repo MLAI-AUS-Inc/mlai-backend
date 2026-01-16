@@ -4,6 +4,7 @@ from django.conf import settings
 from integrations.models import UserIntegration
 from core.models import OrganizationContentConfig
 from integrations.utils import normalize_domain
+from integrations.services.github import ensure_valid_token, TokenRefreshError
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,17 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     except UserIntegration.DoesNotExist:
         raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
 
-    if not integration.github_access_token:
-        raise ArticleGenerationError("No GitHub token found. Please authenticate with GitHub first.")
-    
     if not integration.github_repo:
         raise ArticleGenerationError("No GitHub repository configured for this user.")
+
+    # 2. Ensure we have a fresh, valid token (auto-refresh if expired)
+    try:
+        fresh_token = ensure_valid_token(slack_user_id)
+        logger.info(f"Using fresh GitHub token for {slack_user_id}")
+    except TokenRefreshError as e:
+        raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
+    except Exception as e:
+        raise ArticleGenerationError(f"Failed to validate GitHub credentials: {e}")
 
     # 2. Fetch OrganizationContentConfig for artifacts
     # We match config by github_repo
@@ -101,7 +108,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     payload = {
         "slack_user_id": slack_user_id,
         "github_repo": integration.github_repo,
-        "github_token": integration.github_access_token,
+        "github_token": fresh_token,  # Use the refreshed token
 
         # Generated Content Parameters
         "domain": resolved_domain,
@@ -299,19 +306,25 @@ def confirm_topic(domain: str, confirmed_keyword: str, slack_user_id: str, custo
         integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
     except UserIntegration.DoesNotExist:
         raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
-
-    if not integration.github_access_token:
-        raise ArticleGenerationError("No GitHub token found. Please authenticate with GitHub first.")
     
     if not integration.github_repo:
         raise ArticleGenerationError("No GitHub repository configured for this user.")
 
-    # 2. Prepare payload
+    # 2. Ensure we have a fresh, valid token (auto-refresh if expired)
+    try:
+        fresh_token = ensure_valid_token(slack_user_id)
+        logger.info(f"Using fresh GitHub token for topic confirmation ({slack_user_id})")
+    except TokenRefreshError as e:
+        raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
+    except Exception as e:
+        raise ArticleGenerationError(f"Failed to validate GitHub credentials: {e}")
+
+    # 3. Prepare payload with fresh token
     payload = {
         "domain": domain,
         "confirmed_keyword": confirmed_keyword,
         "slack_user_id": slack_user_id,
-        "github_token": integration.github_access_token,
+        "github_token": fresh_token,  # Use the refreshed token
         "github_repo": integration.github_repo,
         "custom_title": custom_title
     }

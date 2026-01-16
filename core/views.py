@@ -1033,6 +1033,78 @@ class LinkSlackView(APIView):
         except User.DoesNotExist:
             return Response({"error": "User not found by email"}, status=status.HTTP_404_NOT_FOUND)
 
+class ContentFactoryTokenView(APIView):
+    """
+    On-demand token refresh endpoint for content-factory.
+    
+    GET /api/content-factory/token?slack_user_id=U12345
+    
+    Content-factory can call this endpoint mid-job to get a fresh GitHub token
+    without needing to restart the entire pipeline.
+    
+    Returns:
+        {
+            "github_token": "ghu_xxxx...",
+            "github_repo": "owner/repo",
+            "expires_at": "2024-01-16T12:00:00Z" (optional)
+        }
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        from integrations.services.github import ensure_valid_token, TokenRefreshError
+        from integrations.models import UserIntegration
+        
+        slack_user_id = request.query_params.get('slack_user_id')
+        
+        if not slack_user_id:
+            return Response(
+                {'error': 'slack_user_id query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Get fresh token (auto-refreshes if expired)
+            fresh_token = ensure_valid_token(slack_user_id)
+            
+            # Fetch integration for additional context
+            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+            
+            response_data = {
+                'github_token': fresh_token,
+                'github_repo': integration.github_repo,
+                'slack_user_id': slack_user_id,
+            }
+            
+            # Include expiry if available
+            if integration.github_token_expires_at:
+                response_data['expires_at'] = integration.github_token_expires_at.isoformat()
+            
+            logger.info(f"Provided fresh GitHub token for {slack_user_id}")
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except UserIntegration.DoesNotExist:
+            return Response(
+                {'error': 'No integration found for this user'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except TokenRefreshError as e:
+            logger.warning(f"Token refresh failed for {slack_user_id}: {e}")
+            return Response(
+                {
+                    'error': 'Token refresh failed',
+                    'message': str(e),
+                    'action_required': 'auth_required'
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        except Exception as e:
+            logger.exception(f"Error fetching token for {slack_user_id}: {e}")
+            return Response(
+                {'error': 'Internal server error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class ContentFactoryCallbackView(APIView):
     """
@@ -1096,7 +1168,11 @@ class ContentFactoryCallbackView(APIView):
     def _handle_auth_required(self, data):
         """
         Handle 'auth_required' event: notify user to re-authenticate.
+        Attempts automatic token refresh first.
         """
+        from integrations.services.github import refresh_github_token
+        from integrations.services.article_generation import trigger_article_generation, confirm_topic
+
         job_id = data.get('job_id')
         slack_user_id = data.get('slack_user_id')
         domain = data.get('domain')
@@ -1114,9 +1190,63 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': error_message,
             }
         )
+
+        # 1. Attempt Automatic Token Refresh
+        refreshed = False
+        if slack_user_id:
+            try:
+                logger.info(f"Attempting automatic GitHub token refresh for {slack_user_id}")
+                refresh_github_token(slack_user_id)
+                logger.info(f"Successfully refreshed GitHub token for {slack_user_id}")
+                refreshed = True
+            except Exception as e:
+                logger.warning(f"Automatic token refresh failed for {slack_user_id}: {e}")
+
+        # 2. Retry the Job if Refreshed
+        if refreshed:
+            try:
+                # Scenario A: Initial Generation (Phase 1)
+                if job.request_meta:
+                    logger.info(f"Retrying article generation for job {job_id}")
+                    # Reuse request_meta which contains the original article_request
+                    trigger_article_generation(slack_user_id, job.request_meta)
+                    return Response({
+                        'status': 'retried', 
+                        'job_id': job_id, 
+                        'message': 'Token refreshed and job retried'
+                    }, status=status.HTTP_200_OK)
+                
+                # Scenario B: Topic Confirmation (Phase 2)
+                elif job.selected_keyword:
+                     logger.info(f"Retrying topic confirmation for job {job_id}")
+                     confirm_topic(
+                         domain=domain,
+                         confirmed_keyword=job.selected_keyword,
+                         slack_user_id=slack_user_id
+                     )
+                     return Response({
+                         'status': 'retried', 
+                         'job_id': job_id, 
+                         'message': 'Token refreshed and job retried'
+                     }, status=status.HTTP_200_OK)
+                
+                else:
+                    logger.warning(f"Could not retry job {job_id} - no request metadata found")
+                    # If we can't retry, we still notify the user, 
+                    # but maybe we should update status to 'auth_refreshed_manual_retry_needed'?
+                    
+            except Exception as e:
+                logger.error(f"Failed to retry job {job_id} after token refresh: {e}")
+                # Fallthrough to manual notification
         
-        # Notify user via Slack
-        self._send_auth_required_notification(slack_user_id, domain, error_message, job_id)
+        # 3. Fallback: Notify user via Slack (Manual Re-auth)
+        try:
+             self._send_auth_required_notification(slack_user_id, domain, error_message, job_id)
+        except Exception as e:
+             logger.error(f"Failed to send auth_required notification: {e}")
+             # Return success anyway to avoid crashing the caller (Content Factory)
+             # The job status is already updated in DB so we can track it.
+             return Response({'status': 'processed_with_error', 'error': str(e)}, status=status.HTTP_200_OK)
 
         return Response({'status': 'processed', 'job_id': job_id}, status=status.HTTP_200_OK)
 
@@ -1125,59 +1255,70 @@ class ContentFactoryCallbackView(APIView):
         from django.urls import reverse
         from django.conf import settings
 
-        # Construct Re-Auth URL with job_id in state
-        # We point to our backend's connect endpoint, passing job_id as a query param
-        # The backend view will embed it into the OAuth state
-        base_url = settings.MEDHACK_URL.rstrip('/') # Use configured base URL
-        connect_path = reverse('github_connect')
-        auth_url = f"{base_url}{connect_path}?slack_user_id={slack_user_id}&job_id={job_id}"
+        try:
+            # Construct Re-Auth URL with job_id in state
+            # We point to our backend's connect endpoint, passing job_id as a query param
+            # The backend view will embed it into the OAuth state
+            base_url = getattr(settings, 'MEDHACK_URL', 'https://mlai.au').rstrip('/')
+            
+            try:
+                connect_path = reverse('github_connect')
+            except Exception:
+                # Fallback path if reverse fails or namespace issue
+                connect_path = '/integrations/connect/github'
+                
+            auth_url = f"{base_url}{connect_path}?slack_user_id={slack_user_id}&job_id={job_id}"
 
-        text = f"⚠️ GitHub Authentication Failed for {domain}"
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "⚠️ GitHub Authentication Failed",
-                    "emoji": True
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"The content pipeline could not access your repository for *{domain}*.\n\n*Error:* {error_message}"
-                }
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "🔐 Re-authenticate GitHub",
-                            "emoji": True
-                        },
-                        "style": "primary",
-                        "url": auth_url
-                    },
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "❌ Cancel",
-                            "emoji": True
-                        },
-                        "style": "danger",
-                        "action_id": "cancel_auth_required", # We might not handle this yet, but good practice
-                        "value": job_id
+            text = f"⚠️ GitHub Authentication Failed for {domain}"
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "⚠️ GitHub Authentication Failed",
+                        "emoji": True
                     }
-                ]
-            }
-        ]
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"The content pipeline could not access your repository for *{domain}*.\n\n*Error:* {error_message}"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🔐 Re-authenticate GitHub",
+                                "emoji": True
+                            },
+                            "style": "primary",
+                            "url": auth_url
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "❌ Cancel",
+                                "emoji": True
+                            },
+                            "style": "danger",
+                            "action_id": "cancel_auth_required", # We might not handle this yet, but good practice
+                            "value": job_id
+                        }
+                    ]
+                }
+            ]
 
-        SlackService.send_dm(slack_user_id, text, blocks=blocks)
+            SlackService.send_dm(slack_user_id, text, blocks=blocks)
+            
+        except Exception as e:
+            logger.error(f"Error constructing/sending Slack notification: {e}")
+            raise
 
     def _generate_topic_explanation(self, option_data, company_context=None, competitors=None):
         """Generate a user-friendly explanation for why this topic was chosen."""
