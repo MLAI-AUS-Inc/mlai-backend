@@ -105,6 +105,13 @@ class ContentConfirmView(APIView):
     """
     Confirm topic selection and trigger Phase 2 generation.
     POST /api/v1/content/confirm
+
+    Request Body:
+        domain: str (required) - Organization domain
+        confirmed_keyword: str (required) - Keyword to generate article for
+        slack_user_id: str (required) - Slack user ID
+        custom_title: str (optional) - Custom article title
+        skip_alternatives: list[str] (optional) - Keywords to mark as 'skipped'
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -114,15 +121,29 @@ class ContentConfirmView(APIView):
         confirmed_keyword = request.data.get('confirmed_keyword')
         slack_user_id = request.data.get('slack_user_id')
         custom_title = request.data.get('custom_title')
-        
+        skip_alternatives = request.data.get('skip_alternatives')
+
         if not all([domain, confirmed_keyword, slack_user_id]):
             return Response(
-                {"error": "domain, confirmed_keyword, and slack_user_id are required"}, 
+                {"error": "domain, confirmed_keyword, and slack_user_id are required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-            
+
+        # Validate skip_alternatives is a list if provided
+        if skip_alternatives is not None and not isinstance(skip_alternatives, list):
+            return Response(
+                {"error": "skip_alternatives must be a list of strings"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
-            result = confirm_topic(domain, confirmed_keyword, slack_user_id, custom_title)
+            result = confirm_topic(
+                domain=domain,
+                confirmed_keyword=confirmed_keyword,
+                slack_user_id=slack_user_id,
+                custom_title=custom_title,
+                skip_alternatives=skip_alternatives
+            )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleGenerationError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -135,6 +156,9 @@ class ContentJobConfirmView(APIView):
     """
     Confirm topic for a specific job and trigger generation.
     POST /api/v1/content/jobs/{job_id}/confirm
+
+    When a user confirms a topic, non-selected alternatives are marked as 'skipped'
+    in content-factory so they don't appear in future research runs.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -157,12 +181,16 @@ class ContentJobConfirmView(APIView):
         except ContentFactoryJob.DoesNotExist:
             return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Extract all options from selection_data for building skip_alternatives
+        options = []
+        if job.selection_data:
+            options = job.selection_data.get('options', [])
+
         # Handle option_index selection
         confirmed_keyword = None
         if option_index is not None:
             try:
                 idx = int(option_index)
-                options = job.selection_data.get('options', [])
                 if 0 <= idx < len(options):
                     option = options[idx]
                     confirmed_keyword = option.get('keyword') or option.get('selected_keyword')
@@ -172,7 +200,7 @@ class ContentJobConfirmView(APIView):
         # Use keyword from request, or fall back to job's selected_keyword
         if not confirmed_keyword:
             confirmed_keyword = keyword or job.selected_keyword
-            
+
         # Use domain from request, or fall back to job's domain
         resolved_domain = domain or job.domain
 
@@ -180,6 +208,13 @@ class ContentJobConfirmView(APIView):
             return Response({"error": "No keyword specified and job has no selected_keyword"}, status=status.HTTP_400_BAD_REQUEST)
         if not resolved_domain:
             return Response({"error": "No domain specified and job has no domain"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build skip_alternatives: all options except the confirmed keyword
+        skip_alternatives = []
+        for opt in options:
+            opt_keyword = opt.get('keyword') or opt.get('selected_keyword')
+            if opt_keyword and opt_keyword != confirmed_keyword:
+                skip_alternatives.append(opt_keyword)
 
         # Update job status
         job.status = 'confirmed'
@@ -193,12 +228,14 @@ class ContentJobConfirmView(APIView):
                 domain=resolved_domain,
                 confirmed_keyword=confirmed_keyword,
                 slack_user_id=slack_user_id,
-                custom_title=custom_title
+                custom_title=custom_title,
+                skip_alternatives=skip_alternatives if skip_alternatives else None
             )
             return Response({
                 "status": "confirmed",
                 "job_id": job.job_id,
                 "message": "Topic confirmed, article generation started.",
+                "skip_alternatives": skip_alternatives,
                 "cf_response": result
             }, status=status.HTTP_200_OK)
         except ArticleGenerationError as e:
