@@ -12,5 +12,8 @@ urlpatterns = [
     # Callback endpoint for content-factory events
     path('callback/', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback'),
     path('callback', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback_no_slash'),
+    # Token refresh endpoint for content-factory
+    path('token/', views.ContentFactoryTokenView.as_view(), name='content_factory_token'),
+    path('token', views.ContentFactoryTokenView.as_view(), name='content_factory_token_no_slash'),
 ]
 
