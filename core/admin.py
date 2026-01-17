@@ -69,8 +69,8 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
     search_fields = ('organization__name', 'organization__domain', 'brand_name', 'github_repo')
     list_select_related = ('organization',)
     list_filter = ('updated_at',)
-    readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'article_template_preview', 'design_guide_preview')
-    
+    readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'installed_packages_display', 'article_template_preview', 'design_guide_preview')
+
     fieldsets = (
         ('Organization', {
             'fields': ('organization', 'brand_name')
@@ -79,7 +79,7 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
             'fields': ('github_repo', 'github_token_encrypted', 'article_path_pattern', 'registry_path')
         }),
         ('Scan Results', {
-            'fields': ('scan_summary', 'tech_stack_display'),
+            'fields': ('scan_summary', 'tech_stack_display', 'installed_packages_display'),
             'description': 'Data returned from the content-factory scanner agent'
         }),
         ('Templates (LLM Generated)', {
@@ -89,6 +89,11 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
         ('Raw Template Data', {
             'fields': ('article_template', 'design_guide', 'company_context'),
             'classes': ('collapse',),
+        }),
+        ('Raw Package Data (Editable)', {
+            'fields': ('installed_packages',),
+            'classes': ('collapse',),
+            'description': 'Edit installed packages directly (JSON format)'
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -110,7 +115,23 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
         formatted = json.dumps(obj.tech_stack, indent=2)
         return format_html('<pre style="background: #f4f4f4; padding: 10px; border-radius: 4px; max-height: 200px; overflow: auto;">{}</pre>', formatted)
     tech_stack_display.short_description = 'Tech Stack'
-    
+
+    def installed_packages_display(self, obj):
+        """Pretty display of installed_packages JSON."""
+        if not obj.installed_packages:
+            return "No package data (run a scan to populate)"
+        import json
+        # Sort packages alphabetically for readability
+        sorted_packages = dict(sorted(obj.installed_packages.items()))
+        formatted = json.dumps(sorted_packages, indent=2)
+        count = len(obj.installed_packages)
+        return format_html(
+            '<div style="margin-bottom: 8px;"><strong>{} packages installed</strong></div>'
+            '<pre style="background: #f4f4f4; padding: 10px; border-radius: 4px; max-height: 300px; overflow: auto;">{}</pre>',
+            count, formatted
+        )
+    installed_packages_display.short_description = 'Installed Packages (from package.json)'
+
     def article_template_preview(self, obj):
         """Preview of article template (truncated)."""
         if not obj.article_template:

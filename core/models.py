@@ -129,6 +129,10 @@ class OrganizationContentConfig(models.Model):
     registry_path = models.CharField(max_length=255, default="app/articles/registry.ts")
     scan_summary = models.TextField(blank=True, null=True)
     tech_stack = models.JSONField(default=dict, blank=True)
+    installed_packages = models.JSONField(
+        default=dict, blank=True,
+        help_text="Full list of installed packages from package.json {name: version}"
+    )
     brand_name = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
