@@ -700,10 +700,11 @@ class ContentFactoryOrgConfigView(APIView):
             'brand_name': config.brand_name if config else None,
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
+            'installed_packages': config.installed_packages if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
         }
-        
+
         return Response(response_data, status=status.HTTP_200_OK)
 
     def put(self, request):
@@ -765,6 +766,7 @@ class ContentFactoryOrgConfigView(APIView):
             'brand_name',
             'scan_summary',
             'tech_stack',
+            'installed_packages',
             'article_path_pattern',
             'registry_path',
         ]
