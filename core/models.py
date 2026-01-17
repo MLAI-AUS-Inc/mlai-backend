@@ -133,6 +133,10 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="Full list of installed packages from package.json {name: version}"
     )
+    pillar_strategy = models.JSONField(
+        default=dict, blank=True,
+        help_text="SEO content pillars with slugs and topics derived from company context"
+    )
     brand_name = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

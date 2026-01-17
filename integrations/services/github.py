@@ -350,9 +350,20 @@ def scan_github_project(
     # Update project_scanned status and tracking info
     from django.utils import timezone
     integration.project_scanned = True
-    if current_sha:
-        integration.last_scanned_sha = current_sha
-        integration.last_scanned_at = timezone.now()
+
+    # Fetch the CURRENT latest SHA after scan completes (not the one from start)
+    # This prevents false "has_updates" if commits were pushed during the scan
+    try:
+        final_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
+        integration.last_scanned_sha = final_sha
+        logger.info(f"Updated last_scanned_sha to final SHA: {final_sha}")
+    except Exception as e:
+        # Fallback to the SHA from scan start if re-fetch fails
+        logger.warning(f"Failed to fetch final SHA, using start SHA: {e}")
+        if current_sha:
+            integration.last_scanned_sha = current_sha
+
+    integration.last_scanned_at = timezone.now()
     integration.save()
 
     # Save scan artifacts to OrganizationContentConfig
