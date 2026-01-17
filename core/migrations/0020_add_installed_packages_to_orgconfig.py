@@ -19,4 +19,13 @@ class Migration(migrations.Migration):
                 help_text='Full list of installed packages from package.json {name: version}'
             ),
         ),
+        migrations.AddField(
+            model_name='organizationcontentconfig',
+            name='pillar_strategy',
+            field=models.JSONField(
+                blank=True,
+                default=dict,
+                help_text='SEO content pillars with slugs and topics derived from company context'
+            ),
+        ),
     ]

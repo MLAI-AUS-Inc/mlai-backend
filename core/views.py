@@ -701,6 +701,7 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
             'installed_packages': config.installed_packages if config else {},
+            'pillar_strategy': config.pillar_strategy if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
         }
@@ -767,6 +768,7 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_summary',
             'tech_stack',
             'installed_packages',
+            'pillar_strategy',
             'article_path_pattern',
             'registry_path',
         ]

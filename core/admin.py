@@ -69,7 +69,7 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
     search_fields = ('organization__name', 'organization__domain', 'brand_name', 'github_repo')
     list_select_related = ('organization',)
     list_filter = ('updated_at',)
-    readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'installed_packages_display', 'article_template_preview', 'design_guide_preview')
+    readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'installed_packages_display', 'pillar_strategy_display', 'article_template_preview', 'design_guide_preview')
 
     fieldsets = (
         ('Organization', {
@@ -82,6 +82,10 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
             'fields': ('scan_summary', 'tech_stack_display', 'installed_packages_display'),
             'description': 'Data returned from the content-factory scanner agent'
         }),
+        ('SEO Content Pillars', {
+            'fields': ('pillar_strategy_display',),
+            'description': 'Content pillars derived from company context for SEO strategy'
+        }),
         ('Templates (LLM Generated)', {
             'fields': ('article_template_preview', 'design_guide_preview'),
             'classes': ('collapse',),  # Collapsible since these are large
@@ -90,10 +94,10 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
             'fields': ('article_template', 'design_guide', 'company_context'),
             'classes': ('collapse',),
         }),
-        ('Raw Package Data (Editable)', {
-            'fields': ('installed_packages',),
+        ('Raw Data (Editable)', {
+            'fields': ('installed_packages', 'pillar_strategy'),
             'classes': ('collapse',),
-            'description': 'Edit installed packages directly (JSON format)'
+            'description': 'Edit raw JSON data directly'
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -131,6 +135,40 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
             count, formatted
         )
     installed_packages_display.short_description = 'Installed Packages (from package.json)'
+
+    def pillar_strategy_display(self, obj):
+        """Pretty display of pillar_strategy JSON."""
+        if not obj.pillar_strategy:
+            return "No pillar data (run a scan to generate)"
+        import json
+
+        pillars = obj.pillar_strategy.get('pillars', [])
+        if not pillars:
+            return format_html('<pre style="background: #f4f4f4; padding: 10px; border-radius: 4px;">{}</pre>',
+                             json.dumps(obj.pillar_strategy, indent=2))
+
+        # Build a nice HTML display
+        html = '<div style="display: flex; flex-wrap: wrap; gap: 12px;">'
+        for pillar in pillars:
+            name = pillar.get('name', 'Unknown')
+            slug = pillar.get('slug', '')
+            description = pillar.get('description', '')[:100]
+            topics = pillar.get('topics', [])[:5]  # Show first 5 topics
+
+            html += f'''
+            <div style="background: #e8f4fd; border: 1px solid #1976d2; border-radius: 8px; padding: 12px; min-width: 250px; max-width: 300px;">
+                <div style="font-weight: bold; color: #1565c0; margin-bottom: 4px;">{name}</div>
+                <div style="font-size: 11px; color: #666; margin-bottom: 8px;">/{slug}/</div>
+                <div style="font-size: 12px; color: #333; margin-bottom: 8px;">{description}...</div>
+                <div style="font-size: 11px; color: #555;">
+                    <strong>Topics:</strong> {', '.join(topics[:3])}{'...' if len(topics) > 3 else ''}
+                </div>
+            </div>
+            '''
+        html += '</div>'
+
+        return format_html(html)
+    pillar_strategy_display.short_description = 'Content Pillars'
 
     def article_template_preview(self, obj):
         """Preview of article template (truncated)."""

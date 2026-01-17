@@ -90,6 +90,17 @@ class GithubTokenIdentityView(APIView):
                     latest_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
                     if latest_sha and latest_sha != integration.last_scanned_sha:
                         has_updates = True
+
+                    # Check if recently scanned (within 5 minutes) - avoid re-scanning
+                    # even if there are minor updates
+                    if has_updates and integration.last_scanned_at:
+                        from django.utils import timezone
+                        from datetime import timedelta
+                        scan_cooldown = timedelta(minutes=5)
+                        if timezone.now() - integration.last_scanned_at < scan_cooldown:
+                            # Mark as recently scanned - bot can skip re-scan
+                            has_updates = False  # Override: don't trigger re-scan
+                            logger.info(f"Suppressing has_updates for {slack_user_id}: scanned {(timezone.now() - integration.last_scanned_at).seconds}s ago")
             except requests.exceptions.HTTPError as e:
                 # Handle expired token (401) or revoked access (404)
                 if e.response.status_code == 401:
