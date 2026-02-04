@@ -9,6 +9,15 @@ urlpatterns = [
     path('org/components', views.ContentFactoryComponentsView.as_view(), name='content_factory_components_no_slash'),
     path('org/components/<str:name>/', views.ContentFactoryComponentDetailView.as_view(), name='content_factory_component_detail'),
     path('org/components/<str:name>', views.ContentFactoryComponentDetailView.as_view(), name='content_factory_component_detail_no_slash'),
+    # GitHub connection status endpoint
+    path('org/github-status/', views.ContentFactoryGitHubStatusView.as_view(), name='content_factory_github_status'),
+    path('org/github-status', views.ContentFactoryGitHubStatusView.as_view(), name='content_factory_github_status_no_slash'),
+    # GitHub OAuth initiate endpoint (for domain-level OAuth)
+    path('oauth/initiate/', views.ContentFactoryOAuthInitiateView.as_view(), name='content_factory_oauth_initiate'),
+    path('oauth/initiate', views.ContentFactoryOAuthInitiateView.as_view(), name='content_factory_oauth_initiate_no_slash'),
+    # Connect GitHub to organization endpoint
+    path('org/connect-github/', views.ContentFactoryConnectGitHubView.as_view(), name='content_factory_connect_github'),
+    path('org/connect-github', views.ContentFactoryConnectGitHubView.as_view(), name='content_factory_connect_github_no_slash'),
     # Callback endpoint for content-factory events
     path('callback/', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback'),
     path('callback', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback_no_slash'),

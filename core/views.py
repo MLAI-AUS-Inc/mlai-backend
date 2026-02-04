@@ -1040,75 +1040,407 @@ class LinkSlackView(APIView):
 class ContentFactoryTokenView(APIView):
     """
     On-demand token refresh endpoint for content-factory.
-    
+
+    GET /api/content-factory/token?domain=mlai.au
     GET /api/content-factory/token?slack_user_id=U12345
-    
+
     Content-factory can call this endpoint mid-job to get a fresh GitHub token
     without needing to restart the entire pipeline.
-    
+
+    Supports both:
+    - domain: Fetches org-level token (preferred)
+    - slack_user_id: Fetches user-level token (legacy fallback)
+
     Returns:
         {
             "github_token": "ghu_xxxx...",
             "github_repo": "owner/repo",
+            "expires_at": "2024-01-16T12:00:00Z" (optional),
+            "source": "org" | "user"
+        }
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def get(self, request):
+        from integrations.services.github import ensure_valid_token, TokenRefreshError
+        from integrations.services.article_generation import ensure_valid_org_token, ArticleGenerationError
+        from integrations.models import UserIntegration
+
+        domain = request.query_params.get('domain')
+        slack_user_id = request.query_params.get('slack_user_id')
+
+        if not domain and not slack_user_id:
+            return Response(
+                {'error': 'Either domain or slack_user_id query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Try domain-based lookup first (org-level)
+        if domain:
+            normalized_domain = self._normalize_domain(domain)
+            try:
+                fresh_token = ensure_valid_org_token(normalized_domain)
+
+                # Fetch config for additional context
+                org = Organization.objects.get(domain=normalized_domain)
+                config = org.content_config
+
+                response_data = {
+                    'github_token': fresh_token,
+                    'github_repo': config.github_repo,
+                    'domain': normalized_domain,
+                    'source': 'org',
+                }
+
+                if config.github_token_expires_at:
+                    response_data['expires_at'] = config.github_token_expires_at.isoformat()
+
+                logger.info(f"Provided fresh org-level GitHub token for {normalized_domain}")
+                return Response(response_data, status=status.HTTP_200_OK)
+
+            except Organization.DoesNotExist:
+                if not slack_user_id:
+                    return Response(
+                        {'error': f'Organization not found: {domain}'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                # Fall through to user-level lookup
+            except (ArticleGenerationError, TokenRefreshError) as e:
+                if not slack_user_id:
+                    logger.warning(f"Token refresh failed for org {domain}: {e}")
+                    return Response(
+                        {
+                            'error': 'Token refresh failed',
+                            'message': str(e),
+                            'action_required': 'auth_required'
+                        },
+                        status=status.HTTP_401_UNAUTHORIZED
+                    )
+                # Fall through to user-level lookup
+
+        # User-level lookup (legacy fallback)
+        if slack_user_id:
+            try:
+                fresh_token = ensure_valid_token(slack_user_id)
+
+                integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
+
+                response_data = {
+                    'github_token': fresh_token,
+                    'github_repo': integration.github_repo,
+                    'slack_user_id': slack_user_id,
+                    'source': 'user',
+                }
+
+                if integration.github_token_expires_at:
+                    response_data['expires_at'] = integration.github_token_expires_at.isoformat()
+
+                logger.info(f"Provided fresh user-level GitHub token for {slack_user_id}")
+                return Response(response_data, status=status.HTTP_200_OK)
+
+            except UserIntegration.DoesNotExist:
+                return Response(
+                    {'error': 'No integration found for this user'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            except TokenRefreshError as e:
+                logger.warning(f"Token refresh failed for {slack_user_id}: {e}")
+                return Response(
+                    {
+                        'error': 'Token refresh failed',
+                        'message': str(e),
+                        'action_required': 'auth_required'
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+        return Response(
+            {'error': 'No valid credentials found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+class ContentFactoryGitHubStatusView(APIView):
+    """
+    Check GitHub connection status for an organization/domain.
+
+    GET /api/content-factory/org/github-status?domain=mlai.au
+
+    Returns:
+        {
+            "connected": true/false,
+            "github_repo": "owner/repo",
+            "github_user_name": "username",
+            "token_valid": true/false,
             "expires_at": "2024-01-16T12:00:00Z" (optional)
         }
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    def _normalize_domain(self, domain: str) -> str:
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
     def get(self, request):
-        from integrations.services.github import ensure_valid_token, TokenRefreshError
-        from integrations.models import UserIntegration
-        
-        slack_user_id = request.query_params.get('slack_user_id')
-        
-        if not slack_user_id:
+        domain = request.query_params.get('domain')
+
+        if not domain:
             return Response(
-                {'error': 'slack_user_id query parameter is required'},
+                {'error': 'domain query parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        normalized_domain = self._normalize_domain(domain)
+
         try:
-            # Get fresh token (auto-refreshes if expired)
-            fresh_token = ensure_valid_token(slack_user_id)
-            
-            # Fetch integration for additional context
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-            
-            response_data = {
-                'github_token': fresh_token,
-                'github_repo': integration.github_repo,
-                'slack_user_id': slack_user_id,
-            }
-            
-            # Include expiry if available
-            if integration.github_token_expires_at:
-                response_data['expires_at'] = integration.github_token_expires_at.isoformat()
-            
-            logger.info(f"Provided fresh GitHub token for {slack_user_id}")
-            return Response(response_data, status=status.HTTP_200_OK)
-            
-        except UserIntegration.DoesNotExist:
+            org = Organization.objects.get(domain=normalized_domain)
+        except Organization.DoesNotExist:
+            return Response({
+                'connected': False,
+                'domain': normalized_domain,
+                'message': 'Organization not found. Please set up the organization first.'
+            }, status=status.HTTP_200_OK)
+
+        config = getattr(org, 'content_config', None)
+
+        if not config or not config.github_token_encrypted:
+            return Response({
+                'connected': False,
+                'domain': normalized_domain,
+                'github_repo': config.github_repo if config else None,
+                'message': 'No GitHub token configured for this organization.'
+            }, status=status.HTTP_200_OK)
+
+        # Check if token is expired
+        from django.utils import timezone
+        token_valid = True
+        if config.github_token_expires_at:
+            buffer_time = timezone.timedelta(minutes=5)
+            token_valid = timezone.now() < (config.github_token_expires_at - buffer_time)
+
+        response_data = {
+            'connected': True,
+            'domain': normalized_domain,
+            'github_repo': config.github_repo,
+            'github_user_name': config.github_user_name,
+            'token_valid': token_valid,
+        }
+
+        if config.github_token_expires_at:
+            response_data['expires_at'] = config.github_token_expires_at.isoformat()
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class ContentFactoryOAuthInitiateView(APIView):
+    """
+    Initiate GitHub OAuth flow for a specific domain.
+
+    POST /api/content-factory/oauth/initiate
+    {
+        "domain": "mlai.au",
+        "slack_user_id": "U12345" (optional, for callback routing)
+    }
+
+    Returns:
+        {
+            "oauth_url": "https://github.com/apps/mlai-tools/installations/new?state=..."
+        }
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def post(self, request):
+        import secrets
+        import urllib.parse
+        from django.conf import settings
+
+        domain = request.data.get('domain')
+        slack_user_id = request.data.get('slack_user_id', '')
+
+        if not domain:
             return Response(
-                {'error': 'No integration found for this user'},
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'domain is required'},
+                status=status.HTTP_400_BAD_REQUEST
             )
-        except TokenRefreshError as e:
-            logger.warning(f"Token refresh failed for {slack_user_id}: {e}")
+
+        normalized_domain = self._normalize_domain(domain)
+
+        # Ensure organization exists (create if needed)
+        org, _ = Organization.objects.get_or_create(
+            domain=normalized_domain,
+            defaults={'name': normalized_domain}
+        )
+
+        # Build state: domain::random_token::slack_user_id::type
+        # The 'org' type distinguishes this from user-level OAuth
+        rand_token = secrets.token_urlsafe(16)
+        state = f"{normalized_domain}::{rand_token}::{slack_user_id}::org"
+
+        # Store state in cache for validation (optional but recommended)
+        from django.core.cache import cache
+        cache.set(f"github_oauth_state:{rand_token}", state, timeout=600)  # 10 min expiry
+
+        # GitHub App installation URL
+        app_slug = "mlai-tools"
+        install_url = f"https://github.com/apps/{app_slug}/installations/new"
+
+        params = {"state": state}
+        oauth_url = install_url + "?" + urllib.parse.urlencode(params)
+
+        return Response({
+            'oauth_url': oauth_url,
+            'domain': normalized_domain,
+            'state': state,
+        }, status=status.HTTP_200_OK)
+
+
+class ContentFactoryConnectGitHubView(APIView):
+    """
+    Save GitHub credentials for an organization after OAuth completion.
+
+    POST /api/content-factory/org/connect-github
+    {
+        "domain": "mlai.au",
+        "github_token": "ghu_xxx...",
+        "github_refresh_token": "ghr_xxx...",
+        "github_token_expires_at": "2024-01-16T12:00:00Z",
+        "github_user_name": "username",
+        "github_repo": "owner/repo",
+        "github_installation_id": "12345"
+    }
+
+    Called by the OAuth callback to store org-level GitHub credentials.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def post(self, request):
+        from django.utils import timezone
+        from dateutil import parser as date_parser
+
+        data = request.data
+        domain = data.get('domain')
+        github_token = data.get('github_token')
+
+        if not domain:
             return Response(
-                {
-                    'error': 'Token refresh failed',
-                    'message': str(e),
-                    'action_required': 'auth_required'
-                },
-                status=status.HTTP_401_UNAUTHORIZED
+                {'error': 'domain is required'},
+                status=status.HTTP_400_BAD_REQUEST
             )
-        except Exception as e:
-            logger.exception(f"Error fetching token for {slack_user_id}: {e}")
+
+        if not github_token:
             return Response(
-                {'error': 'Internal server error'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': 'github_token is required'},
+                status=status.HTTP_400_BAD_REQUEST
             )
+
+        normalized_domain = self._normalize_domain(domain)
+
+        # Get or create organization
+        org, org_created = Organization.objects.get_or_create(
+            domain=normalized_domain,
+            defaults={'name': normalized_domain}
+        )
+
+        # Get or create config
+        config, config_created = OrganizationContentConfig.objects.get_or_create(
+            organization=org
+        )
+
+        # Update GitHub credentials
+        config.github_token_encrypted = github_token
+
+        if 'github_refresh_token' in data:
+            config.github_refresh_token_encrypted = data['github_refresh_token']
+
+        if 'github_token_expires_at' in data:
+            expires_at = data['github_token_expires_at']
+            if isinstance(expires_at, str):
+                try:
+                    config.github_token_expires_at = date_parser.parse(expires_at)
+                except Exception:
+                    pass
+            else:
+                config.github_token_expires_at = expires_at
+
+        if 'github_user_name' in data:
+            config.github_user_name = data['github_user_name']
+
+        if 'github_repo' in data:
+            config.github_repo = data['github_repo']
+
+        if 'github_installation_id' in data:
+            config.github_installation_id = data['github_installation_id']
+
+        if 'github_scopes' in data:
+            config.github_scopes = data['github_scopes']
+
+        config.save()
+
+        logger.info(f"Connected GitHub for organization {normalized_domain}: repo={config.github_repo}, user={config.github_user_name}")
+
+        return Response({
+            'status': 'connected',
+            'domain': normalized_domain,
+            'github_repo': config.github_repo,
+            'github_user_name': config.github_user_name,
+        }, status=status.HTTP_200_OK)
+
 
 class ContentFactoryCallbackView(APIView):
     """
@@ -1586,6 +1918,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_error(self, data):
         """Handle error event from content-factory."""
         from .models import ContentFactoryJob
+        from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
         error_message = data.get('error_message', 'Unknown error')
@@ -1604,6 +1937,38 @@ class ContentFactoryCallbackView(APIView):
         )
 
         logger.error(f"Error callback for job {job_id}: {error_message}")
+
+        # Notify user via Slack
+        if slack_user_id:
+            try:
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "❌ Content Pipeline Failed",
+                            "emoji": True
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"The article generation pipeline encountered an error for *{domain}*.\n\n*Error:* {error_message}"
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "You can try again by requesting a new article, or contact support if the issue persists."
+                        }
+                    }
+                ]
+                SlackService.send_dm(slack_user_id, f"Content pipeline error for {domain}", blocks=blocks)
+                logger.info(f"Sent error notification to {slack_user_id} for job {job_id}")
+            except Exception as e:
+                logger.warning(f"Failed to send error notification to {slack_user_id}: {e}")
 
         return Response({
             'status': 'received',

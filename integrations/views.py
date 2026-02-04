@@ -133,36 +133,56 @@ def github_connect(request):
     url = install_url + "?" + urllib.parse.urlencode(params)
     return redirect(url)
 
+import logging
+logger = logging.getLogger(__name__)
+
 def github_callback(request):
     """
     Handles GitHub App installation callback.
-    
+
     When a user installs the GitHub App, GitHub redirects here with:
     - installation_id: The ID of the GitHub App installation
     - setup_action: "install" or "update"
     - code: Authorization code to exchange for user access token
-    - state: Our state parameter with slack_user_id
+    - state: Our state parameter with slack_user_id OR domain (for org-level OAuth)
+
+    State formats:
+    - User-level: slack_user_id::random_token::job_id (legacy)
+    - Org-level: domain::random_token::slack_user_id::org
     """
     code = request.GET.get("code")
     state = request.GET.get("state")
     installation_id = request.GET.get("installation_id")
     setup_action = request.GET.get("setup_action")
-    
+
     if not code:
         return HttpResponseBadRequest("Missing code")
-    
+
     if not installation_id:
         return HttpResponseBadRequest("Missing installation_id - this endpoint requires GitHub App installation")
-    
-    # Extract slack_user_id and job_id from state
+
+    # Parse state to determine OAuth type (user vs org)
+    is_org_oauth = False
+    slack_user_id = None
     job_id = None
+    domain = None
+
     try:
         parts = state.split("::")
-        slack_user_id = parts[0]
-        # parts[1] is rand_token
-        if len(parts) >= 3:
-            job_id = parts[2]
-            if job_id == 'None': job_id = None # handle potential str conversion artifacts
+        # Check if this is org-level OAuth (state ends with "org")
+        if len(parts) >= 4 and parts[3] == 'org':
+            is_org_oauth = True
+            domain = parts[0]
+            # parts[1] is rand_token
+            slack_user_id = parts[2] if parts[2] else None
+        else:
+            # Legacy user-level OAuth
+            slack_user_id = parts[0]
+            # parts[1] is rand_token
+            if len(parts) >= 3:
+                job_id = parts[2]
+                if job_id == 'None' or job_id == '':
+                    job_id = None
     except (ValueError, AttributeError):
         return HttpResponseBadRequest("Invalid state format")
 
@@ -232,44 +252,108 @@ def github_callback(request):
         # For now, we'll use the first one but show a message
         selected_repo = repos[0]["full_name"]
 
-    # Store in UserIntegration
-    UserIntegration.objects.update_or_create(
-        slack_user_id=slack_user_id,
-        defaults={
-            "github_access_token": access_token,
-            "github_refresh_token": refresh_token,
-            "github_token_expires_at": token_expires_at,
-            "github_user_name": github_login,
-            "github_repo": selected_repo,
-            "github_installation_id": installation_id,
-            "github_scopes": [],  # GitHub Apps use permissions, not scopes
-        }
-    )
-
-    # Trigger background scan if repo is selected
-    if selected_repo:
-        from integrations.services.github import trigger_scan_async
-        trigger_scan_async(slack_user_id)
-
-    # Trigger RETRY if job_id was present
     retry_message = ""
-    if job_id and selected_repo:
-        try:
-            from core.models import ContentFactoryJob
-            from integrations.services.article_generation import trigger_article_generation
-            
-            job = ContentFactoryJob.objects.get(job_id=job_id)
-            if job.request_meta:
-                 # Re-trigger the generation with original request
-                 # We don't need to specify domain/topic/keyword again if request_meta has it
-                 # But trigger_article_generation expects them in article_request dict
-                 trigger_article_generation(slack_user_id, job.request_meta)
-                 retry_message = "<p>🔄 <strong>Successfully retried your article generation!</strong> You'll get a notification in Slack shortly.</p>"
-            else:
-                 logger.warning(f"Could not retry job {job_id}: No request_meta found")
-        except Exception as e:
-            logger.error(f"Failed to auto-retry job {job_id}: {e}")
-            retry_message = f"<p style='color:orange'>⚠️ Could not auto-retry: {e}</p>"
+    domain_display = ""
+
+    if is_org_oauth:
+        # ====== ORG-LEVEL OAUTH ======
+        # Store credentials in OrganizationContentConfig for the domain
+        from core.models import Organization, OrganizationContentConfig
+
+        # Normalize domain
+        normalized_domain = domain.lower().strip()
+        if normalized_domain.startswith('https://'):
+            normalized_domain = normalized_domain[8:]
+        elif normalized_domain.startswith('http://'):
+            normalized_domain = normalized_domain[7:]
+        if normalized_domain.startswith('www.'):
+            normalized_domain = normalized_domain[4:]
+        if '/' in normalized_domain:
+            normalized_domain = normalized_domain.split('/')[0]
+
+        # Get or create organization
+        org, _ = Organization.objects.get_or_create(
+            domain=normalized_domain,
+            defaults={'name': normalized_domain}
+        )
+
+        # Get or create config and update GitHub credentials
+        config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+        config.github_token_encrypted = access_token
+        config.github_refresh_token_encrypted = refresh_token
+        config.github_token_expires_at = token_expires_at
+        config.github_user_name = github_login
+        config.github_repo = selected_repo
+        config.github_installation_id = installation_id
+        config.github_scopes = []
+        config.save()
+
+        logger.info(f"Org-level GitHub connected for {normalized_domain}: repo={selected_repo}, user={github_login}")
+        domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
+
+        # Also store in UserIntegration if slack_user_id provided (for backward compatibility)
+        if slack_user_id:
+            UserIntegration.objects.update_or_create(
+                slack_user_id=slack_user_id,
+                defaults={
+                    "github_access_token": access_token,
+                    "github_refresh_token": refresh_token,
+                    "github_token_expires_at": token_expires_at,
+                    "github_user_name": github_login,
+                    "github_repo": selected_repo,
+                    "github_installation_id": installation_id,
+                    "github_scopes": [],
+                }
+            )
+
+        # Notify via Slack if slack_user_id provided
+        if slack_user_id and selected_repo:
+            try:
+                from integrations.services.slack import SlackService
+                SlackService.send_dm(
+                    slack_user_id,
+                    f"✅ GitHub connected for *{normalized_domain}*! Repository `{selected_repo}` is now linked."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send Slack notification: {e}")
+
+    else:
+        # ====== USER-LEVEL OAUTH (Legacy) ======
+        # Store in UserIntegration
+        UserIntegration.objects.update_or_create(
+            slack_user_id=slack_user_id,
+            defaults={
+                "github_access_token": access_token,
+                "github_refresh_token": refresh_token,
+                "github_token_expires_at": token_expires_at,
+                "github_user_name": github_login,
+                "github_repo": selected_repo,
+                "github_installation_id": installation_id,
+                "github_scopes": [],  # GitHub Apps use permissions, not scopes
+            }
+        )
+
+        # Trigger background scan if repo is selected
+        if selected_repo:
+            from integrations.services.github import trigger_scan_async
+            trigger_scan_async(slack_user_id)
+
+        # Trigger RETRY if job_id was present
+        if job_id and selected_repo:
+            try:
+                from core.models import ContentFactoryJob
+                from integrations.services.article_generation import trigger_article_generation
+
+                job = ContentFactoryJob.objects.get(job_id=job_id)
+                if job.request_meta:
+                    # Re-trigger the generation with original request
+                    trigger_article_generation(slack_user_id, job.request_meta)
+                    retry_message = "<p>🔄 <strong>Successfully retried your article generation!</strong> You'll get a notification in Slack shortly.</p>"
+                else:
+                    logger.warning(f"Could not retry job {job_id}: No request_meta found")
+            except Exception as e:
+                logger.error(f"Failed to auto-retry job {job_id}: {e}")
+                retry_message = f"<p style='color:orange'>⚠️ Could not auto-retry: {e}</p>"
 
     # Build success message
     if selected_repo:
@@ -285,6 +369,7 @@ def github_callback(request):
     <body style="font-family: sans-serif; text-align: center; padding-top: 50px; max-width: 600px; margin: 0 auto;">
         <h1 style="color: green;">✅ GitHub App Installed!</h1>
         <p>Connected as <strong>{github_login}</strong></p>
+        {domain_display}
         {repo_list_html}
         {retry_message}
         <p>You can now close this window and return to Slack.</p>
