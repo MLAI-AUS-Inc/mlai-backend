@@ -42,7 +42,14 @@ class ContentGenerateView(APIView):
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            error_str = str(e)
+            response_data = {"error": error_str}
+            # Include structured auth fields so the bot can prompt for GitHub connection
+            if "Please connect GitHub:" in error_str:
+                response_data["needs_github_auth"] = True
+                response_data["oauth_url"] = error_str.split("Please connect GitHub: ")[-1]
+                response_data["domain"] = article_request.get("domain")
+            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in generation view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
