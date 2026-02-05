@@ -1,4 +1,6 @@
 import logging
+import secrets
+import urllib.parse
 import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
@@ -14,6 +16,22 @@ logger = logging.getLogger(__name__)
 class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
+
+
+def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
+    """
+    Build a GitHub App OAuth URL for domain-level authentication.
+
+    Returns a URL the user can visit to connect GitHub for the given domain.
+    """
+    normalized_domain = normalize_domain(domain) if domain else ''
+    rand_token = secrets.token_urlsafe(16)
+    state = f"{normalized_domain}::{rand_token}::{slack_user_id}::org"
+
+    app_slug = "mlai-tools"
+    install_url = f"https://github.com/apps/{app_slug}/installations/new"
+    params = {"state": state}
+    return install_url + "?" + urllib.parse.urlencode(params)
 
 
 def refresh_org_github_token(domain: str) -> dict:
@@ -185,9 +203,10 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
         except TokenRefreshError as e:
             raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
 
+    oauth_url = build_github_oauth_url(domain, slack_user_id or '')
     raise ArticleGenerationError(
         f"No GitHub credentials found for domain '{domain}'. "
-        "Please connect GitHub to this organization first."
+        f"Please connect GitHub: {oauth_url}"
     )
 
 
@@ -290,7 +309,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     payload = {
         "slack_user_id": slack_user_id,
-        "github_repo": integration.github_repo,
+        "github_repo": github_repo,
         "github_token": fresh_token,  # Use the refreshed token
 
         # Generated Content Parameters

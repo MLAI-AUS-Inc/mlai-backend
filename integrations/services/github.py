@@ -165,25 +165,62 @@ def scan_github_project(
     Raises:
         ScanError: If validation fails or the external call fails.
     """
-    # Fetch integration if not provided
+    # Resolve credentials: try org-level first, then fall back to UserIntegration
+    from core.models import Organization, OrganizationContentConfig
+    from integrations.services.article_generation import get_github_credentials_for_domain
+
+    resolved_domain = normalize_domain(domain)
+    github_token = None
+    github_repo = None
+    cred_source = None
+
+    # 1. Try org-level credentials if domain is provided
+    if resolved_domain:
+        try:
+            creds = get_github_credentials_for_domain(resolved_domain, slack_user_id)
+            github_token = creds['token']
+            github_repo = creds['repo']
+            cred_source = creds['source']
+            logger.info(f"Scan using {cred_source}-level credentials for {resolved_domain}: repo={github_repo}")
+        except Exception as e:
+            logger.debug(f"Could not resolve credentials via domain for scan: {e}")
+
+    # 2. Fall back to UserIntegration if org-level didn't work
     if integration is None:
         try:
             integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
         except UserIntegration.DoesNotExist:
-            raise ScanError("No integration found for this user. Please connect GitHub first.")
+            if not github_token:
+                from integrations.services.article_generation import build_github_oauth_url
+                oauth_url = build_github_oauth_url(resolved_domain or '', slack_user_id)
+                raise ScanError(
+                    f"No GitHub credentials found for domain '{resolved_domain or 'unknown'}'. "
+                    f"Please connect GitHub: {oauth_url}"
+                )
+            integration = None  # No UserIntegration, but we have org-level creds
 
-    # Validate token
-    if not integration.github_access_token:
-        raise ScanError("No GitHub token found. Please authenticate with GitHub first.")
+    if not github_token and integration:
+        if not integration.github_access_token:
+            raise ScanError("No GitHub token found. Please authenticate with GitHub first.")
+        if not integration.github_repo:
+            raise ScanError("No GitHub repository configured for this user.")
+        github_token = integration.github_access_token
+        github_repo = integration.github_repo
+        cred_source = 'user'
+        logger.info(f"Scan using user-level credentials for {slack_user_id}: repo={github_repo}")
 
-    # Validate repo
-    if not integration.github_repo:
-        raise ScanError("No GitHub repository configured for this user.")
+    if not github_token or not github_repo:
+        from integrations.services.article_generation import build_github_oauth_url
+        oauth_url = build_github_oauth_url(resolved_domain or '', slack_user_id)
+        raise ScanError(
+            f"No GitHub credentials found for domain '{resolved_domain or 'unknown'}'. "
+            f"Please connect GitHub: {oauth_url}"
+        )
 
     # Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
-    
+
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -196,30 +233,35 @@ def scan_github_project(
     import requests as http_requests_lib
     current_sha = None
     try:
-        current_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
+        current_sha = get_latest_repo_sha(github_token, github_repo)
     except http_requests_lib.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             raise ScanError("GitHub token expired. Please reconnect your GitHub account.")
         elif e.response.status_code in [403, 404]:
             raise ScanError("GitHub access revoked or repository not found. Please reconnect your GitHub account.")
         else:
-            logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
+            logger.warning(f"Failed to fetch latest SHA for {github_repo}: {e}")
     except Exception as e:
-        logger.warning(f"Failed to fetch latest SHA for {integration.github_repo}: {e}")
+        logger.warning(f"Failed to fetch latest SHA for {github_repo}: {e}")
 
     # Prepare existing artifacts if available and resolve domain
     config = None
     existing_artifacts = {}
-    resolved_domain = normalize_domain(domain)
     try:
-        from core.models import OrganizationContentConfig
-        # Try to find config by repo name (stored as github_repo in Config)
-        config = (
-            OrganizationContentConfig.objects
-            .select_related('organization')
-            .filter(github_repo=integration.github_repo)
-            .first()
-        )
+        # Try to find config by domain first, then by repo
+        if resolved_domain:
+            try:
+                org = Organization.objects.get(domain=resolved_domain)
+                config = getattr(org, 'content_config', None)
+            except Organization.DoesNotExist:
+                pass
+        if config is None:
+            config = (
+                OrganizationContentConfig.objects
+                .select_related('organization')
+                .filter(github_repo=github_repo)
+                .first()
+            )
         if config:
             if config.article_template:
                 existing_artifacts['article_template'] = config.article_template
@@ -244,8 +286,8 @@ def scan_github_project(
     try:
         payload = {
             "slack_user_id": slack_user_id,
-            "github_repo": integration.github_repo,
-            "github_token": integration.github_access_token,
+            "github_repo": github_repo,
+            "github_token": github_token,
             "domain": resolved_domain,
             "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
             "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
@@ -347,33 +389,34 @@ def scan_github_project(
     except Exception as e:
         raise ScanError(f"Unexpected error during scan: {e}")
 
-    # Update project_scanned status and tracking info
+    # Update project_scanned status and tracking info on UserIntegration (if available)
     from django.utils import timezone
-    integration.project_scanned = True
+    if integration:
+        integration.project_scanned = True
 
-    # Fetch the CURRENT latest SHA after scan completes (not the one from start)
-    # This prevents false "has_updates" if commits were pushed during the scan
-    try:
-        final_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
-        integration.last_scanned_sha = final_sha
-        logger.info(f"Updated last_scanned_sha to final SHA: {final_sha}")
-    except Exception as e:
-        # Fallback to the SHA from scan start if re-fetch fails
-        logger.warning(f"Failed to fetch final SHA, using start SHA: {e}")
-        if current_sha:
-            integration.last_scanned_sha = current_sha
+        # Fetch the CURRENT latest SHA after scan completes (not the one from start)
+        # This prevents false "has_updates" if commits were pushed during the scan
+        try:
+            final_sha = get_latest_repo_sha(github_token, github_repo)
+            integration.last_scanned_sha = final_sha
+            logger.info(f"Updated last_scanned_sha to final SHA: {final_sha}")
+        except Exception as e:
+            # Fallback to the SHA from scan start if re-fetch fails
+            logger.warning(f"Failed to fetch final SHA, using start SHA: {e}")
+            if current_sha:
+                integration.last_scanned_sha = current_sha
 
-    integration.last_scanned_at = timezone.now()
-    integration.save()
+        integration.last_scanned_at = timezone.now()
+        integration.save()
 
     # Save scan artifacts to OrganizationContentConfig
+    org_domain = resolved_domain or github_repo
     try:
-        from core.models import Organization, OrganizationContentConfig
-        
-        # Ensure Organization exists (idempotent, keyed by real domain when provided)
-        org_name = integration.github_user_name or (resolved_domain or "Unknown User")
-        org_domain = resolved_domain or integration.github_repo
-        
+        # Ensure Organization exists (idempotent, keyed by domain)
+        org_name = resolved_domain or "Unknown"
+        if integration and integration.github_user_name:
+            org_name = integration.github_user_name
+
         org, _ = Organization.objects.get_or_create(
             domain=org_domain,
             defaults={"name": org_name}
@@ -385,31 +428,34 @@ def scan_github_project(
         # Update fields from scan response
         # Support both nested 'config' key (legacy) and top-level keys (current)
         cf_config = cf_data.get('config', {})
-        
-        config.github_repo = integration.github_repo
-        config.github_token_encrypted = integration.github_access_token 
-        
+
+        # Only set github_repo/token if not already set (preserve org-level auth)
+        if not config.github_repo:
+            config.github_repo = github_repo
+        if not config.github_token_encrypted:
+            config.github_token_encrypted = github_token
+
         # Save artifacts if present (check top-level first, then nested 'config')
         if 'article_template' in cf_data:
             config.article_template = cf_data['article_template']
         elif 'article_template' in cf_config:
             config.article_template = cf_config['article_template']
-        
+
         if 'design_guide' in cf_data:
             config.design_guide = cf_data['design_guide']
         elif 'design_guide' in cf_config:
             config.design_guide = cf_config['design_guide']
-            
+
         if 'resource_prompt' in cf_data:
             config.resource_prompt = cf_data['resource_prompt']
         elif 'resource_prompt' in cf_config:
             config.resource_prompt = cf_config['resource_prompt']
-            
+
         if 'scan_summary' in cf_data:
             config.scan_summary = cf_data['scan_summary']
         elif 'scan_summary' in cf_config:
             config.scan_summary = cf_config['scan_summary']
-             
+
         if 'tech_stack' in cf_data:
             config.tech_stack = cf_data['tech_stack']
         elif 'tech_stack' in cf_config:
@@ -418,25 +464,25 @@ def scan_github_project(
             config.company_context = cf_data['company_context']
         elif 'company_context' in cf_config:
             config.company_context = cf_config['company_context']
-        
+
         # Save additional metadata if present
         if 'article_path_pattern' in cf_data:
             config.article_path_pattern = cf_data.get('article_path_pattern')
         if 'registry_path' in cf_data:
             config.registry_path = cf_data.get('registry_path')
-            
+
         config.save()
         logger.info(f"Updated OrganizationContentConfig for {org_domain}")
 
     except Exception as e:
         logger.error(f"Failed to save scan artifacts to OrganizationContentConfig: {e}")
 
-    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {integration.github_repo}, domain: {org_domain}, SHA: {current_sha}")
+    logger.info(f"Scan triggered successfully for {slack_user_id}, repo: {github_repo}, domain: {org_domain}, SHA: {current_sha}")
 
     return {
         "status": "scan_completed",
         "slack_user_id": slack_user_id,
-        "github_repo": integration.github_repo,
+        "github_repo": github_repo,
         "domain": org_domain,
         "scanned_sha": current_sha,
         "content_factory_response": cf_data,

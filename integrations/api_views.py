@@ -398,9 +398,9 @@ class GithubScanView(APIView):
 
     def post(self, request):
         from integrations.services.github import trigger_scan_async, ScanError
-        # Also import UserIntegration to check existence quickly (optional, but good UX)
         from integrations.models import UserIntegration
-        
+        from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
+
         slack_user_id = request.data.get('slack_user_id')
         slack_channel_id = request.data.get('slack_channel_id')
         slack_thread_ts = request.data.get('slack_thread_ts')
@@ -408,29 +408,51 @@ class GithubScanView(APIView):
 
         if not slack_user_id:
             return Response(
-                {"error": "slack_user_id is required"}, 
+                {"error": "slack_user_id is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Quick check if integration exists to fail fast
-        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-        if not integration:
-             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if not integration.github_repo:
-            return Response({"error": "github_repo is required"}, status=status.HTTP_400_BAD_REQUEST)
-        if not integration.github_access_token:
-            return Response({"error": "github_access_token is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Resolve domain - prefer request, then existing org config
+        # Resolve domain
         normalized_domain = normalize_domain(domain)
-        if not normalized_domain:
+
+        # Try to resolve credentials: org-level first, then user-level
+        github_repo = None
+        has_credentials = False
+
+        if normalized_domain:
+            try:
+                creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
+                github_repo = creds['repo']
+                has_credentials = True
+                logger.info(f"Scan credentials resolved via {creds['source']}-level for {normalized_domain}")
+            except ArticleGenerationError:
+                pass
+
+        # Fall back to UserIntegration
+        if not has_credentials:
+            integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+            if integration and integration.github_access_token and integration.github_repo:
+                github_repo = integration.github_repo
+                has_credentials = True
+
+        if not has_credentials:
+            from integrations.services.article_generation import build_github_oauth_url
+            oauth_url = build_github_oauth_url(normalized_domain or '', slack_user_id)
+            return Response({
+                "error": f"No GitHub credentials found for domain '{normalized_domain or 'unknown'}'. Please connect GitHub first.",
+                "needs_github_auth": True,
+                "oauth_url": oauth_url,
+                "domain": normalized_domain,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Resolve domain from config if not provided in request
+        if not normalized_domain and github_repo:
             try:
                 from core.models import OrganizationContentConfig
                 config = (
                     OrganizationContentConfig.objects
                     .select_related('organization')
-                    .filter(github_repo=integration.github_repo)
+                    .filter(github_repo=github_repo)
                     .first()
                 )
                 if config and config.organization and config.organization.domain:
@@ -441,7 +463,7 @@ class GithubScanView(APIView):
         if not normalized_domain:
             return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Persist org mapping for future lookups
+        # Ensure org/config exist (but don't overwrite existing github_repo)
         try:
             from core.models import Organization, OrganizationContentConfig
             org, _ = Organization.objects.get_or_create(
@@ -449,12 +471,10 @@ class GithubScanView(APIView):
                 defaults={"name": normalized_domain}
             )
             config, created = OrganizationContentConfig.objects.get_or_create(organization=org)
-            update_fields = []
-            if integration.github_repo and config.github_repo != integration.github_repo:
-                config.github_repo = integration.github_repo
-                update_fields.append('github_repo')
-            if update_fields:
-                config.save(update_fields=update_fields)
+            # Only set github_repo if the config doesn't already have one
+            if not config.github_repo and github_repo:
+                config.github_repo = github_repo
+                config.save(update_fields=['github_repo'])
         except Exception as e:
             logger.warning(f"Failed to persist organization mapping for scan: {e}")
 
@@ -465,10 +485,10 @@ class GithubScanView(APIView):
             slack_thread_ts=slack_thread_ts,
             domain=normalized_domain,
         )
-        
+
         return Response({
             "status": "scan_initiated",
             "message": "Scan running in background. You will be notified via Slack when complete.",
             "domain": normalized_domain,
-            "github_repo": integration.github_repo,
+            "github_repo": github_repo,
         }, status=status.HTTP_202_ACCEPTED)
