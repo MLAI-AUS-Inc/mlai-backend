@@ -185,19 +185,42 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
             logger.warning(f"Org-level token issue for {normalized_domain}: {e}")
             # Fall through to user-level
 
-    # 2. Fall back to user-level credentials
+    # 2. Fall back to user-level credentials (only if repo is relevant to requested domain)
     if slack_user_id:
         try:
             integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
             if integration.github_access_token and integration.github_repo:
-                fresh_token = ensure_valid_token(slack_user_id)
-                logger.info(f"Using user-level GitHub credentials for {slack_user_id}")
-                return {
-                    'token': fresh_token,
-                    'repo': integration.github_repo,
-                    'source': 'user',
-                    'integration': integration,
-                }
+                # If a specific domain was requested, verify the user's repo is associated with it
+                if normalized_domain:
+                    repo_matches_domain = OrganizationContentConfig.objects.filter(
+                        github_repo=integration.github_repo,
+                        organization__domain=normalized_domain
+                    ).exists()
+                    if not repo_matches_domain:
+                        logger.info(
+                            f"User repo {integration.github_repo} is not associated with "
+                            f"{normalized_domain}, skipping user-level fallback"
+                        )
+                        # Don't fall back — this repo isn't for the requested domain
+                    else:
+                        fresh_token = ensure_valid_token(slack_user_id)
+                        logger.info(f"Using user-level GitHub credentials for {slack_user_id} (domain-verified)")
+                        return {
+                            'token': fresh_token,
+                            'repo': integration.github_repo,
+                            'source': 'user',
+                            'integration': integration,
+                        }
+                else:
+                    # No domain specified — allow user-level fallback (backward compat)
+                    fresh_token = ensure_valid_token(slack_user_id)
+                    logger.info(f"Using user-level GitHub credentials for {slack_user_id}")
+                    return {
+                        'token': fresh_token,
+                        'repo': integration.github_repo,
+                        'source': 'user',
+                        'integration': integration,
+                    }
         except UserIntegration.DoesNotExist:
             pass
         except TokenRefreshError as e:
@@ -227,25 +250,11 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     """
     domain = article_request.get('domain')
 
-    # Get GitHub credentials (org-level preferred, user-level fallback)
-    try:
-        creds = get_github_credentials_for_domain(domain, slack_user_id)
-        fresh_token = creds['token']
-        github_repo = creds['repo']
-        logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
-    except ArticleGenerationError:
-        # Legacy fallback: try user integration directly
-        try:
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-            if not integration.github_repo:
-                raise ArticleGenerationError("No GitHub repository configured. Please connect GitHub first.")
-            fresh_token = ensure_valid_token(slack_user_id)
-            github_repo = integration.github_repo
-            logger.info(f"Using legacy user-level GitHub credentials for {slack_user_id}")
-        except UserIntegration.DoesNotExist:
-            raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
-        except TokenRefreshError as e:
-            raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
+    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
+    creds = get_github_credentials_for_domain(domain, slack_user_id)
+    fresh_token = creds['token']
+    github_repo = creds['repo']
+    logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
 
     # Fetch OrganizationContentConfig for artifacts
     # We match config by github_repo
@@ -382,10 +391,54 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         raise ArticleGenerationError(f"Failed to trigger generation: {str(e)}")
 
 
+def _handle_status_failure(job_id: str, result: dict):
+    """
+    Handle a failed job detected during status polling.
+    Updates the local ContentFactoryJob and sends a Slack notification (once).
+    """
+    from core.models import ContentFactoryJob
+    from integrations.services.slack import SlackService
+
+    try:
+        job = ContentFactoryJob.objects.get(job_id=job_id)
+    except ContentFactoryJob.DoesNotExist:
+        logger.warning(f"Status failure for unknown job {job_id}")
+        return
+
+    # Only notify once — skip if already in error state
+    if job.status == 'error':
+        return
+
+    error_message = result.get('error') or result.get('error_message') or 'Unknown error'
+    job.status = 'error'
+    job.error_message = error_message
+    job.save()
+    logger.info(f"Updated job {job_id} to error: {error_message}")
+
+    # Send Slack notification
+    if job.slack_user_id:
+        try:
+            domain_display = f" for *{job.domain}*" if job.domain else ""
+            slack_text = (
+                f"The article generation pipeline encountered an error{domain_display}.\n\n"
+                f"*Error:* {error_message}\n\n"
+                f"You can try again by requesting a new article."
+            )
+
+            # If error suggests missing config/credentials, include OAuth URL
+            if job.domain and ("no configuration" in error_message.lower() or "no github credentials" in error_message.lower()):
+                oauth_url = build_github_oauth_url(job.domain, job.slack_user_id)
+                slack_text += f"\n\n<{oauth_url}|Connect GitHub for {job.domain}>"
+
+            SlackService.send_dm(job.slack_user_id, slack_text)
+        except Exception as e:
+            logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
+
+
 def check_generation_status(job_id: str) -> dict:
     """
     Check status of a generation job.
-    
+
     Returns:
         dict: { "job_id": "...", "status": "...", "progress": int, "current_step": "...", "error": ... }
     """
@@ -393,7 +446,7 @@ def check_generation_status(job_id: str) -> dict:
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
     status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
-    
+
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -406,7 +459,11 @@ def check_generation_status(job_id: str) -> dict:
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            # Detect failure and update local state + notify user
+            if result.get('status') in ('failed', 'error'):
+                _handle_status_failure(job_id, result)
+            return result
         # Fallback to legacy endpoint if primary fails (e.g., older CF deployment)
         response = http_requests.get(
             status_endpoint_legacy,
@@ -414,13 +471,16 @@ def check_generation_status(job_id: str) -> dict:
             timeout=30
         )
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            if result.get('status') in ('failed', 'error'):
+                _handle_status_failure(job_id, result)
+            return result
         elif response.status_code == 404:
             raise ArticleGenerationError(f"Job not found: {job_id}")
         else:
             logger.error(f"Content Factory status check failed: {response.text}")
             raise ArticleGenerationError(f"Status check returned {response.status_code}")
-            
+
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to check status: {str(e)}")
@@ -438,24 +498,11 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
-    # Get GitHub credentials (org-level preferred, user-level fallback)
-    try:
-        creds = get_github_credentials_for_domain(domain, slack_user_id)
-        github_token = creds['token']
-        github_repo = creds['repo']
-        logger.info(f"Using {creds['source']}-level GitHub credentials for publishing")
-    except ArticleGenerationError:
-        # Legacy fallback
-        try:
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-            if not integration.github_access_token:
-                raise ArticleGenerationError("No GitHub token found. Please authenticate with GitHub first.")
-            if not integration.github_repo:
-                raise ArticleGenerationError("No GitHub repository configured for this user.")
-            github_token = integration.github_access_token
-            github_repo = integration.github_repo
-        except UserIntegration.DoesNotExist:
-            raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
+    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
+    creds = get_github_credentials_for_domain(domain, slack_user_id)
+    github_token = creds['token']
+    github_repo = creds['repo']
+    logger.info(f"Using {creds['source']}-level GitHub credentials for publishing")
 
     # Prepare payload with GitHub credentials
     payload = {
@@ -519,25 +566,11 @@ def confirm_topic(
     Returns:
         dict: { "job_id": "...", "status": "queued", ... }
     """
-    # Get GitHub credentials (org-level preferred, user-level fallback)
-    try:
-        creds = get_github_credentials_for_domain(domain, slack_user_id)
-        fresh_token = creds['token']
-        github_repo = creds['repo']
-        logger.info(f"Using {creds['source']}-level GitHub credentials for topic confirmation")
-    except ArticleGenerationError:
-        # Legacy fallback
-        try:
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-            if not integration.github_repo:
-                raise ArticleGenerationError("No GitHub repository configured for this user.")
-            fresh_token = ensure_valid_token(slack_user_id)
-            github_repo = integration.github_repo
-            logger.info(f"Using legacy user-level GitHub credentials for topic confirmation")
-        except UserIntegration.DoesNotExist:
-            raise ArticleGenerationError("No integration found for this user. Please connect GitHub first.")
-        except TokenRefreshError as e:
-            raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
+    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
+    creds = get_github_credentials_for_domain(domain, slack_user_id)
+    fresh_token = creds['token']
+    github_repo = creds['repo']
+    logger.info(f"Using {creds['source']}-level GitHub credentials for topic confirmation")
 
     # Prepare payload with fresh token
     payload = {

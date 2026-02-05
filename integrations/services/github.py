@@ -165,57 +165,27 @@ def scan_github_project(
     Raises:
         ScanError: If validation fails or the external call fails.
     """
-    # Resolve credentials: try org-level first, then fall back to UserIntegration
+    # Resolve credentials via domain-aware resolution (org-level preferred, domain-verified user-level)
     from core.models import Organization, OrganizationContentConfig
-    from integrations.services.article_generation import get_github_credentials_for_domain
+    from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
 
     resolved_domain = normalize_domain(domain)
-    github_token = None
-    github_repo = None
-    cred_source = None
 
-    # 1. Try org-level credentials if domain is provided
-    if resolved_domain:
-        try:
-            creds = get_github_credentials_for_domain(resolved_domain, slack_user_id)
-            github_token = creds['token']
-            github_repo = creds['repo']
-            cred_source = creds['source']
-            logger.info(f"Scan using {cred_source}-level credentials for {resolved_domain}: repo={github_repo}")
-        except Exception as e:
-            logger.debug(f"Could not resolve credentials via domain for scan: {e}")
+    try:
+        creds = get_github_credentials_for_domain(resolved_domain, slack_user_id)
+        github_token = creds['token']
+        github_repo = creds['repo']
+        cred_source = creds['source']
+        logger.info(f"Scan using {cred_source}-level credentials for {resolved_domain}: repo={github_repo}")
+    except ArticleGenerationError as e:
+        raise ScanError(str(e))
 
-    # 2. Fall back to UserIntegration if org-level didn't work
+    # Look up UserIntegration separately for post-scan tracking (not for credentials)
     if integration is None:
         try:
             integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
         except UserIntegration.DoesNotExist:
-            if not github_token:
-                from integrations.services.article_generation import build_github_oauth_url
-                oauth_url = build_github_oauth_url(resolved_domain or '', slack_user_id)
-                raise ScanError(
-                    f"No GitHub credentials found for domain '{resolved_domain or 'unknown'}'. "
-                    f"Please connect GitHub: {oauth_url}"
-                )
-            integration = None  # No UserIntegration, but we have org-level creds
-
-    if not github_token and integration:
-        if not integration.github_access_token:
-            raise ScanError("No GitHub token found. Please authenticate with GitHub first.")
-        if not integration.github_repo:
-            raise ScanError("No GitHub repository configured for this user.")
-        github_token = integration.github_access_token
-        github_repo = integration.github_repo
-        cred_source = 'user'
-        logger.info(f"Scan using user-level credentials for {slack_user_id}: repo={github_repo}")
-
-    if not github_token or not github_repo:
-        from integrations.services.article_generation import build_github_oauth_url
-        oauth_url = build_github_oauth_url(resolved_domain or '', slack_user_id)
-        raise ScanError(
-            f"No GitHub credentials found for domain '{resolved_domain or 'unknown'}'. "
-            f"Please connect GitHub: {oauth_url}"
-        )
+            integration = None  # OK — org-level creds are sufficient for the scan
 
     # Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')

@@ -51,16 +51,39 @@ class GithubTokenIdentityView(APIView):
         Get integration record.
         Path: GET /api/v1/integrations/github/{slack_user_id}/
         Also supports legacy query param: ?slack_user_id=...
+        Optional: ?domain=example.com to check domain-specific GitHub credentials.
         """
         if not slack_user_id:
             slack_user_id = request.query_params.get('slack_user_id')
-        
+
         if not slack_user_id:
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Domain-aware credential check (optional)
+        requested_domain = request.query_params.get('domain')
+        domain_info = {}
+        if requested_domain:
+            try:
+                from integrations.services.article_generation import get_github_credentials_for_domain, build_github_oauth_url, ArticleGenerationError
+                creds = get_github_credentials_for_domain(requested_domain, slack_user_id)
+                domain_info = {
+                    "domain": requested_domain,
+                    "domain_connected": True,
+                    "domain_github_repo": creds['repo'],
+                    "domain_source": creds['source'],
+                }
+            except (ArticleGenerationError, Exception):
+                from integrations.services.article_generation import build_github_oauth_url
+                domain_info = {
+                    "domain": requested_domain,
+                    "domain_connected": False,
+                    "needs_github_auth": True,
+                    "oauth_url": build_github_oauth_url(requested_domain, slack_user_id),
+                }
+
         try:
             integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-            
+
             # Check for updates on GitHub
             has_updates = False
             latest_sha = None
@@ -148,7 +171,7 @@ class GithubTokenIdentityView(APIView):
             except Exception as e:
                 logger.warning(f"Failed to fetch last article: {e}")
 
-            return Response({
+            response_data = {
                 "slack_user_id": integration.slack_user_id,
                 "token": integration.github_access_token,
                 "token_expires_at": integration.github_token_expires_at,
@@ -167,8 +190,16 @@ class GithubTokenIdentityView(APIView):
                 "error": error_message,
                 "auth_url": auth_url,
                 "access_revoked": access_revoked,
-            })
+            }
+            if domain_info:
+                response_data.update(domain_info)
+            return Response(response_data)
         except UserIntegration.DoesNotExist:
+            # If a domain was requested, still return domain info even without user integration
+            if domain_info:
+                error_data = {"error": "Integration not found"}
+                error_data.update(domain_info)
+                return Response(error_data, status=status.HTTP_404_NOT_FOUND)
             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
 
     def patch(self, request, slack_user_id=None):
