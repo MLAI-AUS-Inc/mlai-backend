@@ -2482,3 +2482,27 @@ class SEODashboardView(APIView):
         }
 
         return Response(data, status=status.HTTP_200_OK)
+
+
+class ContentFactoryOrgDomainsView(APIView):
+    """
+    Return all known organization domains for fuzzy matching.
+
+    GET /api/content-factory/orgs/domains
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        from django.core.cache import cache
+        from integrations.utils import normalize_domain
+
+        cache_key = "content_factory_org_domains"
+        domains = cache.get(cache_key)
+
+        if domains is None:
+            raw_domains = Organization.objects.values_list('domain', flat=True).distinct()
+            domains = sorted({normalize_domain(d) for d in raw_domains if d})
+            cache.set(cache_key, domains, 300)  # 5-minute cache
+
+        return Response(domains, status=status.HTTP_200_OK)

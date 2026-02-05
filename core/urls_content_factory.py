@@ -18,6 +18,9 @@ urlpatterns = [
     # Connect GitHub to organization endpoint
     path('org/connect-github/', views.ContentFactoryConnectGitHubView.as_view(), name='content_factory_connect_github'),
     path('org/connect-github', views.ContentFactoryConnectGitHubView.as_view(), name='content_factory_connect_github_no_slash'),
+    # Organization domains listing (for fuzzy matching)
+    path('orgs/domains/', views.ContentFactoryOrgDomainsView.as_view(), name='content_factory_org_domains'),
+    path('orgs/domains', views.ContentFactoryOrgDomainsView.as_view(), name='content_factory_org_domains_no_slash'),
     # Callback endpoint for content-factory events
     path('callback/', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback'),
     path('callback', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback_no_slash'),
