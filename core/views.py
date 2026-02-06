@@ -1460,11 +1460,11 @@ class ContentFactoryCallbackView(APIView):
         from .models import ContentFactoryJob
         
         data = request.data
-        event_type = data.get('event_type')
+        event_type = data.get('event_type') or data.get('event')
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id')
-        
+
         if not event_type:
             return Response(
                 {'error': 'event_type is required'},
