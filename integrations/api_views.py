@@ -523,3 +523,102 @@ class GithubScanView(APIView):
             "domain": normalized_domain,
             "github_repo": github_repo,
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class GithubScaffoldView(APIView):
+    """
+    Trigger article directory scaffolding for a domain.
+    POST /api/v1/integrations/github/scaffold
+
+    Called by the Roo slackbot when a user clicks "Create Articles Directory".
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        import threading
+        from integrations.services.github import scaffold_articles_directory, ScanError
+        from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
+        from integrations.services.slack import SlackService
+        from core.models import Organization, OrganizationContentConfig
+
+        domain = request.data.get('domain')
+        slack_user_id = request.data.get('slack_user_id')
+        slack_channel_id = request.data.get('slack_channel_id', '')
+        slack_thread_ts = request.data.get('slack_thread_ts', '')
+
+        if not domain or not slack_user_id:
+            return Response(
+                {"error": "domain and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        normalized_domain = normalize_domain(domain)
+        if not normalized_domain:
+            return Response({"error": "Invalid domain"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Look up config
+        try:
+            org = Organization.objects.get(domain=normalized_domain)
+            config = org.content_config
+        except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
+            return Response(
+                {"error": f"No configuration found for {normalized_domain}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if config.articles_scaffolded:
+            return Response({
+                "status": "already_scaffolded",
+                "message": f"Articles directory already exists for {normalized_domain}",
+                "pr_url": config.articles_scaffold_pr_url,
+            }, status=status.HTTP_200_OK)
+
+        pillar_strategy = config.pillar_strategy or {}
+        if not pillar_strategy.get('pillars'):
+            return Response(
+                {"error": "No pillar strategy found. Run a scan first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Resolve GitHub credentials
+        try:
+            creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
+        except ArticleGenerationError as e:
+            return Response(
+                {"error": str(e), "needs_github_auth": True},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        def _run_scaffold():
+            try:
+                scaffold_articles_directory(
+                    domain=normalized_domain,
+                    slack_user_id=slack_user_id,
+                    pillar_strategy=pillar_strategy,
+                    article_path_pattern=config.article_path_pattern or '',
+                    tech_stack=config.tech_stack or {},
+                    github_token=creds['token'],
+                    github_repo=creds['repo'],
+                    slack_channel_id=slack_channel_id,
+                    slack_thread_ts=slack_thread_ts,
+                )
+            except ScanError as e:
+                logger.error(f"Scaffold failed for {normalized_domain}: {e}")
+                if slack_channel_id and slack_thread_ts:
+                    SlackService.send_message(
+                        slack_channel_id,
+                        f"❌ Could not start scaffolding for *{normalized_domain}*: {e}",
+                        thread_ts=slack_thread_ts,
+                    )
+                else:
+                    SlackService.send_dm(slack_user_id, f"❌ Could not start scaffolding: {e}")
+
+        thread = threading.Thread(target=_run_scaffold, daemon=True)
+        thread.start()
+
+        return Response({
+            "status": "scaffold_initiated",
+            "message": "Scaffolding started. You will be notified when complete.",
+            "domain": normalized_domain,
+        }, status=status.HTTP_202_ACCEPTED)

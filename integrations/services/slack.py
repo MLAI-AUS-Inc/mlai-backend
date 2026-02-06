@@ -132,3 +132,31 @@ class SlackService:
         except Exception as e:
             logger.error(f"Exception sending message to {channel_id}: {str(e)}")
             return False, None
+
+    @classmethod
+    def update_message(cls, channel_id: str, ts: str, text: str, blocks: list = None) -> bool:
+        """
+        Update an existing Slack message (e.g. to remove interactive buttons after click).
+
+        Args:
+            channel_id: The channel containing the message.
+            ts: The timestamp of the message to update.
+            text: Updated fallback text.
+            blocks: Updated blocks (pass original section block without actions to remove buttons).
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        client = cls.get_client()
+        try:
+            kwargs = {"channel": channel_id, "ts": ts, "text": text}
+            if blocks is not None:
+                kwargs["blocks"] = blocks
+            client.chat_update(**kwargs)
+            return True
+        except SlackApiError as e:
+            logger.error(f"Slack API error updating message in {channel_id}: {e.response['error']}")
+            return False
+        except Exception as e:
+            logger.error(f"Exception updating message in {channel_id}: {str(e)}")
+            return False

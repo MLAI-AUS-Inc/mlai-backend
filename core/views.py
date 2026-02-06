@@ -1488,6 +1488,12 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_error(data)
             elif event_type == 'auth_required':
                 return self._handle_auth_required(data)
+            elif event_type == 'scan_complete':
+                return self._handle_scan_complete(data)
+            elif event_type == 'generation_failed':
+                return self._handle_generation_failed(data)
+            elif event_type == 'scaffold_complete':
+                return self._handle_scaffold_complete(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -1655,6 +1661,291 @@ class ContentFactoryCallbackView(APIView):
         except Exception as e:
             logger.error(f"Error constructing/sending Slack notification: {e}")
             raise
+
+    def _handle_scan_complete(self, data):
+        """Handle scan_complete event from content-factory."""
+        import json as _json
+        from .models import ContentFactoryJob, Organization, OrganizationContentConfig
+        from integrations.services.slack import SlackService
+
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        components_generated = data.get('components_generated', False)
+        components_count = data.get('components_count', 0)
+        component_names = data.get('component_names', [])
+
+        # Update job record if one exists
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if job:
+            job.status = 'completed'
+            job.save()
+
+        # Resolve thread context: job first, then callback payload
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+
+        logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}")
+
+        # Check if scaffolding is available
+        has_pillars = False
+        already_scaffolded = False
+        try:
+            from integrations.utils import normalize_domain
+            org = Organization.objects.get(domain=normalize_domain(domain))
+            config = org.content_config
+            already_scaffolded = config.articles_scaffolded
+            has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
+        except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
+            pass
+
+        if not slack_user_id:
+            return Response({'status': 'received', 'job_id': job_id}, status=status.HTTP_200_OK)
+
+        try:
+            if components_generated and components_count > 0:
+                component_list = "\n".join(f"  • {name}" for name in component_names[:8])
+                if len(component_names) > 8:
+                    component_list += f"\n  • ...and {len(component_names) - 8} more"
+
+                if has_pillars and not already_scaffolded:
+                    text_body = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\n"
+                        f"{component_list}\n\n"
+                        f"*Next step:* I'll create an articles directory in your "
+                        f"repo with pillar-based folders and these components, "
+                        f"submitted as a PR for your review."
+                    )
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": text_body}
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"scaffold_confirm_{domain}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Create Articles Directory"},
+                                    "style": "primary",
+                                    "action_id": "scaffold_confirm",
+                                    "value": _json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Skip for now"},
+                                    "action_id": "scaffold_skip",
+                                    "value": _json.dumps({"domain": domain})
+                                }
+                            ]
+                        }
+                    ]
+                    fallback_text = f"✅ Scan complete for {domain}! Generated {components_count} components."
+                else:
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\n{component_list}\n\n"
+                        f"These components will be used to create articles that look native to your site.\n\n"
+                        f"Would you like me to write your first article? Just say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
+                    blocks = None
+            else:
+                fallback_text = (
+                    f"✅ *Scan complete for {domain}!*\n\n"
+                    f"I've analysed your codebase and I'm ready to help. "
+                    f"You can now ask me to create blog pages or other content.\n\n"
+                    f"To get started, say:\n"
+                    f"  `@Roo write me an article about [topic]`"
+                )
+                blocks = None
+
+            # Reply in-thread if we have context, fall back to DM
+            if channel_id and thread_ts:
+                SlackService.send_message(channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks)
+        except Exception as e:
+            logger.warning(f"Failed to send scan_complete notification to {slack_user_id}: {e}")
+
+        return Response({
+            'status': 'received',
+            'message': 'Scan complete callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_generation_failed(self, data):
+        """Handle generation_failed event from content-factory."""
+        from .models import ContentFactoryJob
+        from integrations.services.slack import SlackService
+
+        job_id = data.get('job_id')
+        error_message = data.get('error', data.get('error_message', 'Unknown error'))
+        error_code = data.get('error_code', 'INTERNAL_ERROR')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+
+        # Update job record
+        job, created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'error',
+                'error_message': f"[{error_code}] {error_message}",
+            }
+        )
+
+        # Resolve thread context: job first, then callback payload
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+
+        logger.error(f"Generation failed for job {job_id} ({domain}): [{error_code}] {error_message}")
+
+        if slack_user_id:
+            try:
+                if error_code == 'MISSING_CONFIG':
+                    message = (
+                        f"❌ *Failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"Please make sure this domain is registered in the system."
+                    )
+                elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
+                    message = (
+                        f"❌ *Failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"Please reconnect your GitHub account by saying:\n"
+                        f"  `@Roo connect to my domain {domain}`"
+                    )
+                else:
+                    message = (
+                        f"❌ *Task failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"If this keeps happening, please contact support."
+                    )
+                # Reply in-thread if we have context, fall back to DM
+                if channel_id and thread_ts:
+                    SlackService.send_message(channel_id, message, thread_ts=thread_ts)
+                else:
+                    SlackService.send_dm(slack_user_id, message)
+            except Exception as e:
+                logger.warning(f"Failed to send generation_failed notification to {slack_user_id}: {e}")
+
+        return Response({
+            'status': 'received',
+            'message': 'Generation failed callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_scaffold_complete(self, data):
+        """Handle scaffold_complete event from content-factory."""
+        from .models import ContentFactoryJob, Organization, OrganizationContentConfig
+        from integrations.services.slack import SlackService
+        from integrations.utils import normalize_domain
+
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        pr_url = data.get('pr_url')
+        pillar_count = data.get('pillar_count', 0)
+        component_count = data.get('component_count', 0)
+        files_created = data.get('files_created', 0)
+        already_exists = data.get('already_exists', False)
+        error = data.get('error')
+
+        # Update job record
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if job:
+            if error:
+                job.status = 'error'
+                job.error_message = error
+            else:
+                job.status = 'completed'
+                job.pr_url = pr_url
+            job.save()
+
+        # Resolve thread context: job first, then callback payload
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+
+        def _send(text):
+            if channel_id and thread_ts:
+                SlackService.send_message(channel_id, text, thread_ts=thread_ts)
+            elif slack_user_id:
+                SlackService.send_dm(slack_user_id, text)
+
+        if error:
+            logger.error(f"Scaffold failed for {domain}: {error}")
+            try:
+                _send(
+                    f"Note: Could not set up article directories for *{domain}*: {error}\n"
+                    f"This won't affect article generation -- directories will be created as needed."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send scaffold error notification: {e}")
+            return Response({
+                'status': 'received',
+                'message': 'Scaffold error processed',
+                'job_id': job_id,
+            }, status=status.HTTP_200_OK)
+
+        # Mark articles as scaffolded in the config
+        try:
+            normalized_domain = normalize_domain(domain)
+            org = Organization.objects.get(domain=normalized_domain)
+            config = org.content_config
+            config.articles_scaffolded = True
+            if pr_url:
+                config.articles_scaffold_pr_url = pr_url
+            config.save()
+            logger.info(f"Marked articles_scaffolded=True for {domain}")
+        except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
+            logger.warning(f"Could not update articles_scaffolded for {domain}: {e}")
+
+        # Send Slack notification
+        try:
+            if already_exists:
+                _send(
+                    f"📁 Articles directory already exists for *{domain}*.\n\n"
+                    f"You're all set! To write your first article, say:\n"
+                    f"  `@Roo write me an article about [topic]`"
+                )
+            elif pr_url:
+                _send(
+                    f"📁 *Articles directory created for {domain}!*\n\n"
+                    f"I've set up your content structure with:\n"
+                    f"  • {pillar_count} content pillar directories\n"
+                    f"  • {component_count} article components\n"
+                    f"  • {files_created} total files\n\n"
+                    f"*Review the PR:* {pr_url}\n\n"
+                    f"Once merged, ask me to write your first article:\n"
+                    f"  `@Roo write me an article about [topic]`"
+                )
+            else:
+                _send(
+                    f"📁 Articles directory scaffolded for *{domain}*, but "
+                    f"the PR could not be created. Check the repo for a "
+                    f"`feature/articles-scaffolding` branch."
+                )
+        except Exception as e:
+            logger.warning(f"Failed to send scaffold_complete notification: {e}")
+
+        return Response({
+            'status': 'received',
+            'message': 'Scaffold complete callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
 
     def _generate_topic_explanation(self, option_data, company_context=None, competitors=None):
         """Generate a user-friendly explanation for why this topic was chosen."""
@@ -2160,6 +2451,7 @@ class SEOKeywordBulkUpsertView(APIView):
                 if ai_sat:
                     AISaturation.objects.create(
                         keyword=keyword_obj,
+                        domain=domain,
                         ai_overview_present=ai_sat.get('ai_overview_present', False),
                         ai_overview_quality=ai_sat.get('ai_overview_quality', 'none'),
                         featured_snippet_present=ai_sat.get('featured_snippet_present', False),
@@ -2182,6 +2474,7 @@ class SEOKeywordBulkUpsertView(APIView):
                         question_normalized=question_text.lower().strip()[:500],
                         defaults={
                             'question': question_text,
+                            'domain': domain,
                             'answer_snippet': paa.get('answer_snippet', ''),
                             'source_url': paa.get('source_url'),
                             'depth': paa.get('depth', 1),

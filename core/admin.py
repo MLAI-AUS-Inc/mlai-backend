@@ -65,7 +65,7 @@ class OrganizationAdmin(admin.ModelAdmin):
 
 @admin.register(OrganizationContentConfig)
 class OrganizationContentConfigAdmin(admin.ModelAdmin):
-    list_display = ('organization', 'brand_name', 'github_repo', 'has_scan', 'updated_at')
+    list_display = ('organization', 'brand_name', 'github_repo', 'has_scan', 'articles_scaffolded', 'updated_at')
     search_fields = ('organization__name', 'organization__domain', 'brand_name', 'github_repo')
     list_select_related = ('organization',)
     list_filter = ('updated_at',)
@@ -93,6 +93,9 @@ class OrganizationContentConfigAdmin(admin.ModelAdmin):
         ('Raw Template Data', {
             'fields': ('article_template', 'design_guide', 'company_context'),
             'classes': ('collapse',),
+        }),
+        ('Article Scaffolding', {
+            'fields': ('articles_scaffolded', 'articles_scaffold_pr_url'),
         }),
         ('Raw Data (Editable)', {
             'fields': ('installed_packages', 'pillar_strategy'),
@@ -507,17 +510,17 @@ class KeywordVelocityAdmin(admin.ModelAdmin):
 
 @admin.register(AISaturation)
 class AISaturationAdmin(admin.ModelAdmin):
-    list_display = ('keyword', 'saturation_score', 'ai_overview_present', 'hostility_score', 'captured_at')
-    list_filter = ('ai_overview_present', 'captured_at')
-    search_fields = ('keyword__keyword',)
+    list_display = ('keyword', 'domain', 'saturation_score', 'ai_overview_present', 'hostility_score', 'captured_at')
+    list_filter = ('domain', 'ai_overview_present', 'captured_at')
+    search_fields = ('keyword__keyword', 'domain')
     ordering = ('-captured_at',)
 
 
 @admin.register(PAQuestion)
 class PAQuestionAdmin(admin.ModelAdmin):
-    list_display = ('question_truncated', 'keyword', 'depth', 'has_ai_overview', 'discovered_at')
-    list_filter = ('depth', 'has_ai_overview', 'discovered_at')
-    search_fields = ('question', 'keyword__keyword')
+    list_display = ('question_truncated', 'keyword', 'domain', 'depth', 'has_ai_overview', 'discovered_at')
+    list_filter = ('domain', 'depth', 'has_ai_overview', 'discovered_at')
+    search_fields = ('question', 'keyword__keyword', 'domain')
     ordering = ('-discovered_at',)
 
     def question_truncated(self, obj):
