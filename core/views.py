@@ -1863,6 +1863,8 @@ class ContentFactoryCallbackView(APIView):
         files_created = data.get('files_created', 0)
         already_exists = data.get('already_exists', False)
         error = data.get('error')
+        preview_url = data.get('preview_url')
+        build_verified = data.get('build_verified', False)
 
         # Update job record
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
@@ -1908,6 +1910,8 @@ class ContentFactoryCallbackView(APIView):
             config.articles_scaffolded = True
             if pr_url:
                 config.articles_scaffold_pr_url = pr_url
+            if preview_url:
+                config.articles_scaffold_preview_url = preview_url
             config.save()
             logger.info(f"Marked articles_scaffolded=True for {domain}")
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
@@ -1922,13 +1926,18 @@ class ContentFactoryCallbackView(APIView):
                     f"  `@Roo write me an article about [topic]`"
                 )
             elif pr_url:
+                preview_line = ""
+                if preview_url:
+                    preview_line = f"\n\n🔗 *Preview:* {preview_url}"
+                build_status = "✅ Build passed" if build_verified else "⏳ Build pending"
                 _send(
                     f"📁 *Articles directory created for {domain}!*\n\n"
                     f"I've set up your content structure with:\n"
                     f"  • {pillar_count} content pillar directories\n"
                     f"  • {component_count} article components\n"
-                    f"  • {files_created} total files\n\n"
-                    f"*Review the PR:* {pr_url}\n\n"
+                    f"  • {files_created} total files\n"
+                    f"  • {build_status}\n\n"
+                    f"*Review the PR:* {pr_url}{preview_line}\n\n"
                     f"Once merged, ask me to write your first article:\n"
                     f"  `@Roo write me an article about [topic]`"
                 )
