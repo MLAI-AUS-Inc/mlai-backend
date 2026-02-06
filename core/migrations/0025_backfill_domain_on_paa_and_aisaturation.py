@@ -12,7 +12,7 @@ def backfill_domain(apps, schema_editor):
             UPDATE seo_ai_saturation AS ai
             SET domain = org.domain
             FROM seo_researched_keyword AS kw
-            JOIN core_organization AS org ON org.id = kw.organization_id
+            JOIN content_factory_organization AS org ON org.id = kw.organization_id
             WHERE ai.keyword_id = kw.id
               AND (ai.domain = '' OR ai.domain IS NULL)
         """)
@@ -23,7 +23,7 @@ def backfill_domain(apps, schema_editor):
             UPDATE seo_paa_question AS paa
             SET domain = org.domain
             FROM seo_researched_keyword AS kw
-            JOIN core_organization AS org ON org.id = kw.organization_id
+            JOIN content_factory_organization AS org ON org.id = kw.organization_id
             WHERE paa.keyword_id = kw.id
               AND (paa.domain = '' OR paa.domain IS NULL)
         """)
