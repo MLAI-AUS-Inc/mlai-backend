@@ -153,6 +153,10 @@ class OrganizationContentConfig(models.Model):
         blank=True, null=True,
         help_text="PR URL from the articles scaffolding operation"
     )
+    articles_scaffold_preview_url = models.URLField(
+        blank=True, null=True,
+        help_text="Cloudflare Pages preview URL from the articles scaffolding operation"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
