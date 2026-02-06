@@ -145,9 +145,17 @@ class OrganizationContentConfig(models.Model):
         help_text="SEO content pillars with slugs and topics derived from company context"
     )
     brand_name = models.CharField(max_length=100, blank=True, null=True)
+    articles_scaffolded = models.BooleanField(
+        default=False,
+        help_text="Whether the articles directory has been scaffolded in the GitHub repo"
+    )
+    articles_scaffold_pr_url = models.URLField(
+        blank=True, null=True,
+        help_text="PR URL from the articles scaffolding operation"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'content_factory_org_config'
 
@@ -270,6 +278,10 @@ class ContentFactoryJob(models.Model):
     selected_keyword = models.CharField(max_length=255, blank=True, null=True)
     selection_reason = models.TextField(blank=True, null=True)
     selection_data = models.JSONField(default=dict, blank=True)  # Full selection payload
+
+    # Slack thread context for in-thread replies
+    slack_channel_id = models.CharField(max_length=100, blank=True, default="")
+    slack_thread_ts = models.CharField(max_length=50, blank=True, default="")
 
     # Result data (populated on article_complete callback)
     article_url = models.URLField(blank=True, null=True)
@@ -524,6 +536,7 @@ class AISaturation(models.Model):
         on_delete=models.CASCADE,
         related_name='ai_saturation_snapshots'
     )
+    domain = models.CharField(max_length=255, blank=True, default='', db_index=True)
 
     # AI Overview detection
     ai_overview_present = models.BooleanField(default=False)
@@ -597,6 +610,7 @@ class PAQuestion(models.Model):
         on_delete=models.CASCADE,
         related_name='paa_questions'
     )
+    domain = models.CharField(max_length=255, blank=True, default='', db_index=True)
 
     # Question content
     question = models.TextField()

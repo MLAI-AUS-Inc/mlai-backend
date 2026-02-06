@@ -5,6 +5,7 @@ from django.conf import settings
 
 from integrations.models import UserIntegration
 from integrations.utils import normalize_domain
+from core.models import GeneratedComponent, ComponentMapping
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,13 @@ def scan_github_project(
                 existing_artifacts['company_context'] = config.company_context
             if config.organization and config.organization.domain:
                 resolved_domain = resolved_domain or normalize_domain(config.organization.domain)
+            # Include existing generated components so CF doesn't regenerate them
+            existing_comps = list(
+                GeneratedComponent.objects.filter(organization=config.organization)
+                .values('name', 'content', 'source')
+            )
+            if existing_comps:
+                existing_artifacts['generated_components'] = existing_comps
     except Exception as e:
         logger.warning(f"Failed to fetch existing artifacts for payload: {e}")
 
@@ -435,6 +443,11 @@ def scan_github_project(
         elif 'company_context' in cf_config:
             config.company_context = cf_config['company_context']
 
+        if 'pillar_strategy' in cf_data:
+            config.pillar_strategy = cf_data['pillar_strategy']
+        elif 'pillar_strategy' in cf_config:
+            config.pillar_strategy = cf_config['pillar_strategy']
+
         # Save additional metadata if present
         if 'article_path_pattern' in cf_data:
             config.article_path_pattern = cf_data.get('article_path_pattern')
@@ -443,6 +456,58 @@ def scan_github_project(
 
         config.save()
         logger.info(f"Updated OrganizationContentConfig for {org_domain}")
+
+        # Save generated components and component mapping from scan response
+        component_generation = cf_data.get('component_generation', {})
+        generated_components = cf_data.get('generated_components', [])
+        component_mapping_data = cf_data.get('component_mapping', {})
+
+        if generated_components:
+            components_saved = 0
+            for comp_data in generated_components:
+                comp_name = comp_data.get('name')
+                if not comp_name:
+                    continue
+                GeneratedComponent.objects.update_or_create(
+                    organization=org,
+                    name=comp_name,
+                    defaults={
+                        'content': comp_data.get('content', ''),
+                        'source': comp_data.get('source', 'generated'),
+                        'original_path': comp_data.get('original_path'),
+                        'similarity_score': comp_data.get('similarity_score', 0.0),
+                        'matched_component': comp_data.get('matched_component'),
+                        'adaptation_notes': comp_data.get('adaptation_notes', ''),
+                    }
+                )
+                components_saved += 1
+            logger.info(f"Saved {components_saved} generated components for {org_domain}")
+
+        if component_generation or component_mapping_data:
+            mapping_defaults = {
+                'mapping_data': component_mapping_data,
+            }
+            if component_generation:
+                mapping_defaults['generation_status'] = component_generation.get('status')
+                mapping_defaults['design_guide_path'] = component_generation.get('design_guide_path')
+                mapping_defaults['failed_components'] = component_generation.get('failed_components', [])
+                generated = component_generation.get('components_generated', 0)
+                adapted = component_generation.get('components_adapted', 0)
+                mapping_defaults['generated_count'] = generated
+                mapping_defaults['matched_count'] = adapted
+                mapping_defaults['total_components'] = generated + adapted
+                storage = component_generation.get('storage', {})
+                if storage:
+                    mapping_defaults['storage_local_path'] = storage.get('local_path')
+                    mapping_defaults['storage_pr_url'] = storage.get('pr_url')
+                    mapping_defaults['storage_branch_url'] = storage.get('branch_url')
+            if current_sha:
+                mapping_defaults['last_scan_commit'] = current_sha
+            ComponentMapping.objects.update_or_create(
+                organization=org,
+                defaults=mapping_defaults
+            )
+            logger.info(f"Updated ComponentMapping for {org_domain}")
 
     except Exception as e:
         logger.error(f"Failed to save scan artifacts to OrganizationContentConfig: {e}")
@@ -486,6 +551,116 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     resp.raise_for_status()
     data = resp.json()
     return data['sha']
+
+
+def scaffold_articles_directory(
+    domain: str,
+    slack_user_id: str,
+    pillar_strategy: dict,
+    article_path_pattern: str,
+    tech_stack: dict,
+    github_token: str,
+    github_repo: str,
+    slack_channel_id: str = None,
+    slack_thread_ts: str = None,
+) -> dict:
+    """
+    Trigger articles directory scaffolding via Content Factory.
+
+    Creates a directory structure in the target GitHub repo:
+      articles/
+      ├── featured/
+      │   └── index.tsx
+      ├── {pillar-1-slug}/
+      │   └── index.tsx
+      └── {pillar-n-slug}/
+          └── index.tsx
+
+    Returns:
+        dict with job_id and status, or None if no pillars found.
+
+    Raises:
+        ScanError: If the API call fails.
+    """
+    from core.models import ContentFactoryJob
+
+    pillars = pillar_strategy.get('pillars', [])
+    if not pillars:
+        logger.warning(f"No pillars found in pillar_strategy for {domain}, skipping scaffolding")
+        return None
+
+    pillar_dirs = [
+        {"slug": p.get("slug"), "name": p.get("name")}
+        for p in pillars
+        if p.get("slug")
+    ]
+
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+    scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scaffold-articles"
+
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    payload = {
+        "domain": domain,
+        "slack_user_id": slack_user_id,
+        "github_repo": github_repo,
+        "github_token": github_token,
+        "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+        "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+        "pillar_dirs": pillar_dirs,
+        "article_path_pattern": article_path_pattern,
+        "tech_stack": tech_stack,
+    }
+
+    if slack_channel_id:
+        payload["slack_channel_id"] = slack_channel_id
+    if slack_thread_ts:
+        payload["slack_thread_ts"] = slack_thread_ts
+
+    logger.info(f"Triggering article scaffolding for {domain} with {len(pillar_dirs)} pillars")
+
+    try:
+        response = http_requests.post(
+            scaffold_endpoint,
+            json=payload,
+            headers=headers,
+            timeout=120,
+        )
+
+        if response.status_code in [200, 202]:
+            data = response.json()
+            job_id = data.get('job_id')
+
+            if job_id:
+                ContentFactoryJob.objects.create(
+                    job_id=job_id,
+                    domain=domain,
+                    slack_user_id=slack_user_id,
+                    status='queued',
+                    slack_channel_id=slack_channel_id or '',
+                    slack_thread_ts=slack_thread_ts or '',
+                    request_meta={
+                        'type': 'scaffold_articles',
+                        'pillar_dirs': pillar_dirs,
+                        'article_path_pattern': article_path_pattern,
+                    },
+                )
+                logger.info(f"Scaffold job created: {job_id} for {domain}")
+
+            return {
+                "job_id": job_id,
+                "status": data.get('status', 'queued'),
+            }
+        else:
+            logger.error(f"Content Factory scaffold failed: {response.status_code} - {response.text}")
+            raise ScanError(f"Scaffold request failed: {response.status_code}")
+
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Failed to connect to Content Factory for scaffolding: {e}")
+        raise ScanError(f"Failed to trigger scaffolding: {str(e)}")
 
 
 def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None, domain: str = None):
@@ -535,16 +710,105 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                 slack_thread_ts=thread_ts
             )
             
-            repo_name = result.get('github_repo', 'your repo')
+            import json as _json
+
+            scan_domain = result.get('domain', domain)
             logger.info(f"Background scan completed: {result}")
-            
-            # Notify success (threaded)
-            success_msg = f"✅ Scan complete for `{repo_name}`! I've analyzed your codebase and I'm ready to help. You can now ask me to create blog pages or other content."
-            
-            if slack_channel_id:
-                SlackService.send_message(slack_channel_id, success_msg, thread_ts=thread_ts)
+
+            # Build success message with component info + scaffold confirmation buttons
+            cf_response = result.get('content_factory_response', {}) or {}
+            generated_components = cf_response.get('generated_components', [])
+
+            # Check if scaffolding is available
+            has_pillars = False
+            already_scaffolded = False
+            try:
+                from core.models import Organization, OrganizationContentConfig
+                scaffold_org = Organization.objects.get(domain=scan_domain)
+                scaffold_config = scaffold_org.content_config
+                already_scaffolded = scaffold_config.articles_scaffolded
+                pillar_strategy = (
+                    cf_response.get('pillar_strategy') or
+                    scaffold_config.pillar_strategy or
+                    {}
+                )
+                has_pillars = bool(pillar_strategy.get('pillars'))
+            except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
+                pass
+
+            if generated_components:
+                comp_names = [c.get('name', '?') for c in generated_components[:8]]
+                comp_list = "\n".join(f"  • {name}" for name in comp_names)
+                if len(generated_components) > 8:
+                    comp_list += f"\n  • ...and {len(generated_components) - 8} more"
+
+                if has_pillars and not already_scaffolded:
+                    text_body = (
+                        f"✅ *Scan complete for {scan_domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{len(generated_components)} article components* "
+                        f"matched to your website's design:\n"
+                        f"{comp_list}\n\n"
+                        f"*Next step:* I'll create an articles directory in your "
+                        f"repo with pillar-based folders and these components, "
+                        f"submitted as a PR for your review."
+                    )
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": text_body}
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"scaffold_confirm_{scan_domain}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Create Articles Directory"},
+                                    "style": "primary",
+                                    "action_id": "scaffold_confirm",
+                                    "value": _json.dumps({
+                                        "domain": scan_domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": slack_channel_id or "",
+                                        "thread_ts": thread_ts or "",
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Skip for now"},
+                                    "action_id": "scaffold_skip",
+                                    "value": _json.dumps({"domain": scan_domain})
+                                }
+                            ]
+                        }
+                    ]
+                    fallback_text = f"✅ Scan complete for {scan_domain}! Generated {len(generated_components)} components."
+                else:
+                    fallback_text = (
+                        f"✅ *Scan complete for {scan_domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{len(generated_components)} article components* "
+                        f"matched to your website's design:\n{comp_list}\n\n"
+                        f"These components will be used to create articles that look native to your site.\n\n"
+                        f"Would you like me to write your first article? Just say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
+                    blocks = None
             else:
-                SlackService.send_dm(slack_user_id, success_msg, thread_ts=thread_ts)
+                fallback_text = (
+                    f"✅ *Scan complete for {scan_domain}!*\n\n"
+                    f"I've analysed your codebase and I'm ready to help. "
+                    f"You can now ask me to create blog pages or other content.\n\n"
+                    f"To get started, say:\n"
+                    f"  `@Roo write me an article about [topic]`"
+                )
+                blocks = None
+
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
             
         except ScanError as e:
             logger.error(f"Background scan failed for {slack_user_id}: {e}")
