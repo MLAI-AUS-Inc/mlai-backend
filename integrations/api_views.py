@@ -462,6 +462,8 @@ class GithubScanView(APIView):
         slack_thread_ts = request.data.get('slack_thread_ts')
         domain = request.data.get('domain') or request.query_params.get('domain')
 
+        logger.info(f"Scan request received: slack_user_id={slack_user_id}, domain={domain}, data_keys={list(request.data.keys())}")
+
         if not slack_user_id:
             return Response(
                 {"error": "slack_user_id is required"},
@@ -481,17 +483,25 @@ class GithubScanView(APIView):
                 github_repo = creds['repo']
                 has_credentials = True
                 logger.info(f"Scan credentials resolved via {creds['source']}-level for {normalized_domain}")
-            except ArticleGenerationError:
+            except ArticleGenerationError as e:
                 # No org-level config for this domain yet.
                 # Bootstrap from UserIntegration credentials so the domain gets linked.
+                logger.info(f"No existing config for {normalized_domain}, attempting bootstrap from user credentials. Error was: {e}")
                 integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                if integration:
+                    logger.info(f"Found UserIntegration for {slack_user_id}: has_token={bool(integration.github_access_token)}, has_repo={bool(integration.github_repo)}, repo={integration.github_repo}")
+                else:
+                    logger.info(f"No UserIntegration found for {slack_user_id}")
+                
                 if integration and integration.github_access_token and integration.github_repo:
                     from core.models import Organization, OrganizationContentConfig
-                    org, _ = Organization.objects.get_or_create(
+                    org, org_created = Organization.objects.get_or_create(
                         domain=normalized_domain,
                         defaults={"name": normalized_domain}
                     )
-                    config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+                    logger.info(f"Organization for {normalized_domain}: created={org_created}, id={org.id}")
+                    config, config_created = OrganizationContentConfig.objects.get_or_create(organization=org)
+                    logger.info(f"OrganizationContentConfig for {normalized_domain}: created={config_created}, id={config.id}")
                     if not config.github_token_encrypted:
                         config.github_token_encrypted = integration.github_access_token
                         config.github_refresh_token_encrypted = integration.github_refresh_token
@@ -504,6 +514,17 @@ class GithubScanView(APIView):
                     github_repo = config.github_repo
                     has_credentials = True
                     logger.info(f"Bootstrapped org config for {normalized_domain} from user-level credentials")
+                elif integration and integration.github_access_token and not integration.github_repo:
+                    # User has connected GitHub but hasn't selected a repo yet
+                    logger.warning(f"User {slack_user_id} has GitHub token but no repo set - cannot bootstrap domain {normalized_domain}")
+                    from integrations.services.article_generation import build_github_oauth_url
+                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id)
+                    return Response({
+                        "error": f"Please complete GitHub setup for {normalized_domain}. You need to select a repository.",
+                        "needs_github_auth": True,
+                        "oauth_url": oauth_url,
+                        "domain": normalized_domain,
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
         # Fall back to UserIntegration ONLY when no domain was specified.
         # When a domain IS specified, we must use the domain-specific repo —
@@ -565,7 +586,12 @@ class GithubScanView(APIView):
                 logger.warning(f"Error resolving domain for scan: {e}")
 
         if not normalized_domain:
-            return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
+            # Provide a helpful error when we have credentials but no domain could be resolved
+            return Response({
+                "error": "Please specify a domain to scan.",
+                "hint": "Try: scan my codebase <domain>",
+                "github_repo": github_repo,
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # Ensure org/config exist (but don't overwrite existing github_repo)
         try:
