@@ -167,7 +167,7 @@ def scan_github_project(
         ScanError: If validation fails or the external call fails.
     """
     # Resolve credentials via domain-aware resolution (org-level preferred, domain-verified user-level)
-    from core.models import Organization, OrganizationContentConfig
+    from core.models import Organization, OrganizationContentConfig, ContentFactoryJob
     from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
 
     resolved_domain = normalize_domain(domain)
@@ -319,7 +319,22 @@ def scan_github_project(
             job_id = data.get('job_id')
             if not job_id:
                 raise ScanError("Async response received but no job_id provided.")
-                
+
+            # Create a ContentFactoryJob so callback handlers can look up thread context
+            try:
+                ContentFactoryJob.objects.create(
+                    job_id=job_id,
+                    domain=resolved_domain,
+                    slack_user_id=slack_user_id,
+                    status='queued',
+                    slack_channel_id=slack_channel_id or '',
+                    slack_thread_ts=slack_thread_ts or '',
+                    request_meta={'type': 'scan', 'github_repo': github_repo},
+                )
+                logger.info(f"Scan job created: {job_id} for {resolved_domain} (channel={slack_channel_id}, thread={slack_thread_ts})")
+            except Exception as e:
+                logger.warning(f"Could not create ContentFactoryJob for scan {job_id}: {e}")
+
             status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/scan/{job_id}"
             
             # Start Polling Loop
