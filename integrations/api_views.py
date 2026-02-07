@@ -171,6 +171,32 @@ class GithubTokenIdentityView(APIView):
             except Exception as e:
                 logger.warning(f"Failed to fetch last article: {e}")
 
+            # Fetch all connected domains for this user (org-level configs with valid tokens)
+            connected_domains = []
+            try:
+                from core.models import OrganizationContentConfig
+                org_configs = (
+                    OrganizationContentConfig.objects
+                    .select_related('organization')
+                    .filter(
+                        github_user_name=integration.github_user_name,
+                        github_token_encrypted__isnull=False,
+                    )
+                    .exclude(github_token_encrypted='')
+                )
+                connected_domains = [
+                    {
+                        "domain": c.organization.domain,
+                        "github_repo": c.github_repo,
+                        "scanned": bool(c.scan_summary),
+                        "articles_scaffolded": c.articles_scaffolded,
+                    }
+                    for c in org_configs
+                    if c.organization
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to fetch connected domains for {slack_user_id}: {e}")
+
             response_data = {
                 "slack_user_id": integration.slack_user_id,
                 "token": integration.github_access_token,
@@ -190,6 +216,7 @@ class GithubTokenIdentityView(APIView):
                 "error": error_message,
                 "auth_url": auth_url,
                 "access_revoked": access_revoked,
+                "connected_domains": connected_domains,
             }
             if domain_info:
                 response_data.update(domain_info)
@@ -463,7 +490,32 @@ class GithubScanView(APIView):
         # When a domain IS specified, we must use the domain-specific repo —
         # falling back to the user's default repo would scan the wrong codebase.
         if not has_credentials and not normalized_domain:
+            # Check if user has multiple connected domains — if so, require domain selection
+            # rather than silently using the default repo (which may be the wrong one).
             integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+            if integration and integration.github_user_name:
+                from core.models import OrganizationContentConfig as OCC
+                user_org_configs = list(
+                    OCC.objects
+                    .select_related('organization')
+                    .filter(
+                        github_user_name=integration.github_user_name,
+                        github_token_encrypted__isnull=False,
+                    )
+                    .exclude(github_token_encrypted='')
+                )
+                if len(user_org_configs) > 1:
+                    # User has multiple domains — require explicit domain selection
+                    available = [
+                        {"domain": c.organization.domain, "github_repo": c.github_repo}
+                        for c in user_org_configs if c.organization
+                    ]
+                    return Response({
+                        "error": "You have multiple connected codebases. Please specify which domain to scan.",
+                        "available_domains": available,
+                        "hint": "Try: scan my codebase <domain>",
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
             if integration and integration.github_access_token and integration.github_repo:
                 github_repo = integration.github_repo
                 has_credentials = True
