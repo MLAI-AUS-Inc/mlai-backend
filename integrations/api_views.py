@@ -628,13 +628,6 @@ class GithubScaffoldView(APIView):
                 "pr_url": config.articles_scaffold_pr_url,
             }, status=status.HTTP_200_OK)
 
-        pillar_strategy = config.pillar_strategy or {}
-        if not pillar_strategy.get('pillars'):
-            return Response(
-                {"error": "No pillar strategy found. Run a scan first."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
         # Resolve GitHub credentials
         try:
             creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
@@ -649,9 +642,6 @@ class GithubScaffoldView(APIView):
                 scaffold_articles_directory(
                     domain=normalized_domain,
                     slack_user_id=slack_user_id,
-                    pillar_strategy=pillar_strategy,
-                    article_path_pattern=config.article_path_pattern or '',
-                    tech_stack=config.tech_stack or {},
                     github_token=creds['token'],
                     github_repo=creds['repo'],
                     slack_channel_id=slack_channel_id,

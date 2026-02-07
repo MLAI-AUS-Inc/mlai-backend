@@ -571,9 +571,6 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
 def scaffold_articles_directory(
     domain: str,
     slack_user_id: str,
-    pillar_strategy: dict,
-    article_path_pattern: str,
-    tech_stack: dict,
     github_token: str,
     github_repo: str,
     slack_channel_id: str = None,
@@ -582,33 +579,17 @@ def scaffold_articles_directory(
     """
     Trigger articles directory scaffolding via Content Factory.
 
-    Creates a directory structure in the target GitHub repo:
-      articles/
-      ├── featured/
-      │   └── index.tsx
-      ├── {pillar-1-slug}/
-      │   └── index.tsx
-      └── {pillar-n-slug}/
-          └── index.tsx
+    CF handles all the heavy lifting (pillar strategy, tech stack, path patterns)
+    using the domain to look up its own stored config. We just need to pass
+    credentials and context.
 
     Returns:
-        dict with job_id and status, or None if no pillars found.
+        dict with job_id and status.
 
     Raises:
         ScanError: If the API call fails.
     """
     from core.models import ContentFactoryJob
-
-    pillars = pillar_strategy.get('pillars', [])
-    if not pillars:
-        logger.warning(f"No pillars found in pillar_strategy for {domain}, skipping scaffolding")
-        return None
-
-    pillar_dirs = [
-        {"slug": p.get("slug"), "name": p.get("name")}
-        for p in pillars
-        if p.get("slug")
-    ]
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scaffold-articles"
@@ -623,11 +604,6 @@ def scaffold_articles_directory(
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
         "github_token": github_token,
-        "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-        "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-        "pillar_dirs": pillar_dirs,
-        "article_path_pattern": article_path_pattern,
-        "tech_stack": tech_stack,
     }
 
     if slack_channel_id:
@@ -635,7 +611,7 @@ def scaffold_articles_directory(
     if slack_thread_ts:
         payload["slack_thread_ts"] = slack_thread_ts
 
-    logger.info(f"Triggering article scaffolding for {domain} with {len(pillar_dirs)} pillars")
+    logger.info(f"Triggering article scaffolding for {domain}")
 
     try:
         response = http_requests.post(
@@ -657,11 +633,7 @@ def scaffold_articles_directory(
                     status='queued',
                     slack_channel_id=slack_channel_id or '',
                     slack_thread_ts=slack_thread_ts or '',
-                    request_meta={
-                        'type': 'scaffold_articles',
-                        'pillar_dirs': pillar_dirs,
-                        'article_path_pattern': article_path_pattern,
-                    },
+                    request_meta={'type': 'scaffold_articles'},
                 )
                 logger.info(f"Scaffold job created: {job_id} for {domain}")
 
