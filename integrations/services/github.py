@@ -742,16 +742,27 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                 if len(generated_components) > 8:
                     comp_list += f"\n  • ...and {len(generated_components) - 8} more"
 
+                # Build pillar summary from strategy
+                pillar_line = ""
+                if has_pillars:
+                    pillars = pillar_strategy.get('pillars', [])
+                    p_names = [p.get('name', '') for p in pillars if p.get('name')]
+                    if p_names:
+                        pillar_display = ", ".join(p_names[:6])
+                        if len(p_names) > 6:
+                            pillar_display += f", +{len(p_names) - 6} more"
+                        pillar_line = f"\n\n*{len(p_names)} content pillars:* {pillar_display}"
+
                 if has_pillars and not already_scaffolded:
                     text_body = (
                         f"✅ *Scan complete for {scan_domain}!*\n\n"
                         f"I've analysed your codebase and generated "
                         f"*{len(generated_components)} article components* "
                         f"matched to your website's design:\n"
-                        f"{comp_list}\n\n"
-                        f"*Next step:* I'll create an articles directory in your "
-                        f"repo with pillar-based folders and these components, "
-                        f"submitted as a PR for your review."
+                        f"{comp_list}{pillar_line}\n\n"
+                        f"The next step is to create an articles directory in your repo. "
+                        f"This will set up content pillar directories, article components, "
+                        f"an index page, and a demo article — submitted as a PR for your review."
                     )
                     blocks = [
                         {
