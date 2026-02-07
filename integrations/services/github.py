@@ -641,6 +641,18 @@ def scaffold_articles_directory(
                 "job_id": job_id,
                 "status": data.get('status', 'queued'),
             }
+        elif response.status_code == 412:
+            # Content Factory prerequisite check failed
+            try:
+                data = response.json()
+                missing_step = data.get('missing_step', 'unknown')
+                cf_message = data.get('message', 'Prerequisite step missing')
+            except Exception:
+                missing_step = 'unknown'
+                cf_message = response.text
+            raise ScanError(
+                f"PREREQUISITE_MISSING: {cf_message} (missing: {missing_step})"
+            )
         else:
             logger.error(f"Content Factory scaffold failed: {response.status_code} - {response.text}")
             raise ScanError(f"Scaffold request failed: {response.status_code}")
