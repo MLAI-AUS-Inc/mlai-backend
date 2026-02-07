@@ -482,7 +482,28 @@ class GithubScanView(APIView):
                 has_credentials = True
                 logger.info(f"Scan credentials resolved via {creds['source']}-level for {normalized_domain}")
             except ArticleGenerationError:
-                pass
+                # No org-level config for this domain yet.
+                # Bootstrap from UserIntegration credentials so the domain gets linked.
+                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                if integration and integration.github_access_token and integration.github_repo:
+                    from core.models import Organization, OrganizationContentConfig
+                    org, _ = Organization.objects.get_or_create(
+                        domain=normalized_domain,
+                        defaults={"name": normalized_domain}
+                    )
+                    config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+                    if not config.github_token_encrypted:
+                        config.github_token_encrypted = integration.github_access_token
+                        config.github_refresh_token_encrypted = integration.github_refresh_token
+                        config.github_token_expires_at = integration.github_token_expires_at
+                        config.github_user_name = integration.github_user_name
+                        config.github_installation_id = integration.github_installation_id
+                    if not config.github_repo:
+                        config.github_repo = integration.github_repo
+                    config.save()
+                    github_repo = config.github_repo
+                    has_credentials = True
+                    logger.info(f"Bootstrapped org config for {normalized_domain} from user-level credentials")
 
         # Fall back to UserIntegration ONLY when no domain was specified.
         # When a domain IS specified, we must use the domain-specific repo —
