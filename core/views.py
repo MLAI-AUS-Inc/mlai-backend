@@ -1674,6 +1674,8 @@ class ContentFactoryCallbackView(APIView):
         components_generated = data.get('components_generated', False)
         components_count = data.get('components_count', 0)
         component_names = data.get('component_names', [])
+        pillar_count = data.get('pillar_count', 0)
+        pillar_names = data.get('pillar_names', [])
 
         # Update job record if one exists
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
@@ -1685,7 +1687,7 @@ class ContentFactoryCallbackView(APIView):
         channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
         thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
 
-        logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}")
+        logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}, pillars={pillar_count}")
 
         # Check if scaffolding is available
         has_pillars = False
@@ -1708,16 +1710,26 @@ class ContentFactoryCallbackView(APIView):
                 if len(component_names) > 8:
                     component_list += f"\n  • ...and {len(component_names) - 8} more"
 
+                # Build pillar summary line
+                pillar_line = ""
+                if pillar_count and pillar_names:
+                    pillar_display = ", ".join(pillar_names[:6])
+                    if len(pillar_names) > 6:
+                        pillar_display += f", +{len(pillar_names) - 6} more"
+                    pillar_line = f"\n\n*{pillar_count} content pillars:* {pillar_display}"
+                elif pillar_count:
+                    pillar_line = f"\n\n*{pillar_count} content pillars* identified"
+
                 if has_pillars and not already_scaffolded:
                     text_body = (
                         f"✅ *Scan complete for {domain}!*\n\n"
                         f"I've analysed your codebase and generated "
                         f"*{components_count} article components* "
                         f"matched to your website's design:\n"
-                        f"{component_list}\n\n"
-                        f"*Next step:* I'll create an articles directory in your "
-                        f"repo with pillar-based folders and these components, "
-                        f"submitted as a PR for your review."
+                        f"{component_list}{pillar_line}\n\n"
+                        f"The next step is to create an articles directory in your repo. "
+                        f"This will set up content pillar directories, article components, "
+                        f"an index page, and a demo article — submitted as a PR for your review."
                     )
                     blocks = [
                         {

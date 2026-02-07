@@ -291,20 +291,33 @@ def github_callback(request):
         logger.info(f"Org-level GitHub connected for {normalized_domain}: repo={selected_repo}, user={github_login}")
         domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
 
-        # Also store in UserIntegration if slack_user_id provided (for backward compatibility)
+        # Also store in UserIntegration if slack_user_id provided (for backward compatibility).
+        # If the user already has a UserIntegration with a different repo, DON'T overwrite
+        # github_repo — that would break multi-domain support (each org-level OAuth
+        # would clobber the user's default repo with the last-connected domain's repo).
         if slack_user_id:
-            UserIntegration.objects.update_or_create(
-                slack_user_id=slack_user_id,
-                defaults={
-                    "github_access_token": access_token,
-                    "github_refresh_token": refresh_token,
-                    "github_token_expires_at": token_expires_at,
-                    "github_user_name": github_login,
-                    "github_repo": selected_repo,
-                    "github_installation_id": installation_id,
-                    "github_scopes": [],
-                }
-            )
+            existing_integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+            if existing_integration:
+                # Update token/auth fields but preserve existing github_repo
+                existing_integration.github_access_token = access_token
+                existing_integration.github_refresh_token = refresh_token
+                existing_integration.github_token_expires_at = token_expires_at
+                existing_integration.github_user_name = github_login
+                existing_integration.github_installation_id = installation_id
+                existing_integration.github_scopes = []
+                existing_integration.save()
+            else:
+                # No existing integration — create one with this repo as default
+                UserIntegration.objects.create(
+                    slack_user_id=slack_user_id,
+                    github_access_token=access_token,
+                    github_refresh_token=refresh_token,
+                    github_token_expires_at=token_expires_at,
+                    github_user_name=github_login,
+                    github_repo=selected_repo,
+                    github_installation_id=installation_id,
+                    github_scopes=[],
+                )
 
         # Notify via Slack if slack_user_id provided
         if slack_user_id and selected_repo:

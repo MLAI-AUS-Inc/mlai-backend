@@ -459,8 +459,10 @@ class GithubScanView(APIView):
             except ArticleGenerationError:
                 pass
 
-        # Fall back to UserIntegration
-        if not has_credentials:
+        # Fall back to UserIntegration ONLY when no domain was specified.
+        # When a domain IS specified, we must use the domain-specific repo —
+        # falling back to the user's default repo would scan the wrong codebase.
+        if not has_credentials and not normalized_domain:
             integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
             if integration and integration.github_access_token and integration.github_repo:
                 github_repo = integration.github_repo
