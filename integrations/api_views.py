@@ -314,29 +314,27 @@ class GithubAuthUrlView(APIView):
     def get(self, request):
         """
         Get the GitHub OAuth URL for a specific slack user.
-        Path: GET /api/v1/integrations/github/auth-url?slack_user_id=...
+        Path: GET /api/v1/integrations/github/auth-url?slack_user_id=...&domain=...
+
+        When domain is provided, returns an org-level OAuth URL that preserves
+        the domain through the OAuth flow. This ensures the domain is linked
+        to the correct Organization after callback.
         """
         slack_user_id = request.query_params.get('slack_user_id')
+        domain = request.query_params.get('domain')
         if not slack_user_id:
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Construct the connect URL (hosted by us)
-        # We need the full absolute URL since Slack is external
-        base_url = settings.MEDHACK_URL.rstrip('/') # Or wherever this django app is hosted publically
-        if 'localhost' in base_url or '127.0.0.1' in base_url:
-             # If MEDHACK_URL is localhost (default), we might need ngrok or just assume localhost for dev
-             pass
-             
-        # Actually, let's just use the path and let the caller prepend domain if needed, 
-        # OR attempt to build absolute URI from request if possible.
-        # But request.build_absolute_uri() is best.
-        
-        connect_path = reverse('github_connect')
-        full_connect_url = request.build_absolute_uri(connect_path)
-        
-        # Append param
-        auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
-        
+        if domain:
+            # Domain-specific: use org-level OAuth which preserves domain in state
+            from integrations.services.article_generation import build_github_oauth_url
+            auth_url = build_github_oauth_url(domain, slack_user_id)
+        else:
+            # Legacy user-level OAuth (no domain context)
+            connect_path = reverse('github_connect')
+            full_connect_url = request.build_absolute_uri(connect_path)
+            auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+
         return Response({
             "auth_url": auth_url,
             "message": "Send this URL to the user to authorize GitHub."

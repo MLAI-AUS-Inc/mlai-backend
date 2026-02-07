@@ -107,29 +107,36 @@ def github_connect(request):
     """
     Initiates GitHub App installation flow.
     Expects 'slack_user_id' in query params to link the token.
-    
+    Optional 'domain' param triggers org-level OAuth (preserves domain through callback).
+
     This uses the GitHub App installation flow which shows the native
     repository selection UI on GitHub's side.
     """
     slack_user_id = request.GET.get('slack_user_id')
+    domain = request.GET.get('domain')
     if not slack_user_id:
         return HttpResponseBadRequest("Missing slack_user_id")
 
-    # State allows us to pass the slack_user_id and optional job_id through the OAuth flow
     rand_token = secrets.token_urlsafe(16)
-    job_id = request.GET.get('job_id', '')
-    state = f"{slack_user_id}::{rand_token}::{job_id}"
+
+    if domain:
+        # Org-level OAuth — preserves domain through the callback
+        state = f"{domain}::{rand_token}::{slack_user_id}::org"
+    else:
+        # Legacy user-level OAuth
+        job_id = request.GET.get('job_id', '')
+        state = f"{slack_user_id}::{rand_token}::{job_id}"
+
     request.session["github_oauth_state"] = state
 
     # GitHub App installation URL - this shows the native repo selector
-    # App slug is "mlai-tools" based on the public link https://github.com/apps/mlai-tools
     app_slug = "mlai-tools"
     install_url = f"https://github.com/apps/{app_slug}/installations/new"
-    
+
     params = {
         "state": state,
     }
-    
+
     url = install_url + "?" + urllib.parse.urlencode(params)
     return redirect(url)
 
@@ -317,16 +324,23 @@ def github_callback(request):
                     github_scopes=[],
                 )
 
-        # Notify via Slack if slack_user_id provided
+        # Notify via Slack and auto-trigger scan
         if slack_user_id and selected_repo:
             try:
                 from integrations.services.slack import SlackService
                 SlackService.send_dm(
                     slack_user_id,
-                    f"✅ GitHub connected for *{normalized_domain}*! Repository `{selected_repo}` is now linked."
+                    f"✅ GitHub connected for *{normalized_domain}*! Repository `{selected_repo}` is now linked.\n\n🔍 Starting automatic scan..."
                 )
             except Exception as e:
                 logger.warning(f"Failed to send Slack notification: {e}")
+
+            # Auto-trigger scan with domain context
+            try:
+                from integrations.services.github import trigger_scan_async
+                trigger_scan_async(slack_user_id, domain=normalized_domain)
+            except Exception as e:
+                logger.warning(f"Failed to auto-trigger scan for {normalized_domain}: {e}")
 
     else:
         # ====== USER-LEVEL OAUTH (Legacy) ======
