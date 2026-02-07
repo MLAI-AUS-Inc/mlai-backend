@@ -1827,7 +1827,26 @@ class ContentFactoryCallbackView(APIView):
 
         if slack_user_id:
             try:
-                if error_code == 'MISSING_CONFIG':
+                if error_code == 'PREREQUISITE_MISSING':
+                    missing_step = data.get('missing_step', 'unknown')
+                    if missing_step == 'scan':
+                        message = (
+                            f"⚠️ *{domain} needs to be scanned first.*\n\n"
+                            f"{error_message}\n\n"
+                            f"Say: `@Roo scan my codebase {domain}`"
+                        )
+                    elif missing_step == 'scaffold':
+                        message = (
+                            f"⚠️ *{domain} needs article scaffolding first.*\n\n"
+                            f"{error_message}\n\n"
+                            f"Say: `@Roo scaffold articles for {domain}`"
+                        )
+                    else:
+                        message = (
+                            f"⚠️ *Prerequisite missing for {domain}*\n\n"
+                            f"{error_message}"
+                        )
+                elif error_code == 'MISSING_CONFIG':
                     message = (
                         f"❌ *Failed for {domain}*\n\n"
                         f"{error_message}\n\n"
@@ -1915,6 +1934,7 @@ class ContentFactoryCallbackView(APIView):
             }, status=status.HTTP_200_OK)
 
         # Mark articles as scaffolded in the config
+        normalized_domain = ''
         try:
             normalized_domain = normalize_domain(domain)
             org = Organization.objects.get(domain=normalized_domain)
@@ -1929,16 +1949,47 @@ class ContentFactoryCallbackView(APIView):
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
             logger.warning(f"Could not update articles_scaffolded for {domain}: {e}")
 
+        # Check for pending article intent to auto-resume
+        pending_resumed = False
+        if slack_user_id:
+            try:
+                from integrations.models import UserIntegration
+                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                if integration and integration.pending_intent:
+                    intent = integration.pending_intent
+                    if intent.get('type') == 'write_article' and intent.get('article_request'):
+                        article_req = intent['article_request']
+                        # Only resume if intent is for the same domain
+                        intent_domain = normalize_domain(article_req.get('domain', ''))
+                        if intent_domain == normalized_domain:
+                            # Clear intent first (prevent double-trigger)
+                            integration.pending_intent = None
+                            integration.save()
+
+                            # Auto-trigger article generation
+                            from integrations.services.article_generation import trigger_article_generation
+                            trigger_article_generation(slack_user_id, article_req)
+                            pending_resumed = True
+                            logger.info(f"Auto-resumed pending article intent for {slack_user_id}/{domain}")
+            except Exception as e:
+                logger.warning(f"Failed to resume pending intent after scaffold: {e}")
+
         # Send Slack notification
         try:
             import json as _json
 
             if already_exists:
-                _send(
-                    f"📁 Articles directory already exists for *{domain}*.\n\n"
-                    f"You're all set! To write your first article, say:\n"
-                    f"  `@Roo write me an article about [topic]`"
-                )
+                if pending_resumed:
+                    _send(
+                        f"📁 Articles directory already exists for *{domain}*.\n\n"
+                        f"🔄 *Resuming your article request automatically!* You'll get a notification shortly."
+                    )
+                else:
+                    _send(
+                        f"📁 Articles directory already exists for *{domain}*.\n\n"
+                        f"You're all set! To write your first article, say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
             elif pr_url:
                 preview_line = ""
                 if preview_url:
@@ -1951,41 +2002,48 @@ class ContentFactoryCallbackView(APIView):
                     f"  • {component_count} article components\n"
                     f"  • {files_created} total files\n"
                     f"  • {build_status}\n\n"
-                    f"*Review the PR:* {pr_url}{preview_line}\n\n"
-                    f"Once merged, I can write your first article."
+                    f"*Review the PR:* {pr_url}{preview_line}"
                 )
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": text_body}
-                    },
-                    {
-                        "type": "actions",
-                        "block_id": f"write_article_{domain}",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Write First Article"},
-                                "style": "primary",
-                                "action_id": "write_first_article",
-                                "value": _json.dumps({
-                                    "domain": domain,
-                                    "slack_user_id": slack_user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                })
-                            },
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Skip for now"},
-                                "action_id": "write_article_skip",
-                                "value": _json.dumps({"domain": domain})
-                            }
-                        ]
-                    }
-                ]
-                fallback_text = f"📁 Articles directory created for {domain}! Review the PR: {pr_url}"
-                _send(fallback_text, blocks=blocks)
+                if pending_resumed:
+                    text_body += (
+                        f"\n\n🔄 *Resuming your article request automatically!* "
+                        f"You'll get a notification shortly."
+                    )
+                    _send(text_body)
+                else:
+                    text_body += "\n\nOnce merged, I can write your first article."
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": text_body}
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"write_article_{domain}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Write First Article"},
+                                    "style": "primary",
+                                    "action_id": "write_first_article",
+                                    "value": _json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Skip for now"},
+                                    "action_id": "write_article_skip",
+                                    "value": _json.dumps({"domain": domain})
+                                }
+                            ]
+                        }
+                    ]
+                    fallback_text = f"📁 Articles directory created for {domain}! Review the PR: {pr_url}"
+                    _send(fallback_text, blocks=blocks)
             else:
                 _send(
                     f"📁 Articles directory scaffolded for *{domain}*, but "

@@ -2,17 +2,56 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from core.permissions import HasRooApiKey
+from django.utils import timezone
 import logging
 
 from integrations.services.article_generation import (
-    trigger_article_generation, 
-    check_generation_status, 
+    trigger_article_generation,
+    check_generation_status,
     publish_article,
     confirm_topic,
     ArticleGenerationError
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_request: dict = None) -> Response:
+    """
+    Parse a PREREQUISITE_MISSING error, store pending intent, and return a structured 412 response.
+
+    Error format: "PREREQUISITE_MISSING:{missing_step}:{domain}:{message}"
+    """
+    parts = error_str.split(":", 3)
+    missing_step = parts[1] if len(parts) > 1 else 'unknown'
+    domain = parts[2] if len(parts) > 2 else ''
+    message = parts[3] if len(parts) > 3 else error_str
+
+    # Store the article request as pending intent so it can be auto-resumed
+    pending_stored = False
+    if slack_user_id and article_request:
+        try:
+            from integrations.models import UserIntegration
+            integration, _ = UserIntegration.objects.get_or_create(slack_user_id=slack_user_id)
+            integration.pending_intent = {
+                "type": "write_article",
+                "article_request": article_request,
+                "stored_at": timezone.now().isoformat(),
+            }
+            integration.save()
+            pending_stored = True
+        except Exception as e:
+            logger.warning(f"Failed to store pending intent for {slack_user_id}: {e}")
+
+    step_label = 'Scan' if missing_step == 'scan' else 'Scaffold'
+    return Response({
+        "error": message,
+        "error_code": "PREREQUISITE_MISSING",
+        "missing_step": missing_step,
+        "domain": domain,
+        "pending_intent_stored": pending_stored,
+        "hint": f"{step_label} the codebase first, then retry.",
+    }, status=status.HTTP_412_PRECONDITION_FAILED)
 
 class ContentGenerateView(APIView):
     """
@@ -43,6 +82,11 @@ class ContentGenerateView(APIView):
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
             error_str = str(e)
+
+            # Handle prerequisite errors — store pending intent and return structured 412
+            if error_str.startswith("PREREQUISITE_MISSING:"):
+                return _handle_prerequisite_error(error_str, slack_user_id, article_request)
+
             response_data = {"error": error_str}
             # Include structured auth fields so the bot can prompt for GitHub connection
             if "Please connect GitHub:" in error_str:
@@ -153,7 +197,10 @@ class ContentConfirmView(APIView):
             )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleGenerationError as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            error_str = str(e)
+            if error_str.startswith("PREREQUISITE_MISSING:"):
+                return _handle_prerequisite_error(error_str, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
+            return Response({"error": error_str}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in confirm view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -246,8 +293,11 @@ class ContentJobConfirmView(APIView):
                 "cf_response": result
             }, status=status.HTTP_200_OK)
         except ArticleGenerationError as e:
+            error_str = str(e)
+            if error_str.startswith("PREREQUISITE_MISSING:"):
+                return _handle_prerequisite_error(error_str, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
             logger.exception(f"Failed to trigger generation for job {job_id}: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": error_str}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
             logger.exception(f"Unexpected error triggering generation for job {job_id}: {e}")
             return Response({"error": "Failed to trigger generation"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

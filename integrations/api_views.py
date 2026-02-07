@@ -621,6 +621,18 @@ class GithubScaffoldView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        # Check scan prerequisite — scan must have completed before scaffolding
+        from core.models import GeneratedComponent
+        has_components = GeneratedComponent.objects.filter(organization=org).exists()
+        if not has_components and not config.scan_summary:
+            return Response({
+                "error": "Repository must be scanned before scaffolding.",
+                "error_code": "PREREQUISITE_MISSING",
+                "missing_step": "scan",
+                "domain": normalized_domain,
+                "hint": "Scan the codebase first.",
+            }, status=status.HTTP_412_PRECONDITION_FAILED)
+
         if config.articles_scaffolded:
             return Response({
                 "status": "already_scaffolded",
@@ -649,14 +661,18 @@ class GithubScaffoldView(APIView):
                 )
             except ScanError as e:
                 logger.error(f"Scaffold failed for {normalized_domain}: {e}")
-                if slack_channel_id and slack_thread_ts:
-                    SlackService.send_message(
-                        slack_channel_id,
-                        f"❌ Could not start scaffolding for *{normalized_domain}*: {e}",
-                        thread_ts=slack_thread_ts,
+                error_str = str(e)
+                if 'PREREQUISITE_MISSING' in error_str:
+                    msg = (
+                        f"⚠️ *{normalized_domain}* needs to be scanned first before setting up articles.\n\n"
+                        f"Say: `@Roo scan my codebase {normalized_domain}`"
                     )
                 else:
-                    SlackService.send_dm(slack_user_id, f"❌ Could not start scaffolding: {e}")
+                    msg = f"❌ Could not start scaffolding for *{normalized_domain}*: {e}"
+                if slack_channel_id and slack_thread_ts:
+                    SlackService.send_message(slack_channel_id, msg, thread_ts=slack_thread_ts)
+                else:
+                    SlackService.send_dm(slack_user_id, msg)
 
         thread = threading.Thread(target=_run_scaffold, daemon=True)
         thread.start()

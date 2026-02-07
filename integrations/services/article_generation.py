@@ -289,6 +289,20 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
+    # Check prerequisites: scan must have completed and articles must be scaffolded
+    if not config or not config.scan_summary:
+        raise ArticleGenerationError(
+            f"PREREQUISITE_MISSING:scan:{resolved_domain}:"
+            f"Repository must be scanned before writing articles. "
+            f"Ask me to scan your codebase first."
+        )
+
+    if not config.articles_scaffolded:
+        raise ArticleGenerationError(
+            f"PREREQUISITE_MISSING:scaffold:{resolved_domain}:"
+            f"Articles directory must be scaffolded before writing articles."
+        )
+
     # Retrieve competitors and seed_keywords early for Auto-Write or Payload
     competitors = []
     seed_keywords = []
@@ -382,6 +396,18 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "message": "Generation started",
                 "job_status_url": status_url
             }
+        elif response.status_code == 412:
+            # Content Factory prerequisite check failed (fallback — our proactive check should catch this first)
+            try:
+                data = response.json()
+                missing_step = data.get('missing_step', 'unknown')
+                cf_message = data.get('message', 'Prerequisite step missing')
+            except Exception:
+                missing_step = 'unknown'
+                cf_message = response.text
+            raise ArticleGenerationError(
+                f"PREREQUISITE_MISSING:{missing_step}:{resolved_domain}:{cf_message}"
+            )
         else:
             logger.error(f"Content Factory generate failed: {response.text}")
             raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
