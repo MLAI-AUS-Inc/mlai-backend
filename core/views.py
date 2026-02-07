@@ -1893,11 +1893,11 @@ class ContentFactoryCallbackView(APIView):
         channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
         thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
 
-        def _send(text):
+        def _send(text, blocks=None):
             if channel_id and thread_ts:
-                SlackService.send_message(channel_id, text, thread_ts=thread_ts)
+                SlackService.send_message(channel_id, text, blocks=blocks, thread_ts=thread_ts)
             elif slack_user_id:
-                SlackService.send_dm(slack_user_id, text)
+                SlackService.send_dm(slack_user_id, text, blocks=blocks)
 
         if error:
             logger.error(f"Scaffold failed for {domain}: {error}")
@@ -1931,6 +1931,8 @@ class ContentFactoryCallbackView(APIView):
 
         # Send Slack notification
         try:
+            import json as _json
+
             if already_exists:
                 _send(
                     f"📁 Articles directory already exists for *{domain}*.\n\n"
@@ -1942,7 +1944,7 @@ class ContentFactoryCallbackView(APIView):
                 if preview_url:
                     preview_line = f"\n\n🔗 *Preview:* {preview_url}"
                 build_status = "✅ Build passed" if build_verified else "⏳ Build pending"
-                _send(
+                text_body = (
                     f"📁 *Articles directory created for {domain}!*\n\n"
                     f"I've set up your content structure with:\n"
                     f"  • {pillar_count} content pillar directories\n"
@@ -1950,9 +1952,40 @@ class ContentFactoryCallbackView(APIView):
                     f"  • {files_created} total files\n"
                     f"  • {build_status}\n\n"
                     f"*Review the PR:* {pr_url}{preview_line}\n\n"
-                    f"Once merged, ask me to write your first article:\n"
-                    f"  `@Roo write me an article about [topic]`"
+                    f"Once merged, I can write your first article."
                 )
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": text_body}
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": f"write_article_{domain}",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Write First Article"},
+                                "style": "primary",
+                                "action_id": "write_first_article",
+                                "value": _json.dumps({
+                                    "domain": domain,
+                                    "slack_user_id": slack_user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                })
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Skip for now"},
+                                "action_id": "write_article_skip",
+                                "value": _json.dumps({"domain": domain})
+                            }
+                        ]
+                    }
+                ]
+                fallback_text = f"📁 Articles directory created for {domain}! Review the PR: {pr_url}"
+                _send(fallback_text, blocks=blocks)
             else:
                 _send(
                     f"📁 Articles directory scaffolded for *{domain}*, but "
@@ -2181,13 +2214,14 @@ class ContentFactoryCallbackView(APIView):
         """Handle article_complete event from content-factory."""
         from .models import ContentFactoryJob
         from integrations.services.slack import SlackService
-        
+
         job_id = data.get('job_id')
         article_url = data.get('article_url')
         pr_url = data.get('pr_url')
+        article_title = data.get('article_title', '')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
-        
+
         # Update or create job record
         job, created = ContentFactoryJob.objects.update_or_create(
             job_id=job_id,
@@ -2199,28 +2233,39 @@ class ContentFactoryCallbackView(APIView):
                 'pr_url': pr_url,
             }
         )
-        
-        logger.info(f"Article complete for job {job_id}: pr_url={pr_url}")
-        
+
+        # Resolve thread context: job first, then callback payload
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+
+        logger.info(f"Article complete for job {job_id}: pr_url={pr_url}, title={article_title}")
+
         if slack_user_id:
-             blocks = [
+            title_line = f"*{article_title}*\n\n" if article_title else ""
+            blocks = [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"✅ *Article Published!* for {domain}"
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"The article has been generated and a Pull Request is ready.\n\n📄 *< {article_url} | View Article >*\n🔗 *< {pr_url} | View Pull Request >*"
+                        "text": (
+                            f"✅ *Article Published!* for {domain}\n\n"
+                            f"{title_line}"
+                            f"The article has been generated and a Pull Request is ready.\n\n"
+                            f"📄 *<{article_url}|View Article>*\n"
+                            f"🔗 *<{pr_url}|View Pull Request>*"
+                        )
                     }
                 }
             ]
-             SlackService.send_dm(slack_user_id, "Article generation complete!", blocks=blocks)
-        
+            fallback_text = f"Article generation complete for {domain}!"
+            try:
+                if channel_id and thread_ts:
+                    SlackService.send_message(channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
+                else:
+                    SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks)
+            except Exception as e:
+                logger.warning(f"Failed to send article_complete notification to {slack_user_id}: {e}")
+
         return Response({
             'status': 'received',
             'message': 'Article complete callback processed',

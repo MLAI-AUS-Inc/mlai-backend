@@ -291,23 +291,21 @@ def github_callback(request):
         logger.info(f"Org-level GitHub connected for {normalized_domain}: repo={selected_repo}, user={github_login}")
         domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
 
-        # Also store in UserIntegration if slack_user_id provided (for backward compatibility).
-        # If the user already has a UserIntegration with a different repo, DON'T overwrite
-        # github_repo — that would break multi-domain support (each org-level OAuth
-        # would clobber the user's default repo with the last-connected domain's repo).
+        # Also update UserIntegration if slack_user_id provided.
+        # IMPORTANT: For org-level OAuth, tokens belong on OrganizationContentConfig (per-domain).
+        # We must NOT overwrite UserIntegration's token/repo — that would break multi-domain
+        # support by clobbering the user's existing credentials with a different domain's token.
         if slack_user_id:
             existing_integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
             if existing_integration:
-                # Update token/auth fields but preserve existing github_repo
-                existing_integration.github_access_token = access_token
-                existing_integration.github_refresh_token = refresh_token
-                existing_integration.github_token_expires_at = token_expires_at
+                # Only update identity metadata — preserve token, refresh, repo, and expiry.
+                # Each domain's token lives on its own OrganizationContentConfig.
                 existing_integration.github_user_name = github_login
                 existing_integration.github_installation_id = installation_id
-                existing_integration.github_scopes = []
                 existing_integration.save()
             else:
-                # No existing integration — create one with this repo as default
+                # No existing integration — create one with this repo+token as the default.
+                # This is the user's first GitHub connection, so it becomes their default.
                 UserIntegration.objects.create(
                     slack_user_id=slack_user_id,
                     github_access_token=access_token,
