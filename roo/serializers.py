@@ -2,7 +2,8 @@ from rest_framework import serializers
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress
+    RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
+    MedHackCase, MedHackGuess, MedHackWinner,
 )
 
 
@@ -167,4 +168,40 @@ class QuestProgressInputSerializer(serializers.Serializer):
 class QuestCompleteInputSerializer(serializers.Serializer):
     slack_user_id = serializers.CharField(max_length=50)
     quest_id = serializers.CharField(max_length=50)
+
+
+class MedHackCaseSerializer(serializers.ModelSerializer):
+    total_guesses = serializers.SerializerMethodField()
+    total_winners = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MedHackCase
+        fields = [
+            'id', 'case_id', 'is_active', 'started_by_slack_id',
+            'started_at', 'closed_at', 'total_guesses', 'total_winners',
+        ]
+        read_only_fields = ['id', 'started_at', 'closed_at']
+
+    def get_total_guesses(self, obj):
+        return obj.guesses.filter(is_pending=False).count()
+
+    def get_total_winners(self, obj):
+        return obj.winners.count()
+
+
+class MedHackGuessSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MedHackGuess
+        fields = [
+            'id', 'case', 'slack_user_id', 'guess', 'correct',
+            'is_pending', 'created_at', 'confirmed_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'confirmed_at']
+
+
+class MedHackWinnerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MedHackWinner
+        fields = ['id', 'case', 'slack_user_id', 'is_first_solver', 'won_at']
+        read_only_fields = ['id', 'won_at']
 
