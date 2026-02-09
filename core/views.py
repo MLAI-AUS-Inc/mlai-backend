@@ -1037,6 +1037,125 @@ class LinkSlackView(APIView):
         except User.DoesNotExist:
             return Response({"error": "User not found by email"}, status=status.HTTP_404_NOT_FOUND)
 
+
+class GetOrCreateSlackUserView(APIView):
+    """
+    Get or create a user from Slack data (for Roo bot interactions).
+
+    POST /api/v1/users/slack-user/
+
+    Creates a user if they don't exist, or returns existing user by slack_id or email.
+    This allows Roo to interact with users who haven't formally signed up yet.
+
+    Request body:
+        {
+            "slack_id": "U12345678",
+            "email": "user@example.com",
+            "first_name": "John",  // optional
+            "last_name": "Doe",    // optional
+            "avatar_url": "https://..."  // optional
+        }
+
+    Returns:
+        {
+            "user_id": 123,
+            "email": "user@example.com",
+            "slack_id": "U12345678",
+            "created": true/false
+        }
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        slack_id = request.data.get('slack_id')
+        email = request.data.get('email')
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        avatar_url = request.data.get('avatar_url')
+
+        if not slack_id or not email:
+            return Response(
+                {"error": "slack_id and email are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Try to find existing user by slack_id first (most specific)
+        user = User.objects.filter(slack_id=slack_id).first()
+
+        if user:
+            # Update email if it changed
+            if user.email.lower() != email.lower():
+                user.email = email.lower()
+                user.save()
+
+            return Response({
+                "user_id": user.id,
+                "email": user.email,
+                "slack_id": user.slack_id,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "created": False
+            }, status=status.HTTP_200_OK)
+
+        # Try to find by email (case-insensitive)
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user:
+            # Link slack_id to existing email account
+            user.slack_id = slack_id
+            if first_name and not user.first_name:
+                user.first_name = first_name
+            if last_name and not user.last_name:
+                user.last_name = last_name
+            if avatar_url and not user.avatar_url:
+                user.avatar_url = avatar_url
+            user.save()
+
+            logger.info(f"Linked Slack ID {slack_id} to existing user {email}")
+
+            return Response({
+                "user_id": user.id,
+                "email": user.email,
+                "slack_id": user.slack_id,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "created": False,
+                "linked": True
+            }, status=status.HTTP_200_OK)
+
+        # Create new user
+        try:
+            user = User.objects.create_user(
+                email=email.lower(),
+                role='participant',
+                first_name=first_name,
+                last_name=last_name,
+                slack_id=slack_id
+            )
+            user.is_active = True  # Auto-activate for Slack users
+            if avatar_url:
+                user.avatar_url = avatar_url
+            user.save()
+
+            logger.info(f"Auto-created user from Slack: {email} (Slack ID: {slack_id})")
+
+            return Response({
+                "user_id": user.id,
+                "email": user.email,
+                "slack_id": user.slack_id,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "created": True
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.exception(f"Error creating user from Slack data: {str(e)}")
+            return Response(
+                {"error": "Failed to create user"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class ContentFactoryTokenView(APIView):
     """
     On-demand token refresh endpoint for content-factory.
