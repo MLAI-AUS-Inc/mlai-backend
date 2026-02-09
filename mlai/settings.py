@@ -127,6 +127,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'hospital.authentication.CustomJWTAuthentication',
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '100/hour',  # Rate limit for MedHack endpoints
+    }
 }
 
 SIMPLE_JWT = {

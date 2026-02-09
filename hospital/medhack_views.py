@@ -1,11 +1,14 @@
 import logging
+import re
 
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from django.utils.html import escape
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.throttling import AnonRateThrottle
 
 from core.permissions import HasAPIKey, HasRooApiKey
 from .models import MedHackCase, MedHackGuess, MedHackWinner
@@ -13,6 +16,50 @@ from .models import MedHackCase, MedHackGuess, MedHackWinner
 logger = logging.getLogger(__name__)
 
 MAX_GUESSES_PER_USER = 1
+MAX_GUESS_LENGTH = 500
+SLACK_ID_PATTERN = re.compile(r'^[UW][A-Z0-9]{8,10}$')
+
+
+class MedHackRateThrottle(AnonRateThrottle):
+    """Rate limiting for MedHack endpoints to prevent abuse."""
+    rate = '100/hour'
+
+
+def validate_slack_id(slack_id: str) -> tuple[bool, str]:
+    """
+    Validate Slack user ID format.
+    Returns (is_valid, error_message).
+    """
+    if not slack_id:
+        return False, "slack_user_id is required"
+    if slack_id == "system":
+        return True, ""
+    if not SLACK_ID_PATTERN.match(slack_id):
+        return False, "Invalid Slack ID format"
+    return True, ""
+
+
+def sanitize_guess(guess: str) -> tuple[str, str]:
+    """
+    Sanitize and validate guess input.
+    Returns (sanitized_guess, error_message).
+    """
+    if not guess:
+        return "", "guess is required"
+
+    # Strip leading/trailing whitespace
+    guess = guess.strip()
+
+    if len(guess) > MAX_GUESS_LENGTH:
+        return "", f"guess exceeds maximum length of {MAX_GUESS_LENGTH} characters"
+
+    if len(guess) == 0:
+        return "", "guess cannot be empty"
+
+    # Escape HTML to prevent XSS
+    sanitized = escape(guess)
+
+    return sanitized, ""
 
 
 def is_medhack_admin(slack_id: str) -> bool:
@@ -26,6 +73,7 @@ class CurrentCaseView(APIView):
     """GET /cases/current/ — Get the active case."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def get(self, request):
         case = MedHackCase.objects.filter(is_active=True).first()
@@ -50,6 +98,7 @@ class StartCaseView(APIView):
     """POST /cases/start/ — Start a new case. Closes any active case."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def post(self, request):
         case_id = request.data.get('case_id')
@@ -58,6 +107,14 @@ class StartCaseView(APIView):
         if case_id is None or not admin_slack_id:
             return Response(
                 {"detail": "case_id and admin_slack_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate admin Slack ID
+        is_valid, error_msg = validate_slack_id(admin_slack_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -96,8 +153,16 @@ class UserCaseStatusView(APIView):
     """GET /cases/active/user/{slack_user_id}/ — User's status for the active case."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def get(self, request, slack_user_id):
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         case = MedHackCase.objects.filter(is_active=True).first()
         if not case:
             return Response(
@@ -134,15 +199,32 @@ class PendingGuessView(APIView):
     """
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def post(self, request):
         case_id = request.data.get('case_id')
         slack_user_id = request.data.get('slack_user_id')
         guess = request.data.get('guess')
 
-        if case_id is None or not slack_user_id or not guess:
+        if case_id is None or not slack_user_id:
             return Response(
-                {"detail": "case_id, slack_user_id, and guess are required"},
+                {"detail": "case_id and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Sanitize and validate guess
+        sanitized_guess, error_msg = sanitize_guess(guess)
+        if error_msg:
+            return Response(
+                {"detail": error_msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -168,14 +250,14 @@ class PendingGuessView(APIView):
         MedHackGuess.objects.create(
             case=case,
             slack_user_id=slack_user_id,
-            guess=guess,
+            guess=sanitized_guess,
             is_pending=True,
         )
 
         return Response({
             "case_id": case.case_id,
             "slack_user_id": slack_user_id,
-            "pending_guess": guess,
+            "pending_guess": sanitized_guess,
         }, status=status.HTTP_201_CREATED)
 
     def delete(self, request):
@@ -185,6 +267,14 @@ class PendingGuessView(APIView):
         if case_id is None or not slack_user_id:
             return Response(
                 {"detail": "case_id and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -203,6 +293,7 @@ class SubmitGuessView(APIView):
     """POST /guesses/submit/ — Submit a confirmed guess."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def post(self, request):
         case_id = request.data.get('case_id')
@@ -210,9 +301,25 @@ class SubmitGuessView(APIView):
         guess = request.data.get('guess')
         correct = request.data.get('correct')
 
-        if case_id is None or not slack_user_id or guess is None or correct is None:
+        if case_id is None or not slack_user_id or correct is None:
             return Response(
-                {"detail": "case_id, slack_user_id, guess, and correct are required"},
+                {"detail": "case_id, slack_user_id, and correct are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Sanitize and validate guess
+        sanitized_guess, error_msg = sanitize_guess(guess)
+        if error_msg:
+            return Response(
+                {"detail": error_msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -239,7 +346,7 @@ class SubmitGuessView(APIView):
             MedHackGuess.objects.create(
                 case=case,
                 slack_user_id=slack_user_id,
-                guess=guess,
+                guess=sanitized_guess,
                 correct=bool(correct),
                 is_pending=False,
                 confirmed_at=timezone.now(),
@@ -250,7 +357,7 @@ class SubmitGuessView(APIView):
         return Response({
             "case_id": case.case_id,
             "slack_user_id": slack_user_id,
-            "guess": guess,
+            "guess": sanitized_guess,
             "correct": bool(correct),
             "guesses_used": new_confirmed_count,
             "locked_out": new_confirmed_count >= MAX_GUESSES_PER_USER,
@@ -261,6 +368,7 @@ class RecordWinnerView(APIView):
     """POST /cases/{case_id}/winners/ — Record a winner. case_id is the YAML case ID."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def post(self, request, case_id):
         slack_user_id = request.data.get('slack_user_id')
@@ -269,6 +377,14 @@ class RecordWinnerView(APIView):
         if not slack_user_id:
             return Response(
                 {"detail": "slack_user_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -305,6 +421,7 @@ class CaseHistoryView(APIView):
     """GET /cases/history/ — List all played cases with stats."""
     authentication_classes = []
     permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
 
     def get(self, request):
         cases = MedHackCase.objects.all().order_by('-started_at')
