@@ -10,14 +10,25 @@ User = get_user_model()
 # Auth serializers have been moved to core/serializers.py
 
 class TeamSerializer(serializers.ModelSerializer):
+    code = serializers.SerializerMethodField()
+    member_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Team
-        fields = ['id', 'team_id', 'team_name', 'members']
+        fields = ['id', 'team_id', 'code', 'team_name', 'members', 'member_count']
+
+    def get_code(self, obj):
+        if obj.team_id is None:
+            return None
+        return f"TEAM{obj.team_id}"
+
+    def get_member_count(self, obj):
+        return obj.members.count()
 
 class SubmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Submission
-        fields = ['id', 'user', 'team', 'file_url', 'score', 'submitted_at']
+        fields = ['id', 'user', 'team', 'participant_name', 'score', 'accuracy', 'submitted_at']
 
 class AuthorSerializer(serializers.ModelSerializer):
     imageUrl = serializers.SerializerMethodField()

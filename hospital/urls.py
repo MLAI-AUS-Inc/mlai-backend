@@ -4,6 +4,10 @@ from . import views
 
 
 urlpatterns = [
+    path('teams/', views.TeamListView.as_view(), name='hospital-team-list'),
+    path('teams/join/', views.JoinTeamView.as_view(), name='hospital-team-join'),
+    path('submissions/', views.SubmissionListCreateView.as_view(), name='hospital-submissions'),
+    path('leaderboard/', views.LeaderboardView.as_view(), name='hospital-leaderboard'),
     path('submit_predictions/', views.submit_predictions, name='submit_predictions'),
     path('get_submission/', views.get_submission, name='get_submission'),
     path('get_recent_submissions/', views.get_recent_submissions, name='get_recent_submissions'),
