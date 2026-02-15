@@ -15,7 +15,7 @@ class TeamSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Team
-        fields = ['id', 'team_id', 'code', 'team_name', 'members', 'member_count']
+        fields = ['id', 'team_id', 'code', 'team_name', 'avatar_url', 'members', 'member_count']
 
     def get_code(self, obj):
         if obj.team_id is None:
