@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.http import JsonResponse
 from rest_framework.test import APIClient
 from unittest.mock import patch
 import base64
@@ -113,8 +114,17 @@ class MedHackOnboardingFlowTests(TestCase):
         response = self.client.get('/api/v1/teams/?app=hospital')
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['app'], 'hospital')
         self.assertCountEqual(response.data['team_names'], ['Trauma Team', 'ICU Avengers'])
+
+    def test_shared_team_names_endpoint_returns_all_by_default(self):
+        HospitalTeam.objects.create(team_name='Trauma Team')
+        EsafetyTeam.objects.create(team_name='Safety Team')
+
+        response = self.client.get('/api/v1/teams/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Trauma Team', response.data['team_names'])
+        self.assertIn('Safety Team', response.data['team_names'])
 
     def test_hospital_join_team_endpoint_switches_existing_team(self):
         team_one = HospitalTeam.objects.create(team_name='Initial Team')
@@ -146,6 +156,19 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['team_id'], team.team_id)
         self.assertEqual(response.data['code'], f'TEAM{team.team_id}')
+        self.assertTrue(team.members.filter(id=self.user.id).exists())
+
+    def test_hospital_join_team_accepts_team_name_as_code(self):
+        team = HospitalTeam.objects.create(team_name='Name Join Team')
+
+        response = self.client.post(
+            '/api/v1/hackathons/hospital/teams/join/',
+            {'code': 'Name Join Team'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['team_id'], team.team_id)
         self.assertTrue(team.members.filter(id=self.user.id).exists())
 
     def test_hospital_join_team_enforces_max_six_members(self):
@@ -189,6 +212,8 @@ class MedHackOnboardingFlowTests(TestCase):
         returned_ids = [team['team_id'] for team in response.data]
         self.assertIn(my_team.team_id, returned_ids)
         self.assertNotIn(their_team.team_id, returned_ids)
+        self.assertEqual(response.data[0]['name'], 'Mine')
+        self.assertEqual(response.data[0]['members'][0]['email'], self.user.email)
 
     def test_hospital_submissions_endpoint_get_lists_user_submissions(self):
         team = HospitalTeam.objects.create(team_name='Submission Team')
@@ -214,7 +239,28 @@ class MedHackOnboardingFlowTests(TestCase):
         response = self.client.post('/api/v1/hackathons/hospital/submissions/', {}, format='multipart')
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn('Team size must be between', response.json().get('error', ''))
+        self.assertIn('Team size must be between', response.json().get('detail', ''))
+
+    @patch('hospital.views.submit_predictions')
+    def test_hospital_submissions_post_returns_contract_shape(self, mock_submit):
+        mock_submit.return_value = JsonResponse(
+            {'score': 0.95, 'submitted_at': '2026-02-15T12:00:00Z', 'accuracy': 0.8},
+            status=200,
+        )
+
+        response = self.client.post('/api/v1/hackathons/hospital/submissions/', {}, format='multipart')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'score': 0.95, 'submitted_at': '2026-02-15T12:00:00Z'})
+
+    @patch('hospital.views.submit_predictions')
+    def test_hospital_submissions_post_error_returns_detail(self, mock_submit):
+        mock_submit.return_value = JsonResponse({'error': 'CSV invalid'}, status=400)
+
+        response = self.client.post('/api/v1/hackathons/hospital/submissions/', {}, format='multipart')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'CSV invalid'})
 
     @patch('core.firebase_utils.upload_file_to_storage', return_value='https://cdn.example.com/team-avatar.png')
     def test_update_profile_can_upload_hospital_team_avatar(self, mock_upload):
@@ -264,8 +310,10 @@ class MedHackOnboardingFlowTests(TestCase):
         response = self.client.get('/api/v1/hackathons/hospital/leaderboard/')
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data[0]['rank'], 1)
         self.assertGreater(response.data[0]['score'], response.data[1]['score'])
+        self.assertIn('team_id', response.data[0])
+        self.assertIn('team_name', response.data[0])
+        self.assertIn('submitted_at', response.data[0])
 
     def test_hackathon_listing_includes_hospital_slug(self):
         response = self.client.get('/api/v1/hackathons/')
@@ -274,3 +322,10 @@ class MedHackOnboardingFlowTests(TestCase):
         slugs = [item['slug'] for item in response.data]
         self.assertIn('hospital', slugs)
         self.assertTrue(Hackathon.objects.filter(slug='hospital').exists())
+
+    def test_hospital_hackathon_detail_matches_expected_name(self):
+        response = self.client.get('/api/v1/hackathons/hospital/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['slug'], 'hospital')
+        self.assertEqual(response.data['name'], 'Medhack: Frontiers')

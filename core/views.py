@@ -734,13 +734,19 @@ class TeamNamesListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        app_context = (request.query_params.get('app') or request.query_params.get('hackathon') or 'esafety').strip().lower()
+        requested_scope = (request.query_params.get('app') or request.query_params.get('hackathon') or '').strip().lower()
 
-        if app_context in ('hospital', 'medhack'):
-            app_context = 'hospital'
+        if not requested_scope:
+            # Default: all team names across both hackathons.
+            hospital_names = list(HospitalTeam.objects.values_list('team_name', flat=True))
+            esafety_names = list(EsafetyTeam.objects.values_list('team_name', flat=True))
+            team_names = sorted(set(hospital_names + esafety_names))
+            return Response({"team_names": team_names})
+
+        app_context = _normalize_app_context(requested_scope, default='')
+        if app_context == 'hospital':
             team_names = HospitalTeam.objects.values_list('team_name', flat=True)
-        elif app_context in ('esafety', 'e-safety'):
-            app_context = 'esafety'
+        elif app_context == 'esafety':
             team_names = EsafetyTeam.objects.values_list('team_name', flat=True)
         else:
             return Response(
@@ -748,10 +754,7 @@ class TeamNamesListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        return Response({
-            "app": app_context,
-            "team_names": list(team_names)
-        })
+        return Response({"team_names": list(team_names)})
 
 class UserDetailView(RetrieveUpdateAPIView):
     queryset = User.objects.all()

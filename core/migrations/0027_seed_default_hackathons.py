@@ -19,7 +19,7 @@ def seed_default_hackathons(apps, schema_editor):
     Hackathon.objects.get_or_create(
         slug='hospital',
         defaults={
-            'name': 'MedHack - AI Hospital Hackathon',
+            'name': 'Medhack: Frontiers',
             'description': 'Revolutionizing healthcare with AI.',
             'start_date': date(2026, 1, 1),
             'end_date': date(2026, 12, 31),
