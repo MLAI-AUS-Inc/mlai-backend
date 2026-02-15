@@ -3,6 +3,7 @@ import csv
 import logging
 import datetime
 import re
+import json
 from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -49,7 +50,31 @@ class TeamListView(APIView):
         teams = Team.objects.all().order_by('team_id')
         member_id = request.query_params.get('member_id')
         if member_id:
-            teams = teams.filter(members__id=member_id).distinct()
+            teams = teams.filter(members__id=member_id).distinct().prefetch_related('members')
+            payload = []
+            for team in teams:
+                payload.append(
+                    {
+                        "id": team.id,
+                        "name": team.team_name,
+                        "team_id": team.team_id,
+                        "code": f"TEAM{team.team_id}" if team.team_id is not None else None,
+                        "avatar_url": team.avatar_url,
+                        "members": [
+                            {
+                                "id": member.id,
+                                "full_name": member.full_name,
+                                "email": member.email,
+                                "avatar_url": member.avatar_url,
+                                "role": member.role,
+                                "personas": member.personas,
+                            }
+                            for member in team.members.all()
+                        ],
+                    }
+                )
+            return Response(payload, status=status.HTTP_200_OK)
+
         serializer = TeamSerializer(teams, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -125,15 +150,22 @@ class JoinTeamView(APIView):
             return Response({"error": "team_id or code is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         lookup_team_id = team_id
+        team = None
         if lookup_team_id is None and code:
             lookup_team_id = _extract_team_id_from_code(code)
-            if lookup_team_id is None:
-                return Response(
-                    {"error": "Invalid code format. Expected format like TEAM12."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            if lookup_team_id is not None:
+                team = Team.objects.filter(team_id=lookup_team_id).first()
+            else:
+                # Backward-compatible support where code is actually a team name.
+                team = Team.objects.filter(team_name__iexact=str(code).strip()).first()
 
-        team = get_object_or_404(Team, team_id=lookup_team_id)
+            if team is None:
+                return Response(
+                    {"error": "Team not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        elif lookup_team_id is not None:
+            team = get_object_or_404(Team, team_id=lookup_team_id)
         user = request.user
 
         if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
@@ -200,7 +232,29 @@ class SubmissionListCreateView(APIView):
 
     def post(self, request):
         # Reuse existing CSV scoring flow.
-        return submit_predictions(request._request)
+        response = submit_predictions(request._request)
+
+        if hasattr(response, 'data'):
+            data = response.data
+        else:
+            try:
+                data = json.loads(response.content.decode('utf-8') or '{}')
+            except Exception:
+                data = {}
+
+        # Normalize error body to the frontend contract.
+        if response.status_code >= 400:
+            detail = data.get('detail') or data.get('error') or 'Submission failed'
+            return JsonResponse({'detail': detail}, status=response.status_code)
+
+        # Contract response shape for /submissions endpoint.
+        return JsonResponse(
+            {
+                'score': data.get('score'),
+                'submitted_at': data.get('submitted_at'),
+            },
+            status=200,
+        )
 
 
 class LeaderboardView(APIView):
@@ -208,36 +262,30 @@ class LeaderboardView(APIView):
 
     def get(self, request):
         submissions = (
-            Submission.objects.select_related('team', 'user')
-            .order_by('-score', '-accuracy', 'submitted_at')
+            Submission.objects.select_related('team')
+            .filter(team__isnull=False)
+            .order_by('-score', '-submitted_at')
         )
-        data = []
-        for rank, sub in enumerate(submissions, start=1):
-            data.append(
+
+        # Best submission per team.
+        best_by_team = {}
+        for sub in submissions:
+            if sub.team_id not in best_by_team:
+                best_by_team[sub.team_id] = sub
+
+        rows = []
+        for team_id, sub in best_by_team.items():
+            rows.append(
                 {
-                    "rank": rank,
-                    "submission_id": sub.id,
-                    "participant_name": sub.participant_name,
+                    "team_id": sub.team.team_id,
+                    "team_name": sub.team.team_name,
                     "score": sub.score,
-                    "accuracy": sub.accuracy,
                     "submitted_at": sub.submitted_at.isoformat(),
-                    "team": (
-                        {
-                            "team_id": sub.team.team_id,
-                            "team_name": sub.team.team_name,
-                            "code": f"TEAM{sub.team.team_id}",
-                        }
-                        if sub.team
-                        else None
-                    ),
-                    "user": {
-                        "id": sub.user.id,
-                        "full_name": sub.user.full_name,
-                        "avatar_url": sub.user.avatar_url,
-                    },
                 }
             )
-        return Response(data, status=status.HTTP_200_OK)
+
+        rows.sort(key=lambda row: row["score"], reverse=True)
+        return Response(rows, status=status.HTTP_200_OK)
 
 # Map the original state_label (0-17) to your 4 classes (0-3)
 def map_state_label(state_label):
@@ -301,12 +349,19 @@ def custom_score(true_labels, pred_labels):
                 total_score -= 10
     return total_score
 
+
+def _error_payload(detail):
+    return {
+        'detail': detail,
+        'error': detail,  # Backward compatibility for older clients.
+    }
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def submit_predictions(request):
     if request.method == 'POST':
         if not request.user.is_authenticated:
-            return JsonResponse({'error': 'Authentication required'}, status=401)
+            return JsonResponse(_error_payload('Authentication required'), status=401)
         logger.info(f"submit_predictions: user={request.user}, is_authenticated={request.user.is_authenticated}")
         
         user = request.user
@@ -319,7 +374,7 @@ def submit_predictions(request):
         if not team:
             return JsonResponse(
                 {
-                    'error': 'You must join a MedHack team before submitting.',
+                    **_error_payload('You must join a MedHack team before submitting.'),
                     'min_members': MEDHACK_TEAM_MIN_MEMBERS,
                     'max_members': MEDHACK_TEAM_MAX_MEMBERS,
                 },
@@ -330,7 +385,7 @@ def submit_predictions(request):
         if team_size < MEDHACK_TEAM_MIN_MEMBERS or team_size > MEDHACK_TEAM_MAX_MEMBERS:
             return JsonResponse(
                 {
-                    'error': f'Team size must be between {MEDHACK_TEAM_MIN_MEMBERS} and {MEDHACK_TEAM_MAX_MEMBERS} members.',
+                    **_error_payload(f'Team size must be between {MEDHACK_TEAM_MIN_MEMBERS} and {MEDHACK_TEAM_MAX_MEMBERS} members.'),
                     'team_id': team.team_id,
                     'team_name': team.team_name,
                     'member_count': team_size,
@@ -340,9 +395,9 @@ def submit_predictions(request):
                 status=400,
             )
 
-        csv_file = request.FILES.get('predictions_csv')
+        csv_file = request.FILES.get('predictions_csv') or request.FILES.get('file')
         if not csv_file:
-            return JsonResponse({'error': 'No CSV file uploaded'}, status=400)
+            return JsonResponse(_error_payload('No CSV file uploaded'), status=400)
         
         # Parse predictions CSV. We assume the CSV has a header like: ID,predicted_label
         pred_labels = []
@@ -362,15 +417,15 @@ def submit_predictions(request):
                 pred = int(row[predicted_label_index].strip())
                 pred_labels.append(pred)
             except Exception as e:
-                return JsonResponse({'error': f'Error parsing row {row}: {str(e)}'}, status=400)
+                return JsonResponse(_error_payload(f'Error parsing row {row}: {str(e)}'), status=400)
         
         gt_rows_all = load_ground_truth()
         if not gt_rows_all:
-             return JsonResponse({'error': 'Ground truth data not loaded properly'}, status=500)
+             return JsonResponse(_error_payload('Ground truth data not loaded properly'), status=500)
         
         if len(pred_labels) != len(gt_rows_all):
             return JsonResponse({
-                'error': f'Number of predictions ({len(pred_labels)}) does not match number of ground truth rows ({len(gt_rows_all)})'
+                **_error_payload(f'Number of predictions ({len(pred_labels)}) does not match number of ground truth rows ({len(gt_rows_all)})')
             }, status=400)
         
         true_labels_all = [map_state_label(row['state_label']) for row in gt_rows_all]
@@ -419,10 +474,11 @@ def submit_predictions(request):
             'participant_name': participant_name,
             'team_id': team.team_id if team else None,
             'score': score,
-            'accuracy': accuracy
+            'accuracy': accuracy,
+            'submitted_at': submission.submitted_at.isoformat(),
         })
     
-    return JsonResponse({'error': 'Invalid request'}, status=405)
+    return JsonResponse(_error_payload('Invalid request'), status=405)
 
 
 
