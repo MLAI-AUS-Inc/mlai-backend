@@ -15,6 +15,7 @@ from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
 from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
+from hospital.models import Team as HospitalTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
@@ -24,6 +25,47 @@ from .serializers import GeneratedComponentSerializer, GeneratedComponentListSer
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+ROLE_ALIASES = {
+    'mentor': 'professional',
+    'judge': 'professional',
+    'organizer': 'professional',
+}
+
+
+def _normalize_app_context(app_value, default='hospital'):
+    app = (app_value or default or '').strip().lower()
+    if app in ('medhack', 'hospital'):
+        return 'hospital'
+    if app in ('esafety', 'e-safety'):
+        return 'esafety'
+    return default
+
+
+def _normalize_next_path(next_path):
+    if not next_path:
+        return None
+
+    normalized = str(next_path).strip()
+    if not normalized:
+        return None
+
+    # Prevent open redirects. We only allow relative paths.
+    if '://' in normalized:
+        return None
+
+    if not normalized.startswith('/'):
+        normalized = f'/{normalized}'
+
+    return normalized
+
+
+def _append_auth_query_params(magic_link, app, next_path=None):
+    separator = '&' if '?' in magic_link else '?'
+    magic_link = f"{magic_link}{separator}app={app}"
+    if next_path:
+        magic_link += f"&next={next_path}"
+    return magic_link
+
 class SendMagicLinkView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
@@ -31,6 +73,8 @@ class SendMagicLinkView(APIView):
     def post(self, request):
         data = request.data
         email = data.get('email')
+        app = _normalize_app_context(data.get('app'), default='hospital')
+        next_path = _normalize_next_path(data.get('next'))
         
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -50,8 +94,6 @@ class SendMagicLinkView(APIView):
                 # Optionally handle inactive users differently, but for now we'll allow them to re-verify
                 pass
 
-            # Determine app context
-            app = data.get('app', 'hospital')
             from django.conf import settings
             
             # Determine base_url based on environment
@@ -61,29 +103,15 @@ class SendMagicLinkView(APIView):
             else:
                 base_url = "https://mlai.au" 
 
-            # Use message_id "2" for both apps since it's configured in Customer.io
-            # We append app and next params to the magic link so the verify page knows where to go
             magic_link = generate_magic_link(user, base_url=base_url)
-            
-            # Append query params to the magic link
-            # generate_magic_link returns base_url + path + ?token=...
-            # We want to add &app=...&next=...
-            if '?' in magic_link:
-                magic_link += f"&app={app}"
-            else:
-                magic_link += f"?app={app}"
-            
-            # We don't have 'next' in the request body usually, but if we did:
-            next_path = data.get('next')
-            if next_path:
-                magic_link += f"&next={next_path}"
+            magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
 
             logger.info(f"Generated magic link for {email}: {magic_link}")
             send_magic_link_email(user, magic_link, message_id="2")
             logger.info(f"Sent magic link to existing user: {email} for app {app}")
 
             return Response(
-                {"user_exists": True, "message": "Magic link sent to your email."}, 
+                {"user_exists": True, "message": "Magic link sent to your email."},
                 status=status.HTTP_200_OK
             )
 
@@ -99,11 +127,16 @@ class CreateUserView(APIView):
     def post(self, request):
         data = request.data
         email = data.get('email')
-        first_name = data.get('firstName', '')
-        last_name = data.get('lastName', '')
-        full_name = f"{first_name} {last_name}".strip()
+        first_name = data.get('firstName') or data.get('first_name') or ''
+        last_name = data.get('lastName') or data.get('last_name') or ''
         phone = data.get('phone')
-        role = data.get('role', 'participant')
+        requested_role = (data.get('role') or 'participant').strip().lower()
+        role = ROLE_ALIASES.get(requested_role, requested_role)
+        allowed_roles = {choice[0] for choice in User.ROLE_CHOICES}
+        if role not in allowed_roles:
+            role = 'participant'
+        app = _normalize_app_context(data.get('app'), default='hospital')
+        next_path = _normalize_next_path(data.get('next'))
 
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -131,8 +164,6 @@ class CreateUserView(APIView):
             # Generate magic link and send email OUTSIDE the transaction
             # so if email fails, user is still created.
             
-            # Determine app context
-            app = data.get('app', 'hospital')
             from django.conf import settings
             
             # Determine base_url based on environment
@@ -141,13 +172,8 @@ class CreateUserView(APIView):
             else:
                 base_url = "https://mlai.au"
 
-            # Use message_id "2" for both apps since it's configured in Customer.io
             magic_link = generate_magic_link(user, base_url=base_url)
-            
-            if '?' in magic_link:
-                magic_link += f"&app={app}"
-            else:
-                magic_link += f"?app={app}"
+            magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
             try:
                 send_magic_link_email(user, magic_link, message_id="2")
                 logger.info(f"Sent magic link to new user: {email} for app {app}")
@@ -159,7 +185,13 @@ class CreateUserView(APIView):
                 message = "Account created, but failed to send email. Please check logs for magic link."
 
             return Response(
-                {"message": message, "magic_link": magic_link}, # Return link for dev convenience
+                {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "message": message,
+                    "magic_link": magic_link,
+                },
                 status=status.HTTP_201_CREATED
             )
 
@@ -196,8 +228,8 @@ class MagicLinkVerifyView(APIView):
                 # Build the response payload
                 # Determine next_url based on app context
                 
-                app_param = request.query_params.get('app')
-                next_param = request.query_params.get('next')
+                app_param = _normalize_app_context(request.query_params.get('app'), default='hospital')
+                next_param = _normalize_next_path(request.query_params.get('next'))
                 
                 from django.conf import settings
                 
@@ -207,21 +239,20 @@ class MagicLinkVerifyView(APIView):
                 else:
                     base_url = "https://mlai.au"
 
-                # Construct the full next_url
+                # Construct app-aware redirect path
                 if next_param:
-                    if not next_param.startswith('/'):
-                        next_param = '/' + next_param
-                    next_url = f"{base_url}{next_param}"
+                    redirect_path = next_param
+                elif app_param == 'esafety':
+                    redirect_path = "/esafety/dashboard"
                 else:
-                    # Default landing pages
-                    if app_param == 'esafety':
-                        next_url = f"{base_url}/esafety/dashboard" 
-                    else:
-                        next_url = f"{base_url}/dashboard"
+                    redirect_path = "/hospital/app"
+
+                next_url = f"{base_url}{redirect_path}"
 
                 response_data = {
                     'message': 'Login successful',
                     'user': {
+                        'id': user.id,
                         'email': user.email,
                         'first_name': user.first_name,
                         'last_name': user.last_name,
@@ -232,6 +263,7 @@ class MagicLinkVerifyView(APIView):
                         'has_team': user.has_team,
                         'avatar_url': user.avatar_url,
                     },
+                    'redirect': redirect_path,
                     'next_url': next_url, 
                 }
 
@@ -393,7 +425,27 @@ class UpdateProfileView(APIView):
         email = request.data.get("email")
         phone = request.data.get("phone")
         about = request.data.get("about")
+        app_context = (request.data.get("app") or request.data.get("hackathon") or "").strip().lower()
         team_name = request.data.get("team")
+        esafety_team_name = request.data.get("esafety_team")
+        hospital_team_name = request.data.get("hospital_team")
+
+        if app_context in ("medhack", "hospital"):
+            app_context = "hospital"
+        elif app_context in ("e-safety", "esafety"):
+            app_context = "esafety"
+        else:
+            app_context = ""
+
+        if team_name:
+            normalized_team_name = str(team_name).strip()
+            if app_context == "hospital":
+                hospital_team_name = normalized_team_name
+            elif app_context == "esafety":
+                esafety_team_name = normalized_team_name
+            elif not esafety_team_name and not hospital_team_name:
+                # Backward compatibility with existing eSafety profile flow.
+                esafety_team_name = normalized_team_name
         
         # Handle personas (list of strings)
         if hasattr(request.data, 'getlist'):
@@ -431,26 +483,31 @@ class UpdateProfileView(APIView):
 
         user.save()
 
-        # Handle team update if provided
-        if team_name:
-            # Remove user from any existing esafety teams
-            # Assuming a user can only be in one team for esafety
-            current_teams = user.esafety_teams.all()
-            for t in current_teams:
-                t.members.remove(user)
-            
-            # Find or create the team
-            # We use filter().first() to avoid errors if multiple teams somehow have same name (though unlikely with unique constraints if any)
-            # But Team model in esafety doesn't enforce unique name, only unique team_id. 
-            # Let's assume we want to match by name.
-            team = EsafetyTeam.objects.filter(team_name__iexact=team_name).first()
-            
+        def _assign_user_to_team(team_model, relation_name, requested_team_name):
+            if not requested_team_name:
+                return
+
+            requested_team_name = str(requested_team_name).strip()
+            if not requested_team_name:
+                return
+
+            # Enforce one team per hackathon by removing existing memberships first.
+            current_teams = getattr(user, relation_name).all()
+            for current_team in current_teams:
+                current_team.members.remove(user)
+
+            team = team_model.objects.filter(team_name__iexact=requested_team_name).first()
             if not team:
-                # Create new team
-                team = EsafetyTeam.objects.create(team_name=team_name)
-            
-            # Add user to the team
+                team = team_model.objects.create(team_name=requested_team_name)
             team.members.add(user)
+
+        _assign_user_to_team(EsafetyTeam, "esafety_teams", esafety_team_name)
+        _assign_user_to_team(HospitalTeam, "hospital_teams", hospital_team_name)
+
+        has_any_team = user.esafety_teams.exists() or user.hospital_teams.exists()
+        if user.has_team != has_any_team:
+            user.has_team = has_any_team
+            user.save(update_fields=['has_team'])
 
         # Handle avatar upload
         avatar_file = request.FILES.get('avatar')
@@ -532,7 +589,17 @@ class UpdateProfileView(APIView):
         # Return the updated profile
         # Re-use CurrentUserView logic or similar structure
         
-        # Retrieve esafety team (freshly updated)
+        # Retrieve teams (freshly updated)
+        hospital_team = user.hospital_teams.first()
+        hospital_team_data = None
+        if hospital_team:
+            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            hospital_team_data = {
+                "team_name": hospital_team.team_name,
+                "team_id": hospital_team.team_id,
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+            }
+
         esafety_team = user.esafety_teams.first()
         esafety_team_data = None
         if esafety_team:
@@ -544,6 +611,8 @@ class UpdateProfileView(APIView):
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 
+        primary_team_data = hospital_team_data if hospital_team_data else esafety_team_data
+
         data = {
             'full_name': user.full_name,
             'email': user.email,
@@ -551,7 +620,10 @@ class UpdateProfileView(APIView):
             'about': user.about,
             'role': user.role,
             'is_superuser': user.is_superuser,
-            'team': esafety_team_data, 
+            'team': primary_team_data,
+            'hospital_team': hospital_team_data,
+            'esafety_team': esafety_team_data,
+            'has_team': user.has_team,
             'avatar_url': user.avatar_url,
             'personas': user.personas,
         }
@@ -594,6 +666,30 @@ class HackathonDetailView(RetrieveAPIView):
     serializer_class = HackathonSerializer
     permission_classes = [AllowAny]
     lookup_field = 'slug'
+
+
+class TeamNamesListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        app_context = (request.query_params.get('app') or request.query_params.get('hackathon') or 'esafety').strip().lower()
+
+        if app_context in ('hospital', 'medhack'):
+            app_context = 'hospital'
+            team_names = HospitalTeam.objects.values_list('team_name', flat=True)
+        elif app_context in ('esafety', 'e-safety'):
+            app_context = 'esafety'
+            team_names = EsafetyTeam.objects.values_list('team_name', flat=True)
+        else:
+            return Response(
+                {"error": "Invalid app. Use 'esafety' or 'hospital'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return Response({
+            "app": app_context,
+            "team_names": list(team_names)
+        })
 
 class UserDetailView(RetrieveUpdateAPIView):
     queryset = User.objects.all()

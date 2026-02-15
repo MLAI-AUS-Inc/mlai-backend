@@ -15,7 +15,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from esafety.views import TeamNamesListView
+from core.views import TeamNamesListView
 from .views import health_check
 
 urlpatterns = [
@@ -38,4 +38,3 @@ urlpatterns = [
     path('api/v1/integrations/', include('integrations.api_urls')),
     path('api/v1/users/', include('core.urls_users')),
 ]
-
