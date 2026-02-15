@@ -7,6 +7,7 @@ class Team(models.Model):
     # team_id is now a positive integer unique field
     team_id = models.PositiveIntegerField(unique=True, blank=True, null=True)
     team_name = models.CharField(max_length=100)
+    avatar_url = models.URLField(blank=True, null=True)
     members = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='hospital_teams')
 
     def save(self, *args, **kwargs):

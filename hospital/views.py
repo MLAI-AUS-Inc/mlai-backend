@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 User = get_user_model()
 TEAM_CODE_PATTERN = re.compile(r'^TEAM(?P<team_id>\d+)$', re.IGNORECASE)
+MEDHACK_TEAM_MIN_MEMBERS = 2
+MEDHACK_TEAM_MAX_MEMBERS = 6
 
 
 def _extract_team_id_from_code(code):
@@ -54,6 +56,7 @@ class TeamListView(APIView):
     def post(self, request):
         team_name = (request.data.get('team_name') or request.data.get('name') or '').strip()
         requested_code = request.data.get('code')
+        requested_avatar_url = request.data.get('avatar_url')
 
         if not team_name:
             return Response({"error": "team_name is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -63,6 +66,9 @@ class TeamListView(APIView):
 
         if existing_team:
             team = existing_team
+            if requested_avatar_url and not team.avatar_url:
+                team.avatar_url = requested_avatar_url
+                team.save(update_fields=['avatar_url'])
         else:
             create_kwargs = {'team_name': team_name}
             requested_team_id = _extract_team_id_from_code(requested_code)
@@ -73,6 +79,8 @@ class TeamListView(APIView):
                 )
             if requested_team_id is not None:
                 create_kwargs['team_id'] = requested_team_id
+            if requested_avatar_url:
+                create_kwargs['avatar_url'] = requested_avatar_url
 
             try:
                 team = Team.objects.create(**create_kwargs)
@@ -87,6 +95,12 @@ class TeamListView(APIView):
         user = request.user
         for current_team in user.hospital_teams.all():
             current_team.members.remove(user)
+
+        if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
+            return Response(
+                {"error": "Team is full.", "max_members": MEDHACK_TEAM_MAX_MEMBERS},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         team.members.add(user)
         if not user.has_team:
@@ -122,6 +136,15 @@ class JoinTeamView(APIView):
         team = get_object_or_404(Team, team_id=lookup_team_id)
         user = request.user
 
+        if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
+            return Response(
+                {
+                    "error": f"Team '{team.team_name}' is full.",
+                    "max_members": MEDHACK_TEAM_MAX_MEMBERS,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         # Keep one-team-per-user semantics for this hackathon.
         for current_team in user.hospital_teams.all():
             current_team.members.remove(user)
@@ -137,6 +160,9 @@ class JoinTeamView(APIView):
                 "team_id": team.team_id,
                 "team_name": team.team_name,
                 "code": f"TEAM{team.team_id}",
+                "member_count": team.members.count(),
+                "min_members": MEDHACK_TEAM_MIN_MEMBERS,
+                "max_members": MEDHACK_TEAM_MAX_MEMBERS,
             },
             status=status.HTTP_200_OK,
         )
@@ -290,6 +316,29 @@ def submit_predictions(request):
         # This assumes each user belongs to at least one team. If they might not,
         # you can default to None.
         team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') and user.hospital_teams.exists() else None
+        if not team:
+            return JsonResponse(
+                {
+                    'error': 'You must join a MedHack team before submitting.',
+                    'min_members': MEDHACK_TEAM_MIN_MEMBERS,
+                    'max_members': MEDHACK_TEAM_MAX_MEMBERS,
+                },
+                status=400,
+            )
+
+        team_size = team.members.count()
+        if team_size < MEDHACK_TEAM_MIN_MEMBERS or team_size > MEDHACK_TEAM_MAX_MEMBERS:
+            return JsonResponse(
+                {
+                    'error': f'Team size must be between {MEDHACK_TEAM_MIN_MEMBERS} and {MEDHACK_TEAM_MAX_MEMBERS} members.',
+                    'team_id': team.team_id,
+                    'team_name': team.team_name,
+                    'member_count': team_size,
+                    'min_members': MEDHACK_TEAM_MIN_MEMBERS,
+                    'max_members': MEDHACK_TEAM_MAX_MEMBERS,
+                },
+                status=400,
+            )
 
         csv_file = request.FILES.get('predictions_csv')
         if not csv_file:

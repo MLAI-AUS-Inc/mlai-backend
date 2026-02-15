@@ -30,6 +30,9 @@ ROLE_ALIASES = {
     'judge': 'professional',
     'organizer': 'professional',
 }
+ALLOWED_PERSONAS = {"hacker", "hustler", "hipster", "healer"}
+MEDHACK_TEAM_MIN_MEMBERS = 2
+MEDHACK_TEAM_MAX_MEMBERS = 6
 
 
 def _normalize_app_context(app_value, default='hospital'):
@@ -378,6 +381,9 @@ class CurrentUserView(APIView):
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
+                "avatar_url": hospital_team.avatar_url,
+                "member_count": hospital_team.members.count(),
+                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 
@@ -425,17 +431,10 @@ class UpdateProfileView(APIView):
         email = request.data.get("email")
         phone = request.data.get("phone")
         about = request.data.get("about")
-        app_context = (request.data.get("app") or request.data.get("hackathon") or "").strip().lower()
+        app_context = _normalize_app_context(request.data.get("app") or request.data.get("hackathon"), default="")
         team_name = request.data.get("team")
         esafety_team_name = request.data.get("esafety_team")
         hospital_team_name = request.data.get("hospital_team")
-
-        if app_context in ("medhack", "hospital"):
-            app_context = "hospital"
-        elif app_context in ("e-safety", "esafety"):
-            app_context = "esafety"
-        else:
-            app_context = ""
 
         if team_name:
             normalized_team_name = str(team_name).strip()
@@ -471,10 +470,34 @@ class UpdateProfileView(APIView):
             user.about = about
 
         if personas is not None:
-            # Ensure it's a list
+            # Ensure it's a list and validate against known persona choices.
             if isinstance(personas, str):
-                personas = [personas]
-            user.personas = personas
+                personas = [p.strip() for p in personas.split(',') if p.strip()]
+
+            normalized_personas = []
+            for persona in personas:
+                normalized = str(persona).strip().lower()
+                if normalized:
+                    normalized_personas.append(normalized)
+
+            invalid_personas = [p for p in normalized_personas if p not in ALLOWED_PERSONAS]
+            if invalid_personas:
+                return Response(
+                    {
+                        "error": f"Invalid personas: {invalid_personas}",
+                        "allowed_personas": sorted(ALLOWED_PERSONAS),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # De-duplicate while preserving user-provided order.
+            deduped_personas = list(dict.fromkeys(normalized_personas))
+            if len(deduped_personas) > 4:
+                return Response(
+                    {"error": "A maximum of 4 personas may be selected."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            user.personas = deduped_personas
 
         # Only update the email if it's changed.
         if email and email != user.email:
@@ -483,26 +506,58 @@ class UpdateProfileView(APIView):
 
         user.save()
 
-        def _assign_user_to_team(team_model, relation_name, requested_team_name):
+        def _assign_user_to_esafety_team(requested_team_name):
             if not requested_team_name:
-                return
+                return None
 
             requested_team_name = str(requested_team_name).strip()
             if not requested_team_name:
-                return
+                return None
 
-            # Enforce one team per hackathon by removing existing memberships first.
-            current_teams = getattr(user, relation_name).all()
+            current_teams = user.esafety_teams.all()
             for current_team in current_teams:
                 current_team.members.remove(user)
 
-            team = team_model.objects.filter(team_name__iexact=requested_team_name).first()
+            team = EsafetyTeam.objects.filter(team_name__iexact=requested_team_name).first()
             if not team:
-                team = team_model.objects.create(team_name=requested_team_name)
+                team = EsafetyTeam.objects.create(team_name=requested_team_name)
             team.members.add(user)
+            return team
 
-        _assign_user_to_team(EsafetyTeam, "esafety_teams", esafety_team_name)
-        _assign_user_to_team(HospitalTeam, "hospital_teams", hospital_team_name)
+        def _assign_user_to_hospital_team(requested_team_name):
+            if not requested_team_name:
+                return None, None
+
+            requested_team_name = str(requested_team_name).strip()
+            if not requested_team_name:
+                return None, None
+
+            team = HospitalTeam.objects.filter(team_name__iexact=requested_team_name).first()
+            if not team:
+                team = HospitalTeam.objects.create(team_name=requested_team_name)
+
+            is_already_member = team.members.filter(id=user.id).exists()
+            if not is_already_member and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
+                return None, Response(
+                    {
+                        "error": f"Team '{team.team_name}' is full.",
+                        "max_members": MEDHACK_TEAM_MAX_MEMBERS,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            current_teams = user.hospital_teams.all()
+            for current_team in current_teams:
+                if current_team.id != team.id:
+                    current_team.members.remove(user)
+
+            team.members.add(user)
+            return team, None
+
+        _assign_user_to_esafety_team(esafety_team_name)
+        _, hospital_team_error = _assign_user_to_hospital_team(hospital_team_name)
+        if hospital_team_error is not None:
+            return hospital_team_error
 
         has_any_team = user.esafety_teams.exists() or user.hospital_teams.exists()
         if user.has_team != has_any_team:
@@ -552,10 +607,14 @@ class UpdateProfileView(APIView):
         
         if team_avatar_file:
             logger.info(f"Processing team_avatar: {team_avatar_file}")
-            # Get the user's current team (esafety)
-            # We assume the user is in a team if they are uploading a team avatar, 
-            # or they just joined/created one above.
-            team = user.esafety_teams.first()
+            # Select target team by app context (defaulting to esafety for backward compatibility).
+            if app_context == "hospital":
+                team = user.hospital_teams.first()
+                team_avatar_path_prefix = "hospital-team-avatars"
+            else:
+                team = user.esafety_teams.first()
+                team_avatar_path_prefix = "team-avatars"
+
             if team:
                 try:
                     from PIL import Image
@@ -575,7 +634,7 @@ class UpdateProfileView(APIView):
                     output_buffer.seek(0)
                     
                     # Upload
-                    filename = f"team-avatars/{team.team_id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
+                    filename = f"{team_avatar_path_prefix}/{team.team_id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
                     team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
                     
                     if team_avatar_url:
@@ -597,6 +656,9 @@ class UpdateProfileView(APIView):
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
+                "avatar_url": hospital_team.avatar_url,
+                "member_count": hospital_team.members.count(),
+                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 

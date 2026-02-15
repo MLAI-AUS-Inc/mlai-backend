@@ -1,6 +1,9 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
+from unittest.mock import patch
+import base64
 
 from core.models import Hackathon
 from esafety.models import Team as EsafetyTeam
@@ -21,6 +24,53 @@ class MedHackOnboardingFlowTests(TestCase):
             role='participant',
         )
         self.client.force_authenticate(user=self.user)
+
+    def _make_png_upload(self, name='team.png'):
+        # 1x1 PNG
+        raw = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO8B9V8AAAAASUVORK5CYII='
+        )
+        return SimpleUploadedFile(name, raw, content_type='image/png')
+
+    def test_update_profile_basic_details(self):
+        response = self.client.patch(
+            '/api/v1/auth/update-profile/',
+            {
+                'first_name': 'Alex',
+                'last_name': 'Morgan',
+                'phone': '0412345678',
+                'about': 'Building triage tools',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Alex')
+        self.assertEqual(self.user.last_name, 'Morgan')
+        self.assertEqual(self.user.phone, '0412345678')
+        self.assertEqual(self.user.about, 'Building triage tools')
+
+    def test_update_profile_personas_accepts_healer(self):
+        response = self.client.patch(
+            '/api/v1/auth/update-profile/',
+            {'personas': ['hacker', 'healer']},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.personas, ['hacker', 'healer'])
+
+    def test_update_profile_personas_rejects_invalid(self):
+        response = self.client.patch(
+            '/api/v1/auth/update-profile/',
+            {'personas': ['hacker', 'wizard']},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('allowed_personas', response.data)
 
     def test_update_profile_assigns_hospital_team_when_app_is_hospital(self):
         response = self.client.patch(
@@ -98,6 +148,22 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.data['code'], f'TEAM{team.team_id}')
         self.assertTrue(team.members.filter(id=self.user.id).exists())
 
+    def test_hospital_join_team_enforces_max_six_members(self):
+        team = HospitalTeam.objects.create(team_name='Full Team')
+        for i in range(6):
+            teammate = User.objects.create_user(email=f'full{i}@example.com', password='password')
+            team.members.add(teammate)
+
+        response = self.client.post(
+            '/api/v1/hackathons/hospital/teams/join/',
+            {'team_id': team.team_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['max_members'], 6)
+        self.assertFalse(team.members.filter(id=self.user.id).exists())
+
     def test_hospital_teams_post_creates_and_joins(self):
         response = self.client.post(
             '/api/v1/hackathons/hospital/teams/',
@@ -140,6 +206,38 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['team']['team_name'], 'Submission Team')
+
+    def test_hospital_submissions_post_requires_min_two_members(self):
+        team = HospitalTeam.objects.create(team_name='Solo Team')
+        team.members.add(self.user)
+
+        response = self.client.post('/api/v1/hackathons/hospital/submissions/', {}, format='multipart')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Team size must be between', response.json().get('error', ''))
+
+    @patch('core.firebase_utils.upload_file_to_storage', return_value='https://cdn.example.com/team-avatar.png')
+    def test_update_profile_can_upload_hospital_team_avatar(self, mock_upload):
+        self.client.patch(
+            '/api/v1/auth/update-profile/',
+            {'team': 'Avatar Team', 'app': 'hospital'},
+            format='json',
+        )
+
+        avatar = self._make_png_upload()
+        response = self.client.patch(
+            '/api/v1/auth/update-profile/',
+            {'app': 'hospital', 'team_avatar': avatar},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        hospital_team = self.user.hospital_teams.first()
+        self.assertIsNotNone(hospital_team)
+        self.assertEqual(hospital_team.avatar_url, 'https://cdn.example.com/team-avatar.png')
+        self.assertEqual(response.data['hospital_team']['avatar_url'], 'https://cdn.example.com/team-avatar.png')
+        mock_upload.assert_called()
 
     def test_hospital_leaderboard_endpoint_returns_ranked_results(self):
         team_a = HospitalTeam.objects.create(team_name='A Team')
