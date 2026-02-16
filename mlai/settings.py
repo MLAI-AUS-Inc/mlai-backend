@@ -201,8 +201,9 @@ except ImportError:
     pass
 
 # App URLs
-MEDHACK_URL = os.getenv('MEDHACK_URL', 'http://localhost:3000')
-ESAFETY_URL = os.getenv('ESAFETY_URL', 'http://localhost:5173/esafety')
+DEFAULT_FRONTEND_URL = 'http://localhost:5173' if DEBUG else 'https://mlai.au'
+MEDHACK_URL = os.getenv('MEDHACK_URL', DEFAULT_FRONTEND_URL)
+ESAFETY_URL = os.getenv('ESAFETY_URL', DEFAULT_FRONTEND_URL)
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
 

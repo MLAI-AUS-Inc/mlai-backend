@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlparse
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -69,6 +70,27 @@ def _append_auth_query_params(magic_link, app, next_path=None):
         magic_link += f"&next={next_path}"
     return magic_link
 
+
+def _origin_from_url(url, fallback):
+    if not url:
+        return fallback
+
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return fallback
+
+
+def _frontend_base_url(app_context):
+    from django.conf import settings
+
+    fallback = "http://localhost:5173" if settings.DEBUG else "https://mlai.au"
+    if app_context == 'hospital':
+        return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), fallback)
+    if app_context == 'esafety':
+        return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), fallback)
+    return fallback
+
 class SendMagicLinkView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
@@ -97,14 +119,7 @@ class SendMagicLinkView(APIView):
                 # Optionally handle inactive users differently, but for now we'll allow them to re-verify
                 pass
 
-            from django.conf import settings
-            
-            # Determine base_url based on environment
-            # We now use a single domain for both apps
-            if settings.DEBUG:
-                base_url = "http://localhost:5173"
-            else:
-                base_url = "https://mlai.au" 
+            base_url = _frontend_base_url(app)
 
             magic_link = generate_magic_link(user, base_url=base_url)
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
@@ -167,13 +182,7 @@ class CreateUserView(APIView):
             # Generate magic link and send email OUTSIDE the transaction
             # so if email fails, user is still created.
             
-            from django.conf import settings
-            
-            # Determine base_url based on environment
-            if settings.DEBUG:
-                base_url = "http://localhost:5173"
-            else:
-                base_url = "https://mlai.au"
+            base_url = _frontend_base_url(app)
 
             magic_link = generate_magic_link(user, base_url=base_url)
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
@@ -234,13 +243,7 @@ class MagicLinkVerifyView(APIView):
                 app_param = _normalize_app_context(request.query_params.get('app'), default='hospital')
                 next_param = _normalize_next_path(request.query_params.get('next'))
                 
-                from django.conf import settings
-                
-                # Determine base_url based on environment
-                if settings.DEBUG:
-                    base_url = "http://localhost:5173"
-                else:
-                    base_url = "https://mlai.au"
+                base_url = _frontend_base_url(app_param)
 
                 # Construct app-aware redirect path
                 if next_param:
