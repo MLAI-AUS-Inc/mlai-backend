@@ -610,3 +610,83 @@ class AnnouncementListView(generics.ListAPIView):
     queryset = Announcement.objects.all()
     serializer_class = AnnouncementSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+
+class ChannelMessagesView(APIView):
+    """Read-only feed of messages from the #medhack-frontiers Slack channel."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    CHANNEL_NAME = "medhack-frontiers"
+
+    def get(self, request):
+        from integrations.services.slack import SlackService
+
+        cursor = request.query_params.get('cursor')
+        limit = min(int(request.query_params.get('limit', 30)), 100)
+
+        channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
+        if not channel_id:
+            return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        result = SlackService.get_channel_history(channel_id, limit=limit, cursor=cursor)
+        if result is None:
+            return Response({"error": "Failed to fetch messages from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        user_cache = {}
+        messages = []
+        for msg in result["messages"]:
+            user_id = msg.get("user")
+            if user_id and user_id not in user_cache:
+                user_cache[user_id] = SlackService.get_user_profile(user_id)
+
+            messages.append({
+                "ts": msg.get("ts"),
+                "text": msg.get("text", ""),
+                "user": user_cache.get(user_id),
+                "thread_ts": msg.get("thread_ts"),
+                "reply_count": msg.get("reply_count", 0),
+                "reactions": msg.get("reactions", []),
+            })
+
+        return Response({
+            "channel": self.CHANNEL_NAME,
+            "messages": messages,
+            "next_cursor": result.get("next_cursor"),
+        })
+
+
+class ThreadRepliesView(APIView):
+    """Read-only replies for a single thread in #medhack-frontiers."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    CHANNEL_NAME = "medhack-frontiers"
+
+    def get(self, request, thread_ts):
+        from integrations.services.slack import SlackService
+
+        channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
+        if not channel_id:
+            return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        replies = SlackService.get_thread_replies(channel_id, thread_ts)
+        if replies is None:
+            return Response({"error": "Failed to fetch thread from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        user_cache = {}
+        enriched = []
+        for msg in replies:
+            user_id = msg.get("user")
+            if user_id and user_id not in user_cache:
+                user_cache[user_id] = SlackService.get_user_profile(user_id)
+
+            enriched.append({
+                "ts": msg.get("ts"),
+                "text": msg.get("text", ""),
+                "user": user_cache.get(user_id),
+                "reactions": msg.get("reactions", []),
+            })
+
+        return Response({
+            "thread_ts": thread_ts,
+            "messages": enriched,
+        })
