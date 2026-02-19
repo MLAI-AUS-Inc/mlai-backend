@@ -160,3 +160,83 @@ class SlackService:
         except Exception as e:
             logger.error(f"Exception updating message in {channel_id}: {str(e)}")
             return False
+
+    @classmethod
+    def get_channel_id_by_name(cls, channel_name: str) -> Optional[str]:
+        """Resolve a public channel name (without #) to its Slack channel ID."""
+        client = cls.get_client()
+        try:
+            cursor = None
+            while True:
+                kwargs = {"types": "public_channel", "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                response = client.conversations_list(**kwargs)
+                for ch in response["channels"]:
+                    if ch["name"] == channel_name:
+                        return ch["id"]
+                cursor = response.get("response_metadata", {}).get("next_cursor")
+                if not cursor:
+                    break
+            logger.warning(f"Channel '{channel_name}' not found")
+            return None
+        except SlackApiError as e:
+            logger.error(f"Error listing channels: {e.response['error']}")
+            return None
+        except Exception as e:
+            logger.error(f"Exception listing channels: {str(e)}")
+            return None
+
+    @classmethod
+    def get_channel_history(cls, channel_id: str, limit: int = 50, cursor: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Fetch messages from a public channel.
+
+        Args:
+            channel_id: The Slack channel ID.
+            limit: Max messages to return (1-100).
+            cursor: Pagination cursor from a previous response.
+
+        Returns:
+            Dict with 'messages' list and 'next_cursor' for pagination, or None on error.
+        """
+        client = cls.get_client()
+        try:
+            kwargs = {"channel": channel_id, "limit": limit}
+            if cursor:
+                kwargs["cursor"] = cursor
+            response = client.conversations_history(**kwargs)
+            messages = response.get("messages", [])
+            next_cursor = response.get("response_metadata", {}).get("next_cursor")
+            return {"messages": messages, "next_cursor": next_cursor}
+        except SlackApiError as e:
+            logger.error(f"Error fetching channel history for {channel_id}: {e.response['error']}")
+            return None
+        except Exception as e:
+            logger.error(f"Exception fetching channel history for {channel_id}: {str(e)}")
+            return None
+
+    @classmethod
+    def get_thread_replies(cls, channel_id: str, thread_ts: str) -> Optional[list]:
+        """
+        Fetch all replies in a message thread.
+
+        Args:
+            channel_id: The channel containing the thread.
+            thread_ts: The timestamp of the parent message.
+
+        Returns:
+            List of message dicts (including the parent), or None on error.
+        """
+        client = cls.get_client()
+        try:
+            response = client.conversations_replies(
+                channel=channel_id, ts=thread_ts, limit=200
+            )
+            return response.get("messages", [])
+        except SlackApiError as e:
+            logger.error(f"Error fetching thread {thread_ts}: {e.response['error']}")
+            return None
+        except Exception as e:
+            logger.error(f"Exception fetching thread {thread_ts}: {str(e)}")
+            return None

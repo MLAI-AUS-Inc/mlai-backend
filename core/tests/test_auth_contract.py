@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 
@@ -40,6 +40,21 @@ class AuthContractTests(TestCase):
         created_user = User.objects.get(email='new@example.com')
         self.assertFalse(created_user.is_active)
         mock_generate.assert_called_once()
+        mock_send.assert_called_once()
+
+    @override_settings(MEDHACK_URL='http://localhost:3000')
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_uses_hospital_frontend_origin(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='origin@example.com', role='participant')
+
+        self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': 'origin@example.com', 'app': 'hospital', 'next': '/hospital/app'},
+            format='json',
+        )
+
+        mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
         mock_send.assert_called_once()
 
     @patch('core.views.verify_magic_link', return_value='verify@example.com')

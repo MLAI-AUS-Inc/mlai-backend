@@ -325,25 +325,22 @@ def load_ground_truth():
     return gt_rows
 
 def custom_score(true_labels, pred_labels):
-    # (Your custom scoring logic remains unchanged.)
-    normal = {0, 9, 10}
-    warning = {1, 2, 3, 4, 5, 6, 7, 8}
-    crisis = {11, 12, 13, 14, 15}
+    """Score predictions using mapped classes: 0=Normal, 1=Warning, 2=Crisis, 3=Other."""
     total_score = 0
     for t, p in zip(true_labels, pred_labels):
-        if t in normal:
-            total_score += 0 if p in normal else -2
-        elif t in warning:
-            if p in warning:
+        if t == 0:    # Normal
+            total_score += 0 if p == 0 else -2
+        elif t == 1:  # Warning
+            if p == 1:
                 total_score += 2
-            elif p in crisis:
+            elif p == 2:
                 total_score -= 1
             else:
                 total_score -= 3
-        elif t in crisis:
-            if p in crisis:
+        elif t == 2:  # Crisis
+            if p == 2:
                 total_score += 3
-            elif p in warning:
+            elif p == 1:
                 total_score -= 3
             else:
                 total_score -= 10
@@ -410,14 +407,20 @@ def submit_predictions(request):
         except ValueError:
             predicted_label_index = 1  # assume second column
         
-        for row in reader:
+        valid_classes = {0, 1, 2, 3}
+        for row_num, row in enumerate(reader, start=1):
             if not row:
                 continue
             try:
                 pred = int(row[predicted_label_index].strip())
-                pred_labels.append(pred)
             except Exception as e:
-                return JsonResponse(_error_payload(f'Error parsing row {row}: {str(e)}'), status=400)
+                return JsonResponse(_error_payload(f'Error parsing row {row_num}: {str(e)}'), status=400)
+            if pred not in valid_classes:
+                return JsonResponse(
+                    _error_payload(f'Invalid predicted_label "{pred}" at row {row_num}. Must be 0 (Normal), 1 (Warning), 2 (Crisis), or 3 (Other).'),
+                    status=400,
+                )
+            pred_labels.append(pred)
         
         gt_rows_all = load_ground_truth()
         if not gt_rows_all:
@@ -607,3 +610,83 @@ class AnnouncementListView(generics.ListAPIView):
     queryset = Announcement.objects.all()
     serializer_class = AnnouncementSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+
+class ChannelMessagesView(APIView):
+    """Read-only feed of messages from the #medhack-frontiers Slack channel."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    CHANNEL_NAME = "medhack-frontiers"
+
+    def get(self, request):
+        from integrations.services.slack import SlackService
+
+        cursor = request.query_params.get('cursor')
+        limit = min(int(request.query_params.get('limit', 30)), 100)
+
+        channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
+        if not channel_id:
+            return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        result = SlackService.get_channel_history(channel_id, limit=limit, cursor=cursor)
+        if result is None:
+            return Response({"error": "Failed to fetch messages from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        user_cache = {}
+        messages = []
+        for msg in result["messages"]:
+            user_id = msg.get("user")
+            if user_id and user_id not in user_cache:
+                user_cache[user_id] = SlackService.get_user_profile(user_id)
+
+            messages.append({
+                "ts": msg.get("ts"),
+                "text": msg.get("text", ""),
+                "user": user_cache.get(user_id),
+                "thread_ts": msg.get("thread_ts"),
+                "reply_count": msg.get("reply_count", 0),
+                "reactions": msg.get("reactions", []),
+            })
+
+        return Response({
+            "channel": self.CHANNEL_NAME,
+            "messages": messages,
+            "next_cursor": result.get("next_cursor"),
+        })
+
+
+class ThreadRepliesView(APIView):
+    """Read-only replies for a single thread in #medhack-frontiers."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    CHANNEL_NAME = "medhack-frontiers"
+
+    def get(self, request, thread_ts):
+        from integrations.services.slack import SlackService
+
+        channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
+        if not channel_id:
+            return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        replies = SlackService.get_thread_replies(channel_id, thread_ts)
+        if replies is None:
+            return Response({"error": "Failed to fetch thread from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        user_cache = {}
+        enriched = []
+        for msg in replies:
+            user_id = msg.get("user")
+            if user_id and user_id not in user_cache:
+                user_cache[user_id] = SlackService.get_user_profile(user_id)
+
+            enriched.append({
+                "ts": msg.get("ts"),
+                "text": msg.get("text", ""),
+                "user": user_cache.get(user_id),
+                "reactions": msg.get("reactions", []),
+            })
+
+        return Response({
+            "thread_ts": thread_ts,
+            "messages": enriched,
+        })
