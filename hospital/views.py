@@ -325,25 +325,22 @@ def load_ground_truth():
     return gt_rows
 
 def custom_score(true_labels, pred_labels):
-    # (Your custom scoring logic remains unchanged.)
-    normal = {0, 9, 10}
-    warning = {1, 2, 3, 4, 5, 6, 7, 8}
-    crisis = {11, 12, 13, 14, 15}
+    """Score predictions using mapped classes: 0=Normal, 1=Warning, 2=Crisis, 3=Other."""
     total_score = 0
     for t, p in zip(true_labels, pred_labels):
-        if t in normal:
-            total_score += 0 if p in normal else -2
-        elif t in warning:
-            if p in warning:
+        if t == 0:    # Normal
+            total_score += 0 if p == 0 else -2
+        elif t == 1:  # Warning
+            if p == 1:
                 total_score += 2
-            elif p in crisis:
+            elif p == 2:
                 total_score -= 1
             else:
                 total_score -= 3
-        elif t in crisis:
-            if p in crisis:
+        elif t == 2:  # Crisis
+            if p == 2:
                 total_score += 3
-            elif p in warning:
+            elif p == 1:
                 total_score -= 3
             else:
                 total_score -= 10
@@ -410,14 +407,20 @@ def submit_predictions(request):
         except ValueError:
             predicted_label_index = 1  # assume second column
         
-        for row in reader:
+        valid_classes = {0, 1, 2, 3}
+        for row_num, row in enumerate(reader, start=1):
             if not row:
                 continue
             try:
                 pred = int(row[predicted_label_index].strip())
-                pred_labels.append(pred)
             except Exception as e:
-                return JsonResponse(_error_payload(f'Error parsing row {row}: {str(e)}'), status=400)
+                return JsonResponse(_error_payload(f'Error parsing row {row_num}: {str(e)}'), status=400)
+            if pred not in valid_classes:
+                return JsonResponse(
+                    _error_payload(f'Invalid predicted_label "{pred}" at row {row_num}. Must be 0 (Normal), 1 (Warning), 2 (Crisis), or 3 (Other).'),
+                    status=400,
+                )
+            pred_labels.append(pred)
         
         gt_rows_all = load_ground_truth()
         if not gt_rows_all:
