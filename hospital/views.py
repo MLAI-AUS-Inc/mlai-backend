@@ -361,6 +361,47 @@ def _error_payload(detail):
         'error': detail,  # Backward compatibility for older clients.
     }
 
+
+def _announce_if_top_score(submission):
+    """Post a hype message to #medhack-frontiers if this submission is the new #1."""
+    try:
+        previous_best = (
+            Submission.objects
+            .exclude(id=submission.id)
+            .order_by('-score')
+            .values_list('score', flat=True)
+            .first()
+        )
+
+        if previous_best is not None and submission.score <= previous_best:
+            return  # Not a new top score
+
+        from integrations.services.slack import SlackService
+
+        channel_id = SlackService.get_channel_id_by_name("medhack-frontiers")
+        if not channel_id:
+            logger.warning("Could not find #medhack-frontiers channel for leaderboard announcement")
+            return
+
+        team_name = submission.team.team_name if submission.team else "an unnamed team"
+        accuracy_pct = round(submission.accuracy * 100, 1)
+
+        message = (
+            f":rotating_light::fire::trophy: *NEW #1 ON THE LEADERBOARD!* :trophy::fire::rotating_light:\n\n"
+            f"*{team_name}* just smashed it with a score of *{submission.score}*! "
+            f"({accuracy_pct}% accuracy)\n\n"
+            f"Submitted by *{submission.participant_name}*\n\n"
+            f"Think you can beat them? Get your submissions in! :rocket:"
+        )
+
+        SlackService.send_message(channel_id, message)
+        logger.info(f"Announced new top score {submission.score} by {team_name} in #medhack-frontiers")
+
+    except Exception as e:
+        # Never let a Slack failure break the submission flow
+        logger.error(f"Failed to announce top score in Slack: {e}")
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def submit_predictions(request):
@@ -509,6 +550,9 @@ def submit_predictions(request):
             accuracy=accuracy,
             feedback=feedback,
         )
+
+        # Check if this is the new top score and announce in Slack
+        _announce_if_top_score(submission)
 
         return JsonResponse({
             'message': 'Submission scored successfully',
