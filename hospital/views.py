@@ -361,6 +361,68 @@ def _error_payload(detail):
         'error': detail,  # Backward compatibility for older clients.
     }
 
+
+def _announce_if_top_score(submission):
+    """Post a hype message to #medhack-frontiers if this submission is the new #1."""
+    try:
+        previous_best = (
+            Submission.objects
+            .exclude(id=submission.id)
+            .order_by('-score')
+            .values_list('score', flat=True)
+            .first()
+        )
+
+        if previous_best is not None and submission.score <= previous_best:
+            return  # Not a new top score
+
+        from integrations.services.slack import SlackService
+
+        channel_id = SlackService.get_channel_id_by_name("medhack-frontiers")
+        if not channel_id:
+            logger.warning("Could not find #medhack-frontiers channel for leaderboard announcement")
+            return
+
+        team_name = submission.team.team_name if submission.team else "an unnamed team"
+        accuracy_pct = round(submission.accuracy * 100, 1)
+
+        import random
+        hype_intros = [
+            f"STOP EVERYTHING!!! :rotating_light::rotating_light::rotating_light:",
+            f"OH MY GOD OH MY GOD OH MY GOD :scream::scream::scream:",
+            f"EVERYBODY GET IN HERE RIGHT NOW :mega::mega::mega:",
+            f"NO WAYYYYY THIS JUST HAPPENED :exploding_head::exploding_head::exploding_head:",
+            f"HOLD THE PHONE!!! DROP WHAT YOU'RE DOING!!! :phone::boom::boom:",
+        ]
+        hype_bodies = [
+            f"*{team_name}* JUST ABSOLUTELY OBLITERATED THE LEADERBOARD WITH A SCORE OF *{submission.score}*!!! ({accuracy_pct}% accuracy) THIS IS NOT A DRILL!!!",
+            f"*{team_name}* CAME OUT OF NOWHERE AND DETONATED THE ENTIRE LEADERBOARD!!! *{submission.score} POINTS*!!! ({accuracy_pct}% accuracy) I AM LOSING MY MIND!!!",
+            f"*{team_name}* JUST WENT FULL BEAST MODE AND DROPPED A *{submission.score}* ON THE LEADERBOARD!!! ({accuracy_pct}% accuracy) THE CROWD GOES ABSOLUTELY WILD!!!",
+            f"*{team_name}* SAID \"HOLD MY COFFEE\" AND CASUALLY POSTED A *{submission.score}*!!! ({accuracy_pct}% accuracy) SOMEONE CALL AN AMBULANCE BECAUSE THE OLD LEADERS ARE FINISHED!!!",
+            f"*{team_name}* JUST DID THE UNTHINKABLE!!! *{submission.score} POINTS*!!! ({accuracy_pct}% accuracy) THE LEADERBOARD IS IN SHAMBLES!!! ABSOLUTE CARNAGE!!!",
+        ]
+        hype_closers = [
+            f"Submitted by the legendary *{submission.participant_name}* :crown:\n\nARE YOU GONNA LET THAT STAND?! GET YOUR SUBMISSIONS IN!!! :fire::fire::fire::rocket::rocket::rocket:",
+            f"Massive respect to *{submission.participant_name}* :saluting_face:\n\nTHE GAUNTLET HAS BEEN THROWN DOWN!!! WHO'S NEXT?! :boxing_glove::fire::fire:",
+            f"*{submission.participant_name}* is BUILT DIFFERENT :sunglasses:\n\nEVERYONE ELSE — YOUR MOVE!!! :chess_pawn::fire::rocket::rocket:",
+            f"*{submission.participant_name}* just became PUBLIC ENEMY #1 :dart:\n\nTHE REST OF YOU BETTER START TRAINING HARDER!!! :weight_lifter::fire::fire::fire:",
+        ]
+
+        message = (
+            f"{random.choice(hype_intros)}\n\n"
+            f":trophy::trophy::trophy: *NEW #1 ON THE LEADERBOARD!!!* :trophy::trophy::trophy:\n\n"
+            f"{random.choice(hype_bodies)}\n\n"
+            f"{random.choice(hype_closers)}"
+        )
+
+        SlackService.send_message(channel_id, message)
+        logger.info(f"Announced new top score {submission.score} by {team_name} in #medhack-frontiers")
+
+    except Exception as e:
+        # Never let a Slack failure break the submission flow
+        logger.error(f"Failed to announce top score in Slack: {e}")
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def submit_predictions(request):
@@ -509,6 +571,9 @@ def submit_predictions(request):
             accuracy=accuracy,
             feedback=feedback,
         )
+
+        # Check if this is the new top score and announce in Slack
+        _announce_if_top_score(submission)
 
         return JsonResponse({
             'message': 'Submission scored successfully',
