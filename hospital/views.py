@@ -386,6 +386,13 @@ def _announce_if_top_score(submission):
         team_name = submission.team.team_name if submission.team else "an unnamed team"
         accuracy_pct = round(submission.accuracy * 100, 1)
 
+        # Extract clinical metrics for the announcement
+        cm = (submission.feedback or {}).get('clinical_metrics', {})
+        saved = cm.get('patients_saved', '?')
+        at_risk = cm.get('patients_at_risk', '?')
+        false_alarms = cm.get('false_alarms', '?')
+        crisis_total = cm.get('crisis_episodes_total', '?')
+
         import random
         hype_intros = [
             f"STOP EVERYTHING!!! :rotating_light::rotating_light::rotating_light:",
@@ -408,10 +415,16 @@ def _announce_if_top_score(submission):
             f"*{submission.participant_name}* just became PUBLIC ENEMY #1 :dart:\n\nTHE REST OF YOU BETTER START TRAINING HARDER!!! :weight_lifter::fire::fire::fire:",
         ]
 
+        clinical_line = (
+            f":hospital: *Clinical Impact:* {saved}/{crisis_total} patients saved | "
+            f"{at_risk} lives at risk | {false_alarms} false alarms"
+        )
+
         message = (
             f"{random.choice(hype_intros)}\n\n"
             f":trophy::trophy::trophy: *NEW #1 ON THE LEADERBOARD!!!* :trophy::trophy::trophy:\n\n"
             f"{random.choice(hype_bodies)}\n\n"
+            f"{clinical_line}\n\n"
             f"{random.choice(hype_closers)}"
         )
 
@@ -554,12 +567,93 @@ def submit_predictions(request):
                 'correct': t == p,
             })
 
+        # --- Clinical metrics: episode-level patient outcomes ---
+        # Identify contiguous crisis episodes (blocks where true_label == 2)
+        crisis_episodes = []  # list of (start_idx, end_idx) tuples
+        in_crisis = False
+        ep_start = 0
+        for i, t in enumerate(true_labels_all):
+            if t == 2 and not in_crisis:
+                in_crisis = True
+                ep_start = i
+            elif t != 2 and in_crisis:
+                in_crisis = False
+                crisis_episodes.append((ep_start, i))
+        if in_crisis:
+            crisis_episodes.append((ep_start, len(true_labels_all)))
+
+        # For each episode, check if the model detected at least one crisis row
+        patients_saved = 0
+        patients_at_risk = 0
+        episode_details = []
+        for start, end in crisis_episodes:
+            detected = any(pred_labels[j] == 2 for j in range(start, end))
+            if detected:
+                patients_saved += 1
+            else:
+                patients_at_risk += 1
+            episode_details.append({
+                'start_row': start + 1,
+                'end_row': end,
+                'length': end - start,
+                'detected': detected,
+            })
+
+        # Identify contiguous warning episodes (blocks where true_label == 1)
+        warning_episodes = []
+        in_warning = False
+        for i, t in enumerate(true_labels_all):
+            if t == 1 and not in_warning:
+                in_warning = True
+                ep_start = i
+            elif t != 1 and in_warning:
+                in_warning = False
+                warning_episodes.append((ep_start, i))
+        if in_warning:
+            warning_episodes.append((ep_start, len(true_labels_all)))
+
+        warnings_caught = sum(
+            1 for s, e in warning_episodes
+            if any(pred_labels[j] == 1 for j in range(s, e))
+        )
+        warnings_missed = len(warning_episodes) - warnings_caught
+
+        # False alarms: predicted crisis (2) when actual was not crisis
+        false_alarm_rows = [(i, true_labels_all[i]) for i in range(len(true_labels_all))
+                           if pred_labels[i] == 2 and true_labels_all[i] != 2]
+        false_alarm_breakdown = {0: 0, 1: 0, 3: 0}
+        for _, actual in false_alarm_rows:
+            if actual in false_alarm_breakdown:
+                false_alarm_breakdown[actual] += 1
+
+        clinical_metrics = {
+            'crisis_episodes_total': len(crisis_episodes),
+            'patients_saved': patients_saved,
+            'patients_at_risk': patients_at_risk,
+            'crisis_detection_rate': round(patients_saved / len(crisis_episodes), 4) if crisis_episodes else 0,
+            'warning_episodes_total': len(warning_episodes),
+            'warnings_caught': warnings_caught,
+            'warnings_missed': warnings_missed,
+            'warning_detection_rate': round(warnings_caught / len(warning_episodes), 4) if warning_episodes else 0,
+            'false_alarms': len(false_alarm_rows),
+            'false_alarm_breakdown': {
+                'actual_normal': false_alarm_breakdown[0],
+                'actual_warning': false_alarm_breakdown[1],
+                'actual_other': false_alarm_breakdown[3],
+            },
+            # First 10 missed episodes for debugging
+            'missed_episodes_sample': [
+                ep for ep in episode_details if not ep['detected']
+            ][:10],
+        }
+
         feedback = {
             'confusion_matrix': confusion,
             'class_stats': class_stats,
             'missed_crises': missed_crises,
             'missed_crises_total': sum(1 for t, p in zip(true_labels_all, pred_labels) if t == 2 and p != 2),
             'first_100_public': first_100,
+            'clinical_metrics': clinical_metrics,
         }
 
         # Create Submission with feedback — no Prediction rows needed
