@@ -7,6 +7,7 @@ from .medhack_views import (
     SubmitGuessView,
     RecordWinnerView,
     CaseHistoryView,
+    CreateAnnouncementView,
 )
 
 urlpatterns = [
@@ -20,4 +21,7 @@ urlpatterns = [
     # Guesses
     path('guesses/pending/', PendingGuessView.as_view(), name='medhack-pending-guess'),
     path('guesses/submit/', SubmitGuessView.as_view(), name='medhack-submit-guess'),
+
+    # Announcements
+    path('announcements/', CreateAnnouncementView.as_view(), name='medhack-create-announcement'),
 ]

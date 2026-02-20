@@ -434,21 +434,7 @@ class UpdateProfileView(APIView):
         email = request.data.get("email")
         phone = request.data.get("phone")
         about = request.data.get("about")
-        app_context = _normalize_app_context(request.data.get("app") or request.data.get("hackathon"), default="")
-        team_name = request.data.get("team")
-        esafety_team_name = request.data.get("esafety_team")
-        hospital_team_name = request.data.get("hospital_team")
 
-        if team_name:
-            normalized_team_name = str(team_name).strip()
-            if app_context == "hospital":
-                hospital_team_name = normalized_team_name
-            elif app_context == "esafety":
-                esafety_team_name = normalized_team_name
-            elif not esafety_team_name and not hospital_team_name:
-                # Backward compatibility with existing eSafety profile flow.
-                esafety_team_name = normalized_team_name
-        
         # Handle personas (list of strings)
         if hasattr(request.data, 'getlist'):
             personas = request.data.getlist("personas")
@@ -509,64 +495,6 @@ class UpdateProfileView(APIView):
 
         user.save()
 
-        def _assign_user_to_esafety_team(requested_team_name):
-            if not requested_team_name:
-                return None
-
-            requested_team_name = str(requested_team_name).strip()
-            if not requested_team_name:
-                return None
-
-            current_teams = user.esafety_teams.all()
-            for current_team in current_teams:
-                current_team.members.remove(user)
-
-            team = EsafetyTeam.objects.filter(team_name__iexact=requested_team_name).first()
-            if not team:
-                team = EsafetyTeam.objects.create(team_name=requested_team_name)
-            team.members.add(user)
-            return team
-
-        def _assign_user_to_hospital_team(requested_team_name):
-            if not requested_team_name:
-                return None, None
-
-            requested_team_name = str(requested_team_name).strip()
-            if not requested_team_name:
-                return None, None
-
-            team = HospitalTeam.objects.filter(team_name__iexact=requested_team_name).first()
-            if not team:
-                team = HospitalTeam.objects.create(team_name=requested_team_name)
-
-            is_already_member = team.members.filter(id=user.id).exists()
-            if not is_already_member and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
-                return None, Response(
-                    {
-                        "error": f"Team '{team.team_name}' is full.",
-                        "max_members": MEDHACK_TEAM_MAX_MEMBERS,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            current_teams = user.hospital_teams.all()
-            for current_team in current_teams:
-                if current_team.id != team.id:
-                    current_team.members.remove(user)
-
-            team.members.add(user)
-            return team, None
-
-        _assign_user_to_esafety_team(esafety_team_name)
-        _, hospital_team_error = _assign_user_to_hospital_team(hospital_team_name)
-        if hospital_team_error is not None:
-            return hospital_team_error
-
-        has_any_team = user.esafety_teams.exists() or user.hospital_teams.exists()
-        if user.has_team != has_any_team:
-            user.has_team = has_any_team
-            user.save(update_fields=['has_team'])
-
         # Handle avatar upload
         avatar_file = request.FILES.get('avatar')
         if avatar_file:
@@ -574,84 +502,27 @@ class UpdateProfileView(APIView):
                 from PIL import Image
                 from io import BytesIO
                 from .firebase_utils import upload_file_to_storage
-                
-                # Open image
+
                 img = Image.open(avatar_file)
-                
-                # Resize/Crop to square (optional but good for avatars)
-                # Simple resize to max 200x200 while maintaining aspect ratio, then center crop?
-                # Or just resize to 200x200 thumbnail
-                img.thumbnail((300, 300)) 
-                
-                # Save to buffer
+                img.thumbnail((300, 300))
+
                 output_buffer = BytesIO()
-                # Convert to RGB if RGBA (e.g. PNG) and saving as JPEG, 
-                # but let's keep original format or default to PNG for transparency
                 img_format = img.format if img.format else 'PNG'
                 img.save(output_buffer, format=img_format)
                 output_buffer.seek(0)
-                
-                # Upload
-                # Use user ID in filename to avoid collisions/overwrite
+
                 filename = f"avatars/{user.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
                 avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-                
+
                 if avatar_url:
                     user.avatar_url = avatar_url
                     user.save()
-                    
+
             except Exception as e:
                 logger.error(f"Error uploading avatar: {e}")
-                # Don't fail the whole request, just log it
 
-        # Handle team avatar upload
-        # Check both FILES and data (in case of different parsing)
-        team_avatar_file = request.FILES.get('team_avatar') or request.data.get('team_avatar')
-        
-        if team_avatar_file:
-            logger.info(f"Processing team_avatar: {team_avatar_file}")
-            # Select target team by app context (defaulting to esafety for backward compatibility).
-            if app_context == "hospital":
-                team = user.hospital_teams.first()
-                team_avatar_path_prefix = "hospital-team-avatars"
-            else:
-                team = user.esafety_teams.first()
-                team_avatar_path_prefix = "team-avatars"
-
-            if team:
-                try:
-                    from PIL import Image
-                    from io import BytesIO
-                    from .firebase_utils import upload_file_to_storage
-                    
-                    # Open image
-                    img = Image.open(team_avatar_file)
-                    
-                    # Resize/Crop
-                    img.thumbnail((300, 300)) 
-                    
-                    # Save to buffer
-                    output_buffer = BytesIO()
-                    img_format = img.format if img.format else 'PNG'
-                    img.save(output_buffer, format=img_format)
-                    output_buffer.seek(0)
-                    
-                    # Upload
-                    filename = f"{team_avatar_path_prefix}/{team.team_id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
-                    team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-                    
-                    if team_avatar_url:
-                        team.avatar_url = team_avatar_url
-                        team.save()
-                        
-                except Exception as e:
-                    logger.error(f"Error uploading team avatar: {e}")
-
-
-        # Return the updated profile
-        # Re-use CurrentUserView logic or similar structure
-        
-        # Retrieve teams (freshly updated)
+        # Return the updated profile — team data is read-only here,
+        # managed via /api/v1/hackathons/{app}/teams/ endpoints.
         hospital_team = user.hospital_teams.first()
         hospital_team_data = None
         if hospital_team:
@@ -732,32 +603,6 @@ class HackathonDetailView(RetrieveAPIView):
     permission_classes = [AllowAny]
     lookup_field = 'slug'
 
-
-class TeamNamesListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        requested_scope = (request.query_params.get('app') or request.query_params.get('hackathon') or '').strip().lower()
-
-        if not requested_scope:
-            # Default: all team names across both hackathons.
-            hospital_names = list(HospitalTeam.objects.values_list('team_name', flat=True))
-            esafety_names = list(EsafetyTeam.objects.values_list('team_name', flat=True))
-            team_names = sorted(set(hospital_names + esafety_names))
-            return Response({"team_names": team_names})
-
-        app_context = _normalize_app_context(requested_scope, default='')
-        if app_context == 'hospital':
-            team_names = HospitalTeam.objects.values_list('team_name', flat=True)
-        elif app_context == 'esafety':
-            team_names = EsafetyTeam.objects.values_list('team_name', flat=True)
-        else:
-            return Response(
-                {"error": "Invalid app. Use 'esafety' or 'hospital'."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        return Response({"team_names": list(team_names)})
 
 class UserDetailView(RetrieveUpdateAPIView):
     queryset = User.objects.all()

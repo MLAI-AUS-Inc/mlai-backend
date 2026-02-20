@@ -22,8 +22,7 @@ class AnnouncementAdmin(admin.ModelAdmin):
     list_filter = ('created_at',)
     search_fields = ('title', 'body')
     ordering = ('-created_at',)
-    # Optionally, restrict the fields that can be edited in the change form.
-    fields = ('user', 'team', 'participant_name', 'score', 'accuracy')
+    fields = ('title', 'body', 'author')
 
 
 @admin.register(MedHackCase)
