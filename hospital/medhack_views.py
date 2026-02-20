@@ -10,8 +10,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import AnonRateThrottle
 
+from django.contrib.auth import get_user_model
 from core.permissions import HasAPIKey, HasRooApiKey
-from .models import MedHackCase, MedHackGuess, MedHackWinner
+from integrations.services.slack import SlackService
+from .models import MedHackCase, MedHackGuess, MedHackWinner, Announcement
+from .serializers import AnnouncementSerializer
+
+User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
@@ -440,3 +445,89 @@ class CaseHistoryView(APIView):
                 "total_guesses": total_guesses,
             })
         return Response({"cases": data})
+
+
+class CreateAnnouncementView(APIView):
+    """POST /announcements/ — Create a MedHack announcement via Roo bot."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+    throttle_classes = [MedHackRateThrottle]
+
+    def post(self, request):
+        title = request.data.get('title', '').strip()
+        body = request.data.get('body', '').strip()
+        slack_user_id = request.data.get('slack_user_id')
+
+        if not title or not body:
+            return Response(
+                {"detail": "title and body are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not slack_user_id:
+            return Response(
+                {"detail": "slack_user_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate Slack ID
+        is_valid, error_msg = validate_slack_id(slack_user_id)
+        if not is_valid:
+            return Response(
+                {"detail": error_msg},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Resolve Slack user to a Django User (create if needed)
+        author = self._resolve_user(slack_user_id)
+        if author is None:
+            return Response(
+                {"detail": "Could not resolve Slack user to an account"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        announcement = Announcement.objects.create(
+            title=title,
+            body=body,
+            author=author,
+        )
+
+        return Response(
+            AnnouncementSerializer(announcement).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @staticmethod
+    def _resolve_user(slack_user_id: str):
+        """Look up or auto-create a Django User from a Slack ID."""
+        try:
+            return User.objects.get(slack_id=slack_user_id)
+        except User.DoesNotExist:
+            pass
+
+        profile = SlackService.get_user_profile(slack_user_id)
+        if not profile:
+            return None
+
+        email = profile.get('email')
+        real_name = profile.get('real_name', 'Unknown')
+
+        if not email:
+            email = f"{slack_user_id}@slack.placeholder.com"
+
+        # Check if email already exists
+        if User.objects.filter(email=email).exists():
+            user = User.objects.get(email=email)
+            if not user.slack_id:
+                user.slack_id = slack_user_id
+                user.save(update_fields=['slack_id'])
+            return user
+
+        return User.objects.create(
+            email=email,
+            slack_id=slack_user_id,
+            first_name=real_name.split()[0],
+            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+            avatar_url=profile.get('image_url'),
+            role='participant',
+        )
