@@ -439,7 +439,7 @@ def submit_predictions(request):
                 **_error_payload(f'Number of predictions ({len(pred_labels)}) does not match number of ground truth rows ({len(gt_rows_all)})')
             }, status=400)
         
-        true_labels_all = [map_state_label(row['state_label']) for row in gt_rows_all]
+        true_labels_all = [int(row['predicted_label']) for row in gt_rows_all]
         score = custom_score(true_labels_all, pred_labels)
         correct_count = sum(1 for t, p in zip(true_labels_all, pred_labels) if t == p)
         accuracy = correct_count / len(true_labels_all) if true_labels_all else 0
@@ -459,23 +459,11 @@ def submit_predictions(request):
         for public_idx, global_idx in enumerate(public_indices, start=1):
             pred = pred_labels[global_idx]
             gt = gt_rows_all[global_idx]
-            try:
-                ts = datetime.datetime.strptime(gt['timestamp'], '%Y-%m-%d %H:%M:%S')
-                # Convert the naive datetime to an aware datetime using the current timezone
-                ts = timezone.make_aware(ts, timezone.get_current_timezone())
-            except Exception:
-                ts = None
             predictions_to_create.append(Prediction(
                 submission=submission,
                 row_id=public_idx,
                 predicted_label=pred,
-                correct_label=map_state_label(gt['state_label']),
-                timestamp=ts,
-                diastolic_bp=float(gt['diastolic_bp']),
-                systolic_bp=float(gt['systolic_bp']),
-                heart_rate=float(gt['heart_rate']),
-                respiratory_rate=float(gt['respiratory_rate']),
-                oxygen_saturation=float(gt['oxygen_saturation'])
+                correct_label=int(gt['predicted_label']),
             ))
 
         Prediction.objects.bulk_create(predictions_to_create)
