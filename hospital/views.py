@@ -49,7 +49,15 @@ class TeamListView(APIView):
     def get(self, request):
         teams = Team.objects.all().order_by('team_id')
         member_id = request.query_params.get('member_id')
-        if member_id:
+        if member_id and member_id not in ('undefined', 'null'):
+            try:
+                member_id = int(member_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "member_id must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if member_id and isinstance(member_id, int):
             teams = teams.filter(members__id=member_id).distinct().prefetch_related('members')
             payload = []
             for team in teams:
