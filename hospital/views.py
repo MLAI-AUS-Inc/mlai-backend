@@ -386,12 +386,33 @@ def _announce_if_top_score(submission):
         team_name = submission.team.team_name if submission.team else "an unnamed team"
         accuracy_pct = round(submission.accuracy * 100, 1)
 
+        import random
+        hype_intros = [
+            f"STOP EVERYTHING!!! :rotating_light::rotating_light::rotating_light:",
+            f"OH MY GOD OH MY GOD OH MY GOD :scream::scream::scream:",
+            f"EVERYBODY GET IN HERE RIGHT NOW :mega::mega::mega:",
+            f"NO WAYYYYY THIS JUST HAPPENED :exploding_head::exploding_head::exploding_head:",
+            f"HOLD THE PHONE!!! DROP WHAT YOU'RE DOING!!! :phone::boom::boom:",
+        ]
+        hype_bodies = [
+            f"*{team_name}* JUST ABSOLUTELY OBLITERATED THE LEADERBOARD WITH A SCORE OF *{submission.score}*!!! ({accuracy_pct}% accuracy) THIS IS NOT A DRILL!!!",
+            f"*{team_name}* CAME OUT OF NOWHERE AND DETONATED THE ENTIRE LEADERBOARD!!! *{submission.score} POINTS*!!! ({accuracy_pct}% accuracy) I AM LOSING MY MIND!!!",
+            f"*{team_name}* JUST WENT FULL BEAST MODE AND DROPPED A *{submission.score}* ON THE LEADERBOARD!!! ({accuracy_pct}% accuracy) THE CROWD GOES ABSOLUTELY WILD!!!",
+            f"*{team_name}* SAID \"HOLD MY COFFEE\" AND CASUALLY POSTED A *{submission.score}*!!! ({accuracy_pct}% accuracy) SOMEONE CALL AN AMBULANCE BECAUSE THE OLD LEADERS ARE FINISHED!!!",
+            f"*{team_name}* JUST DID THE UNTHINKABLE!!! *{submission.score} POINTS*!!! ({accuracy_pct}% accuracy) THE LEADERBOARD IS IN SHAMBLES!!! ABSOLUTE CARNAGE!!!",
+        ]
+        hype_closers = [
+            f"Submitted by the legendary *{submission.participant_name}* :crown:\n\nARE YOU GONNA LET THAT STAND?! GET YOUR SUBMISSIONS IN!!! :fire::fire::fire::rocket::rocket::rocket:",
+            f"Massive respect to *{submission.participant_name}* :saluting_face:\n\nTHE GAUNTLET HAS BEEN THROWN DOWN!!! WHO'S NEXT?! :boxing_glove::fire::fire:",
+            f"*{submission.participant_name}* is BUILT DIFFERENT :sunglasses:\n\nEVERYONE ELSE — YOUR MOVE!!! :chess_pawn::fire::rocket::rocket:",
+            f"*{submission.participant_name}* just became PUBLIC ENEMY #1 :dart:\n\nTHE REST OF YOU BETTER START TRAINING HARDER!!! :weight_lifter::fire::fire::fire:",
+        ]
+
         message = (
-            f":rotating_light::fire::trophy: *NEW #1 ON THE LEADERBOARD!* :trophy::fire::rotating_light:\n\n"
-            f"*{team_name}* just smashed it with a score of *{submission.score}*! "
-            f"({accuracy_pct}% accuracy)\n\n"
-            f"Submitted by *{submission.participant_name}*\n\n"
-            f"Think you can beat them? Get your submissions in! :rocket:"
+            f"{random.choice(hype_intros)}\n\n"
+            f":trophy::trophy::trophy: *NEW #1 ON THE LEADERBOARD!!!* :trophy::trophy::trophy:\n\n"
+            f"{random.choice(hype_bodies)}\n\n"
+            f"{random.choice(hype_closers)}"
         )
 
         SlackService.send_message(channel_id, message)
