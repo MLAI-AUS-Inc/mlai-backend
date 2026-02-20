@@ -9,7 +9,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.shortcuts import get_object_or_404
-from .models import Submission, Team, Prediction, Announcement
+from .models import Submission, Team, Announcement
 from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
@@ -443,31 +443,73 @@ def submit_predictions(request):
         score = custom_score(true_labels_all, pred_labels)
         correct_count = sum(1 for t, p in zip(true_labels_all, pred_labels) if t == p)
         accuracy = correct_count / len(true_labels_all) if true_labels_all else 0
-        
-        # Create a Submission with the authenticated user and associated team (if available)
+
+        # --- Build compact feedback JSON instead of 180K+ Prediction rows ---
+        CLASS_NAMES = {0: 'Normal', 1: 'Warning', 2: 'Crisis', 3: 'Other'}
+
+        # Confusion matrix: confusion[actual][predicted] = count
+        confusion = {a: {p: 0 for p in range(4)} for a in range(4)}
+        for t, p in zip(true_labels_all, pred_labels):
+            if t in confusion and p in confusion[t]:
+                confusion[t][p] += 1
+
+        # Per-class stats
+        class_stats = {}
+        for cls in range(4):
+            total = sum(confusion[cls].values())
+            correct = confusion[cls][cls]
+            class_stats[str(cls)] = {
+                'name': CLASS_NAMES[cls],
+                'total': total,
+                'correct': correct,
+                'accuracy': round(correct / total, 4) if total else 0,
+            }
+
+        # Missed crises (actual=2, predicted!=2) — first 50
+        missed_crises = []
+        for i, (t, p) in enumerate(zip(true_labels_all, pred_labels)):
+            if t == 2 and p != 2:
+                missed_crises.append({
+                    'row': i + 1,
+                    'predicted': p,
+                    'predicted_name': CLASS_NAMES.get(p, 'Unknown'),
+                })
+                if len(missed_crises) >= 50:
+                    break
+
+        # First 100 public rows with detailed feedback
+        public_indices = [i for i, row in enumerate(gt_rows_all) if row.get('Usage', '').strip() == 'Public']
+        first_100 = []
+        for idx in public_indices[:100]:
+            t = true_labels_all[idx]
+            p = pred_labels[idx]
+            first_100.append({
+                'row': idx + 1,
+                'actual': t,
+                'actual_name': CLASS_NAMES.get(t, 'Unknown'),
+                'predicted': p,
+                'predicted_name': CLASS_NAMES.get(p, 'Unknown'),
+                'correct': t == p,
+            })
+
+        feedback = {
+            'confusion_matrix': confusion,
+            'class_stats': class_stats,
+            'missed_crises': missed_crises,
+            'missed_crises_total': sum(1 for t, p in zip(true_labels_all, pred_labels) if t == 2 and p != 2),
+            'first_100_public': first_100,
+        }
+
+        # Create Submission with feedback — no Prediction rows needed
         submission = Submission.objects.create(
             user=user,
             team=team,
             participant_name=participant_name,
             score=score,
-            accuracy=accuracy
+            accuracy=accuracy,
+            feedback=feedback,
         )
-        
-        public_indices = [i for i, row in enumerate(gt_rows_all) if row.get('Usage', '').strip() == 'Public']
 
-        predictions_to_create = []
-        for public_idx, global_idx in enumerate(public_indices, start=1):
-            pred = pred_labels[global_idx]
-            gt = gt_rows_all[global_idx]
-            predictions_to_create.append(Prediction(
-                submission=submission,
-                row_id=public_idx,
-                predicted_label=pred,
-                correct_label=int(gt['predicted_label']),
-            ))
-
-        Prediction.objects.bulk_create(predictions_to_create)
-        
         return JsonResponse({
             'message': 'Submission scored successfully',
             'participant_name': participant_name,
@@ -475,6 +517,7 @@ def submit_predictions(request):
             'score': score,
             'accuracy': accuracy,
             'submitted_at': submission.submitted_at.isoformat(),
+            'feedback': feedback,
         })
     
     return JsonResponse(_error_payload('Invalid request'), status=405)
@@ -490,10 +533,7 @@ def get_submission(request):
         submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
         if not submission:
             return JsonResponse({'error': 'No submission found'}, status=404)
-        
-        predictions = submission.predictions.all().order_by('row_id')
 
-        # If the submission has a team, include the team's name in the response
         team_data = None
         if submission.team:
             team_data = {
@@ -505,20 +545,10 @@ def get_submission(request):
             'submission_id': submission.id,
             'participant_name': submission.participant_name,
             'score': submission.score,
-            'accuracy': submission.accuracy,  # ensure numeric
+            'accuracy': submission.accuracy,
             'submitted_at': submission.submitted_at.isoformat(),
-            'team': team_data,  # Add the team info
-            'predictions': [{
-                'row_id': p.row_id,
-                'predicted_label': p.predicted_label,
-                'correct_label': p.correct_label,
-                'timestamp': p.timestamp.isoformat() if p.timestamp else None,
-                'diastolic_bp': p.diastolic_bp,
-                'systolic_bp': p.systolic_bp,
-                'heart_rate': p.heart_rate,
-                'respiratory_rate': p.respiratory_rate,
-                'oxygen_saturation': p.oxygen_saturation,
-            } for p in predictions]
+            'team': team_data,
+            'feedback': submission.feedback,
         }
         return JsonResponse(submission_data)
     return JsonResponse({'error': 'Invalid request'}, status=405)
@@ -534,16 +564,14 @@ def get_submission_by_id(request, submission_id):
         submission = Submission.objects.get(id=submission_id, user=request.user)
     except Submission.DoesNotExist:
         return JsonResponse({'error': 'Submission not found'}, status=404)
-    
-    predictions = submission.predictions.all().order_by('row_id')
-    
+
     team_data = None
     if submission.team:
         team_data = {
             'team_id': submission.team.team_id,
             'team_name': submission.team.team_name
         }
-    
+
     submission_data = {
         'submission_id': submission.id,
         'participant_name': submission.participant_name,
@@ -551,19 +579,9 @@ def get_submission_by_id(request, submission_id):
         'accuracy': submission.accuracy,
         'submitted_at': submission.submitted_at.isoformat(),
         'team': team_data,
-        'predictions': [{
-            'row_id': p.row_id,
-            'predicted_label': p.predicted_label,
-            'correct_label': p.correct_label,
-            'timestamp': p.timestamp.isoformat() if p.timestamp else None,
-            'diastolic_bp': p.diastolic_bp,
-            'systolic_bp': p.systolic_bp,
-            'heart_rate': p.heart_rate,
-            'respiratory_rate': p.respiratory_rate,
-            'oxygen_saturation': p.oxygen_saturation,
-        } for p in predictions]
+        'feedback': submission.feedback,
     }
-    
+
     return JsonResponse(submission_data)
 
 
