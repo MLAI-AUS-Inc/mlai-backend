@@ -521,6 +521,37 @@ class UpdateProfileView(APIView):
             except Exception as e:
                 logger.error(f"Error uploading avatar: {e}")
 
+        # Handle team avatar upload
+        team_avatar_file = request.FILES.get('team_avatar')
+        if team_avatar_file:
+            team = user.hospital_teams.first() or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
+            if team:
+                try:
+                    from PIL import Image
+                    from io import BytesIO
+                    from .firebase_utils import upload_file_to_storage
+
+                    img = Image.open(team_avatar_file)
+                    img.thumbnail((300, 300))
+
+                    output_buffer = BytesIO()
+                    img_format = img.format if img.format else 'PNG'
+                    img.save(output_buffer, format=img_format)
+                    output_buffer.seek(0)
+
+                    filename = f"team-avatars/{team.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
+                    team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
+
+                    if team_avatar_url:
+                        team.avatar_url = team_avatar_url
+                        team.save(update_fields=['avatar_url'])
+                        logger.info(f"Team avatar uploaded for team {team.id}: {team_avatar_url}")
+
+                except Exception as e:
+                    logger.error(f"Error uploading team avatar: {e}")
+            else:
+                logger.warning(f"User {user.email} uploaded team_avatar but has no team")
+
         # Return the updated profile — team data is read-only here,
         # managed via /api/v1/hackathons/{app}/teams/ endpoints.
         hospital_team = user.hospital_teams.first()
