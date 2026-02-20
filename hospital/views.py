@@ -324,12 +324,12 @@ def load_ground_truth():
     gt_rows = []
     # Ensure path is correct relative to where manage.py is run
     try:
-        with open('./hospital/test_data_backend.csv', 'r') as f:
+        with open('./hospital/solution.csv', 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 gt_rows.append(row)
     except FileNotFoundError:
-        logger.error("Ground truth file not found at ./hospital/test_data_backend.csv")
+        logger.error("Ground truth file not found at ./hospital/solution.csv")
     return gt_rows
 
 def custom_score(true_labels, pred_labels):
