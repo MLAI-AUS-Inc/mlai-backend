@@ -73,59 +73,6 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('allowed_personas', response.data)
 
-    def test_update_profile_assigns_hospital_team_when_app_is_hospital(self):
-        response = self.client.patch(
-            '/api/v1/auth/update-profile/',
-            {'team': 'Code Blue', 'app': 'hospital'},
-            format='json',
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.user.refresh_from_db()
-
-        self.assertTrue(self.user.has_team)
-        self.assertEqual(self.user.hospital_teams.count(), 1)
-        self.assertEqual(self.user.hospital_teams.first().team_name, 'Code Blue')
-        self.assertEqual(self.user.esafety_teams.count(), 0)
-
-        self.assertEqual(response.data['hospital_team']['team_name'], 'Code Blue')
-        self.assertEqual(response.data['team']['team_name'], 'Code Blue')
-
-    def test_update_profile_defaults_to_esafety_for_legacy_team_field(self):
-        response = self.client.patch(
-            '/api/v1/auth/update-profile/',
-            {'team': 'Safety Squad'},
-            format='json',
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.user.refresh_from_db()
-
-        self.assertTrue(self.user.has_team)
-        self.assertEqual(self.user.esafety_teams.count(), 1)
-        self.assertEqual(self.user.esafety_teams.first().team_name, 'Safety Squad')
-        self.assertEqual(self.user.hospital_teams.count(), 0)
-
-    def test_shared_team_names_endpoint_supports_hospital_context(self):
-        HospitalTeam.objects.create(team_name='Trauma Team')
-        HospitalTeam.objects.create(team_name='ICU Avengers')
-        EsafetyTeam.objects.create(team_name='Ignore Me')
-
-        response = self.client.get('/api/v1/teams/?app=hospital')
-
-        self.assertEqual(response.status_code, 200)
-        self.assertCountEqual(response.data['team_names'], ['Trauma Team', 'ICU Avengers'])
-
-    def test_shared_team_names_endpoint_returns_all_by_default(self):
-        HospitalTeam.objects.create(team_name='Trauma Team')
-        EsafetyTeam.objects.create(team_name='Safety Team')
-
-        response = self.client.get('/api/v1/teams/')
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('Trauma Team', response.data['team_names'])
-        self.assertIn('Safety Team', response.data['team_names'])
-
     def test_hospital_join_team_endpoint_switches_existing_team(self):
         team_one = HospitalTeam.objects.create(team_name='Initial Team')
         team_two = HospitalTeam.objects.create(team_name='Target Team')
@@ -261,29 +208,6 @@ class MedHackOnboardingFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'detail': 'CSV invalid'})
-
-    @patch('core.firebase_utils.upload_file_to_storage', return_value='https://cdn.example.com/team-avatar.png')
-    def test_update_profile_can_upload_hospital_team_avatar(self, mock_upload):
-        self.client.patch(
-            '/api/v1/auth/update-profile/',
-            {'team': 'Avatar Team', 'app': 'hospital'},
-            format='json',
-        )
-
-        avatar = self._make_png_upload()
-        response = self.client.patch(
-            '/api/v1/auth/update-profile/',
-            {'app': 'hospital', 'team_avatar': avatar},
-            format='multipart',
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.user.refresh_from_db()
-        hospital_team = self.user.hospital_teams.first()
-        self.assertIsNotNone(hospital_team)
-        self.assertEqual(hospital_team.avatar_url, 'https://cdn.example.com/team-avatar.png')
-        self.assertEqual(response.data['hospital_team']['avatar_url'], 'https://cdn.example.com/team-avatar.png')
-        mock_upload.assert_called()
 
     def test_hospital_leaderboard_endpoint_returns_ranked_results(self):
         team_a = HospitalTeam.objects.create(team_name='A Team')

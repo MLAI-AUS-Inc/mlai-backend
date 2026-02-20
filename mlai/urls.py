@@ -15,7 +15,6 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from core.views import TeamNamesListView
 from .views import health_check
 
 urlpatterns = [
@@ -25,7 +24,6 @@ urlpatterns = [
     path('api/v1/hackathons/esafety/', include('esafety.urls')),
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
-    path('api/v1/teams/', TeamNamesListView.as_view(), name='team-names-list'),
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API

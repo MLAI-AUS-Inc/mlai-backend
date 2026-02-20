@@ -598,14 +598,6 @@ def get_recent_submissions(request):
     return JsonResponse(submission_list, safe=False)
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_team_names(request):
-    # Retrieve all teams ordered by name (or any order you prefer)
-    teams = Team.objects.all().order_by('team_name')
-    team_names = list(teams.values_list('team_name', flat=True))
-    return Response(team_names)
-
 class AnnouncementListView(generics.ListAPIView):
     queryset = Announcement.objects.all()
     serializer_class = AnnouncementSerializer
