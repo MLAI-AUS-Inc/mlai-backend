@@ -283,12 +283,17 @@ class LeaderboardView(APIView):
 
         rows = []
         for team_id, sub in best_by_team.items():
+            cm = (sub.feedback or {}).get('clinical_metrics', {})
             rows.append(
                 {
                     "team_id": sub.team.team_id,
                     "team_name": sub.team.team_name,
                     "score": sub.score,
                     "submitted_at": sub.submitted_at.isoformat(),
+                    "patients_saved": cm.get('patients_saved'),
+                    "patients_at_risk": cm.get('patients_at_risk'),
+                    "crisis_episodes_total": cm.get('crisis_episodes_total'),
+                    "false_alarms": cm.get('false_alarms'),
                 }
             )
 
