@@ -48,6 +48,7 @@ class Submission(models.Model):
     participant_name = models.CharField(max_length=100)
     score = models.FloatField()
     accuracy = models.FloatField(default=0.0)  # Overall accuracy
+    feedback = models.JSONField(null=True, blank=True, help_text="Scoring breakdown: confusion matrix, per-class stats, missed crises, first 100 row details")
     submitted_at = models.DateTimeField(auto_now_add=True)
 
 class Prediction(models.Model):
