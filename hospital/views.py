@@ -324,10 +324,14 @@ def map_state_label(state_label):
     }
     return mapping.get(int(state_label), -1)
 
-# Load the full ground truth CSV as a list of dictionaries.
+# Module-level cache so the 452K-row CSV is read once per worker, not per request.
+_ground_truth_cache = None
+
 def load_ground_truth():
+    global _ground_truth_cache
+    if _ground_truth_cache is not None:
+        return _ground_truth_cache
     gt_rows = []
-    # Ensure path is correct relative to where manage.py is run
     try:
         with open('./hospital/solution.csv', 'r') as f:
             reader = csv.DictReader(f)
@@ -335,7 +339,10 @@ def load_ground_truth():
                 gt_rows.append(row)
     except FileNotFoundError:
         logger.error("Ground truth file not found at ./hospital/solution.csv")
-    return gt_rows
+        return gt_rows
+    _ground_truth_cache = gt_rows
+    logger.info(f"Ground truth loaded and cached: {len(gt_rows)} rows")
+    return _ground_truth_cache
 
 def custom_score(true_labels, pred_labels):
     """Score predictions using mapped classes: 0=Normal, 1=Warning, 2=Crisis, 3=Other."""
