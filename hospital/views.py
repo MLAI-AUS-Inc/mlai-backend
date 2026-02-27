@@ -679,8 +679,8 @@ def submit_predictions(request):
             feedback=feedback,
         )
 
-        # Check if this is the new top score and announce in Slack
-        _announce_if_top_score(submission)
+        # Disabled: leaderboard is hidden during the competition
+        # _announce_if_top_score(submission)
 
         return JsonResponse({
             'message': 'Submission scored successfully',
