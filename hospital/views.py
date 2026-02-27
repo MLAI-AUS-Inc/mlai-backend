@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model
 from rest_framework import permissions, status, generics
+from core.permissions import IsLeaderboardAdmin
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -266,7 +267,7 @@ class SubmissionListCreateView(APIView):
 
 
 class LeaderboardView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsLeaderboardAdmin]
 
     def get(self, request):
         submissions = (

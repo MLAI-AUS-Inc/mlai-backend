@@ -209,7 +209,17 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'detail': 'CSV invalid'})
 
+    def test_hospital_leaderboard_forbidden_for_non_admin(self):
+        response = self.client.get('/api/v1/hackathons/hospital/leaderboard/')
+        self.assertEqual(response.status_code, 403)
+
     def test_hospital_leaderboard_endpoint_returns_ranked_results(self):
+        admin_user = User.objects.create_user(
+            email='hi@mlai.au', password='password', role='participant',
+        )
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=admin_user)
+
         team_a = HospitalTeam.objects.create(team_name='A Team')
         team_b = HospitalTeam.objects.create(team_name='B Team')
         team_a.members.add(self.user)
@@ -231,7 +241,7 @@ class MedHackOnboardingFlowTests(TestCase):
             accuracy=0.8,
         )
 
-        response = self.client.get('/api/v1/hackathons/hospital/leaderboard/')
+        response = admin_client.get('/api/v1/hackathons/hospital/leaderboard/')
 
         self.assertEqual(response.status_code, 200)
         self.assertGreater(response.data[0]['score'], response.data[1]['score'])
