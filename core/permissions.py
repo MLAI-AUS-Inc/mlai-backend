@@ -42,6 +42,18 @@ class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
         return False
 
 
+class IsLeaderboardAdmin(permissions.BasePermission):
+    """
+    Only allows access to the user with email 'hi@mlai.au'.
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user
+            and request.user.is_authenticated
+            and request.user.email == 'hi@mlai.au'
+        )
+
+
 class HasAPIKey(permissions.BasePermission):
     """
     Allows access if the X-API-Key header matches INTERNAL_API_KEY in settings.
