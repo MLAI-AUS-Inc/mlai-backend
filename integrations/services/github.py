@@ -1,7 +1,11 @@
-import time
+import json
 import logging
+import time
+import urllib.parse
+
 import requests as http_requests
 from django.conf import settings
+from django.urls import reverse
 
 from integrations.models import UserIntegration
 from integrations.utils import normalize_domain
@@ -15,9 +19,114 @@ class ScanError(Exception):
     pass
 
 
+class GitHubAuthScanError(ScanError):
+    """Exception raised when a scan fails due to invalid GitHub credentials."""
+    pass
+
+
 class TokenRefreshError(Exception):
     """Exception raised when token refresh fails."""
     pass
+
+
+AUTH_RECONNECT_TEXT = (
+    "❌ Scan failed: GitHub token expired. Please reconnect your GitHub account to continue."
+)
+
+
+def build_github_auth_url(slack_user_id: str, domain: str = None, request=None) -> str:
+    """
+    Build the same GitHub auth URL returned by GET /api/v1/integrations/github/auth-url.
+    """
+    normalized_domain = normalize_domain(domain) if domain else ''
+
+    if normalized_domain:
+        from integrations.services.article_generation import build_github_oauth_url
+        return build_github_oauth_url(normalized_domain, slack_user_id)
+
+    connect_path = reverse('github_connect')
+    if request is not None:
+        base_connect_url = request.build_absolute_uri(connect_path)
+    else:
+        redirect_uri = getattr(settings, 'GITHUB_OAUTH_REDIRECT_URI', '')
+        parsed = urllib.parse.urlparse(redirect_uri)
+        if parsed.scheme and parsed.netloc:
+            base_connect_url = urllib.parse.urlunparse(
+                (parsed.scheme, parsed.netloc, connect_path, '', '', '')
+            )
+        else:
+            base_connect_url = connect_path
+
+    return f"{base_connect_url}?{urllib.parse.urlencode({'slack_user_id': slack_user_id})}"
+
+
+def is_github_auth_scan_error_message(message: str) -> bool:
+    if not message:
+        return False
+
+    normalized = message.lower()
+    auth_markers = (
+        "github token expired",
+        "token expired",
+        "access revoked",
+        "bad credentials",
+        "please reconnect your github account",
+        "please re-authenticate",
+        "reauthenticate",
+        "re-authenticate",
+        "token refresh failed",
+        "no github token found",
+        "no github credentials found",
+    )
+    return any(marker in normalized for marker in auth_markers)
+
+
+def coerce_scan_error(message: str) -> ScanError:
+    if is_github_auth_scan_error_message(message):
+        return GitHubAuthScanError(message)
+    return ScanError(message)
+
+
+def build_github_reconnect_blocks(slack_user_id: str, domain: str = None) -> tuple[str, list]:
+    auth_url = build_github_auth_url(slack_user_id, domain=domain)
+    normalized_domain = normalize_domain(domain) if domain else ''
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": AUTH_RECONNECT_TEXT,
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Re-connect GitHub",
+                        "emoji": True,
+                    },
+                    "url": auth_url,
+                    "action_id": "connect_github",
+                    "style": "danger",
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "I've Connected - Resume",
+                        "emoji": True,
+                    },
+                    "action_id": "resume_scan",
+                    "value": json.dumps({"domain": normalized_domain}),
+                    "style": "primary",
+                },
+            ],
+        },
+    ]
+    return AUTH_RECONNECT_TEXT, blocks
 
 
 def refresh_github_token(slack_user_id: str) -> dict:
@@ -179,7 +288,7 @@ def scan_github_project(
         cred_source = creds['source']
         logger.info(f"Scan using {cred_source}-level credentials for {resolved_domain}: repo={github_repo}")
     except ArticleGenerationError as e:
-        raise ScanError(str(e))
+        raise coerce_scan_error(str(e))
 
     # Look up UserIntegration separately for post-scan tracking (not for credentials)
     if integration is None:
@@ -207,9 +316,9 @@ def scan_github_project(
         current_sha = get_latest_repo_sha(github_token, github_repo)
     except http_requests_lib.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            raise ScanError("GitHub token expired. Please reconnect your GitHub account.")
+            raise GitHubAuthScanError("GitHub token expired. Please reconnect your GitHub account.")
         elif e.response.status_code in [403, 404]:
-            raise ScanError("GitHub access revoked or repository not found. Please reconnect your GitHub account.")
+            raise GitHubAuthScanError("GitHub access revoked or repository not found. Please reconnect your GitHub account.")
         else:
             logger.warning(f"Failed to fetch latest SHA for {github_repo}: {e}")
     except Exception as e:
@@ -303,7 +412,7 @@ def scan_github_project(
                      if data.get('status') == 'completed':
                          cf_data = data.get('result')
                      else:
-                         raise ScanError(f"Scan failed immediately: {data.get('error')}")
+                         raise coerce_scan_error(f"Scan failed immediately: {data.get('error')}")
                 else:
                     # It's queued or processing, start polling
                     start_polling = True
@@ -361,7 +470,7 @@ def scan_github_project(
                             break # Done!
                         elif state == 'failed':
                             error_detail = status_data.get('error', 'Unknown error')
-                            raise ScanError(f"Remote scan job failed: {error_detail}")
+                            raise coerce_scan_error(f"Remote scan job failed: {error_detail}")
                         # else: processing/queued, continue loop
                     else:
                         logger.warning(f"Status check returned {status_resp.status_code}")
@@ -819,7 +928,14 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                 SlackService.send_message(slack_channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
             else:
                 SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
-            
+
+        except GitHubAuthScanError as e:
+            logger.error(f"Background scan auth failed for {slack_user_id}: {e}")
+            fallback_text, blocks = build_github_reconnect_blocks(slack_user_id, domain=domain)
+            if slack_channel_id:
+                SlackService.send_message(slack_channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
+            else:
+                SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
         except ScanError as e:
             logger.error(f"Background scan failed for {slack_user_id}: {e}")
             if slack_channel_id:
