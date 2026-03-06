@@ -140,9 +140,8 @@ class GithubTokenIdentityView(APIView):
                 # Generate Re-Auth URL for any access issue
                 if access_revoked:
                     try:
-                        connect_path = reverse('github_connect')
-                        full_connect_url = request.build_absolute_uri(connect_path)
-                        auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+                        from integrations.services.github import build_github_auth_url
+                        auth_url = build_github_auth_url(slack_user_id, request=request)
                     except Exception as url_err:
                         logger.error(f"Failed to build auth url: {url_err}")
             except Exception as e:
@@ -325,15 +324,8 @@ class GithubAuthUrlView(APIView):
         if not slack_user_id:
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if domain:
-            # Domain-specific: use org-level OAuth which preserves domain in state
-            from integrations.services.article_generation import build_github_oauth_url
-            auth_url = build_github_oauth_url(domain, slack_user_id)
-        else:
-            # Legacy user-level OAuth (no domain context)
-            connect_path = reverse('github_connect')
-            full_connect_url = request.build_absolute_uri(connect_path)
-            auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+        from integrations.services.github import build_github_auth_url
+        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request)
 
         return Response({
             "auth_url": auth_url,
