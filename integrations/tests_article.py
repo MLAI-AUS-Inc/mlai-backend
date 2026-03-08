@@ -1,8 +1,13 @@
 from django.test import TestCase
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
 from core.models import Organization, OrganizationContentConfig
-from integrations.services.article_generation import trigger_article_generation, publish_article, ArticleGenerationError
+from integrations.services.article_generation import (
+    ArticleSystemActionRequiredError,
+    publish_article,
+    trigger_article_generation,
+)
 
 class ArticleGenerationServiceTest(TestCase):
     def setUp(self):
@@ -14,6 +19,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_user_id=self.slack_user_id,
             github_repo=self.repo_name,
             github_access_token="gh_token_123",
+            github_token_expires_at=timezone.now() + timezone.timedelta(days=1),
             project_scanned=True
         )
         
@@ -23,6 +29,16 @@ class ArticleGenerationServiceTest(TestCase):
             organization=self.org,
             github_repo=self.repo_name,
             article_template="## Template Content",
+            scan_summary="scan complete",
+            article_system={
+                "state": "existing",
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "confidence": "high",
+                "reason": "Detected existing article system",
+                "source": "scan",
+                "verified_at": "2026-03-08T00:00:00+00:00",
+            },
         )
         
     @patch('integrations.services.article_generation.http_requests.post')
@@ -70,7 +86,7 @@ class ArticleGenerationServiceTest(TestCase):
         mock_post.return_value = mock_response
         
         with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
-            result = publish_article("job_123")
+            result = publish_article("job_123", self.slack_user_id, domain="mlai.au")
             
         self.assertEqual(result['status'], "published")
         self.assertEqual(result['preview_url'], "http://p.com")
@@ -78,3 +94,19 @@ class ArticleGenerationServiceTest(TestCase):
         # Verify URL
         args, _ = mock_post.call_args
         self.assertIn('/api/pipeline/publish/job_123', args[0])
+
+    def test_trigger_generation_requires_article_system_when_missing(self):
+        self.config.article_system = {}
+        self.config.save(update_fields=["article_system"])
+
+        article_request = {
+            "domain": "mlai.au",
+            "topic": "AI Agents",
+            "target_keyword": "agentic",
+            "context": "Context info"
+        }
+
+        with self.assertRaises(ArticleSystemActionRequiredError) as exc:
+            trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(exc.exception.recommended_action, "scaffold")

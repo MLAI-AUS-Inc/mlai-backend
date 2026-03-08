@@ -5,6 +5,7 @@ import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
+from core.article_system import article_system_ready, resolve_article_system
 from integrations.models import UserIntegration
 from core.models import OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
@@ -16,6 +17,41 @@ logger = logging.getLogger(__name__)
 class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
+
+
+class ArticleSystemActionRequiredError(ArticleGenerationError):
+    """Raised when article writing is blocked on article-system readiness."""
+
+    def __init__(self, *, domain: str, article_system: dict, recommended_action: str, hint: str, message: str):
+        super().__init__(message)
+        self.domain = domain
+        self.article_system = article_system
+        self.recommended_action = recommended_action
+        self.hint = hint
+
+
+def _raise_article_system_action_required(resolved_domain: str, article_system: dict) -> None:
+    state = article_system.get('state', 'missing')
+    detected_location = article_system.get('directory_path') or article_system.get('directory_name') or 'the detected article directory'
+    if state == 'ambiguous':
+        raise ArticleSystemActionRequiredError(
+            domain=resolved_domain,
+            article_system=article_system,
+            recommended_action='confirm_article_system',
+            hint='Confirm the detected article system, rescan the repo, or scaffold a Roo-managed structure.',
+            message=(
+                f"I found what looks like an article system at {detected_location}, "
+                f"but the detection confidence is low. Confirm it before writing."
+            ),
+        )
+
+    raise ArticleSystemActionRequiredError(
+        domain=resolved_domain,
+        article_system=article_system,
+        recommended_action='scaffold',
+        hint='Scaffold an article system first, or rescan if the repo already contains one.',
+        message='This repository needs an article system before Roo can write a concrete article into it.',
+    )
 
 
 def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
@@ -249,21 +285,15 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         dict: { "job_id": "...", "status": "queued", "message": "Generation started" }
     """
     domain = article_request.get('domain')
+    resolved_domain = normalize_domain(domain)
 
-    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
-    creds = get_github_credentials_for_domain(domain, slack_user_id)
-    fresh_token = creds['token']
-    github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
-
-    # Fetch OrganizationContentConfig for artifacts
-    # We match config by github_repo
-    config = (
-        OrganizationContentConfig.objects
-        .select_related('organization')
-        .filter(github_repo=github_repo)
-        .first()
-    )
+    config = None
+    if resolved_domain:
+        try:
+            org = Organization.objects.get(domain=resolved_domain)
+            config = getattr(org, 'content_config', None)
+        except Organization.DoesNotExist:
+            config = None
     
     existing_artifacts = {}
     if config:
@@ -289,18 +319,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
-    # Check prerequisites: scan must have completed and articles must be scaffolded
+    # Check prerequisites: scan must have completed before discovery or article generation.
     if not config or not config.scan_summary:
         raise ArticleGenerationError(
             f"PREREQUISITE_MISSING:scan:{resolved_domain}:"
             f"Repository must be scanned before writing articles. "
             f"Ask me to scan your codebase first."
-        )
-
-    if not config.articles_scaffolded:
-        raise ArticleGenerationError(
-            f"PREREQUISITE_MISSING:scaffold:{resolved_domain}:"
-            f"Articles directory must be scaffolded before writing articles."
         )
 
     # Retrieve competitors and seed_keywords early for Auto-Write or Payload
@@ -310,12 +334,88 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         competitors = config.organization.competitors or []
         seed_keywords = config.organization.seed_keywords or []
 
-    # Auto-Write Mode: If topic is missing, we send empty topic/keyword
-    # Content Factory will handle the research phase and callback with topic_selection
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
-        logger.info(f"Auto-Write Mode enabled for {resolved_domain}. Content Factory will perform research.")
-        topic = ""
-        target_keyword = ""
+        discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
+        payload = {
+            "domain": resolved_domain,
+            "slack_user_id": slack_user_id,
+        }
+
+        logger.info(f"Research mode enabled for {resolved_domain}. Triggering discovery at {discovery_endpoint}.")
+
+        try:
+            response = http_requests.post(
+                discovery_endpoint,
+                json=payload,
+                headers=headers,
+                timeout=600,
+            )
+
+            if response.status_code not in [200, 202]:
+                logger.error(f"Content Factory discovery failed: {response.text}")
+                raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
+
+            data = response.json()
+            job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
+            if not job_id:
+                logger.warning("Content Factory returned discovery success but no job_id")
+                return {
+                    "job_id": "unknown",
+                    "status": "completed",
+                    "message": "Discovery completed immediately (unexpected)",
+                }
+
+            from core.models import ContentFactoryJob
+            ContentFactoryJob.objects.create(
+                job_id=job_id,
+                domain=resolved_domain,
+                slack_user_id=slack_user_id,
+                status='queued',
+                request_meta=article_request,
+            )
+            return {
+                "job_id": job_id,
+                "status": "queued",
+                "message": "Discovery started",
+                "job_status_url": f"{content_factory_url.rstrip('/')}/api/runs/{job_id}",
+            }
+        except http_requests.exceptions.RequestException as e:
+            logger.error(f"Failed to connect to Content Factory discovery endpoint: {e}")
+            raise ArticleGenerationError(f"Failed to trigger discovery: {str(e)}")
+
+    article_system = resolve_article_system(config)
+    if not article_system_ready(article_system):
+        _raise_article_system_action_required(resolved_domain, article_system)
+
+    creds = get_github_credentials_for_domain(domain, slack_user_id)
+    fresh_token = creds['token']
+    github_repo = creds['repo']
+    logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
+
+    if config is None:
+        config = (
+            OrganizationContentConfig.objects
+            .select_related('organization')
+            .filter(github_repo=github_repo)
+            .first()
+        )
+
+    if config and not existing_artifacts:
+        if config.article_template: existing_artifacts['article_template'] = config.article_template
+        if config.design_guide: existing_artifacts['design_guide'] = config.design_guide
+        if config.resource_prompt: existing_artifacts['resource_prompt'] = config.resource_prompt
+        if config.tech_stack: existing_artifacts['tech_stack'] = config.tech_stack
+        if config.brand_name: existing_artifacts['brand_name'] = config.brand_name
+        if config.article_path_pattern: existing_artifacts['article_path_pattern'] = config.article_path_pattern
+        if config.registry_path: existing_artifacts['registry_path'] = config.registry_path
+        if config.company_context: existing_artifacts['company_context'] = config.company_context
 
     # Auto-fill target_keyword from topic if missing
     if not target_keyword and topic:
@@ -350,13 +450,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     }
 
     # 4. Call Content Factory
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     generate_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/generate"
-    
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
 
     # Debug logging
     masked_payload = payload.copy()
@@ -592,6 +686,25 @@ def confirm_topic(
     Returns:
         dict: { "job_id": "...", "status": "queued", ... }
     """
+    normalized_domain = normalize_domain(domain)
+    config = None
+    try:
+        org = Organization.objects.get(domain=normalized_domain)
+        config = getattr(org, 'content_config', None)
+    except Organization.DoesNotExist:
+        config = None
+
+    if not config or not config.scan_summary:
+        raise ArticleGenerationError(
+            f"PREREQUISITE_MISSING:scan:{normalized_domain}:"
+            f"Repository must be scanned before writing articles. "
+            f"Ask me to scan your codebase first."
+        )
+
+    article_system = resolve_article_system(config)
+    if not article_system_ready(article_system):
+        _raise_article_system_action_required(normalized_domain, article_system)
+
     # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
     creds = get_github_credentials_for_domain(domain, slack_user_id)
     fresh_token = creds['token']
