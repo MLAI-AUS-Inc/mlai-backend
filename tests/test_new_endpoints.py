@@ -157,7 +157,6 @@ class ContentGenerateAutoWriteTests(TestCase):
             github_token_encrypted="org-token",
             github_token_expires_at=timezone.now() + timedelta(hours=1),
             scan_summary="scan complete",
-            articles_scaffolded=True,
         )
 
     def _mock_response(self, status_code, body):
@@ -167,7 +166,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         response.headers['Content-Type'] = 'application/json'
         return response
 
-    def test_generate_auto_write_sends_empty_topic(self):
+    def test_generate_auto_write_uses_discovery_endpoint_after_scan(self):
         url = reverse('content_generate')
         data = {
             "slack_user_id": self.integration.slack_user_id,
@@ -185,16 +184,127 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], "job-123")
         
-        # Verify call count (should be 1 call to generate, NO discovery call)
+        # Verify call count (should be 1 call to discovery)
         self.assertEqual(mock_post.call_count, 1)
 
         generate_call = mock_post.call_args_list[0]
-        self.assertIn("/api/runs/article", generate_call.args[0])
+        self.assertIn("/api/runs/discovery", generate_call.args[0])
 
         generate_payload = generate_call.kwargs.get('json') or {}
-        # Verify it sends empty topic/keyword for auto-write mode
-        self.assertEqual(generate_payload.get('topic'), "")
-        self.assertEqual(generate_payload.get('target_keyword'), "")
+        self.assertEqual(generate_payload.get('domain'), self.organization.domain)
+        self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
+
+    def test_generate_with_topic_returns_article_system_action_required_when_missing(self):
+        url = reverse('content_generate')
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "topic": "best ai coding agents",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_412_PRECONDITION_FAILED)
+        self.assertEqual(response.data['error_code'], 'ARTICLE_SYSTEM_ACTION_REQUIRED')
+        self.assertEqual(response.data['recommended_action'], 'scaffold')
+        self.assertEqual(response.data['article_system_resolution_source'], 'default_missing')
+        self.assertTrue(response.data['pending_intent_stored'])
+
+    @patch('integrations.services.article_generation.get_github_credentials_for_domain')
+    @patch('integrations.services.article_generation.http_requests.post')
+    def test_generate_with_topic_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.scan_summary = {
+            "articles_status": {
+                "has_articles_system": True,
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "detected_type": "tsx",
+            }
+        }
+        config.save(update_fields=['scan_summary'])
+
+        mock_get_credentials.return_value = {
+            "token": "gh_token",
+            "repo": "owner/repo",
+            "source": "org",
+        }
+        mock_response = self._mock_response(202, {"job_id": "job-article-123"})
+        mock_post.return_value = mock_response
+
+        url = reverse('content_generate')
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "topic": "best ai coding agents",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['job_id'], 'job-article-123')
+
+
+class ArticleSystemDecisionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = self.api_key
+
+        from django.conf import settings
+        settings.ROO_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = self.api_key
+
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        self.integration = UserIntegration.objects.create(
+            slack_user_id="U-DECIDE",
+            pending_intent={
+                "type": "write_article",
+                "article_request": {
+                    "domain": "mlai.au",
+                    "topic": "best ai coding agents",
+                },
+            },
+        )
+        self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.organization,
+            scan_summary="scan complete",
+            article_system={
+                "state": "ambiguous",
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "confidence": "low",
+                "reason": "Possible article directory detected",
+                "source": "scan",
+                "verified_at": "2026-03-08T00:00:00+00:00",
+            },
+        )
+
+    @patch('integrations.api_views_content.trigger_article_generation')
+    def test_article_system_decision_use_detected_resumes_pending_intent(self, mock_trigger):
+        mock_trigger.return_value = {"job_id": "job-123", "status": "queued"}
+        url = reverse('content_article_system_decision')
+
+        response = self.client.post(
+            url,
+            {
+                "domain": "mlai.au",
+                "slack_user_id": "U-DECIDE",
+                "decision": "use_detected",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.integration.refresh_from_db()
+        self.assertEqual(self.config.article_system['state'], 'existing')
+        self.assertEqual(self.config.article_system['source'], 'manual_confirmed')
+        self.assertIsNone(self.integration.pending_intent)
+        self.assertTrue(response.data['resume_triggered'])
+        mock_trigger.assert_called_once()
 
 
 class ContentFactoryCallbackTests(TestCase):

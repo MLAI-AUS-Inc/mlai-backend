@@ -9,6 +9,7 @@ from django.urls import reverse
 
 from integrations.models import UserIntegration
 from integrations.utils import normalize_domain
+from core.article_system import merge_article_system, resolve_article_system
 from core.models import GeneratedComponent, ComponentMapping
 
 logger = logging.getLogger(__name__)
@@ -562,6 +563,11 @@ def scan_github_project(
             config.pillar_strategy = cf_data['pillar_strategy']
         elif 'pillar_strategy' in cf_config:
             config.pillar_strategy = cf_config['pillar_strategy']
+
+        if 'article_system' in cf_data:
+            config.article_system = merge_article_system(resolve_article_system(config), cf_data['article_system'])
+        elif 'article_system' in cf_config:
+            config.article_system = merge_article_system(resolve_article_system(config), cf_config['article_system'])
 
         # Save additional metadata if present
         if 'article_path_pattern' in cf_data:

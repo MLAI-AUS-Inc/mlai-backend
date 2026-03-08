@@ -8,6 +8,7 @@ from django.conf import settings
 from django.urls import reverse
 
 from .models import UserIntegration
+from core.article_system import article_system_ready, recommended_next_action as derive_recommended_next_action, resolve_article_system
 from core.permissions import HasRooApiKey
 from integrations.utils import normalize_domain
 
@@ -189,12 +190,46 @@ class GithubTokenIdentityView(APIView):
                         "github_repo": c.github_repo,
                         "scanned": bool(c.scan_summary),
                         "articles_scaffolded": c.articles_scaffolded,
+                        "article_system": resolve_article_system(c),
+                        "article_system_ready": article_system_ready(resolve_article_system(c)),
                     }
                     for c in org_configs
                     if c.organization
                 ]
             except Exception as e:
                 logger.warning(f"Failed to fetch connected domains for {slack_user_id}: {e}")
+
+            scan_completed = bool(integration.project_scanned)
+            articles_scaffolded = False
+            article_system = {}
+            article_system_ready_flag = False
+            repo_has_new_commits = has_updates
+
+            try:
+                from core.models import GeneratedComponent, Organization
+
+                normalized_requested_domain = normalize_domain(requested_domain) if requested_domain else None
+                if normalized_requested_domain:
+                    org = Organization.objects.filter(domain=normalized_requested_domain).first()
+                    config = getattr(org, 'content_config', None) if org else None
+                    if config:
+                        scan_completed = bool(config.scan_summary)
+                        if not scan_completed:
+                            scan_completed = GeneratedComponent.objects.filter(organization=org).exists()
+                        articles_scaffolded = bool(config.articles_scaffolded)
+                        article_system = resolve_article_system(config)
+                        article_system_ready_flag = article_system_ready(article_system)
+            except Exception as e:
+                logger.warning(f"Failed to derive scan readiness for {requested_domain}: {e}")
+
+            # Repo drift should not force a re-scan for article research once a usable scan exists.
+            if scan_completed:
+                has_updates = False
+
+            if access_revoked:
+                recommended_next_action = "connect_github"
+            else:
+                recommended_next_action = derive_recommended_next_action(scan_completed, article_system)
 
             response_data = {
                 "slack_user_id": integration.slack_user_id,
@@ -209,7 +244,15 @@ class GithubTokenIdentityView(APIView):
                 "last_scanned_at": integration.last_scanned_at,
                 "last_scanned_sha": integration.last_scanned_sha,
                 "has_updates": has_updates,
+                "repo_has_new_commits": repo_has_new_commits,
                 "current_sha": latest_sha,
+                "scan_completed": scan_completed,
+                "scan_required": not scan_completed,
+                "content_research_ready": scan_completed,
+                "articles_scaffolded": articles_scaffolded,
+                "article_system": article_system,
+                "article_system_ready": article_system_ready_flag,
+                "recommended_next_action": recommended_next_action,
                 "last_article": last_article,
                 "pending_intent": integration.pending_intent,
                 "error": error_message,

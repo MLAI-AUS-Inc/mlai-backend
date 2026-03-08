@@ -15,6 +15,12 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
+from .article_system import (
+    article_system_ready,
+    merge_article_system,
+    normalize_article_system,
+    resolve_article_system,
+)
 from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
 from hospital.models import Team as HospitalTeam
@@ -761,6 +767,7 @@ class ContentFactoryOrgConfigView(APIView):
             'pillar_strategy': config.pillar_strategy if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
+            'article_system': resolve_article_system(config),
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -833,6 +840,10 @@ class ContentFactoryOrgConfigView(APIView):
         for field in target_fields:
             if field in data:
                 defaults[field] = data[field]
+
+        if 'article_system' in data:
+            current_article_system = resolve_article_system(getattr(org, 'content_config', None))
+            defaults['article_system'] = merge_article_system(current_article_system, data.get('article_system'))
 
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
@@ -1865,17 +1876,46 @@ class ContentFactoryCallbackView(APIView):
 
         logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}, pillars={pillar_count}")
 
-        # Check if scaffolding is available
+        # Persist and resolve article-system readiness for messaging and auto-resume.
         has_pillars = False
-        already_scaffolded = False
+        article_system = normalize_article_system(data.get('article_system'))
         try:
             from integrations.utils import normalize_domain
             org = Organization.objects.get(domain=normalize_domain(domain))
             config = org.content_config
-            already_scaffolded = config.articles_scaffolded
             has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
+            if data.get('article_system') is not None:
+                merged_article_system = merge_article_system(resolve_article_system(config), data.get('article_system'))
+                if merged_article_system != (config.article_system or {}):
+                    config.article_system = merged_article_system
+                    config.save(update_fields=['article_system', 'updated_at'])
+                article_system = merged_article_system
+            else:
+                article_system = resolve_article_system(config)
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
             pass
+
+        article_system_state = article_system.get('state', 'missing')
+        article_system_is_ready = article_system_ready(article_system)
+
+        pending_resumed = False
+        if slack_user_id and article_system_is_ready:
+            try:
+                from integrations.models import UserIntegration
+                from integrations.services.article_generation import trigger_article_generation
+
+                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                if integration and integration.pending_intent:
+                    intent = integration.pending_intent
+                    article_req = intent.get('article_request') or {}
+                    if intent.get('type') == 'write_article' and normalize_domain(article_req.get('domain', '')) == normalize_domain(domain):
+                        integration.pending_intent = None
+                        integration.save(update_fields=['pending_intent'])
+                        trigger_article_generation(slack_user_id, article_req)
+                        pending_resumed = True
+                        logger.info(f"Auto-resumed pending article intent after scan for {slack_user_id}/{domain}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-resume pending intent after scan for {domain}: {e}")
 
         if not slack_user_id:
             return Response({'status': 'received', 'job_id': job_id}, status=status.HTTP_200_OK)
@@ -1896,7 +1936,32 @@ class ContentFactoryCallbackView(APIView):
                 elif pillar_count:
                     pillar_line = f"\n\n*{pillar_count} content pillars* identified"
 
-                if has_pillars and not already_scaffolded:
+                if article_system_is_ready:
+                    text_body = (
+                        f"✅ *Scan complete for {domain}!*\\n\\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\\n"
+                        f"{component_list}{pillar_line}\\n\\n"
+                        f"I found an existing article system at "
+                        f"`{article_system.get('directory_path') or article_system.get('directory_name') or 'your content directory'}`."
+                    )
+                    if pending_resumed:
+                        text_body += "\\n\\n🔄 *Resuming your article request automatically!* You'll get a notification shortly."
+                    else:
+                        text_body += "\\n\\nYou can now ask me to research or write an article."
+                    fallback_text = text_body
+                    blocks = None
+                elif article_system_state == 'ambiguous':
+                    detected_location = article_system.get('directory_path') or article_system.get('directory_name') or 'an existing content directory'
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\\n\\n"
+                        f"I found what looks like an article system at `{detected_location}`, "
+                        f"but the detection confidence is low.\\n\\n"
+                        f"You can tell me to use the detected system, rescan the repo, or scaffold a new articles directory."
+                    )
+                    blocks = None
+                elif has_pillars:
                     text_body = (
                         f"✅ *Scan complete for {domain}!*\n\n"
                         f"I've analysed your codebase and generated "
@@ -1950,13 +2015,29 @@ class ContentFactoryCallbackView(APIView):
                     )
                     blocks = None
             else:
-                fallback_text = (
-                    f"✅ *Scan complete for {domain}!*\n\n"
-                    f"I've analysed your codebase and I'm ready to help. "
-                    f"You can now ask me to create blog pages or other content.\n\n"
-                    f"To get started, say:\n"
-                    f"  `@Roo write me an article about [topic]`"
-                )
+                if article_system_is_ready:
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I found an existing article system at "
+                        f"`{article_system.get('directory_path') or article_system.get('directory_name') or 'your content directory'}`.\n\n"
+                        f"You can now ask me to research or write an article."
+                    )
+                    if pending_resumed:
+                        fallback_text += "\n\n🔄 *Resuming your article request automatically!* You'll get a notification shortly."
+                elif article_system_state == 'ambiguous':
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I found what looks like an existing article system, but I’m not fully confident.\n\n"
+                        f"You can tell me to use the detected system, rescan the repo, or scaffold a new articles directory."
+                    )
+                else:
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and I'm ready to help. "
+                        f"You can now ask me to create blog pages or other content.\n\n"
+                        f"To get started, say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
                 blocks = None
 
             # Reply in-thread if we have context, fall back to DM
@@ -2028,6 +2109,20 @@ class ContentFactoryCallbackView(APIView):
                         f"{error_message}\n\n"
                         f"Please make sure this domain is registered in the system."
                     )
+                elif error_code == 'ARTICLE_SYSTEM_ACTION_REQUIRED':
+                    recommended_action = data.get('recommended_action', 'scaffold')
+                    if recommended_action == 'confirm_article_system':
+                        message = (
+                            f"⚠️ *{domain} needs article-system confirmation first.*\n\n"
+                            f"{error_message}\n\n"
+                            f"I found what may already be the right article directory, but I need confirmation before writing into it."
+                        )
+                    else:
+                        message = (
+                            f"⚠️ *{domain} needs an article system before writing.*\n\n"
+                            f"{error_message}\n\n"
+                            f"Ask me to scaffold articles for {domain}, or confirm the detected structure if one already exists."
+                        )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
                         f"❌ *Failed for {domain}*\n\n"
@@ -2109,21 +2204,46 @@ class ContentFactoryCallbackView(APIView):
                 'job_id': job_id,
             }, status=status.HTTP_200_OK)
 
-        # Mark articles as scaffolded in the config
+        # Persist canonical article-system state from scaffold results.
         normalized_domain = ''
         try:
             normalized_domain = normalize_domain(domain)
             org = Organization.objects.get(domain=normalized_domain)
             config = org.content_config
-            config.articles_scaffolded = True
+            incoming_article_system = data.get('article_system')
+            if incoming_article_system is not None:
+                config.article_system = merge_article_system(resolve_article_system(config), incoming_article_system)
+            elif already_exists:
+                existing_system = resolve_article_system(config)
+                existing_system.update(
+                    {
+                        'state': 'existing',
+                        'source': existing_system.get('source') or 'scan',
+                    }
+                )
+                config.article_system = normalize_article_system(existing_system)
+            else:
+                scaffolded_system = resolve_article_system(config)
+                scaffolded_system.update(
+                    {
+                        'state': 'roo_scaffolded',
+                        'confidence': 'high',
+                        'source': 'scaffold',
+                        'reason': scaffolded_system.get('reason') or 'Roo scaffolded the article system for this repository',
+                    }
+                )
+                config.article_system = normalize_article_system(scaffolded_system)
+
+            if not already_exists:
+                config.articles_scaffolded = True
             if pr_url:
                 config.articles_scaffold_pr_url = pr_url
             if preview_url:
                 config.articles_scaffold_preview_url = preview_url
             config.save()
-            logger.info(f"Marked articles_scaffolded=True for {domain}")
+            logger.info(f"Updated article_system for {domain} after scaffold callback")
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
-            logger.warning(f"Could not update articles_scaffolded for {domain}: {e}")
+            logger.warning(f"Could not update article_system for {domain}: {e}")
 
         # Check for pending article intent to auto-resume
         pending_resumed = False

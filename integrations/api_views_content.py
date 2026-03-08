@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from core.permissions import HasRooApiKey
 from django.utils import timezone
+from typing import Optional
 import logging
 
 from integrations.services.article_generation import (
@@ -10,7 +11,8 @@ from integrations.services.article_generation import (
     check_generation_status,
     publish_article,
     confirm_topic,
-    ArticleGenerationError
+    ArticleGenerationError,
+    ArticleSystemActionRequiredError,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,61 @@ def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_reque
         "hint": f"{step_label} the codebase first, then retry.",
     }, status=status.HTTP_412_PRECONDITION_FAILED)
 
+
+def _store_pending_article_intent(slack_user_id: str, article_request: dict = None) -> bool:
+    pending_stored = False
+    if slack_user_id and article_request:
+        try:
+            from integrations.models import UserIntegration
+            integration, _ = UserIntegration.objects.get_or_create(slack_user_id=slack_user_id)
+            integration.pending_intent = {
+                "type": "write_article",
+                "article_request": article_request,
+                "stored_at": timezone.now().isoformat(),
+            }
+            integration.save()
+            pending_stored = True
+        except Exception as e:
+            logger.warning(f"Failed to store pending intent for {slack_user_id}: {e}")
+    return pending_stored
+
+
+def _resume_pending_article_intent(slack_user_id: str, domain: str) -> Optional[dict]:
+    from integrations.models import UserIntegration
+    from integrations.utils import normalize_domain
+
+    integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+    if not integration or not integration.pending_intent:
+        return None
+
+    intent = integration.pending_intent
+    article_request = intent.get("article_request") or {}
+    if intent.get("type") != "write_article":
+        return None
+    if normalize_domain(article_request.get("domain", "")) != normalize_domain(domain):
+        return None
+
+    integration.pending_intent = None
+    integration.save(update_fields=["pending_intent"])
+    return trigger_article_generation(slack_user_id, article_request)
+
+
+def _handle_article_system_action_required(error: ArticleSystemActionRequiredError, slack_user_id: str, article_request: dict = None) -> Response:
+    pending_stored = _store_pending_article_intent(slack_user_id, article_request)
+    return Response(
+        {
+            "error": str(error),
+            "error_code": "ARTICLE_SYSTEM_ACTION_REQUIRED",
+            "domain": error.domain,
+            "article_system": error.article_system,
+            "recommended_action": error.recommended_action,
+            "article_system_resolution_source": error.resolution_source,
+            "pending_intent_stored": pending_stored,
+            "hint": error.hint,
+        },
+        status=status.HTTP_412_PRECONDITION_FAILED,
+    )
+
 class ContentGenerateView(APIView):
     """
     Trigger content generation pipeline.
@@ -79,6 +136,9 @@ class ContentGenerateView(APIView):
         try:
             result = trigger_article_generation(slack_user_id, article_request)
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except ArticleSystemActionRequiredError as e:
+            logger.warning(f"Article system action required: {e}")
+            return _handle_article_system_action_required(e, slack_user_id, article_request)
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
             error_str = str(e)
@@ -193,6 +253,8 @@ class ContentConfirmView(APIView):
                 source_run_id=source_run_id,
             )
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except ArticleSystemActionRequiredError as e:
+            return _handle_article_system_action_required(e, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
@@ -291,6 +353,8 @@ class ContentJobConfirmView(APIView):
                 "skip_alternatives": skip_alternatives,
                 "cf_response": result
             }, status=status.HTTP_200_OK)
+        except ArticleSystemActionRequiredError as e:
+            return _handle_article_system_action_required(e, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
@@ -300,3 +364,90 @@ class ContentJobConfirmView(APIView):
         except Exception as e:
             logger.exception(f"Unexpected error triggering generation for job {job_id}: {e}")
             return Response({"error": "Failed to trigger generation"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ArticleSystemDecisionView(APIView):
+    """
+    Persist an article-system decision and optionally resume pending article intent.
+    POST /api/v1/content/article-system/decision
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from core.article_system import normalize_article_system, resolve_article_system
+        from core.models import Organization
+        from integrations.services.github import scaffold_articles_directory, trigger_scan_async
+        from integrations.services.article_generation import get_github_credentials_for_domain
+        from integrations.utils import normalize_domain
+
+        domain = request.data.get('domain')
+        slack_user_id = request.data.get('slack_user_id')
+        decision = request.data.get('decision')
+
+        if not all([domain, slack_user_id, decision]):
+            return Response(
+                {"error": "domain, slack_user_id, and decision are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if decision not in {'use_detected', 'rescan', 'scaffold'}:
+            return Response({"error": "decision must be use_detected, rescan, or scaffold"}, status=status.HTTP_400_BAD_REQUEST)
+
+        normalized_domain = normalize_domain(domain)
+        org = Organization.objects.filter(domain=normalized_domain).first()
+        config = getattr(org, 'content_config', None) if org else None
+        if not config:
+            return Response({"error": f"No content config found for {normalized_domain}"}, status=status.HTTP_404_NOT_FOUND)
+
+        if decision == 'use_detected':
+            article_system = resolve_article_system(config)
+            article_system.update(
+                {
+                    'state': 'existing',
+                    'source': 'manual_confirmed',
+                    'reason': article_system.get('reason') or 'User manually confirmed the detected article system',
+                }
+            )
+            config.article_system = normalize_article_system(article_system)
+            config.save(update_fields=['article_system', 'updated_at'])
+            resumed = _resume_pending_article_intent(slack_user_id, normalized_domain)
+            return Response(
+                {
+                    "status": "updated",
+                    "domain": normalized_domain,
+                    "article_system": config.article_system,
+                    "resume_triggered": bool(resumed),
+                    "result": resumed,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if decision == 'rescan':
+            trigger_scan_async(slack_user_id, domain=normalized_domain)
+            return Response(
+                {
+                    "status": "queued",
+                    "domain": normalized_domain,
+                    "decision": decision,
+                    "article_system": resolve_article_system(config),
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
+        scaffold_result = scaffold_articles_directory(
+            domain=normalized_domain,
+            slack_user_id=slack_user_id,
+            github_token=creds['token'],
+            github_repo=creds['repo'],
+        )
+        return Response(
+            {
+                "status": "queued",
+                "domain": normalized_domain,
+                "decision": decision,
+                "job": scaffold_result,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )

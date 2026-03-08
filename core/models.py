@@ -157,6 +157,11 @@ class OrganizationContentConfig(models.Model):
         blank=True, null=True,
         help_text="Cloudflare Pages preview URL from the articles scaffolding operation"
     )
+    article_system = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Canonical article/blog system readiness state for this organization"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
