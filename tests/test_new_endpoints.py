@@ -9,7 +9,7 @@ from rest_framework import status
 from django.urls import reverse
 from requests import Response
 
-from core.models import Organization, OrganizationContentConfig
+from core.models import Organization, OrganizationContentConfig, ResearchedKeyword
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost
 from core.models import ContentFactoryJob
@@ -338,6 +338,14 @@ class TopicConfirmTests(TestCase):
             github_access_token="gh_token",
             github_repo="owner/repo",
         )
+        self.organization = Organization.objects.create(
+            name="MLAI",
+            domain="mlai.au",
+        )
+        OrganizationContentConfig.objects.create(
+            organization=self.organization,
+            github_repo="owner/repo",
+        )
 
     def _mock_response(self, status_code, body):
         response = Response()
@@ -354,19 +362,21 @@ class TopicConfirmTests(TestCase):
             "slack_user_id": "U-CONFIRM",
         }
         
-        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
-            mock_post.return_value = self._mock_response(200, {"job_id": "job-new", "status": "queued"})
+        with patch('integrations.api_views_content.confirm_topic') as mock_confirm_topic:
+            mock_confirm_topic.return_value = {"job_id": "job-new", "status": "queued"}
             
             response = self.client.post(url, data, format='json')
             
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], "job-new")
         
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        self.assertIn("/api/pipeline/confirm-topic", call_args[0][0])
-        payload = call_args[1]['json']
-        self.assertEqual(payload['confirmed_keyword'], "ai agents")
+        mock_confirm_topic.assert_called_once_with(
+            domain="mlai.au",
+            confirmed_keyword="ai agents",
+            slack_user_id="U-CONFIRM",
+            custom_title=None,
+            skip_alternatives=None,
+        )
 
     def test_confirm_topic_with_index(self):
         # Setup job with options
@@ -382,24 +392,86 @@ class TopicConfirmTests(TestCase):
                 ]
             }
         )
-        
+
         url = reverse('content_job_confirm', args=["job-index"])
         data = {
             "slack_user_id": "U-CONFIRM",
             "option_index": 1
         }
-        
-        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
-            mock_post.return_value = self._mock_response(200, {"job_id": "job-index", "status": "queued"})
-            
+
+        with patch('integrations.services.article_generation.confirm_topic') as mock_confirm_topic:
+            mock_confirm_topic.return_value = {"job_id": "job-index", "status": "queued"}
+
             response = self.client.post(url, data, format='json')
-            
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job.refresh_from_db()
         self.assertEqual(job.selected_keyword, "keyword 1")
         self.assertEqual(job.status, "confirmed")
-        
-        # Verify API called with correct keyword
-        call_args = mock_post.call_args
-        payload = call_args[1]['json']
-        self.assertEqual(payload['confirmed_keyword'], "keyword 1")
+
+        mock_confirm_topic.assert_called_once()
+        call_args = mock_confirm_topic.call_args
+        self.assertEqual(call_args.kwargs['confirmed_keyword'], "keyword 1")
+
+
+class SEOResearchMemoryTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = self.api_key
+        from django.conf import settings
+        settings.ROO_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = self.api_key
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+        self.organization = Organization.objects.create(
+            name="MLAI",
+            domain="mlai.au",
+        )
+        self.keyword_a = ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="ai agents",
+            volume=2400,
+            difficulty=35,
+            opportunity_index=82.0,
+            cluster_fingerprint="ai-agents",
+        )
+        self.keyword_b = ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="agent workflows",
+            volume=1800,
+            difficulty=28,
+            opportunity_index=74.0,
+        )
+
+    def test_research_feedback_updates_memory_fields(self):
+        payload = {
+            "domain": self.organization.domain,
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "shown_keywords": ["ai agents", "agent workflows"],
+            "selected_keyword": "ai agents",
+            "rejected_keywords": ["agent workflows"],
+        }
+
+        response = self.client.post("/api/seo/keywords/research-feedback/", payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.keyword_a.refresh_from_db()
+        self.keyword_b.refresh_from_db()
+
+        self.assertEqual(self.keyword_a.times_shown, 1)
+        self.assertEqual(self.keyword_a.times_selected, 1)
+        self.assertIsNotNone(self.keyword_a.last_shown_at)
+        self.assertIsNotNone(self.keyword_a.last_selected_at)
+
+        self.assertEqual(self.keyword_b.times_shown, 1)
+        self.assertEqual(self.keyword_b.times_rejected, 1)
+        self.assertIsNotNone(self.keyword_b.cooldown_until)
+
+    def test_keyword_list_supports_offset(self):
+        response = self.client.get(
+            f"/api/seo/keywords/?domain={self.organization.domain}&limit=1&offset=1"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["keywords"]), 1)

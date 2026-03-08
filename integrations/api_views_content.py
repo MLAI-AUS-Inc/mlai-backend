@@ -162,7 +162,7 @@ class ContentConfirmView(APIView):
         confirmed_keyword: str (required) - Keyword to generate article for
         slack_user_id: str (required) - Slack user ID
         custom_title: str (optional) - Custom article title
-        skip_alternatives: list[str] (optional) - Keywords to mark as 'skipped'
+        skip_alternatives: list[str] (optional) - Keywords to mark as temporarily rejected/cooldown topics
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -211,8 +211,9 @@ class ContentJobConfirmView(APIView):
     Confirm topic for a specific job and trigger generation.
     POST /api/v1/content/jobs/{job_id}/confirm
 
-    When a user confirms a topic, non-selected alternatives are marked as 'skipped'
-    in content-factory so they don't appear in future research runs.
+    When a user confirms a topic, non-selected alternatives are sent back as
+    temporary rejection/cooldown feedback so they can be deprioritized in
+    future research runs without being permanently skipped.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]

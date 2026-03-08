@@ -586,8 +586,8 @@ def confirm_topic(
         confirmed_keyword: The selected keyword (or alternative) to generate.
         slack_user_id: The Slack user confirming the topic.
         custom_title: Optional custom title override.
-        skip_alternatives: List of keywords to mark as 'skipped' in content-factory.
-                          These are the alternatives that were not selected.
+        skip_alternatives: List of keywords to send back as temporary rejections/cooldowns.
+                          These are the alternatives that were shown but not selected.
 
     Returns:
         dict: { "job_id": "...", "status": "queued", ... }
@@ -608,7 +608,7 @@ def confirm_topic(
         "custom_title": custom_title,
     }
 
-    # Include skip_alternatives if provided (for keyword exclusion)
+    # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
     if skip_alternatives:
         payload["skip_alternatives"] = skip_alternatives
 
