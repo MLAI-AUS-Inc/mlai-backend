@@ -149,6 +149,9 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'keyword', 'volume', 'difficulty', 'intent',
             'tier', 'opportunity_index', 'source', 'status',
+            'times_shown', 'last_shown_at', 'times_rejected', 'last_rejected_at',
+            'cooldown_until', 'times_selected', 'last_selected_at',
+            'cluster_fingerprint',
             'latest_velocity', 'latest_saturation', 'paa_count',
             'discovered_at', 'metrics_updated_at'
         ]
@@ -192,7 +195,10 @@ class ResearchedKeywordDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty',
             'intent', 'tier', 'opportunity_index', 'source', 'source_detail',
-            'competitor_urls', 'status', 'discovered_at', 'metrics_updated_at',
+            'competitor_urls', 'status', 'times_shown', 'last_shown_at',
+            'times_rejected', 'last_rejected_at', 'cooldown_until',
+            'times_selected', 'last_selected_at', 'cluster_fingerprint',
+            'discovered_at', 'metrics_updated_at',
             'status_changed_at', 'velocity_history', 'saturation_history',
             'paa_questions', 'cluster', 'written_article'
         ]
@@ -304,6 +310,22 @@ class KeywordStatusUpdateSerializer(serializers.Serializer):
         ('skipped', 'Skipped'),
     ])
     written_article_id = serializers.UUIDField(required=False, allow_null=True)
+
+
+class ResearchFeedbackSerializer(serializers.Serializer):
+    """Serializer for research exposure/selection/rejection memory updates."""
+    domain = serializers.CharField()
+    session_id = serializers.UUIDField(required=False, allow_null=True)
+    shown_keywords = serializers.ListField(
+        child=serializers.CharField(),
+        allow_empty=True,
+    )
+    selected_keyword = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    rejected_keywords = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        allow_empty=True,
+    )
 
 
 class SEODashboardSerializer(serializers.Serializer):

@@ -1,4 +1,5 @@
 import logging
+import os
 from urllib.parse import urlparse
 from django.db import transaction
 from django.contrib.auth import get_user_model
@@ -2356,6 +2357,7 @@ class ContentFactoryCallbackView(APIView):
             
             for idx, option in enumerate(options):
                 keyword = option.get('keyword', option.get('selected_keyword', 'Unknown Topic'))
+                display_title = option.get('suggested_title') or keyword
                 volume = option.get('volume', 'N/A')
                 difficulty = option.get('difficulty', 'N/A')
                 score = option.get('opportunity_index', 'N/A')
@@ -2377,7 +2379,8 @@ class ContentFactoryCallbackView(APIView):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{idx + 1}. {keyword}*\n"
+                        "text": f"*{idx + 1}. {display_title}*\n"
+                                f"`{keyword}`\n"
                                 f"📈 {volume}/mo • 🎯 Difficulty: {difficulty}/100 • Score: {score_str}\n"
                                 f"_{explanation}_"
                     }
@@ -2565,7 +2568,8 @@ from .serializers import (
     KeywordBulkUpsertSerializer, SemanticClusterSerializer,
     ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
     WrittenArticleCreateSerializer, ResearchSessionSerializer,
-    KeywordStatusUpdateSerializer, SEODashboardSerializer
+    KeywordStatusUpdateSerializer, SEODashboardSerializer,
+    ResearchFeedbackSerializer,
 )
 
 
@@ -2623,7 +2627,14 @@ class SEOKeywordListView(APIView):
             limit = int(limit)
         except ValueError:
             limit = 100
-        qs = qs[:limit]
+
+        offset = request.query_params.get('offset', 0)
+        try:
+            offset = int(offset)
+        except ValueError:
+            offset = 0
+
+        qs = qs[offset:offset + limit]
 
         serializer = ResearchedKeywordListSerializer(qs, many=True)
         return Response({
@@ -2705,6 +2716,7 @@ class SEOKeywordBulkUpsertView(APIView):
                     'source': kw_data.get('source', 'seed'),
                     'source_detail': kw_data.get('source_detail'),
                     'competitor_urls': kw_data.get('competitor_urls', []),
+                    'cluster_fingerprint': kw_data.get('cluster_fingerprint', ''),
                 }
 
                 keyword_obj, created = ResearchedKeyword.objects.update_or_create(
@@ -2719,7 +2731,7 @@ class SEOKeywordBulkUpsertView(APIView):
                     updated_count += 1
 
                 # Create velocity snapshot if provided
-                velocity = kw_data.get('velocity_data')
+                velocity = kw_data.get('velocity_data') or kw_data.get('velocity')
                 if velocity:
                     KeywordVelocity.objects.create(
                         keyword=keyword_obj,
@@ -2814,6 +2826,85 @@ class SEOKeywordStatusUpdateView(APIView):
             'id': str(keyword.id),
             'status': keyword.status,
             'updated_at': keyword.status_changed_at
+        }, status=status.HTTP_200_OK)
+
+
+class SEOKeywordResearchFeedbackView(APIView):
+    """
+    POST /api/seo/keywords/research-feedback/
+
+    Persist research exposure, selection, and temporary rejections without
+    changing the keyword lifecycle status.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        serializer = ResearchFeedbackSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = serializer.validated_data['domain']
+        shown_keywords = serializer.validated_data.get('shown_keywords', [])
+        selected_keyword = serializer.validated_data.get('selected_keyword')
+        rejected_keywords = serializer.validated_data.get('rejected_keywords', [])
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        cooldown_days = int(os.environ.get("RESEARCH_TOPIC_COOLDOWN_DAYS", "7"))
+        now = timezone.now()
+        shown_count = 0
+        selected_count = 0
+        rejected_count = 0
+
+        with transaction.atomic():
+            for keyword_text in shown_keywords:
+                keyword = ResearchedKeyword.objects.filter(
+                    organization=org,
+                    keyword_normalized=keyword_text.lower().strip()
+                ).first()
+                if not keyword:
+                    continue
+                keyword.times_shown += 1
+                keyword.last_shown_at = now
+                keyword.save(update_fields=['times_shown', 'last_shown_at'])
+                shown_count += 1
+
+            if selected_keyword:
+                keyword = ResearchedKeyword.objects.filter(
+                    organization=org,
+                    keyword_normalized=selected_keyword.lower().strip()
+                ).first()
+                if keyword:
+                    keyword.times_selected += 1
+                    keyword.last_selected_at = now
+                    keyword.save(update_fields=['times_selected', 'last_selected_at'])
+                    selected_count = 1
+
+            for keyword_text in rejected_keywords:
+                keyword = ResearchedKeyword.objects.filter(
+                    organization=org,
+                    keyword_normalized=keyword_text.lower().strip()
+                ).first()
+                if not keyword:
+                    continue
+                keyword.times_rejected += 1
+                keyword.last_rejected_at = now
+                keyword.cooldown_until = now + timezone.timedelta(days=cooldown_days)
+                keyword.save(update_fields=['times_rejected', 'last_rejected_at', 'cooldown_until'])
+                rejected_count += 1
+
+        return Response({
+            'shown_updated': shown_count,
+            'selected_updated': selected_count,
+            'rejected_updated': rejected_count,
+            'cooldown_days': cooldown_days,
         }, status=status.HTTP_200_OK)
 
 

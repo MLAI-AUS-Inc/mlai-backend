@@ -451,6 +451,16 @@ class ResearchedKeyword(models.Model):
         db_index=True
     )
 
+    # Research memory
+    times_shown = models.IntegerField(default=0)
+    last_shown_at = models.DateTimeField(null=True, blank=True)
+    times_rejected = models.IntegerField(default=0)
+    last_rejected_at = models.DateTimeField(null=True, blank=True)
+    cooldown_until = models.DateTimeField(null=True, blank=True)
+    times_selected = models.IntegerField(default=0)
+    last_selected_at = models.DateTimeField(null=True, blank=True)
+    cluster_fingerprint = models.CharField(max_length=255, blank=True, default="", db_index=True)
+
     # Link to written article
     written_article = models.ForeignKey(
         WrittenArticle,
@@ -474,6 +484,7 @@ class ResearchedKeyword(models.Model):
             models.Index(fields=['organization', 'tier']),
             models.Index(fields=['organization', 'opportunity_index']),
             models.Index(fields=['organization', 'status', 'opportunity_index']),
+            models.Index(fields=['organization', 'cooldown_until']),
         ]
 
     def save(self, *args, **kwargs):
