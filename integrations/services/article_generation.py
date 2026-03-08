@@ -5,7 +5,10 @@ import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
-from core.article_system import article_system_ready, resolve_article_system
+from core.article_system import (
+    article_system_ready,
+    resolve_article_system_with_source,
+)
 from integrations.models import UserIntegration
 from core.models import OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
@@ -22,15 +25,30 @@ class ArticleGenerationError(Exception):
 class ArticleSystemActionRequiredError(ArticleGenerationError):
     """Raised when article writing is blocked on article-system readiness."""
 
-    def __init__(self, *, domain: str, article_system: dict, recommended_action: str, hint: str, message: str):
+    def __init__(
+        self,
+        *,
+        domain: str,
+        article_system: dict,
+        recommended_action: str,
+        hint: str,
+        message: str,
+        resolution_source: str,
+    ):
         super().__init__(message)
         self.domain = domain
         self.article_system = article_system
         self.recommended_action = recommended_action
         self.hint = hint
+        self.resolution_source = resolution_source
 
 
-def _raise_article_system_action_required(resolved_domain: str, article_system: dict) -> None:
+def _raise_article_system_action_required(
+    resolved_domain: str,
+    article_system: dict,
+    *,
+    resolution_source: str,
+) -> None:
     state = article_system.get('state', 'missing')
     detected_location = article_system.get('directory_path') or article_system.get('directory_name') or 'the detected article directory'
     if state == 'ambiguous':
@@ -43,6 +61,7 @@ def _raise_article_system_action_required(resolved_domain: str, article_system: 
                 f"I found what looks like an article system at {detected_location}, "
                 f"but the detection confidence is low. Confirm it before writing."
             ),
+            resolution_source=resolution_source,
         )
 
     raise ArticleSystemActionRequiredError(
@@ -51,6 +70,7 @@ def _raise_article_system_action_required(resolved_domain: str, article_system: 
         recommended_action='scaffold',
         hint='Scaffold an article system first, or rescan if the repo already contains one.',
         message='This repository needs an article system before Roo can write a concrete article into it.',
+        resolution_source=resolution_source,
     )
 
 
@@ -390,9 +410,20 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             logger.error(f"Failed to connect to Content Factory discovery endpoint: {e}")
             raise ArticleGenerationError(f"Failed to trigger discovery: {str(e)}")
 
-    article_system = resolve_article_system(config)
+    article_system, article_system_source = resolve_article_system_with_source(config)
+    logger.info(
+        "Article-system readiness for %s resolved via %s: state=%s path=%s",
+        resolved_domain,
+        article_system_source,
+        article_system.get('state'),
+        article_system.get('directory_path') or article_system.get('directory_name'),
+    )
     if not article_system_ready(article_system):
-        _raise_article_system_action_required(resolved_domain, article_system)
+        _raise_article_system_action_required(
+            resolved_domain,
+            article_system,
+            resolution_source=article_system_source,
+        )
 
     creds = get_github_credentials_for_domain(domain, slack_user_id)
     fresh_token = creds['token']
@@ -433,7 +464,6 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     payload = {
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
-        "github_token": fresh_token,  # Use the refreshed token
 
         # Generated Content Parameters
         "domain": resolved_domain,
@@ -441,21 +471,13 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "target_keyword": target_keyword,
         "context": context,
         "competitors": competitors,
-        "seed_keywords": seed_keywords,
-
-        # Backend injected data
-        "existing_artifacts": existing_artifacts,
-        "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-        "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
     }
 
     # 4. Call Content Factory
-    generate_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/generate"
+    generate_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
 
     # Debug logging
     masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
 
     try:
@@ -468,7 +490,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         
         if response.status_code in [200, 202]:
             data = response.json()
-            job_id = data.get('job_id') or data.get('task_id')
+            job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
             if not job_id:
                 logger.warning("Content Factory returned success but no job_id")
                 # If CF returns completed result immediately
@@ -483,7 +505,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 request_meta=article_request,  # Store original request
             )
 
-            status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
+            status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
             return {
                 "job_id": job_id,
                 "status": "queued",
@@ -564,8 +586,9 @@ def check_generation_status(job_id: str) -> dict:
     """
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
-    status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
+    status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
+    status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
+    status_endpoint_old_backend = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
 
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -585,21 +608,23 @@ def check_generation_status(job_id: str) -> dict:
                 _handle_status_failure(job_id, result)
             return result
         # Fallback to legacy endpoint if primary fails (e.g., older CF deployment)
-        response = http_requests.get(
-            status_endpoint_legacy,
-            headers=headers,
-            timeout=30
-        )
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('status') in ('failed', 'error'):
-                _handle_status_failure(job_id, result)
-            return result
-        elif response.status_code == 404:
+        for fallback_endpoint in (status_endpoint_legacy, status_endpoint_old_backend):
+            response = http_requests.get(
+                fallback_endpoint,
+                headers=headers,
+                timeout=30
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('status') in ('failed', 'error'):
+                    _handle_status_failure(job_id, result)
+                return result
+
+        if response.status_code == 404:
             raise ArticleGenerationError(f"Job not found: {job_id}")
-        else:
-            logger.error(f"Content Factory status check failed: {response.text}")
-            raise ArticleGenerationError(f"Status check returned {response.status_code}")
+
+        logger.error(f"Content Factory status check failed: {response.text}")
+        raise ArticleGenerationError(f"Status check returned {response.status_code}")
 
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
@@ -618,37 +643,20 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
-    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
-    creds = get_github_credentials_for_domain(domain, slack_user_id)
-    github_token = creds['token']
-    github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for publishing")
-
-    # Prepare payload with GitHub credentials
-    payload = {
-        "github_token": github_token,
-        "github_repo": github_repo,
-    }
-
     # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    publish_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/{job_id}"
+    publish_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/approve"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-API-KEY"] = api_key
 
-    # Debug logging for troubleshooting
-    masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
-    logger.info(f"Publishing article to: {publish_endpoint} with payload: {masked_payload}")
+    logger.info(f"Publishing article to: {publish_endpoint}")
 
     try:
         response = http_requests.post(
             publish_endpoint,
-            json=payload,
             headers=headers,
             timeout=120  # Publishing might take a moment (git ops)
         )
@@ -701,23 +709,32 @@ def confirm_topic(
             f"Ask me to scan your codebase first."
         )
 
-    article_system = resolve_article_system(config)
+    article_system, article_system_source = resolve_article_system_with_source(config)
+    logger.info(
+        "Confirmed-topic article-system readiness for %s resolved via %s: state=%s path=%s",
+        normalized_domain,
+        article_system_source,
+        article_system.get('state'),
+        article_system.get('directory_path') or article_system.get('directory_name'),
+    )
     if not article_system_ready(article_system):
-        _raise_article_system_action_required(normalized_domain, article_system)
+        _raise_article_system_action_required(
+            normalized_domain,
+            article_system,
+            resolution_source=article_system_source,
+        )
 
-    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
+    # Get GitHub repo context (server-side credentials stay in mlai-backend/content-factory)
     creds = get_github_credentials_for_domain(domain, slack_user_id)
-    fresh_token = creds['token']
     github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for topic confirmation")
+    logger.info(f"Using {creds['source']}-level GitHub repo context for topic confirmation")
 
-    # Prepare payload with fresh token
     payload = {
         "domain": domain,
-        "confirmed_keyword": confirmed_keyword,
         "slack_user_id": slack_user_id,
-        "github_token": fresh_token,
         "github_repo": github_repo,
+        "topic": confirmed_keyword,
+        "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
     }
 
@@ -727,7 +744,7 @@ def confirm_topic(
 
     # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/confirm-topic"
+    confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -736,8 +753,6 @@ def confirm_topic(
 
     # Debug logging
     masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
     logger.info(f"Confirming topic at {confirm_endpoint} with payload: {masked_payload}")
 
     try:
@@ -749,7 +764,10 @@ def confirm_topic(
         )
         
         if response.status_code in [200, 202]:
-            return response.json()
+            data = response.json()
+            if data.get('run_id') and not data.get('job_id'):
+                data['job_id'] = data['run_id']
+            return data
         else:
             logger.error(f"Content Factory confirm topic failed: {response.text}")
             raise ArticleGenerationError(f"Topic confirmation failed: {response.text}")

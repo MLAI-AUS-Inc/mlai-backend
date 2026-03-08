@@ -203,7 +203,42 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_412_PRECONDITION_FAILED)
         self.assertEqual(response.data['error_code'], 'ARTICLE_SYSTEM_ACTION_REQUIRED')
         self.assertEqual(response.data['recommended_action'], 'scaffold')
+        self.assertEqual(response.data['article_system_resolution_source'], 'default_missing')
         self.assertTrue(response.data['pending_intent_stored'])
+
+    @patch('integrations.services.article_generation.get_github_credentials_for_domain')
+    @patch('integrations.services.article_generation.http_requests.post')
+    def test_generate_with_topic_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.scan_summary = {
+            "articles_status": {
+                "has_articles_system": True,
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "detected_type": "tsx",
+            }
+        }
+        config.save(update_fields=['scan_summary'])
+
+        mock_get_credentials.return_value = {
+            "token": "gh_token",
+            "repo": "owner/repo",
+            "source": "org",
+        }
+        mock_response = self._mock_response(202, {"job_id": "job-article-123"})
+        mock_post.return_value = mock_response
+
+        url = reverse('content_generate')
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "topic": "best ai coding agents",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['job_id'], 'job-article-123')
 
 
 class ArticleSystemDecisionTests(TestCase):

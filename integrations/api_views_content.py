@@ -103,6 +103,7 @@ def _handle_article_system_action_required(error: ArticleSystemActionRequiredErr
             "domain": error.domain,
             "article_system": error.article_system,
             "recommended_action": error.recommended_action,
+            "article_system_resolution_source": error.resolution_source,
             "pending_intent_stored": pending_stored,
             "hint": error.hint,
         },

@@ -2,6 +2,7 @@ from django.test import TestCase
 from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
+from core.article_system import resolve_article_system_with_source
 from core.models import Organization, OrganizationContentConfig
 from integrations.services.article_generation import (
     ArticleSystemActionRequiredError,
@@ -64,15 +65,15 @@ class ArticleGenerationServiceTest(TestCase):
         
         # Check Payload
         args, kwargs = mock_post.call_args
+        self.assertIn('/api/runs/article', args[0])
         payload = kwargs['json']
         
         self.assertEqual(payload['domain'], "mlai.au")
         self.assertEqual(payload['topic'], "AI Agents")
         self.assertEqual(payload['target_keyword'], "agentic")
         self.assertEqual(payload['context'], "Context info")
-        
-        # Check Artifacts
-        self.assertEqual(payload['existing_artifacts']['article_template'], "## Template Content")
+        self.assertEqual(payload['github_repo'], self.repo_name)
+        self.assertNotIn('github_token', payload)
 
     @patch('integrations.services.article_generation.http_requests.post')
     def test_publish_article(self, mock_post):
@@ -93,7 +94,7 @@ class ArticleGenerationServiceTest(TestCase):
         
         # Verify URL
         args, _ = mock_post.call_args
-        self.assertIn('/api/pipeline/publish/job_123', args[0])
+        self.assertIn('/api/runs/job_123/approve', args[0])
 
     def test_trigger_generation_requires_article_system_when_missing(self):
         self.config.article_system = {}
@@ -110,3 +111,45 @@ class ArticleGenerationServiceTest(TestCase):
             trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(exc.exception.recommended_action, "scaffold")
+        self.assertEqual(exc.exception.resolution_source, "default_missing")
+
+    @patch('integrations.services.article_generation.get_github_credentials_for_domain')
+    @patch('integrations.services.article_generation.http_requests.post')
+    def test_trigger_generation_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
+        self.config.article_system = {}
+        self.config.scan_summary = {
+            "articles_status": {
+                "has_articles_system": True,
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "detected_type": "tsx",
+                "existing_files": ["app/articles/content/index.tsx"],
+            }
+        }
+        self.config.save(update_fields=["article_system", "scan_summary"])
+
+        resolved, source = resolve_article_system_with_source(self.config)
+        self.assertEqual(resolved["state"], "existing")
+        self.assertEqual(source, "scan_summary_fallback")
+
+        mock_get_credentials.return_value = {
+            "token": "gh_token_123",
+            "repo": self.repo_name,
+            "source": "user",
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_scan_fallback", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = {
+            "domain": "mlai.au",
+            "topic": "AI Agents",
+            "target_keyword": "agentic",
+            "context": "Context info"
+        }
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_scan_fallback")
