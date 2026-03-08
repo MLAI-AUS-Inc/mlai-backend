@@ -376,13 +376,16 @@ class ContentFactoryRunSyncSerializer(serializers.Serializer):
     current_step = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     artifact_root = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     step_order = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    started_at = serializers.DateTimeField(required=False, allow_null=True)
+    updated_at = serializers.DateTimeField(required=False, allow_null=True)
     acceptance_summary = serializers.DictField(required=False, default=dict)
     verification_summary = serializers.DictField(required=False, default=dict)
     approval_state = serializers.CharField(required=False, default="not_required")
     resume_available = serializers.BooleanField(required=False, default=False)
     error = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    result = serializers.DictField(required=False, default=dict)
-    run_request = serializers.DictField(required=False, default=dict)
+    result = serializers.DictField(required=False, default=dict, allow_null=True)
+    run_request = serializers.DictField(required=False, default=dict, allow_null=True)
+    run_request_path = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     step_states = serializers.DictField(required=False, default=dict)
 
 
