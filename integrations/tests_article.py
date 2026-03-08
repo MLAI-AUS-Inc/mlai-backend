@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.test import TestCase
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
 from core.models import Organization, OrganizationContentConfig
@@ -23,6 +26,10 @@ class ArticleGenerationServiceTest(TestCase):
             organization=self.org,
             github_repo=self.repo_name,
             article_template="## Template Content",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timedelta(hours=1),
+            scan_summary="scan complete",
+            articles_scaffolded=True,
         )
         
     @patch('integrations.services.article_generation.http_requests.post')
@@ -49,32 +56,31 @@ class ArticleGenerationServiceTest(TestCase):
         # Check Payload
         args, kwargs = mock_post.call_args
         payload = kwargs['json']
-        
+
         self.assertEqual(payload['domain'], "mlai.au")
         self.assertEqual(payload['topic'], "AI Agents")
         self.assertEqual(payload['target_keyword'], "agentic")
         self.assertEqual(payload['context'], "Context info")
-        
-        # Check Artifacts
-        self.assertEqual(payload['existing_artifacts']['article_template'], "## Template Content")
+        self.assertEqual(payload['github_repo'], self.repo_name)
+        self.assertEqual(payload['slack_user_id'], self.slack_user_id)
 
     @patch('integrations.services.article_generation.http_requests.post')
     def test_publish_article(self, mock_post):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "status": "published", 
-            "preview_url": "http://p.com", 
-            "pr_url": "http://gh.com/pr/1"
+            "status": "queued",
+            "approval_state": "approved",
+            "job_id": "job_123",
         }
         mock_post.return_value = mock_response
         
         with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
             result = publish_article("job_123")
             
-        self.assertEqual(result['status'], "published")
-        self.assertEqual(result['preview_url'], "http://p.com")
+        self.assertEqual(result['status'], "queued")
+        self.assertEqual(result['approval_state'], "approved")
         
         # Verify URL
         args, _ = mock_post.call_args
-        self.assertIn('/api/pipeline/publish/job_123', args[0])
+        self.assertIn('/api/runs/job_123/approve', args[0])
