@@ -201,6 +201,37 @@ class SmartScanTests(TestCase):
         self.assertFalse(response.data['article_system_ready'])
 
     @patch('integrations.services.github.get_latest_repo_sha')
+    def test_status_endpoint_uses_scan_summary_article_system_fallback(self, mock_get_sha):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        self.integration.project_scanned = True
+        self.integration.save()
+        self.config.article_system = {}
+        self.config.scan_summary = {
+            "articles_status": {
+                "has_articles_system": True,
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "detected_type": "tsx",
+            }
+        }
+        self.config.save(update_fields=['article_system', 'scan_summary'])
+        mock_get_sha.return_value = 'new_sha_999'
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/?domain={self.domain}')
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['article_system_ready'])
+        self.assertEqual(response.data['article_system']['state'], 'existing')
+        self.assertEqual(response.data['recommended_next_action'], 'research_article')
+
+    @patch('integrations.services.github.get_latest_repo_sha')
     def test_status_endpoint_token_expired(self, mock_get_sha):
         from rest_framework.test import APIRequestFactory
         from integrations.api_views import GithubTokenIdentityView

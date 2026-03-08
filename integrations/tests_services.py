@@ -1,6 +1,10 @@
+from datetime import timedelta
+
 from django.test import TestCase
+from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
+from core.models import Organization, OrganizationContentConfig
 from integrations.services.github import scan_github_project, ScanError
 
 class GithubServiceTest(TestCase):
@@ -13,9 +17,17 @@ class GithubServiceTest(TestCase):
             github_access_token="gh_token_123",
             project_scanned=False
         )
+        self.organization = Organization.objects.create(domain=self.domain, name="MLAI")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.organization,
+            github_repo="owner/repo",
+            github_token_encrypted="org_token_123",
+            github_token_expires_at=timezone.now() + timedelta(hours=1),
+        )
 
+    @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
     @patch('integrations.services.github.http_requests.post')
-    def test_scan_github_project_success(self, mock_post):
+    def test_scan_github_project_success(self, mock_post, _mock_get_latest_sha):
         # Mock Content Factory response
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -39,7 +51,7 @@ class GithubServiceTest(TestCase):
         # Verify API call
         mock_post.assert_called_once()
         args, kwargs = mock_post.call_args
-        self.assertIn('/api/pipeline/scan', args[0])
+        self.assertIn('/api/runs/scan', args[0])
         self.assertEqual(kwargs['json']['slack_user_id'], self.slack_user_id)
         self.assertEqual(kwargs['json']['domain'], self.domain)
         
@@ -47,8 +59,9 @@ class GithubServiceTest(TestCase):
         headers = kwargs['headers']
         self.assertEqual(headers['X-API-KEY'], "test-content-factory-key")
 
+    @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
     @patch('integrations.services.github.http_requests.post')
-    def test_scan_github_project_failure(self, mock_post):
+    def test_scan_github_project_failure(self, mock_post, _mock_get_latest_sha):
         # Mock failure
         import requests
         mock_post.side_effect = requests.exceptions.RequestException("Connection refused")
@@ -58,9 +71,10 @@ class GithubServiceTest(TestCase):
         
         self.assertIn("Failed to trigger scan", str(context.exception))
 
+    @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
     @patch('integrations.services.github.http_requests.post')
-    def test_scan_github_project_with_thread_context(self, mock_post):
-        """Test that thread context is passed to Content Factory."""
+    def test_scan_github_project_with_thread_context(self, mock_post, _mock_get_latest_sha):
+        """Thread context stays in local job tracking and is not sent to Content Factory."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         # Return a legacy synchronous response without job_id to skip polling
@@ -77,6 +91,6 @@ class GithubServiceTest(TestCase):
 
         args, kwargs = mock_post.call_args
         payload = kwargs['json']
-        self.assertEqual(payload['slack_channel_id'], "C123")
-        self.assertEqual(payload['slack_thread_ts'], "123.456")
+        self.assertNotIn('slack_channel_id', payload)
+        self.assertNotIn('slack_thread_ts', payload)
         self.assertEqual(payload['domain'], self.domain)
