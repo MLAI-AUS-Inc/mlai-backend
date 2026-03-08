@@ -252,7 +252,6 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
     creds = get_github_credentials_for_domain(domain, slack_user_id)
-    fresh_token = creds['token']
     github_repo = creds['repo']
     logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
 
@@ -327,31 +326,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if target_keyword is None:
         target_keyword = ""
 
-    # 3. Prepare Payload (Strict Interface)
-    # competitors is already set above
-
-    payload = {
-        "slack_user_id": slack_user_id,
-        "github_repo": github_repo,
-        "github_token": fresh_token,  # Use the refreshed token
-
-        # Generated Content Parameters
-        "domain": resolved_domain,
-        "topic": topic, # Can be None/Empty for research mode
-        "target_keyword": target_keyword,
-        "context": context,
-        "competitors": competitors,
-        "seed_keywords": seed_keywords,
-
-        # Backend injected data
-        "existing_artifacts": existing_artifacts,
-        "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-        "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-    }
-
     # 4. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    generate_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/generate"
+    generate_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -359,9 +336,23 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         headers["X-API-KEY"] = api_key
 
     # Debug logging
+    payload = {
+        "domain": resolved_domain,
+        "topic": topic,
+        "target_keyword": target_keyword,
+        "context": context,
+        "slack_user_id": slack_user_id,
+        "github_repo": github_repo,
+        "competitors": competitors,
+    }
+    if article_request.get("custom_title"):
+        payload["custom_title"] = article_request["custom_title"]
+    if article_request.get("skip_alternatives"):
+        payload["skip_alternatives"] = article_request["skip_alternatives"]
+    if article_request.get("source_run_id"):
+        payload["source_run_id"] = article_request["source_run_id"]
+
     masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
 
     try:
@@ -389,9 +380,10 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 request_meta=article_request,  # Store original request
             )
 
-            status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
+            status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
             return {
                 "job_id": job_id,
+                "run_id": job_id,
                 "status": "queued",
                 "message": "Generation started",
                 "job_status_url": status_url
@@ -470,8 +462,7 @@ def check_generation_status(job_id: str) -> dict:
     """
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
-    status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
+    status_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
 
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -479,40 +470,24 @@ def check_generation_status(job_id: str) -> dict:
         headers["X-API-KEY"] = api_key
 
     try:
-        response = http_requests.get(
-            status_endpoint_primary,
-            headers=headers,
-            timeout=30
-        )
+        response = http_requests.get(status_endpoint, headers=headers, timeout=30)
         if response.status_code == 200:
             result = response.json()
             # Detect failure and update local state + notify user
-            if result.get('status') in ('failed', 'error'):
+            if result.get('status') in ('failed', 'error', 'blocked_verification', 'denied'):
                 _handle_status_failure(job_id, result)
             return result
-        # Fallback to legacy endpoint if primary fails (e.g., older CF deployment)
-        response = http_requests.get(
-            status_endpoint_legacy,
-            headers=headers,
-            timeout=30
-        )
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('status') in ('failed', 'error'):
-                _handle_status_failure(job_id, result)
-            return result
-        elif response.status_code == 404:
+        if response.status_code == 404:
             raise ArticleGenerationError(f"Job not found: {job_id}")
-        else:
-            logger.error(f"Content Factory status check failed: {response.text}")
-            raise ArticleGenerationError(f"Status check returned {response.status_code}")
+        logger.error(f"Content Factory status check failed: {response.text}")
+        raise ArticleGenerationError(f"Status check returned {response.status_code}")
 
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to check status: {str(e)}")
 
 
-def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict:
+def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) -> dict:
     """
     Trigger publication (PR creation) for a job.
 
@@ -524,21 +499,9 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
-    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
-    creds = get_github_credentials_for_domain(domain, slack_user_id)
-    github_token = creds['token']
-    github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for publishing")
-
-    # Prepare payload with GitHub credentials
-    payload = {
-        "github_token": github_token,
-        "github_repo": github_repo,
-    }
-
-    # 3. Call Content Factory
+    # Publishing is now an approval transition on an existing run.
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    publish_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/{job_id}"
+    publish_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/approve"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -546,17 +509,14 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
         headers["X-API-KEY"] = api_key
 
     # Debug logging for troubleshooting
-    masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
-    logger.info(f"Publishing article to: {publish_endpoint} with payload: {masked_payload}")
+    logger.info(f"Approving article publication at: {publish_endpoint}")
 
     try:
         response = http_requests.post(
             publish_endpoint,
-            json=payload,
+            json={},
             headers=headers,
-            timeout=120  # Publishing might take a moment (git ops)
+            timeout=120,
         )
         
         if response.status_code == 200:
@@ -575,11 +535,12 @@ def confirm_topic(
     confirmed_keyword: str,
     slack_user_id: str,
     custom_title: str = None,
-    skip_alternatives: list = None
+    skip_alternatives: list = None,
+    source_run_id: str = None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
-    POST /api/pipeline/confirm-topic
+    POST /api/runs/article
 
     Args:
         domain: The organization domain.
@@ -592,18 +553,16 @@ def confirm_topic(
     Returns:
         dict: { "job_id": "...", "status": "queued", ... }
     """
-    # Get GitHub credentials (org-level preferred, domain-verified user-level fallback)
+    # Get GitHub credentials to resolve the canonical repo, but do not pass raw tokens through.
     creds = get_github_credentials_for_domain(domain, slack_user_id)
-    fresh_token = creds['token']
     github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for topic confirmation")
+    logger.info(f"Using {creds['source']}-level GitHub repository for topic confirmation")
 
-    # Prepare payload with fresh token
     payload = {
         "domain": domain,
-        "confirmed_keyword": confirmed_keyword,
+        "topic": custom_title or confirmed_keyword,
+        "target_keyword": confirmed_keyword,
         "slack_user_id": slack_user_id,
-        "github_token": fresh_token,
         "github_repo": github_repo,
         "custom_title": custom_title,
     }
@@ -611,10 +570,12 @@ def confirm_topic(
     # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
     if skip_alternatives:
         payload["skip_alternatives"] = skip_alternatives
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
 
     # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/confirm-topic"
+    confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
     
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -623,8 +584,6 @@ def confirm_topic(
 
     # Debug logging
     masked_payload = payload.copy()
-    if 'github_token' in masked_payload:
-        masked_payload['github_token'] = '***'
     logger.info(f"Confirming topic at {confirm_endpoint} with payload: {masked_payload}")
 
     try:

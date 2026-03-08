@@ -125,11 +125,8 @@ class ContentStatusView(APIView):
 
 class ContentPublishView(APIView):
     """
-    Publish a generated article.
+    Approve a generated article run for ready-for-review publication.
     POST /api/v1/content/publish/{job_id}
-    
-    Request Body:
-        { "slack_user_id": "U12345678" }  // Required for GitHub credential lookup
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -137,13 +134,11 @@ class ContentPublishView(APIView):
     def post(self, request, job_id):
         if not job_id:
             return Response({"error": "job_id is required"}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         slack_user_id = request.data.get('slack_user_id')
-        if not slack_user_id:
-            return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            result = publish_article(job_id, slack_user_id)
+            result = publish_article(job_id, slack_user_id=slack_user_id)
             return Response(result, status=status.HTTP_200_OK)
         except ArticleGenerationError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -173,6 +168,7 @@ class ContentConfirmView(APIView):
         slack_user_id = request.data.get('slack_user_id')
         custom_title = request.data.get('custom_title')
         skip_alternatives = request.data.get('skip_alternatives')
+        source_run_id = request.data.get('source_run_id')
 
         if not all([domain, confirmed_keyword, slack_user_id]):
             return Response(
@@ -193,7 +189,8 @@ class ContentConfirmView(APIView):
                 confirmed_keyword=confirmed_keyword,
                 slack_user_id=slack_user_id,
                 custom_title=custom_title,
-                skip_alternatives=skip_alternatives
+                skip_alternatives=skip_alternatives,
+                source_run_id=source_run_id,
             )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleGenerationError as e:
@@ -284,7 +281,8 @@ class ContentJobConfirmView(APIView):
                 confirmed_keyword=confirmed_keyword,
                 slack_user_id=slack_user_id,
                 custom_title=custom_title,
-                skip_alternatives=skip_alternatives if skip_alternatives else None
+                skip_alternatives=skip_alternatives if skip_alternatives else None,
+                source_run_id=job_id,
             )
             return Response({
                 "status": "confirmed",
