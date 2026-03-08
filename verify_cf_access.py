@@ -8,7 +8,7 @@ CONTENT_FACTORY_URL = os.environ.get('CONTENT_FACTORY_URL', 'http://localhost:80
 API_KEY = os.environ.get('CONTENT_FACTORY_API_KEY')
 
 def check_publish_endpoint():
-    endpoint = f"{CONTENT_FACTORY_URL.rstrip('/')}/api/pipeline/publish/test-job-id" # Random job id
+    endpoint = f"{CONTENT_FACTORY_URL.rstrip('/')}/api/runs/test-job-id/approve"
     print(f"Checking endpoint: {endpoint}")
     
     headers = {"Content-Type": "application/json"}
@@ -18,7 +18,7 @@ def check_publish_endpoint():
     try:
         # We expect 404 or 422 or 500, but NOT a connection error
         # Use a small timeout to see if it even connects
-        response = requests.post(endpoint, json={"github_token": "test", "github_repo": "test"}, timeout=5)
+        response = requests.post(endpoint, json={}, headers=headers, timeout=5)
         print(f"Response Status: {response.status_code}")
         print(f"Response Text: {response.text}")
         return True

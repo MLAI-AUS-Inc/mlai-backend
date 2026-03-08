@@ -1,9 +1,11 @@
 import json
 import os
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.urls import reverse
@@ -152,6 +154,10 @@ class ContentGenerateAutoWriteTests(TestCase):
         OrganizationContentConfig.objects.create(
             organization=self.organization,
             github_repo="owner/repo",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timedelta(hours=1),
+            scan_summary="scan complete",
+            articles_scaffolded=True,
         )
 
     def _mock_response(self, status_code, body):
@@ -183,7 +189,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(mock_post.call_count, 1)
 
         generate_call = mock_post.call_args_list[0]
-        self.assertIn("/api/pipeline/generate", generate_call.args[0])
+        self.assertIn("/api/runs/article", generate_call.args[0])
 
         generate_payload = generate_call.kwargs.get('json') or {}
         # Verify it sends empty topic/keyword for auto-write mode
@@ -376,6 +382,7 @@ class TopicConfirmTests(TestCase):
             slack_user_id="U-CONFIRM",
             custom_title=None,
             skip_alternatives=None,
+            source_run_id=None,
         )
 
     def test_confirm_topic_with_index(self):
