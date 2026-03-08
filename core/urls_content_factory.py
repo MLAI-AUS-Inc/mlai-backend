@@ -27,5 +27,11 @@ urlpatterns = [
     # Token refresh endpoint for content-factory
     path('token/', views.ContentFactoryTokenView.as_view(), name='content_factory_token'),
     path('token', views.ContentFactoryTokenView.as_view(), name='content_factory_token_no_slash'),
+    # Durable run state endpoints
+    path('runs/<str:run_id>/', views.ContentFactoryRunView.as_view(), name='content_factory_run'),
+    path('runs/<str:run_id>', views.ContentFactoryRunView.as_view(), name='content_factory_run_no_slash'),
+    path('runs/<str:run_id>/artifacts/', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts'),
+    path('runs/<str:run_id>/artifacts', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts_no_slash'),
+    path('runs/<str:run_id>/<str:action>/', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control'),
+    path('runs/<str:run_id>/<str:action>', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control_no_slash'),
 ]
-

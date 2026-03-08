@@ -21,8 +21,24 @@ from hospital.models import Team as HospitalTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
-from .models import Organization, OrganizationContentConfig, GeneratedComponent, ComponentMapping
-from .serializers import GeneratedComponentSerializer, GeneratedComponentListSerializer
+from .models import (
+    ComponentMapping,
+    ContentFactoryApprovalState,
+    ContentFactoryRun,
+    ContentFactoryRunStatus,
+    ContentFactoryRunStep,
+    ContentFactoryRunStepAttempt,
+    ContentFactoryStepStatus,
+    GeneratedComponent,
+    Organization,
+    OrganizationContentConfig,
+)
+from .serializers import (
+    ContentFactoryRunControlSerializer,
+    ContentFactoryRunSyncSerializer,
+    GeneratedComponentListSerializer,
+    GeneratedComponentSerializer,
+)
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -3173,3 +3189,246 @@ class ContentFactoryOrgDomainsView(APIView):
             cache.set(cache_key, domains, 300)  # 5-minute cache
 
         return Response(domains, status=status.HTTP_200_OK)
+
+
+def _parse_optional_datetime(value):
+    from django.utils.dateparse import parse_datetime
+
+    if not value:
+        return None
+    if hasattr(value, "tzinfo"):
+        return value
+    return parse_datetime(value)
+
+
+def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
+    steps = {}
+    for step in run.steps.order_by("display_order", "id"):
+        attempts = []
+        for attempt in step.attempt_history.order_by("attempt"):
+            attempts.append(
+                {
+                    "attempt": attempt.attempt,
+                    "status": attempt.status,
+                    "message": attempt.message or None,
+                    "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+                    "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+                    "artifacts": attempt.artifacts or [],
+                    "error": attempt.error or None,
+                    "input_path": attempt.input_path or None,
+                    "output_path": attempt.output_path or None,
+                    "notes_path": attempt.notes_path or None,
+                    "status_path": attempt.status_path or None,
+                }
+            )
+        steps[step.step_key] = {
+            "name": step.step_key,
+            "required": step.required,
+            "status": step.status,
+            "attempts": step.attempts,
+            "message": step.message or None,
+            "started_at": step.started_at.isoformat() if step.started_at else None,
+            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+            "artifacts": step.artifacts or [],
+            "error": step.error or None,
+            "latest_attempt_path": step.latest_attempt_path or None,
+            "attempt_history": attempts,
+        }
+    return {
+        "run_id": run.run_id,
+        "workflow": run.workflow,
+        "domain": run.domain,
+        "github_repo": run.github_repo,
+        "slack_user_id": run.slack_user_id,
+        "status": run.status,
+        "current_step": run.current_step,
+        "artifact_root": run.artifact_root,
+        "step_order": run.step_order or [],
+        "acceptance_summary": run.acceptance_summary or {},
+        "verification_summary": run.verification_summary or {},
+        "approval_state": run.approval_state,
+        "resume_available": run.resume_available,
+        "error": run.error or None,
+        "result": run.result or {},
+        "run_request": run.run_request or {},
+        "step_states": steps,
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
+    }
+
+
+class ContentFactoryRunView(APIView):
+    """
+    GET/PUT durable Content Factory run snapshots.
+
+    GET /api/content-factory/runs/<run_id>
+    PUT /api/content-factory/runs/<run_id>
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if not run:
+            return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
+
+    def put(self, request, run_id: str):
+        payload = dict(request.data)
+        payload["run_id"] = run_id
+        serializer = ContentFactoryRunSyncSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        step_states = request.data.get("step_states", {}) or {}
+
+        with transaction.atomic():
+            run, created = ContentFactoryRun.objects.update_or_create(
+                run_id=run_id,
+                defaults={
+                    "workflow": data["workflow"],
+                    "domain": data.get("domain") or "",
+                    "github_repo": data.get("github_repo") or "",
+                    "slack_user_id": data.get("slack_user_id") or "",
+                    "status": data["status"],
+                    "current_step": data.get("current_step") or "",
+                    "approval_state": data.get("approval_state") or ContentFactoryApprovalState.NOT_REQUIRED,
+                    "artifact_root": data.get("artifact_root") or "",
+                    "step_order": data.get("step_order") or [],
+                    "acceptance_summary": data.get("acceptance_summary") or {},
+                    "verification_summary": data.get("verification_summary") or {},
+                    "run_request": data.get("run_request") or {},
+                    "result": data.get("result") or {},
+                    "error": data.get("error") or "",
+                    "resume_available": bool(data.get("resume_available")),
+                },
+            )
+
+            seen_steps = set()
+            ordered_steps = data.get("step_order") or list(step_states.keys())
+            for index, step_key in enumerate(ordered_steps):
+                state_payload = dict(step_states.get(step_key) or {"name": step_key})
+                step, _ = ContentFactoryRunStep.objects.update_or_create(
+                    run=run,
+                    step_key=step_key,
+                    defaults={
+                        "display_order": index,
+                        "required": bool(state_payload.get("required", True)),
+                        "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
+                        "attempts": int(state_payload.get("attempts", 0)),
+                        "message": state_payload.get("message") or "",
+                        "started_at": _parse_optional_datetime(state_payload.get("started_at")),
+                        "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
+                        "error": state_payload.get("error") or "",
+                        "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
+                        "artifacts": state_payload.get("artifacts") or [],
+                    },
+                )
+                seen_steps.add(step_key)
+
+                for attempt_payload in state_payload.get("attempt_history", []):
+                    ContentFactoryRunStepAttempt.objects.update_or_create(
+                        step=step,
+                        attempt=int(attempt_payload.get("attempt", 0)),
+                        defaults={
+                            "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
+                            "message": attempt_payload.get("message") or "",
+                            "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
+                            "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
+                            "artifacts": attempt_payload.get("artifacts") or [],
+                            "error": attempt_payload.get("error") or "",
+                            "input_path": attempt_payload.get("input_path") or "",
+                            "output_path": attempt_payload.get("output_path") or "",
+                            "notes_path": attempt_payload.get("notes_path") or "",
+                            "status_path": attempt_payload.get("status_path") or "",
+                        },
+                    )
+
+            if seen_steps:
+                ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
+
+        response_payload = _serialize_content_factory_run(run)
+        response_payload["sync_status"] = "created" if created else "updated"
+        return Response(
+            response_payload,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryRunArtifactsView(APIView):
+    """
+    GET artifact manifest for a durable run snapshot.
+
+    GET /api/content-factory/runs/<run_id>/artifacts
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if not run:
+            return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = _serialize_content_factory_run(run)
+        return Response(
+            {
+                "run_id": payload["run_id"],
+                "workflow": payload["workflow"],
+                "artifact_root": payload["artifact_root"],
+                "steps": payload["step_states"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryRunControlView(APIView):
+    """
+    Control approval and resume metadata for durable runs.
+
+    POST /api/content-factory/runs/<run_id>/approve
+    POST /api/content-factory/runs/<run_id>/deny
+    POST /api/content-factory/runs/<run_id>/resume
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str, action: str):
+        serializer = ContentFactoryRunControlSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        actor = serializer.validated_data.get("actor") or "content-factory"
+
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if not run:
+            return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == "approve":
+            run.approval_state = ContentFactoryApprovalState.APPROVED
+            run.status = ContentFactoryRunStatus.RUNNING
+        elif action == "deny":
+            run.approval_state = ContentFactoryApprovalState.DENIED
+            run.status = ContentFactoryRunStatus.DENIED
+        elif action == "resume":
+            run.resume_available = True
+            if run.status in {
+                ContentFactoryRunStatus.FAILED,
+                ContentFactoryRunStatus.BLOCKED,
+                ContentFactoryRunStatus.DENIED,
+            }:
+                run.status = ContentFactoryRunStatus.QUEUED
+        else:
+            return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
+
+        run.save(update_fields=["approval_state", "status", "resume_available", "updated_at"])
+        return Response(
+            {
+                "run_id": run_id,
+                "action": action,
+                "actor": actor,
+                "status": run.status,
+                "approval_state": run.approval_state,
+                "resume_available": run.resume_available,
+            },
+            status=status.HTTP_200_OK,
+        )
