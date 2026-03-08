@@ -300,7 +300,7 @@ def scan_github_project(
 
     # Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
-    scan_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scan"
+    scan_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scan"
 
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -375,18 +375,9 @@ def scan_github_project(
         payload = {
             "slack_user_id": slack_user_id,
             "github_repo": github_repo,
-            "github_token": github_token,
             "domain": resolved_domain,
-            "github_client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-            "github_client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             "existing_artifacts": existing_artifacts,
         }
-
-        # Add thread context if available
-        if slack_channel_id:
-            payload["slack_channel_id"] = slack_channel_id
-        if slack_thread_ts:
-            payload["slack_thread_ts"] = slack_thread_ts
 
         cf_response = http_requests.post(
             scan_endpoint,
@@ -445,7 +436,7 @@ def scan_github_project(
             except Exception as e:
                 logger.warning(f"Could not create ContentFactoryJob for scan {job_id}: {e}")
 
-            status_url = f"{content_factory_url.rstrip('/')}/api/pipeline/scan/{job_id}"
+            status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
             
             # Start Polling Loop
             last_progress = ""
@@ -707,7 +698,7 @@ def scaffold_articles_directory(
     from core.models import ContentFactoryJob
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
-    scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/pipeline/scaffold-articles"
+    scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scan"
 
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -718,13 +709,8 @@ def scaffold_articles_directory(
         "domain": domain,
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
-        "github_token": github_token,
+        "scaffold_if_missing": True,
     }
-
-    if slack_channel_id:
-        payload["slack_channel_id"] = slack_channel_id
-    if slack_thread_ts:
-        payload["slack_thread_ts"] = slack_thread_ts
 
     logger.info(f"Triggering article scaffolding for {domain}")
 

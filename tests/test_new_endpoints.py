@@ -1,9 +1,11 @@
 import json
 import os
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.urls import reverse
@@ -152,6 +154,8 @@ class ContentGenerateAutoWriteTests(TestCase):
         OrganizationContentConfig.objects.create(
             organization=self.organization,
             github_repo="owner/repo",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timedelta(hours=1),
             scan_summary="scan complete",
         )
 
@@ -488,6 +492,7 @@ class TopicConfirmTests(TestCase):
             slack_user_id="U-CONFIRM",
             custom_title=None,
             skip_alternatives=None,
+            source_run_id=None,
         )
 
     def test_confirm_topic_with_index(self):

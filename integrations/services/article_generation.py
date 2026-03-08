@@ -458,25 +458,26 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if target_keyword is None:
         target_keyword = ""
 
-    # 3. Prepare Payload (Strict Interface)
-    # competitors is already set above
-
-    payload = {
-        "slack_user_id": slack_user_id,
-        "github_repo": github_repo,
-
-        # Generated Content Parameters
-        "domain": resolved_domain,
-        "topic": topic, # Can be None/Empty for research mode
-        "target_keyword": target_keyword,
-        "context": context,
-        "competitors": competitors,
-    }
-
     # 4. Call Content Factory
     generate_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
 
     # Debug logging
+    payload = {
+        "domain": resolved_domain,
+        "topic": topic,
+        "target_keyword": target_keyword,
+        "context": context,
+        "slack_user_id": slack_user_id,
+        "github_repo": github_repo,
+        "competitors": competitors,
+    }
+    if article_request.get("custom_title"):
+        payload["custom_title"] = article_request["custom_title"]
+    if article_request.get("skip_alternatives"):
+        payload["skip_alternatives"] = article_request["skip_alternatives"]
+    if article_request.get("source_run_id"):
+        payload["source_run_id"] = article_request["source_run_id"]
+
     masked_payload = payload.copy()
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
 
@@ -508,6 +509,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
             return {
                 "job_id": job_id,
+                "run_id": job_id,
                 "status": "queued",
                 "message": "Generation started",
                 "job_status_url": status_url
@@ -586,7 +588,7 @@ def check_generation_status(job_id: str) -> dict:
     """
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    status_endpoint_primary = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
+    status_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
     status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
     status_endpoint_old_backend = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
 
@@ -596,18 +598,13 @@ def check_generation_status(job_id: str) -> dict:
         headers["X-API-KEY"] = api_key
 
     try:
-        response = http_requests.get(
-            status_endpoint_primary,
-            headers=headers,
-            timeout=30
-        )
+        response = http_requests.get(status_endpoint, headers=headers, timeout=30)
         if response.status_code == 200:
             result = response.json()
             # Detect failure and update local state + notify user
-            if result.get('status') in ('failed', 'error'):
+            if result.get('status') in ('failed', 'error', 'blocked_verification', 'denied'):
                 _handle_status_failure(job_id, result)
             return result
-        # Fallback to legacy endpoint if primary fails (e.g., older CF deployment)
         for fallback_endpoint in (status_endpoint_legacy, status_endpoint_old_backend):
             response = http_requests.get(
                 fallback_endpoint,
@@ -622,7 +619,6 @@ def check_generation_status(job_id: str) -> dict:
 
         if response.status_code == 404:
             raise ArticleGenerationError(f"Job not found: {job_id}")
-
         logger.error(f"Content Factory status check failed: {response.text}")
         raise ArticleGenerationError(f"Status check returned {response.status_code}")
 
@@ -631,7 +627,7 @@ def check_generation_status(job_id: str) -> dict:
         raise ArticleGenerationError(f"Failed to check status: {str(e)}")
 
 
-def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict:
+def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) -> dict:
     """
     Trigger publication (PR creation) for a job.
 
@@ -643,7 +639,7 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
     Returns:
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
-    # 3. Call Content Factory
+    # Publishing is now an approval transition on an existing run.
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     publish_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/approve"
     
@@ -657,8 +653,9 @@ def publish_article(job_id: str, slack_user_id: str, domain: str = None) -> dict
     try:
         response = http_requests.post(
             publish_endpoint,
+            json={},
             headers=headers,
-            timeout=120  # Publishing might take a moment (git ops)
+            timeout=120,
         )
         
         if response.status_code == 200:
@@ -677,11 +674,12 @@ def confirm_topic(
     confirmed_keyword: str,
     slack_user_id: str,
     custom_title: str = None,
-    skip_alternatives: list = None
+    skip_alternatives: list = None,
+    source_run_id: str = None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
-    POST /api/pipeline/confirm-topic
+    POST /api/runs/article
 
     Args:
         domain: The organization domain.
@@ -733,7 +731,7 @@ def confirm_topic(
         "domain": domain,
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
-        "topic": confirmed_keyword,
+        "topic": custom_title or confirmed_keyword,
         "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
     }
@@ -741,6 +739,8 @@ def confirm_topic(
     # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
     if skip_alternatives:
         payload["skip_alternatives"] = skip_alternatives
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
 
     # 3. Call Content Factory
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
