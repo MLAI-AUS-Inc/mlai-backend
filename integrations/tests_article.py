@@ -63,7 +63,10 @@ class ArticleGenerationServiceTest(TestCase):
             "context": "Context info",
         }
 
-        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+        with self.settings(
+            CONTENT_FACTORY_API_KEY="test-key",
+            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
+        ):
             result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_123")
@@ -88,7 +91,10 @@ class ArticleGenerationServiceTest(TestCase):
         mock_response.json.return_value = {"job_id": "job_confirm_123", "status": "queued"}
         mock_post.return_value = mock_response
 
-        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+        with self.settings(
+            CONTENT_FACTORY_API_KEY="test-key",
+            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
+        ):
             result = confirm_topic(
                 domain="mlai.au",
                 confirmed_keyword="agentic ai",
@@ -179,7 +185,10 @@ class ArticleGenerationServiceTest(TestCase):
             "context": "Context info",
         }
 
-        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+        with self.settings(
+            CONTENT_FACTORY_API_KEY="test-key",
+            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
+        ):
             result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_scan_fallback")
