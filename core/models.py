@@ -273,7 +273,10 @@ class ContentFactoryJob(models.Model):
         ('queued', 'Queued'),
         ('researching', 'Researching'),
         ('awaiting_confirmation', 'Awaiting Confirmation'),
+        ('awaiting_delivery_mode', 'Awaiting Delivery Mode'),
+        ('awaiting_approval', 'Awaiting Approval'),
         ('generating', 'Generating'),
+        ('confirmed', 'Confirmed'),
         ('completed', 'Completed'),
         ('error', 'Error'),
         ('auth_required', 'Auth Required'),
@@ -319,8 +322,10 @@ class ContentFactoryRunStatus(models.TextChoices):
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
     BLOCKED = "blocked", "Blocked"
+    AWAITING_DELIVERY_MODE = "awaiting_delivery_mode", "Awaiting Delivery Mode"
     AWAITING_CONFIRMATION = "awaiting_confirmation", "Awaiting Confirmation"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
+    APPROVAL_REQUIRED = "approval_required", "Approval Required"
     DENIED = "denied", "Denied"
 
 

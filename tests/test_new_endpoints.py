@@ -436,6 +436,77 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, 'error')
         self.assertEqual(job.error_message, "Generation failed")
 
+    @patch('integrations.services.article_generation.set_article_delivery_mode')
+    def test_delivery_mode_required_callback_auto_selects_mode(self, mock_set_delivery_mode):
+        mock_set_delivery_mode.return_value = {
+            "job_id": "job-delivery-mode",
+            "status": "queued",
+            "delivery_mode": "publish_code",
+        }
+
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "delivery_mode_required",
+            "job_id": "job-delivery-mode",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-delivery-mode")
+        self.assertEqual(job.status, "generating")
+        mock_set_delivery_mode.assert_called_once_with("job-delivery-mode", "publish_code")
+
+    @patch('integrations.services.article_generation.publish_article')
+    def test_preview_ready_callback_auto_approves(self, mock_publish_article):
+        mock_publish_article.return_value = {
+            "job_id": "job-preview-ready",
+            "status": "queued",
+            "approval_state": "approved",
+        }
+
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "preview_ready",
+            "job_id": "job-preview-ready",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "preview_url": "https://preview.example.com",
+            "pr_url": "https://github.com/example/pr/1",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-preview-ready")
+        self.assertEqual(job.status, "generating")
+        mock_publish_article.assert_called_once_with(
+            "job-preview-ready",
+            slack_user_id="U123",
+            domain="mlai.au",
+        )
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_content_ready_callback_marks_job_completed(self, mock_send_dm):
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "content_ready",
+            "job_id": "job-content-ready",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "title": "How to Find a Technical Cofounder",
+            "article_markdown_path": "/tmp/run/article.md",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-content-ready")
+        self.assertEqual(job.status, "completed")
+        mock_send_dm.assert_called_once()
+
 
 class TopicConfirmTests(TestCase):
     def setUp(self):

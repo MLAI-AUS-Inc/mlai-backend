@@ -3,12 +3,15 @@ from datetime import timedelta
 from django.test import TestCase
 from django.utils import timezone
 from unittest.mock import MagicMock, patch
+import requests
 
 from core.article_system import resolve_article_system_with_source
-from core.models import Organization, OrganizationContentConfig
+from core.models import ContentFactoryRun, Organization, OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleSystemActionRequiredError,
+    check_generation_status,
+    confirm_topic,
     publish_article,
     trigger_article_generation,
 )
@@ -75,7 +78,30 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["context"], "Context info")
         self.assertEqual(payload["github_repo"], self.repo_name)
         self.assertEqual(payload["slack_user_id"], self.slack_user_id)
+        self.assertEqual(payload["delivery_mode"], "publish_code")
         self.assertNotIn("github_token", payload)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirm_topic_payload_includes_delivery_mode(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "job_confirm_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = confirm_topic(
+                domain="mlai.au",
+                confirmed_keyword="agentic ai",
+                slack_user_id=self.slack_user_id,
+                custom_title="Agentic AI",
+            )
+
+        self.assertEqual(result["job_id"], "job_confirm_123")
+
+        args, kwargs = mock_post.call_args
+        self.assertIn("/api/runs/article", args[0])
+        payload = kwargs["json"]
+        self.assertEqual(payload["delivery_mode"], "publish_code")
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_publish_article(self, mock_post):
@@ -157,3 +183,41 @@ class ArticleGenerationServiceTest(TestCase):
             result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_scan_fallback")
+
+    @patch("integrations.services.article_generation.set_article_delivery_mode")
+    @patch("integrations.services.article_generation.http_requests.get")
+    def test_check_generation_status_auto_selects_delivery_mode(self, mock_get, mock_set_delivery_mode):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "job_id": "job_waiting_mode",
+            "status": "awaiting_delivery_mode",
+        }
+        mock_get.return_value = mock_response
+        mock_set_delivery_mode.return_value = {
+            "job_id": "job_waiting_mode",
+            "status": "queued",
+            "delivery_mode": "publish_code",
+        }
+
+        result = check_generation_status("job_waiting_mode")
+
+        self.assertEqual(result["status"], "queued")
+        mock_set_delivery_mode.assert_called_once_with("job_waiting_mode")
+
+    @patch("integrations.services.article_generation.http_requests.get")
+    def test_check_generation_status_falls_back_to_local_run_when_cf_unavailable(self, mock_get):
+        ContentFactoryRun.objects.create(
+            run_id="run-local-1",
+            workflow="direct_generate",
+            domain="mlai.au",
+            status="awaiting_delivery_mode",
+            current_step="awaiting_delivery_mode",
+            run_request={"domain": "mlai.au"},
+        )
+        mock_get.side_effect = requests.exceptions.RequestException("boom")
+
+        result = check_generation_status("run-local-1")
+
+        self.assertEqual(result["job_id"], "run-local-1")
+        self.assertEqual(result["status"], "awaiting_delivery_mode")
