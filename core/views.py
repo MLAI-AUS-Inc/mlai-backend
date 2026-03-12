@@ -1681,6 +1681,12 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_generation_failed(data)
             elif event_type == 'scaffold_complete':
                 return self._handle_scaffold_complete(data)
+            elif event_type == 'delivery_mode_required':
+                return self._handle_delivery_mode_required(data)
+            elif event_type == 'preview_ready':
+                return self._handle_preview_ready(data)
+            elif event_type == 'content_ready':
+                return self._handle_content_ready(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -1693,6 +1699,172 @@ class ContentFactoryCallbackView(APIView):
                 {'error': 'Internal server error processing callback'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _update_content_factory_job(self, *, job_id, domain, slack_user_id, status_value, error_message=None):
+        from .models import ContentFactoryJob
+
+        defaults = {
+            'domain': domain or '',
+            'slack_user_id': slack_user_id or '',
+            'status': status_value,
+        }
+        if error_message is not None:
+            defaults['error_message'] = error_message
+
+        job, _ = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults=defaults,
+        )
+        return job
+
+    def _send_job_message(self, *, job, data, slack_user_id, text, blocks=None):
+        from integrations.services.slack import SlackService
+
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+
+        if channel_id and thread_ts:
+            SlackService.send_message(channel_id, text, blocks=blocks, thread_ts=thread_ts)
+        elif slack_user_id:
+            SlackService.send_dm(slack_user_id, text, blocks=blocks)
+
+    def _handle_delivery_mode_required(self, data):
+        from integrations.services.article_generation import (
+            ArticleGenerationError,
+            get_default_article_delivery_mode,
+            set_article_delivery_mode,
+        )
+
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        selected_mode = get_default_article_delivery_mode()
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='awaiting_delivery_mode',
+        )
+
+        try:
+            result = set_article_delivery_mode(job_id, selected_mode)
+            job.status = 'generating'
+            job.error_message = ''
+            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            logger.info("Auto-selected delivery mode %s for job %s", selected_mode, job_id)
+            return Response(
+                {
+                    'status': 'processed',
+                    'job_id': job_id,
+                    'delivery_mode': result.get('delivery_mode', selected_mode),
+                    'auto_selected': True,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ArticleGenerationError as exc:
+            logger.warning("Failed to auto-select delivery mode for %s: %s", job_id, exc)
+            job.error_message = str(exc)
+            job.save(update_fields=['error_message', 'updated_at'])
+            return Response(
+                {
+                    'status': 'deferred',
+                    'job_id': job_id,
+                    'delivery_mode': selected_mode,
+                    'message': str(exc),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+    def _handle_preview_ready(self, data):
+        from integrations.services.article_generation import ArticleGenerationError, publish_article
+
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='awaiting_approval',
+        )
+
+        try:
+            result = publish_article(job_id, slack_user_id=slack_user_id, domain=domain)
+            job.status = 'generating'
+            job.error_message = ''
+            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            logger.info("Auto-approved preview for job %s", job_id)
+            return Response(
+                {
+                    'status': 'processed',
+                    'job_id': job_id,
+                    'auto_approved': True,
+                    'cf_response': result,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ArticleGenerationError as exc:
+            logger.warning("Failed to auto-approve preview for %s: %s", job_id, exc)
+            job.error_message = str(exc)
+            job.save(update_fields=['error_message', 'updated_at'])
+            return Response(
+                {
+                    'status': 'deferred',
+                    'job_id': job_id,
+                    'message': str(exc),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+    def _handle_content_ready(self, data):
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        title = data.get('title') or data.get('topic') or 'Untitled article'
+        article_markdown_path = data.get('article_markdown_path')
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='completed',
+            error_message='',
+        )
+
+        logger.info("Content-only article complete for job %s (%s)", job_id, domain)
+
+        if slack_user_id:
+            details = f"\n\n*Artifact:* `{article_markdown_path}`" if article_markdown_path else ""
+            text = f"✅ *Article content ready* for {domain}\n\n*{title}*{details}"
+            try:
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=f"Article content ready for {domain}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": text,
+                            },
+                        }
+                    ],
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to send content_ready notification to {slack_user_id}: {exc}")
+
+        return Response(
+            {
+                'status': 'received',
+                'message': 'Content ready callback processed',
+                'job_id': job_id,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def _handle_auth_required(self, data):
         """

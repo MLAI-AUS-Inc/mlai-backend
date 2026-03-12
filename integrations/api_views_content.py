@@ -346,6 +346,26 @@ class ContentJobConfirmView(APIView):
                 skip_alternatives=skip_alternatives if skip_alternatives else None,
                 source_run_id=job_id,
             )
+            new_job_id = result.get("job_id") or result.get("run_id")
+            if new_job_id and new_job_id != job.job_id:
+                ContentFactoryJob.objects.update_or_create(
+                    job_id=new_job_id,
+                    defaults={
+                        "domain": resolved_domain,
+                        "slack_user_id": slack_user_id,
+                        "status": "generating",
+                        "request_meta": {
+                            "domain": resolved_domain,
+                            "topic": custom_title or confirmed_keyword,
+                            "target_keyword": confirmed_keyword,
+                            "custom_title": custom_title,
+                            "skip_alternatives": skip_alternatives,
+                            "source_run_id": job_id,
+                        },
+                        "slack_channel_id": job.slack_channel_id,
+                        "slack_thread_ts": job.slack_thread_ts,
+                    },
+                )
             return Response({
                 "status": "confirmed",
                 "job_id": job.job_id,

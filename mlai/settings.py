@@ -19,6 +19,20 @@ from corsheaders.defaults import default_headers
 import dj_database_url
 load_dotenv()
 
+
+def _env_is_true(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_app_env(*, debug: bool, raw_env: str = "") -> str:
+    if raw_env:
+        return raw_env
+    return "local" if debug else "production"
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,7 +47,12 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+RAW_APP_ENV = os.getenv('APP_ENV', '').strip().lower()
+DEBUG_DEFAULT = False if RAW_APP_ENV in {'production', 'prod'} else True
+DEBUG = _env_is_true('DEBUG', DEBUG_DEFAULT)
+APP_ENV = _resolve_app_env(debug=DEBUG, raw_env=RAW_APP_ENV)
+IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test'}
+IS_PRODUCTION_ENV = not IS_LOCAL_ENV
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,0.0.0.0').split(',')
 ALLOWED_HOSTS.extend(['.localhost'])
@@ -201,11 +220,15 @@ except ImportError:
     pass
 
 # App URLs
-DEFAULT_FRONTEND_URL = 'http://localhost:5173' if DEBUG else 'https://mlai.au'
+DEFAULT_FRONTEND_URL = 'http://localhost:5173' if IS_LOCAL_ENV else 'https://mlai.au'
 MEDHACK_URL = os.getenv('MEDHACK_URL', DEFAULT_FRONTEND_URL)
 ESAFETY_URL = os.getenv('ESAFETY_URL', DEFAULT_FRONTEND_URL)
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
+CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
+    'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
+    'publish_code',
+)
 
 # Google OAuth Settings
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")

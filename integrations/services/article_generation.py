@@ -1,6 +1,7 @@
 import logging
 import secrets
 import urllib.parse
+from typing import Optional
 import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
@@ -15,6 +16,11 @@ from integrations.utils import normalize_domain
 from integrations.services.github import ensure_valid_token, TokenRefreshError
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ARTICLE_DELIVERY_MODE = "publish_code"
+VALID_ARTICLE_DELIVERY_MODES = {"publish_code", "content_only"}
+FAILURE_RUN_STATUSES = {"failed", "error", "blocked", "blocked_verification", "denied"}
+APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
 
 
 class ArticleGenerationError(Exception):
@@ -88,6 +94,119 @@ def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
     install_url = f"https://github.com/apps/{app_slug}/installations/new"
     params = {"state": state}
     return install_url + "?" + urllib.parse.urlencode(params)
+
+
+def get_default_article_delivery_mode() -> str:
+    """
+    Resolve the default Content Factory article delivery mode.
+    """
+    raw_mode = str(
+        getattr(
+            settings,
+            "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE",
+            DEFAULT_ARTICLE_DELIVERY_MODE,
+        )
+        or DEFAULT_ARTICLE_DELIVERY_MODE
+    ).strip().lower()
+
+    if raw_mode not in VALID_ARTICLE_DELIVERY_MODES:
+        logger.warning(
+            "Ignoring invalid CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE=%s",
+            raw_mode,
+        )
+        return DEFAULT_ARTICLE_DELIVERY_MODE
+
+    return raw_mode
+
+
+def _store_job_tracking_record(
+    job_id: str,
+    *,
+    domain: str,
+    slack_user_id: str,
+    request_meta: Optional[dict] = None,
+    default_status: str = "queued",
+):
+    from core.models import ContentFactoryJob
+
+    defaults = {
+        "domain": domain or "",
+        "slack_user_id": slack_user_id or "",
+        "status": default_status,
+        "request_meta": request_meta or {},
+    }
+    job, created = ContentFactoryJob.objects.get_or_create(job_id=job_id, defaults=defaults)
+
+    if created:
+        return job
+
+    update_fields = []
+    if domain and job.domain != domain:
+        job.domain = domain
+        update_fields.append("domain")
+    if slack_user_id and job.slack_user_id != slack_user_id:
+        job.slack_user_id = slack_user_id
+        update_fields.append("slack_user_id")
+    if request_meta is not None:
+        merged_request_meta = dict(job.request_meta or {})
+        merged_request_meta.update(request_meta)
+        if merged_request_meta != (job.request_meta or {}):
+            job.request_meta = merged_request_meta
+            update_fields.append("request_meta")
+
+    if update_fields:
+        update_fields.append("updated_at")
+        job.save(update_fields=update_fields)
+
+    return job
+
+
+def _serialize_local_run_snapshot(run) -> dict:
+    steps = {}
+    for step in run.steps.order_by("display_order", "id"):
+        steps[step.step_key] = {
+            "name": step.step_key,
+            "required": step.required,
+            "status": step.status,
+            "attempts": step.attempts,
+            "message": step.message or None,
+            "started_at": step.started_at.isoformat() if step.started_at else None,
+            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+            "artifacts": step.artifacts or [],
+            "error": step.error or None,
+            "latest_attempt_path": step.latest_attempt_path or None,
+        }
+
+    return {
+        "job_id": run.run_id,
+        "run_id": run.run_id,
+        "workflow": run.workflow,
+        "domain": run.domain,
+        "github_repo": run.github_repo,
+        "slack_user_id": run.slack_user_id,
+        "status": run.status,
+        "current_step": run.current_step,
+        "approval_state": run.approval_state,
+        "artifact_root": run.artifact_root,
+        "step_order": run.step_order or [],
+        "acceptance_summary": run.acceptance_summary or {},
+        "verification_summary": run.verification_summary or {},
+        "resume_available": run.resume_available,
+        "error": run.error or None,
+        "result": run.result or {},
+        "run_request": run.run_request or {},
+        "step_states": steps,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+    }
+
+
+def _load_local_run_snapshot(job_id: str) -> Optional[dict]:
+    from core.models import ContentFactoryRun
+
+    run = ContentFactoryRun.objects.filter(run_id=job_id).first()
+    if not run:
+        return None
+    return _serialize_local_run_snapshot(run)
 
 
 def refresh_org_github_token(domain: str) -> dict:
@@ -392,13 +511,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                     "message": "Discovery completed immediately (unexpected)",
                 }
 
-            from core.models import ContentFactoryJob
-            ContentFactoryJob.objects.create(
-                job_id=job_id,
+            _store_job_tracking_record(
+                job_id,
                 domain=resolved_domain,
                 slack_user_id=slack_user_id,
-                status='queued',
                 request_meta=article_request,
+                default_status="queued",
             )
             return {
                 "job_id": job_id,
@@ -470,6 +588,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
         "competitors": competitors,
+        "delivery_mode": get_default_article_delivery_mode(),
     }
     if article_request.get("custom_title"):
         payload["custom_title"] = article_request["custom_title"]
@@ -496,14 +615,13 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 logger.warning("Content Factory returned success but no job_id")
                 # If CF returns completed result immediately
                 return {"job_id": "unknown", "status": "completed", "message": "Generation completed immediately (unexpected)"}
-            # Create job record with request metadata for retry
-            from core.models import ContentFactoryJob
-            ContentFactoryJob.objects.create(
-                job_id=job_id,
+            # Create or refresh job tracking without clobbering callback-driven state.
+            _store_job_tracking_record(
+                job_id,
                 domain=resolved_domain,
                 slack_user_id=slack_user_id,
-                status='queued',
-                request_meta=article_request,  # Store original request
+                request_meta=article_request,
+                default_status="queued",
             )
 
             status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
@@ -579,6 +697,71 @@ def _handle_status_failure(job_id: str, result: dict):
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
 
 
+def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) -> dict:
+    """
+    Select a delivery mode for an article run paused before queueing.
+    """
+    selected_mode = delivery_mode or get_default_article_delivery_mode()
+    if selected_mode not in VALID_ARTICLE_DELIVERY_MODES:
+        raise ArticleGenerationError(f"Unsupported delivery mode: {selected_mode}")
+
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/delivery-mode"
+
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    logger.info("Selecting article delivery mode %s for %s", selected_mode, job_id)
+
+    try:
+        response = http_requests.post(
+            endpoint,
+            json={"delivery_mode": selected_mode},
+            headers=headers,
+            timeout=120,
+        )
+        if response.status_code == 200:
+            return response.json()
+
+        logger.error(f"Content Factory delivery mode selection failed: {response.text}")
+        raise ArticleGenerationError(f"Delivery mode selection failed: {response.text}")
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Failed to connect to Content Factory: {e}")
+        raise ArticleGenerationError(f"Failed to set delivery mode: {str(e)}")
+
+
+def _maybe_auto_advance_run(job_id: str, result: dict) -> dict:
+    status_value = str(result.get("status") or "").strip().lower()
+
+    if status_value == "awaiting_delivery_mode":
+        try:
+            auto_result = set_article_delivery_mode(job_id)
+            auto_result.setdefault("job_id", job_id)
+            auto_result.setdefault("run_id", job_id)
+            return auto_result
+        except ArticleGenerationError as exc:
+            logger.warning("Auto-selecting delivery mode for %s failed: %s", job_id, exc)
+            return result
+
+    if status_value in APPROVAL_PENDING_STATUSES:
+        try:
+            auto_result = publish_article(
+                job_id,
+                slack_user_id=result.get("slack_user_id"),
+                domain=result.get("domain"),
+            )
+            auto_result.setdefault("job_id", job_id)
+            auto_result.setdefault("run_id", job_id)
+            return auto_result
+        except ArticleGenerationError as exc:
+            logger.warning("Auto-approving preview for %s failed: %s", job_id, exc)
+            return result
+
+    return result
+
+
 def check_generation_status(job_id: str) -> dict:
     """
     Check status of a generation job.
@@ -600,9 +783,9 @@ def check_generation_status(job_id: str) -> dict:
     try:
         response = http_requests.get(status_endpoint, headers=headers, timeout=30)
         if response.status_code == 200:
-            result = response.json()
+            result = _maybe_auto_advance_run(job_id, response.json())
             # Detect failure and update local state + notify user
-            if result.get('status') in ('failed', 'error', 'blocked_verification', 'denied'):
+            if result.get('status') in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, result)
             return result
         for fallback_endpoint in (status_endpoint_legacy, status_endpoint_old_backend):
@@ -612,10 +795,16 @@ def check_generation_status(job_id: str) -> dict:
                 timeout=30
             )
             if response.status_code == 200:
-                result = response.json()
-                if result.get('status') in ('failed', 'error'):
+                result = _maybe_auto_advance_run(job_id, response.json())
+                if result.get('status') in FAILURE_RUN_STATUSES:
                     _handle_status_failure(job_id, result)
                 return result
+
+        local_result = _load_local_run_snapshot(job_id)
+        if local_result:
+            if local_result.get("status") in FAILURE_RUN_STATUSES:
+                _handle_status_failure(job_id, local_result)
+            return local_result
 
         if response.status_code == 404:
             raise ArticleGenerationError(f"Job not found: {job_id}")
@@ -623,6 +812,16 @@ def check_generation_status(job_id: str) -> dict:
         raise ArticleGenerationError(f"Status check returned {response.status_code}")
 
     except http_requests.exceptions.RequestException as e:
+        local_result = _load_local_run_snapshot(job_id)
+        if local_result:
+            logger.warning(
+                "Content Factory unreachable during status check for %s; returning mirrored local run",
+                job_id,
+            )
+            if local_result.get("status") in FAILURE_RUN_STATUSES:
+                _handle_status_failure(job_id, local_result)
+            return local_result
+
         logger.error(f"Failed to connect to Content Factory: {e}")
         raise ArticleGenerationError(f"Failed to check status: {str(e)}")
 
@@ -734,6 +933,7 @@ def confirm_topic(
         "topic": custom_title or confirmed_keyword,
         "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
+        "delivery_mode": get_default_article_delivery_mode(),
     }
 
     # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
@@ -767,6 +967,22 @@ def confirm_topic(
             data = response.json()
             if data.get('run_id') and not data.get('job_id'):
                 data['job_id'] = data['run_id']
+            job_id = data.get("job_id") or data.get("run_id")
+            if job_id:
+                _store_job_tracking_record(
+                    job_id,
+                    domain=normalized_domain,
+                    slack_user_id=slack_user_id,
+                    request_meta={
+                        "domain": normalized_domain,
+                        "topic": custom_title or confirmed_keyword,
+                        "target_keyword": confirmed_keyword,
+                        "custom_title": custom_title,
+                        "skip_alternatives": skip_alternatives or [],
+                        "source_run_id": source_run_id,
+                    },
+                    default_status="queued",
+                )
             return data
         else:
             logger.error(f"Content Factory confirm topic failed: {response.text}")

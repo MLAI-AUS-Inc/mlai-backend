@@ -129,6 +129,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.local-docker
+.live-db-inspection.json
+.local-live-db-*
 .venv
 env/
 venv/
