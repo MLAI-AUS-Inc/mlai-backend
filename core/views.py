@@ -1557,8 +1557,7 @@ class ContentFactoryConnectGitHubView(APIView):
         return domain
 
     def post(self, request):
-        from django.utils import timezone
-        from dateutil import parser as date_parser
+        from django.utils.dateparse import parse_datetime
 
         data = request.data
         domain = data.get('domain')
@@ -1598,10 +1597,9 @@ class ContentFactoryConnectGitHubView(APIView):
         if 'github_token_expires_at' in data:
             expires_at = data['github_token_expires_at']
             if isinstance(expires_at, str):
-                try:
-                    config.github_token_expires_at = date_parser.parse(expires_at)
-                except Exception:
-                    pass
+                parsed_expires_at = parse_datetime(expires_at)
+                if parsed_expires_at is not None:
+                    config.github_token_expires_at = parsed_expires_at
             else:
                 config.github_token_expires_at = expires_at
 
