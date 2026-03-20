@@ -1635,7 +1635,9 @@ class ContentFactoryCallbackView(APIView):
     
     Event types:
     - topic_selection: Research complete, topic selected, awaiting confirmation
+    - article_progress: Non-terminal article milestone update
     - article_complete: Article generated and published successfully
+    - publish_bundle_ready: Delivery bundle packaged and ready
     - error: Pipeline failed with error
     """
     authentication_classes = []
@@ -1685,6 +1687,10 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_preview_ready(data)
             elif event_type == 'content_ready':
                 return self._handle_content_ready(data)
+            elif event_type == 'publish_bundle_ready':
+                return self._handle_publish_bundle_ready(data)
+            elif event_type == 'article_progress':
+                return self._handle_article_progress(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -1715,16 +1721,147 @@ class ContentFactoryCallbackView(APIView):
         )
         return job
 
-    def _send_job_message(self, *, job, data, slack_user_id, text, blocks=None):
+    def _resolve_job_thread_context(self, *, job, data):
+        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
+        root_message_ts = (
+            (job.slack_root_message_ts if job else None)
+            or data.get('slack_root_message_ts')
+            or data.get('root_message_ts')
+            or ''
+        )
+        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or root_message_ts or ''
+        if not root_message_ts:
+            root_message_ts = thread_ts or ''
+        return channel_id, root_message_ts, thread_ts
+
+    def _send_job_message(self, *, job, data, slack_user_id, text, blocks=None, allow_dm_fallback=True):
         from integrations.services.slack import SlackService
 
-        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
-        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
         if channel_id and thread_ts:
             SlackService.send_message(channel_id, text, blocks=blocks, thread_ts=thread_ts)
-        elif slack_user_id:
+            return True
+        if allow_dm_fallback and slack_user_id:
             SlackService.send_dm(slack_user_id, text, blocks=blocks)
+            return True
+        return False
+
+    def _handle_article_progress(self, data):
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        milestone_key = data.get('milestone_key', '')
+        progress_id = data.get('progress_id') or f"{job_id}:{milestone_key}"
+        message = data.get('message') or 'Progress update received.'
+
+        try:
+            milestone_index = int(data.get('milestone_index') or 0)
+        except (TypeError, ValueError):
+            milestone_index = 0
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='generating',
+        )
+
+        posted_progress_ids = list(job.posted_progress_ids or [])
+        if progress_id in posted_progress_ids:
+            logger.info("Ignoring duplicate article_progress callback for %s (%s)", job_id, progress_id)
+            return Response(
+                {
+                    'status': 'ignored',
+                    'reason': 'duplicate_progress_id',
+                    'job_id': job_id,
+                    'progress_id': progress_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
+            logger.info(
+                "Ignoring stale article_progress callback for %s (%s <= %s)",
+                job_id,
+                milestone_index,
+                job.last_progress_milestone_index,
+            )
+            return Response(
+                {
+                    'status': 'ignored',
+                    'reason': 'stale_milestone',
+                    'job_id': job_id,
+                    'progress_id': progress_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+        if not channel_id or not thread_ts:
+            logger.warning("Unable to route article_progress callback for %s: missing Slack thread context", job_id)
+            return Response(
+                {
+                    'status': 'ignored',
+                    'reason': 'missing_thread_context',
+                    'job_id': job_id,
+                    'progress_id': progress_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        stage_titles = {
+            'research_locked': 'Research locked',
+            'draft_grounded': 'Draft grounded',
+            'finishing_pass': 'Finishing pass',
+        }
+        stage_title = stage_titles.get(milestone_key, 'Progress update')
+        fallback_text = f"{stage_title}: {message}"
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{stage_title}*\n{message}",
+                },
+            }
+        ]
+
+        try:
+            self._send_job_message(
+                job=job,
+                data=data,
+                slack_user_id=slack_user_id,
+                text=fallback_text,
+                blocks=blocks,
+                allow_dm_fallback=False,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send article_progress notification for %s: %s", job_id, exc)
+            return Response(
+                {
+                    'status': 'processed_with_error',
+                    'job_id': job_id,
+                    'progress_id': progress_id,
+                    'message': str(exc),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        job.posted_progress_ids = posted_progress_ids + [progress_id]
+        if milestone_index:
+            job.last_progress_milestone_index = milestone_index
+        job.save(update_fields=['posted_progress_ids', 'last_progress_milestone_index', 'updated_at'])
+
+        return Response(
+            {
+                'status': 'received',
+                'message': 'Article progress callback processed',
+                'job_id': job_id,
+                'progress_id': progress_id,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def _handle_delivery_mode_required(self, data):
         from integrations.services.article_generation import (
@@ -1864,6 +2001,77 @@ class ContentFactoryCallbackView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    def _handle_publish_bundle_ready(self, data):
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        title = data.get('title') or data.get('topic') or 'Untitled article'
+        publish_resolution = data.get('publish_resolution') or 'publish_bundle'
+        suggested_target_path = (
+            data.get('suggested_target_path')
+            or data.get('primary_artifact_path')
+            or data.get('article_markdown_path')
+        )
+        route_path = data.get('route_path')
+        manual_apply_guidance = data.get('manual_apply_guidance') or []
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='completed',
+            error_message='',
+        )
+
+        logger.info("Publish bundle ready for job %s (%s)", job_id, domain)
+
+        if slack_user_id:
+            details = []
+            if route_path:
+                details.append(f"*Route:* `{route_path}`")
+            if suggested_target_path:
+                details.append(f"*Target path:* `{suggested_target_path}`")
+            if manual_apply_guidance:
+                details.append(
+                    "*Next step:* " + " ".join(str(item).strip() for item in manual_apply_guidance[:2] if str(item).strip())
+                )
+            details_text = "\n".join(details)
+            if details_text:
+                details_text = f"\n\n{details_text}"
+
+            text = (
+                f"✅ *Publish bundle ready* for {domain}\n\n"
+                f"*{title}*\n\n"
+                f"The article is packaged for `{publish_resolution}` delivery.{details_text}"
+            )
+            try:
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=f"Publish bundle ready for {domain}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": text,
+                            },
+                        }
+                    ],
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to send publish_bundle_ready notification to {slack_user_id}: {exc}")
+
+        return Response(
+            {
+                'status': 'received',
+                'message': 'Publish bundle ready callback processed',
+                'job_id': job_id,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def _handle_auth_required(self, data):
         """
         Handle 'auth_required' event: notify user to re-authenticate.
@@ -1921,7 +2129,10 @@ class ContentFactoryCallbackView(APIView):
                      confirm_topic(
                          domain=domain,
                          confirmed_keyword=job.selected_keyword,
-                         slack_user_id=slack_user_id
+                         slack_user_id=slack_user_id,
+                         slack_channel_id=job.slack_channel_id,
+                         slack_thread_ts=job.slack_thread_ts,
+                         slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
                      )
                      return Response({
                          'status': 'retried', 
@@ -2040,9 +2251,7 @@ class ContentFactoryCallbackView(APIView):
             job.status = 'completed'
             job.save()
 
-        # Resolve thread context: job first, then callback payload
-        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
-        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
         logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}, pillars={pillar_count}")
 
@@ -2246,9 +2455,7 @@ class ContentFactoryCallbackView(APIView):
             }
         )
 
-        # Resolve thread context: job first, then callback payload
-        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
-        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
         logger.error(f"Generation failed for job {job_id} ({domain}): [{error_code}] {error_message}")
 
@@ -2785,10 +2992,13 @@ class ContentFactoryCallbackView(APIView):
             ]
             fallback_text = f"Article generation complete for {domain}!"
             try:
-                if channel_id and thread_ts:
-                    SlackService.send_message(channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
-                else:
-                    SlackService.send_dm(slack_user_id, fallback_text, blocks=blocks)
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=fallback_text,
+                    blocks=blocks,
+                )
             except Exception as e:
                 logger.warning(f"Failed to send article_complete notification to {slack_user_id}: {e}")
 
@@ -2848,7 +3058,13 @@ class ContentFactoryCallbackView(APIView):
                         }
                     }
                 ]
-                SlackService.send_dm(slack_user_id, f"Content pipeline error for {domain}", blocks=blocks)
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=f"Content pipeline error for {domain}",
+                    blocks=blocks,
+                )
                 logger.info(f"Sent error notification to {slack_user_id} for job {job_id}")
             except Exception as e:
                 logger.warning(f"Failed to send error notification to {slack_user_id}: {e}")

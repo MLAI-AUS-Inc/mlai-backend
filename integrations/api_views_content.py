@@ -131,6 +131,9 @@ class ContentGenerateView(APIView):
             "topic": request.data.get('topic'),
             "target_keyword": request.data.get('target_keyword'),
             "context": request.data.get('context'),
+            "slack_channel_id": request.data.get('slack_channel_id'),
+            "slack_thread_ts": request.data.get('slack_thread_ts'),
+            "slack_root_message_ts": request.data.get('slack_root_message_ts') or request.data.get('slack_thread_ts'),
         }
 
         try:
@@ -229,6 +232,9 @@ class ContentConfirmView(APIView):
         custom_title = request.data.get('custom_title')
         skip_alternatives = request.data.get('skip_alternatives')
         source_run_id = request.data.get('source_run_id')
+        slack_channel_id = request.data.get('slack_channel_id')
+        slack_thread_ts = request.data.get('slack_thread_ts')
+        slack_root_message_ts = request.data.get('slack_root_message_ts') or slack_thread_ts
 
         if not all([domain, confirmed_keyword, slack_user_id]):
             return Response(
@@ -251,6 +257,9 @@ class ContentConfirmView(APIView):
                 custom_title=custom_title,
                 skip_alternatives=skip_alternatives,
                 source_run_id=source_run_id,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+                slack_root_message_ts=slack_root_message_ts,
             )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleSystemActionRequiredError as e:
@@ -345,6 +354,9 @@ class ContentJobConfirmView(APIView):
                 custom_title=custom_title,
                 skip_alternatives=skip_alternatives if skip_alternatives else None,
                 source_run_id=job_id,
+                slack_channel_id=job.slack_channel_id,
+                slack_thread_ts=job.slack_thread_ts,
+                slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
             )
             new_job_id = result.get("job_id") or result.get("run_id")
             if new_job_id and new_job_id != job.job_id:
@@ -361,8 +373,12 @@ class ContentJobConfirmView(APIView):
                             "custom_title": custom_title,
                             "skip_alternatives": skip_alternatives,
                             "source_run_id": job_id,
+                            "slack_channel_id": job.slack_channel_id,
+                            "slack_thread_ts": job.slack_thread_ts,
+                            "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         },
                         "slack_channel_id": job.slack_channel_id,
+                        "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
                     },
                 )
