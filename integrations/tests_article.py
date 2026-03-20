@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from core.article_system import resolve_article_system_with_source
-from core.models import ContentFactoryRun, Organization, OrganizationContentConfig
+from core.models import ContentFactoryJob, ContentFactoryRun, Organization, OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleSystemActionRequiredError,
@@ -83,6 +83,42 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["slack_user_id"], self.slack_user_id)
         self.assertEqual(payload["delivery_mode"], "publish_code")
         self.assertNotIn("github_token", payload)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_thread_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = {
+            "domain": "mlai.au",
+            "topic": "AI Agents",
+            "target_keyword": "agentic",
+            "context": "Context info",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "123.456",
+            "slack_root_message_ts": "123.456",
+        }
+
+        with self.settings(
+            CONTENT_FACTORY_API_KEY="test-key",
+            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
+        ):
+            result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_thread_123")
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertNotIn("slack_channel_id", payload)
+        self.assertNotIn("slack_thread_ts", payload)
+        self.assertNotIn("slack_root_message_ts", payload)
+
+        job = ContentFactoryJob.objects.get(job_id="job_thread_123")
+        self.assertEqual(job.slack_channel_id, "C123")
+        self.assertEqual(job.slack_thread_ts, "123.456")
+        self.assertEqual(job.slack_root_message_ts, "123.456")
+        self.assertEqual(job.request_meta["slack_thread_ts"], "123.456")
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirm_topic_payload_includes_delivery_mode(self, mock_post):

@@ -125,15 +125,23 @@ def _store_job_tracking_record(
     domain: str,
     slack_user_id: str,
     request_meta: Optional[dict] = None,
+    slack_channel_id: str = "",
+    slack_thread_ts: str = "",
+    slack_root_message_ts: str = "",
     default_status: str = "queued",
 ):
     from core.models import ContentFactoryJob
+
+    resolved_root_message_ts = slack_root_message_ts or slack_thread_ts or ""
 
     defaults = {
         "domain": domain or "",
         "slack_user_id": slack_user_id or "",
         "status": default_status,
         "request_meta": request_meta or {},
+        "slack_channel_id": slack_channel_id or "",
+        "slack_thread_ts": slack_thread_ts or "",
+        "slack_root_message_ts": resolved_root_message_ts,
     }
     job, created = ContentFactoryJob.objects.get_or_create(job_id=job_id, defaults=defaults)
 
@@ -147,6 +155,15 @@ def _store_job_tracking_record(
     if slack_user_id and job.slack_user_id != slack_user_id:
         job.slack_user_id = slack_user_id
         update_fields.append("slack_user_id")
+    if slack_channel_id and job.slack_channel_id != slack_channel_id:
+        job.slack_channel_id = slack_channel_id
+        update_fields.append("slack_channel_id")
+    if slack_thread_ts and job.slack_thread_ts != slack_thread_ts:
+        job.slack_thread_ts = slack_thread_ts
+        update_fields.append("slack_thread_ts")
+    if resolved_root_message_ts and job.slack_root_message_ts != resolved_root_message_ts:
+        job.slack_root_message_ts = resolved_root_message_ts
+        update_fields.append("slack_root_message_ts")
     if request_meta is not None:
         merged_request_meta = dict(job.request_meta or {})
         merged_request_meta.update(request_meta)
@@ -454,6 +471,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     topic = article_request.get('topic')
     target_keyword = article_request.get('target_keyword')
     context = article_request.get('context')
+    slack_channel_id = article_request.get('slack_channel_id') or ''
+    slack_thread_ts = article_request.get('slack_thread_ts') or ''
+    slack_root_message_ts = article_request.get('slack_root_message_ts') or slack_thread_ts
 
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
@@ -516,6 +536,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 domain=resolved_domain,
                 slack_user_id=slack_user_id,
                 request_meta=article_request,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+                slack_root_message_ts=slack_root_message_ts,
                 default_status="queued",
             )
             return {
@@ -621,6 +644,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 domain=resolved_domain,
                 slack_user_id=slack_user_id,
                 request_meta=article_request,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+                slack_root_message_ts=slack_root_message_ts,
                 default_status="queued",
             )
 
@@ -875,6 +901,9 @@ def confirm_topic(
     custom_title: str = None,
     skip_alternatives: list = None,
     source_run_id: str = None,
+    slack_channel_id: str = "",
+    slack_thread_ts: str = "",
+    slack_root_message_ts: str = "",
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -892,6 +921,15 @@ def confirm_topic(
         dict: { "job_id": "...", "status": "queued", ... }
     """
     normalized_domain = normalize_domain(domain)
+    if source_run_id and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
+        from core.models import ContentFactoryJob
+
+        source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
+        if source_job:
+            slack_channel_id = source_job.slack_channel_id or ""
+            slack_thread_ts = source_job.slack_thread_ts or ""
+            slack_root_message_ts = source_job.slack_root_message_ts or slack_thread_ts
+
     config = None
     try:
         org = Organization.objects.get(domain=normalized_domain)
@@ -980,7 +1018,13 @@ def confirm_topic(
                         "custom_title": custom_title,
                         "skip_alternatives": skip_alternatives or [],
                         "source_run_id": source_run_id,
+                        "slack_channel_id": slack_channel_id or "",
+                        "slack_thread_ts": slack_thread_ts or "",
+                        "slack_root_message_ts": slack_root_message_ts or slack_thread_ts or "",
                     },
+                    slack_channel_id=slack_channel_id,
+                    slack_thread_ts=slack_thread_ts,
+                    slack_root_message_ts=slack_root_message_ts,
                     default_status="queued",
                 )
             return data

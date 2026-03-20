@@ -293,7 +293,10 @@ class ContentFactoryJob(models.Model):
 
     # Slack thread context for in-thread replies
     slack_channel_id = models.CharField(max_length=100, blank=True, default="")
+    slack_root_message_ts = models.CharField(max_length=50, blank=True, default="")
     slack_thread_ts = models.CharField(max_length=50, blank=True, default="")
+    posted_progress_ids = models.JSONField(default=list, blank=True)
+    last_progress_milestone_index = models.IntegerField(default=0)
 
     # Result data (populated on article_complete callback)
     article_url = models.URLField(blank=True, null=True)

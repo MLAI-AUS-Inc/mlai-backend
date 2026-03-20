@@ -210,6 +210,35 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(response.data['article_system_resolution_source'], 'default_missing')
         self.assertTrue(response.data['pending_intent_stored'])
 
+    @patch('integrations.api_views_content.trigger_article_generation')
+    def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
+        mock_trigger.return_value = {"job_id": "job-thread", "status": "queued"}
+
+        url = reverse('content_generate')
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "topic": "best ai coding agents",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "123.456",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        mock_trigger.assert_called_once_with(
+            self.integration.slack_user_id,
+            {
+                "domain": self.organization.domain,
+                "topic": "best ai coding agents",
+                "target_keyword": None,
+                "context": None,
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "slack_root_message_ts": "123.456",
+            },
+        )
+
     @patch('integrations.services.article_generation.get_github_credentials_for_domain')
     @patch('integrations.services.article_generation.http_requests.post')
     def test_generate_with_topic_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
@@ -507,6 +536,194 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, "completed")
         mock_send_dm.assert_called_once()
 
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-progress",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "article_progress",
+            "job_id": "job-progress",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "progress_id": "job-progress:research_locked",
+            "milestone_key": "research_locked",
+            "milestone_index": 1,
+            "milestone_count": 3,
+            "message": "Research complete. Sources are gathered and the outline is locked.",
+        }
+
+        response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-progress")
+        self.assertEqual(job.posted_progress_ids, ["job-progress:research_locked"])
+        self.assertEqual(job.last_progress_milestone_index, 1)
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertIn("Research locked", mock_send_message.call_args[0][1])
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertEqual(blocks[0]["text"]["text"], "*Research locked*\nResearch complete. Sources are gathered and the outline is locked.")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_article_progress_callback_dedupes_progress_id(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-progress-dup",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            posted_progress_ids=["job-progress-dup:research_locked"],
+            last_progress_milestone_index=1,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_progress",
+                "job_id": "job-progress-dup",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-progress-dup:research_locked",
+                "milestone_key": "research_locked",
+                "milestone_index": 1,
+                "message": "Research complete. Sources are gathered and the outline is locked.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "duplicate_progress_id")
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_article_progress_callback_ignores_stale_milestone(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-progress-stale",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            posted_progress_ids=["job-progress-stale:draft_grounded"],
+            last_progress_milestone_index=2,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_progress",
+                "job_id": "job-progress-stale",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-progress-stale:research_locked",
+                "milestone_key": "research_locked",
+                "milestone_index": 1,
+                "message": "Research complete. Sources are gathered and the outline is locked.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "stale_milestone")
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_article_progress_callback_missing_thread_context_is_safe(self, mock_send_message):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_progress",
+                "job_id": "job-progress-missing-thread",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-progress-missing-thread:research_locked",
+                "milestone_key": "research_locked",
+                "milestone_index": 1,
+                "message": "Research complete. Sources are gathered and the outline is locked.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "missing_thread_context")
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_content_ready_callback_uses_root_message_ts_as_thread_fallback(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-content-threaded",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "content_ready",
+                "job_id": "job-content-threaded",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "title": "How to Find a Technical Cofounder",
+                "article_markdown_path": "/tmp/run/article.md",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_publish_bundle_ready_callback_posts_thread_reply(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-bundle-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "publish_bundle_ready",
+                "job_id": "job-bundle-ready",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "title": "How to Find a Technical Cofounder",
+                "publish_resolution": "patch_bundle",
+                "suggested_target_path": "content/blog/how-to-find-a-technical-cofounder.mdx",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-bundle-ready")
+        self.assertEqual(job.status, "completed")
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+
 
 class TopicConfirmTests(TestCase):
     def setUp(self):
@@ -564,6 +781,9 @@ class TopicConfirmTests(TestCase):
             custom_title=None,
             skip_alternatives=None,
             source_run_id=None,
+            slack_channel_id=None,
+            slack_thread_ts=None,
+            slack_root_message_ts=None,
         )
 
     def test_confirm_topic_with_index(self):
