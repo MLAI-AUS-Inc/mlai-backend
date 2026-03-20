@@ -183,6 +183,7 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], "job-123")
+        self.assertEqual(response.data['workflow'], "auto_discovery")
         
         # Verify call count (should be 1 call to discovery)
         self.assertEqual(mock_post.call_count, 1)
@@ -379,6 +380,43 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(call_args[0][0], "U123")
         self.assertIn("Topic selection ready", call_args[0][1])
 
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_topic_selection_callback_posts_to_thread_when_context_exists(self, mock_send_dm, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-topic-thread",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "topic_selection",
+                "job_id": "job-topic-thread",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "selection": {
+                    "selected_keyword": "ai agents",
+                    "options": [
+                        {"keyword": "option 1", "volume": 1000},
+                        {"keyword": "option 2", "volume": 800},
+                    ],
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        mock_send_dm.assert_not_called()
+
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_topic_selection_multi_options(self, mock_send_dm):
         url = reverse('content_factory_callback')
@@ -573,6 +611,131 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
         blocks = mock_send_message.call_args[1]["blocks"]
         self.assertEqual(blocks[0]["text"]["text"], "*Research locked*\nResearch complete. Sources are gathered and the outline is locked.")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_discovery_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-discovery-progress",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="queued",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "discovery_progress",
+                "job_id": "job-discovery-progress",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-discovery-progress:research_started",
+                "milestone_key": "research_started",
+                "milestone_index": 1,
+                "milestone_count": 2,
+                "message": "Research started. Context, competitors, and prior topic history are loaded. I'm now researching candidate topics.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-discovery-progress")
+        self.assertEqual(job.status, "researching")
+        self.assertEqual(job.posted_progress_ids, ["job-discovery-progress:research_started"])
+        self.assertEqual(job.last_progress_milestone_index, 1)
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertIn("Research started", mock_send_message.call_args[0][1])
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_discovery_progress_callback_dedupes_progress_id(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-discovery-dup",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            posted_progress_ids=["job-discovery-dup:research_started"],
+            last_progress_milestone_index=1,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "discovery_progress",
+                "job_id": "job-discovery-dup",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-discovery-dup:research_started",
+                "milestone_key": "research_started",
+                "milestone_index": 1,
+                "message": "Research started. Context, competitors, and prior topic history are loaded. I'm now researching candidate topics.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "duplicate_progress_id")
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_discovery_progress_callback_ignores_stale_milestone(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="job-discovery-stale",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            posted_progress_ids=["job-discovery-stale:candidate_pool_ready"],
+            last_progress_milestone_index=2,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "discovery_progress",
+                "job_id": "job-discovery-stale",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-discovery-stale:research_started",
+                "milestone_key": "research_started",
+                "milestone_index": 1,
+                "message": "Research started. Context, competitors, and prior topic history are loaded. I'm now researching candidate topics.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "stale_milestone")
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_discovery_progress_callback_missing_thread_context_is_safe(self, mock_send_message):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "discovery_progress",
+                "job_id": "job-discovery-missing-thread",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-discovery-missing-thread:research_started",
+                "milestone_key": "research_started",
+                "milestone_index": 1,
+                "message": "Research started. Context, competitors, and prior topic history are loaded. I'm now researching candidate topics.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reason"], "missing_thread_context")
+        mock_send_message.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_dedupes_progress_id(self, mock_send_message):
@@ -808,14 +971,20 @@ class TopicConfirmTests(TestCase):
         }
 
         with patch('integrations.services.article_generation.confirm_topic') as mock_confirm_topic:
-            mock_confirm_topic.return_value = {"job_id": "job-index", "status": "queued"}
+            mock_confirm_topic.return_value = {"job_id": "job-article", "status": "queued"}
 
             response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["job_id"], "job-article")
+        self.assertEqual(response.data["run_id"], "job-article")
+        self.assertEqual(response.data["source_run_id"], "job-index")
         job.refresh_from_db()
         self.assertEqual(job.selected_keyword, "keyword 1")
         self.assertEqual(job.status, "confirmed")
+
+        article_job = ContentFactoryJob.objects.get(job_id="job-article")
+        self.assertEqual(article_job.request_meta["source_run_id"], "job-index")
 
         mock_confirm_topic.assert_called_once()
         call_args = mock_confirm_topic.call_args

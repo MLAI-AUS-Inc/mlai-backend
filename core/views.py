@@ -1,7 +1,8 @@
 import logging
 import os
+import time
 from urllib.parse import urlparse
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -1635,6 +1636,7 @@ class ContentFactoryCallbackView(APIView):
     
     Event types:
     - topic_selection: Research complete, topic selected, awaiting confirmation
+    - discovery_progress: Non-terminal discovery milestone update
     - article_progress: Non-terminal article milestone update
     - article_complete: Article generated and published successfully
     - publish_bundle_ready: Delivery bundle packaged and ready
@@ -1689,6 +1691,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_content_ready(data)
             elif event_type == 'publish_bundle_ready':
                 return self._handle_publish_bundle_ready(data)
+            elif event_type == 'discovery_progress':
+                return self._handle_discovery_progress(data)
             elif event_type == 'article_progress':
                 return self._handle_article_progress(data)
             else:
@@ -1747,7 +1751,7 @@ class ContentFactoryCallbackView(APIView):
             return True
         return False
 
-    def _handle_article_progress(self, data):
+    def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -1764,12 +1768,12 @@ class ContentFactoryCallbackView(APIView):
             job_id=job_id,
             domain=domain,
             slack_user_id=slack_user_id,
-            status_value='generating',
+            status_value=status_value,
         )
 
         posted_progress_ids = list(job.posted_progress_ids or [])
         if progress_id in posted_progress_ids:
-            logger.info("Ignoring duplicate article_progress callback for %s (%s)", job_id, progress_id)
+            logger.info("Ignoring duplicate %s callback for %s (%s)", event_name, job_id, progress_id)
             return Response(
                 {
                     'status': 'ignored',
@@ -1782,7 +1786,8 @@ class ContentFactoryCallbackView(APIView):
 
         if milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
             logger.info(
-                "Ignoring stale article_progress callback for %s (%s <= %s)",
+                "Ignoring stale %s callback for %s (%s <= %s)",
+                event_name,
                 job_id,
                 milestone_index,
                 job.last_progress_milestone_index,
@@ -1799,7 +1804,7 @@ class ContentFactoryCallbackView(APIView):
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
         if not channel_id or not thread_ts:
-            logger.warning("Unable to route article_progress callback for %s: missing Slack thread context", job_id)
+            logger.warning("Unable to route %s callback for %s: missing Slack thread context", event_name, job_id)
             return Response(
                 {
                     'status': 'ignored',
@@ -1810,11 +1815,6 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        stage_titles = {
-            'research_locked': 'Research locked',
-            'draft_grounded': 'Draft grounded',
-            'finishing_pass': 'Finishing pass',
-        }
         stage_title = stage_titles.get(milestone_key, 'Progress update')
         fallback_text = f"{stage_title}: {message}"
         blocks = [
@@ -1837,7 +1837,7 @@ class ContentFactoryCallbackView(APIView):
                 allow_dm_fallback=False,
             )
         except Exception as exc:
-            logger.warning("Failed to send article_progress notification for %s: %s", job_id, exc)
+            logger.warning("Failed to send %s notification for %s: %s", event_name, job_id, exc)
             return Response(
                 {
                     'status': 'processed_with_error',
@@ -1856,11 +1856,36 @@ class ContentFactoryCallbackView(APIView):
         return Response(
             {
                 'status': 'received',
-                'message': 'Article progress callback processed',
+                'message': response_message,
                 'job_id': job_id,
                 'progress_id': progress_id,
             },
             status=status.HTTP_200_OK,
+        )
+
+    def _handle_article_progress(self, data):
+        return self._handle_progress_callback(
+            data,
+            event_name='article_progress',
+            status_value='generating',
+            stage_titles={
+                'research_locked': 'Research locked',
+                'draft_grounded': 'Draft grounded',
+                'finishing_pass': 'Finishing pass',
+            },
+            response_message='Article progress callback processed',
+        )
+
+    def _handle_discovery_progress(self, data):
+        return self._handle_progress_callback(
+            data,
+            event_name='discovery_progress',
+            status_value='researching',
+            stage_titles={
+                'research_started': 'Research started',
+                'candidate_pool_ready': 'Candidate pool ready',
+            },
+            response_message='Discovery progress callback processed',
         )
 
     def _handle_delivery_mode_required(self, data):
@@ -2794,7 +2819,6 @@ class ContentFactoryCallbackView(APIView):
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
         from .models import ContentFactoryJob, Organization
-        from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -2933,8 +2957,14 @@ class ContentFactoryCallbackView(APIView):
                 "type": "actions",
                 "elements": action_elements
             })
-            
-            SlackService.send_dm(slack_user_id, "Topic selection ready for review", blocks=blocks)
+
+            self._send_job_message(
+                job=job,
+                data=data,
+                slack_user_id=slack_user_id,
+                text="Topic selection ready for review",
+                blocks=blocks,
+            )
         
         return Response({
             'status': 'received',
@@ -3763,6 +3793,79 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
     }
 
 
+def _is_retryable_sqlite_lock(exc: Exception) -> bool:
+    return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
+
+
+def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: dict):
+    with transaction.atomic():
+        run, created = ContentFactoryRun.objects.update_or_create(
+            run_id=run_id,
+            defaults={
+                "workflow": data["workflow"],
+                "domain": data.get("domain") or "",
+                "github_repo": data.get("github_repo") or "",
+                "slack_user_id": data.get("slack_user_id") or "",
+                "status": data["status"],
+                "current_step": data.get("current_step") or "",
+                "approval_state": data.get("approval_state") or ContentFactoryApprovalState.NOT_REQUIRED,
+                "artifact_root": data.get("artifact_root") or "",
+                "step_order": data.get("step_order") or [],
+                "acceptance_summary": data.get("acceptance_summary") or {},
+                "verification_summary": data.get("verification_summary") or {},
+                "run_request": data.get("run_request") or {},
+                "result": data.get("result") or {},
+                "error": data.get("error") or "",
+                "resume_available": bool(data.get("resume_available")),
+            },
+        )
+
+        seen_steps = set()
+        ordered_steps = data.get("step_order") or list(step_states.keys())
+        for index, step_key in enumerate(ordered_steps):
+            state_payload = dict(step_states.get(step_key) or {"name": step_key})
+            step, _ = ContentFactoryRunStep.objects.update_or_create(
+                run=run,
+                step_key=step_key,
+                defaults={
+                    "display_order": index,
+                    "required": bool(state_payload.get("required", True)),
+                    "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
+                    "attempts": int(state_payload.get("attempts", 0)),
+                    "message": state_payload.get("message") or "",
+                    "started_at": _parse_optional_datetime(state_payload.get("started_at")),
+                    "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
+                    "error": state_payload.get("error") or "",
+                    "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
+                    "artifacts": state_payload.get("artifacts") or [],
+                },
+            )
+            seen_steps.add(step_key)
+
+            for attempt_payload in state_payload.get("attempt_history", []):
+                ContentFactoryRunStepAttempt.objects.update_or_create(
+                    step=step,
+                    attempt=int(attempt_payload.get("attempt", 0)),
+                    defaults={
+                        "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
+                        "message": attempt_payload.get("message") or "",
+                        "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
+                        "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
+                        "artifacts": attempt_payload.get("artifacts") or [],
+                        "error": attempt_payload.get("error") or "",
+                        "input_path": attempt_payload.get("input_path") or "",
+                        "output_path": attempt_payload.get("output_path") or "",
+                        "notes_path": attempt_payload.get("notes_path") or "",
+                        "status_path": attempt_payload.get("status_path") or "",
+                    },
+                )
+
+        if seen_steps:
+            ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
+
+    return run, created
+
+
 class ContentFactoryRunView(APIView):
     """
     GET/PUT durable Content Factory run snapshots.
@@ -3788,70 +3891,25 @@ class ContentFactoryRunView(APIView):
         data = serializer.validated_data
         step_states = request.data.get("step_states", {}) or {}
 
-        with transaction.atomic():
-            run, created = ContentFactoryRun.objects.update_or_create(
-                run_id=run_id,
-                defaults={
-                    "workflow": data["workflow"],
-                    "domain": data.get("domain") or "",
-                    "github_repo": data.get("github_repo") or "",
-                    "slack_user_id": data.get("slack_user_id") or "",
-                    "status": data["status"],
-                    "current_step": data.get("current_step") or "",
-                    "approval_state": data.get("approval_state") or ContentFactoryApprovalState.NOT_REQUIRED,
-                    "artifact_root": data.get("artifact_root") or "",
-                    "step_order": data.get("step_order") or [],
-                    "acceptance_summary": data.get("acceptance_summary") or {},
-                    "verification_summary": data.get("verification_summary") or {},
-                    "run_request": data.get("run_request") or {},
-                    "result": data.get("result") or {},
-                    "error": data.get("error") or "",
-                    "resume_available": bool(data.get("resume_available")),
-                },
-            )
-
-            seen_steps = set()
-            ordered_steps = data.get("step_order") or list(step_states.keys())
-            for index, step_key in enumerate(ordered_steps):
-                state_payload = dict(step_states.get(step_key) or {"name": step_key})
-                step, _ = ContentFactoryRunStep.objects.update_or_create(
-                    run=run,
-                    step_key=step_key,
-                    defaults={
-                        "display_order": index,
-                        "required": bool(state_payload.get("required", True)),
-                        "status": state_payload.get("status", ContentFactoryStepStatus.PENDING),
-                        "attempts": int(state_payload.get("attempts", 0)),
-                        "message": state_payload.get("message") or "",
-                        "started_at": _parse_optional_datetime(state_payload.get("started_at")),
-                        "completed_at": _parse_optional_datetime(state_payload.get("completed_at")),
-                        "error": state_payload.get("error") or "",
-                        "latest_attempt_path": state_payload.get("latest_attempt_path") or "",
-                        "artifacts": state_payload.get("artifacts") or [],
-                    },
+        max_attempts = 3 if connection.vendor == "sqlite" else 1
+        for attempt_number in range(1, max_attempts + 1):
+            try:
+                run, created = _sync_content_factory_run_snapshot(
+                    run_id=run_id,
+                    data=data,
+                    step_states=step_states,
                 )
-                seen_steps.add(step_key)
-
-                for attempt_payload in state_payload.get("attempt_history", []):
-                    ContentFactoryRunStepAttempt.objects.update_or_create(
-                        step=step,
-                        attempt=int(attempt_payload.get("attempt", 0)),
-                        defaults={
-                            "status": attempt_payload.get("status", ContentFactoryStepStatus.PENDING),
-                            "message": attempt_payload.get("message") or "",
-                            "started_at": _parse_optional_datetime(attempt_payload.get("started_at")),
-                            "completed_at": _parse_optional_datetime(attempt_payload.get("completed_at")),
-                            "artifacts": attempt_payload.get("artifacts") or [],
-                            "error": attempt_payload.get("error") or "",
-                            "input_path": attempt_payload.get("input_path") or "",
-                            "output_path": attempt_payload.get("output_path") or "",
-                            "notes_path": attempt_payload.get("notes_path") or "",
-                            "status_path": attempt_payload.get("status_path") or "",
-                        },
-                    )
-
-            if seen_steps:
-                ContentFactoryRunStep.objects.filter(run=run).exclude(step_key__in=seen_steps).delete()
+                break
+            except OperationalError as exc:
+                if not _is_retryable_sqlite_lock(exc) or attempt_number == max_attempts:
+                    raise
+                logger.warning(
+                    "Retrying Content Factory run sync for %s after SQLite lock (%s/%s).",
+                    run_id,
+                    attempt_number,
+                    max_attempts,
+                )
+                time.sleep(0.25 * attempt_number)
 
         response_payload = _serialize_content_factory_run(run)
         response_payload["sync_status"] = "created" if created else "updated"

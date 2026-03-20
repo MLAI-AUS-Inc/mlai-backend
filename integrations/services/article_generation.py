@@ -543,6 +543,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             )
             return {
                 "job_id": job_id,
+                "run_id": job_id,
+                "workflow": data.get("workflow") or "auto_discovery",
                 "status": "queued",
                 "message": "Discovery started",
                 "job_status_url": f"{content_factory_url.rstrip('/')}/api/runs/{job_id}",
@@ -654,6 +656,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             return {
                 "job_id": job_id,
                 "run_id": job_id,
+                "workflow": data.get("workflow") or "direct_generate",
                 "status": "queued",
                 "message": "Generation started",
                 "job_status_url": status_url
