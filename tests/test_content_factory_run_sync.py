@@ -1,5 +1,7 @@
 import os
+from unittest.mock import patch
 
+from django.db import OperationalError
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -59,3 +61,31 @@ class ContentFactoryRunSyncTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id="run-sync-1")
         self.assertEqual(run.workflow, "repo_scan")
         self.assertEqual(run.run_request.get("domain"), "mlai.au")
+
+    def test_run_sync_retries_transient_sqlite_lock(self):
+        payload = {
+            "run_id": "run-sync-lock-1",
+            "workflow": "repo_scan",
+            "status": "queued",
+            "step_states": {},
+        }
+
+        original_update_or_create = ContentFactoryRun.objects.update_or_create
+        attempts = {"count": 0}
+
+        def flaky_update_or_create(*args, **kwargs):
+            if attempts["count"] == 0:
+                attempts["count"] += 1
+                raise OperationalError("database is locked")
+            return original_update_or_create(*args, **kwargs)
+
+        with patch("core.views.ContentFactoryRun.objects.update_or_create", side_effect=flaky_update_or_create):
+            with patch("core.views.time.sleep"):
+                response = self.client.put(
+                    "/api/content-factory/runs/run-sync-lock-1/",
+                    payload,
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(ContentFactoryRun.objects.filter(run_id="run-sync-lock-1").exists())

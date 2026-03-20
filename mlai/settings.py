@@ -119,18 +119,19 @@ CORS_ALLOW_CREDENTIALS = True
 
 
 database_url = os.getenv('DATABASE_URL')
-default_config = dj_database_url.config(default=os.environ.get('DATABASE_URL'))
-# default_config.update({
-#     'ENGINE': 'django.db.backends.postgresql',
-# })
-
+is_sqlite_database = (database_url or '').startswith('sqlite:')
+database_conn_max_age = 0 if is_sqlite_database else 600
 
 # Parse database configuration from $DATABASE_URL
 default_config = dj_database_url.config(
     default=os.environ.get('DATABASE_URL'),
-    conn_max_age=600,
+    conn_max_age=database_conn_max_age,
     ssl_require=os.getenv('DATABASE_SSL_REQUIRE', 'False') == 'True'
 )
+
+if default_config.get('ENGINE') == 'django.db.backends.sqlite3':
+    sqlite_options = default_config.setdefault('OPTIONS', {})
+    sqlite_options.setdefault('timeout', int(os.getenv('SQLITE_TIMEOUT_SECONDS', '30')))
 
 DATABASES = {
     'default': default_config

@@ -359,6 +359,7 @@ class ContentJobConfirmView(APIView):
                 slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
             )
             new_job_id = result.get("job_id") or result.get("run_id")
+            active_job_id = new_job_id or job.job_id
             if new_job_id and new_job_id != job.job_id:
                 ContentFactoryJob.objects.update_or_create(
                     job_id=new_job_id,
@@ -384,7 +385,9 @@ class ContentJobConfirmView(APIView):
                 )
             return Response({
                 "status": "confirmed",
-                "job_id": job.job_id,
+                "job_id": active_job_id,
+                "run_id": active_job_id,
+                **({"source_run_id": job.job_id} if active_job_id != job.job_id else {}),
                 "message": "Topic confirmed, article generation started.",
                 "skip_alternatives": skip_alternatives,
                 "cf_response": result
