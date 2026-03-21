@@ -487,6 +487,89 @@ class ContentFactoryCallbackTests(TestCase):
         mock_send_dm.assert_called_once()
         self.assertEqual(mock_send_dm.call_args[0][0], "U123")
 
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_mentions_scaffold_when_already_queued(self, mock_send_dm):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-queued",
+                "run_id": "scan-run-queued",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "components_generated": True,
+                "components_count": 3,
+                "component_names": ["ArticleHeroHeader", "ArticleFAQ", "ArticleFooterNav"],
+                "scaffold_queued": True,
+                "scaffold_job_id": "scaffold-run-1",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertIn("queued article-directory setup", message)
+        self.assertNotIn("Create Articles Directory", message)
+        self.assertIsNone(mock_send_dm.call_args[1].get("blocks"))
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_auto_discovery_no_opportunities_mentions_research_scope(self, mock_send_dm):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "discovery-run-1",
+                "run_id": "discovery-run-1",
+                "workflow": "auto_discovery",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "error_code": "NO_OPPORTUNITIES",
+                "error": "No relevant keywords found after filtering.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertIn("Research for mlai.au", message)
+        self.assertIn("doesn't affect any scan or scaffold work already in progress", message)
+        self.assertNotIn("Task failed for", message)
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_scaffold_complete_uses_parent_run_thread_context(self, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="scan-parent-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scaffold_complete",
+                "job_id": "scaffold-run-1",
+                "run_id": "scaffold-run-1",
+                "workflow": "scaffold",
+                "parent_run_id": "scan-parent-1",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "already_exists": True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+
     def test_error_callback(self):
         url = reverse('content_factory_callback')
         data = {
