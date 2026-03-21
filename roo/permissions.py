@@ -8,6 +8,9 @@ from django.conf import settings
 from .models import PointsAdmin
 
 
+POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+
+
 def is_points_admin(slack_id: str) -> bool:
     """
     Check if a Slack user ID is an active Points Admin.
@@ -31,6 +34,11 @@ def is_points_admin(slack_id: str) -> bool:
         slack_user_id=slack_id,
         is_active=True
     ).exists()
+
+
+def is_points_super_admin(slack_id: str) -> bool:
+    """Return True only for the Roo points super-admin requester."""
+    return bool(slack_id and slack_id.strip() == POINTS_SUPER_ADMIN_SLACK_ID)
 
 
 def get_admin_role(slack_id: str) -> Optional[str]:
