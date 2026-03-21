@@ -60,3 +60,132 @@ class ManualAwardViewTests(APITestCase):
         response = self.client.post(self.url, data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
+
+
+class PointsAdminManagementViewSetTests(APITestCase):
+    def setUp(self):
+        self.super_admin_slack_id = 'U05QPB483K9'
+        self.other_slack_id = 'UNOTSUPER'
+        self.target_slack_id = 'UTARGET456'
+        self.list_url = reverse('points-admin-list')
+        self.detail_url = reverse(
+            'points-admin-detail',
+            kwargs={'slack_user_id': self.target_slack_id},
+        )
+        self.target_user = User.objects.create_user(
+            email='target@example.com',
+            slack_id=self.target_slack_id,
+        )
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_promote_points_admin_creates_admin(self, mock_permission):
+        response = self.client.post(
+            self.list_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'target_slack_id': self.target_slack_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
+        self.assertTrue(admin.is_active)
+        self.assertEqual(admin.role, 'committee')
+        self.assertEqual(admin.user, self.target_user)
+        self.assertEqual(admin.added_by_slack_id, self.super_admin_slack_id)
+        self.assertEqual(response.data['target_slack_id'], self.target_slack_id)
+        self.assertFalse(response.data['already_admin'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_promote_points_admin_is_idempotent_when_already_active(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=True,
+            added_by_slack_id='UOLDER',
+        )
+
+        response = self.client.post(
+            self.list_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'target_slack_id': self.target_slack_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(PointsAdmin.objects.filter(slack_user_id=self.target_slack_id).count(), 1)
+        self.assertTrue(response.data['already_admin'])
+        self.assertFalse(response.data['created'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_promote_points_admin_requires_super_admin_requester(self, mock_permission):
+        response = self.client.post(
+            self.list_url,
+            {
+                'requester_slack_id': self.other_slack_id,
+                'target_slack_id': self.target_slack_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(PointsAdmin.objects.filter(slack_user_id=self.target_slack_id).exists())
+        self.assertIn('super admin', response.data['error'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_patch_points_admin_weekly_allowance(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=True,
+            weekly_allowance=100,
+        )
+
+        response = self.client.patch(
+            self.detail_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'weekly_allowance': 150,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
+        self.assertEqual(admin.weekly_allowance, 150)
+        self.assertEqual(response.data['target_slack_id'], self.target_slack_id)
+        self.assertEqual(response.data['weekly_allowance'], 150)
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_patch_points_admin_weekly_allowance_rejects_non_positive_values(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=True,
+        )
+
+        response = self.client.patch(
+            self.detail_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'weekly_allowance': 0,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['error'], 'weekly_allowance must be positive')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_patch_points_admin_weekly_allowance_requires_existing_admin(self, mock_permission):
+        response = self.client.patch(
+            self.detail_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'weekly_allowance': 150,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error'], 'Not a points admin')

@@ -18,7 +18,12 @@ from .models import (
 )
 
 from .services import PointsService, CoworkingService, TaskService, RewardsService
-from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
+from .permissions import (
+    is_points_admin,
+    is_points_super_admin,
+    InsufficientBalanceError,
+    PermissionDeniedError,
+)
 from core.models import User
 from core.permissions import HasAPIKey, HasRooApiKey
 from integrations.services import SlackService
@@ -56,15 +61,145 @@ class RateCardView(viewsets.ReadOnlyModelViewSet):
     permission_classes = [HasAPIKey | settings.REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'][0]]
 
 
-class PointsAdminViewSet(viewsets.ReadOnlyModelViewSet):
+class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet):
     """
-    Read-only view for Points Admins. 
-    Use Django Admin to add/manage admins.
+    View for Points Admins.
+    Reads are available to Roo.
+    Writes are restricted to the single points super-admin requester.
     """
     queryset = PointsAdmin.objects.filter(is_active=True)
     serializer_class = PointsAdminSerializer
     lookup_field = 'slack_user_id'
     permission_classes = [HasRooApiKey]
+
+    def _clean_slack_id(self, value):
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _require_super_admin_requester(self, request):
+        requester_slack_id = self._clean_slack_id(request.data.get('requester_slack_id'))
+        if not requester_slack_id:
+            return None, Response(
+                {'error': 'requester_slack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not is_points_super_admin(requester_slack_id):
+            return None, Response(
+                {'error': 'Only the Roo points super admin can manage points admins'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return requester_slack_id, None
+
+    def create(self, request, *args, **kwargs):
+        """Promote a Slack user to Points Admin."""
+        requester_slack_id, error_response = self._require_super_admin_requester(request)
+        if error_response:
+            return error_response
+
+        target_slack_id = self._clean_slack_id(request.data.get('target_slack_id'))
+        if not target_slack_id:
+            return Response(
+                {'error': 'target_slack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        admin = PointsAdmin.objects.filter(slack_user_id=target_slack_id).first()
+        linked_user = PointsService.get_user_by_slack_id(target_slack_id)
+
+        if admin and admin.is_active:
+            changed_fields = []
+            if linked_user and admin.user_id != linked_user.id:
+                admin.user = linked_user
+                changed_fields.append('user')
+            if changed_fields:
+                admin.save(update_fields=changed_fields)
+
+            data = PointsAdminSerializer(admin).data
+            data.update({
+                'target_slack_id': target_slack_id,
+                'already_admin': True,
+                'created': False,
+            })
+            return Response(data, status=status.HTTP_200_OK)
+
+        if admin:
+            admin.is_active = True
+            admin.added_by_slack_id = requester_slack_id
+            if linked_user:
+                admin.user = linked_user
+            admin.save()
+            status_code = status.HTTP_200_OK
+        else:
+            admin = PointsAdmin.objects.create(
+                slack_user_id=target_slack_id,
+                user=linked_user,
+                role='committee',
+                is_active=True,
+                added_by_slack_id=requester_slack_id,
+            )
+            status_code = status.HTTP_201_CREATED
+
+        data = PointsAdminSerializer(admin).data
+        data.update({
+            'target_slack_id': target_slack_id,
+            'already_admin': False,
+            'created': status_code == status.HTTP_201_CREATED,
+        })
+        return Response(data, status=status_code)
+
+    def update(self, request, *args, **kwargs):
+        """Treat PUT the same as PATCH for the points admin allowance update contract."""
+        kwargs['partial'] = True
+        return self.partial_update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Update a specific Points Admin's weekly allowance."""
+        requester_slack_id, error_response = self._require_super_admin_requester(request)
+        if error_response:
+            return error_response
+
+        weekly_allowance = request.data.get('weekly_allowance')
+        if weekly_allowance is None:
+            return Response(
+                {'error': 'weekly_allowance is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            weekly_allowance = int(weekly_allowance)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'weekly_allowance must be an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if weekly_allowance <= 0:
+            return Response(
+                {'error': 'weekly_allowance must be positive'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        target_slack_id = self.kwargs.get(self.lookup_field)
+        admin = PointsAdmin.objects.filter(
+            slack_user_id=target_slack_id,
+            is_active=True,
+        ).first()
+        if not admin:
+            return Response({'error': 'Not a points admin'}, status=status.HTTP_404_NOT_FOUND)
+
+        admin.weekly_allowance = weekly_allowance
+        admin.save(update_fields=['weekly_allowance'])
+
+        data = PointsAdminSerializer(admin).data
+        data.update({
+            'requester_slack_id': requester_slack_id,
+            'target_slack_id': target_slack_id,
+            'weekly_allowance': admin.weekly_allowance,
+        })
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class AdminAllowanceView(APIView):
@@ -1101,4 +1236,3 @@ class QuestCompletionStatusView(APIView):
                 "completed": False,
                 "current_count": 0
             })
-
