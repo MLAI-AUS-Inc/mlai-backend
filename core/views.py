@@ -2262,6 +2262,10 @@ class ContentFactoryCallbackView(APIView):
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
+        run_id = data.get('run_id') or job_id
+        workflow = data.get('workflow') or 'repo_scan'
+        scaffold_queued = bool(data.get('scaffold_queued'))
+        scaffold_job_id = data.get('scaffold_job_id') or ''
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         components_generated = data.get('components_generated', False)
@@ -2278,7 +2282,17 @@ class ContentFactoryCallbackView(APIView):
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
-        logger.info(f"Scan complete for {domain}: components_generated={components_generated}, count={components_count}, pillars={pillar_count}")
+        logger.info(
+            "Scan complete for %s: run_id=%s workflow=%s components_generated=%s count=%s pillars=%s scaffold_queued=%s scaffold_job_id=%s",
+            domain,
+            run_id,
+            workflow,
+            components_generated,
+            components_count,
+            pillar_count,
+            scaffold_queued,
+            scaffold_job_id,
+        )
 
         # Persist and resolve article-system readiness for messaging and auto-resume.
         has_pillars = False
@@ -2364,6 +2378,17 @@ class ContentFactoryCallbackView(APIView):
                         f"but the detection confidence is low.\\n\\n"
                         f"You can tell me to use the detected system, rescan the repo, or scaffold a new articles directory."
                     )
+                    blocks = None
+                elif scaffold_queued:
+                    text_body = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\n"
+                        f"{component_list}{pillar_line}\n\n"
+                        f"I've already queued article-directory setup in your repo, and I'll update you again when that PR is ready."
+                    )
+                    fallback_text = text_body
                     blocks = None
                 elif has_pillars:
                     text_body = (
@@ -2464,6 +2489,8 @@ class ContentFactoryCallbackView(APIView):
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
+        run_id = data.get('run_id') or job_id
+        workflow = data.get('workflow') or 'unknown'
         error_message = data.get('error', data.get('error_message', 'Unknown error'))
         error_code = data.get('error_code', 'INTERNAL_ERROR')
         domain = data.get('domain', '')
@@ -2482,7 +2509,15 @@ class ContentFactoryCallbackView(APIView):
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
-        logger.error(f"Generation failed for job {job_id} ({domain}): [{error_code}] {error_message}")
+        logger.error(
+            "Generation failed for job %s run %s workflow=%s (%s): [%s] %s",
+            job_id,
+            run_id,
+            workflow,
+            domain,
+            error_code,
+            error_message,
+        )
 
         if slack_user_id:
             try:
@@ -2532,6 +2567,30 @@ class ContentFactoryCallbackView(APIView):
                         f"Please reconnect your GitHub account by saying:\n"
                         f"  `@Roo connect to my domain {domain}`"
                     )
+                elif workflow == 'auto_discovery' and error_code == 'NO_OPPORTUNITIES':
+                    message = (
+                        f"⚠️ *Research for {domain} didn't find viable topics yet*\n\n"
+                        f"{error_message}\n\n"
+                        f"This doesn't affect any scan or scaffold work already in progress."
+                    )
+                elif workflow == 'auto_discovery':
+                    message = (
+                        f"❌ *Research failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"This doesn't affect any scan or scaffold work already in progress."
+                    )
+                elif workflow == 'repo_scan':
+                    message = (
+                        f"❌ *Scan failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"If this keeps happening, please contact support."
+                    )
+                elif workflow == 'scaffold':
+                    message = (
+                        f"❌ *Articles directory setup failed for {domain}*\n\n"
+                        f"{error_message}\n\n"
+                        f"If this keeps happening, please contact support."
+                    )
                 else:
                     message = (
                         f"❌ *Task failed for {domain}*\n\n"
@@ -2559,6 +2618,7 @@ class ContentFactoryCallbackView(APIView):
         from integrations.utils import normalize_domain
 
         job_id = data.get('job_id')
+        parent_run_id = data.get('parent_run_id') or ''
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         pr_url = data.get('pr_url')
@@ -2581,9 +2641,23 @@ class ContentFactoryCallbackView(APIView):
                 job.pr_url = pr_url
             job.save()
 
-        # Resolve thread context: job first, then callback payload
-        channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
-        thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
+        parent_job = ContentFactoryJob.objects.filter(job_id=parent_run_id).first() if parent_run_id else None
+
+        # Resolve thread context: scaffold job first, then parent scan job, then callback payload.
+        channel_id = (
+            (job.slack_channel_id if job else None)
+            or (parent_job.slack_channel_id if parent_job else None)
+            or data.get('slack_channel_id')
+            or ''
+        )
+        thread_ts = (
+            (job.slack_thread_ts if job else None)
+            or (parent_job.slack_thread_ts if parent_job else None)
+            or (parent_job.slack_root_message_ts if parent_job else None)
+            or data.get('slack_thread_ts')
+            or data.get('slack_root_message_ts')
+            or ''
+        )
 
         def _send(text, blocks=None):
             if channel_id and thread_ts:
