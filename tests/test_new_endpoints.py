@@ -11,10 +11,16 @@ from rest_framework import status
 from django.urls import reverse
 from requests import Response
 
-from core.models import Organization, OrganizationContentConfig, ResearchedKeyword
+from core.models import (
+    ContentFactoryJob,
+    Organization,
+    OrganizationContentConfig,
+    ResearchedKeyword,
+    ScheduledDiscoveryDispatch,
+    ScheduledDiscoveryDispatchState,
+)
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
-from core.models import ContentFactoryJob
 
 User = get_user_model()
 
@@ -394,6 +400,14 @@ class ContentFactoryCallbackTests(TestCase):
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_topic_selection_callback(self, mock_send_dm):
+        ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="mlai.au",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.QUEUED,
+            content_factory_job_id="job-123",
+        )
         url = reverse('content_factory_callback')
         data = {
             "event_type": "topic_selection",
@@ -420,6 +434,8 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, 'awaiting_confirmation')
         self.assertEqual(job.selected_keyword, "ai agents")
         self.assertEqual(job.slack_user_id, "U123")
+        dispatch = ScheduledDiscoveryDispatch.objects.get(content_factory_job_id="job-123")
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT)
         
         mock_send_dm.assert_called_once()
         call_args = mock_send_dm.call_args
@@ -710,6 +726,49 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(user.points_account.balance, 20)
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_scheduled_daily_updates_dispatch_and_suppresses_user_message(self, mock_send_dm, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="scheduled-failure-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            request_meta={
+                "domain": "mlai.au",
+                "trigger_source": "scheduled_daily",
+            },
+        )
+        dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="mlai.au",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.QUEUED,
+            content_factory_job_id="scheduled-failure-1",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "scheduled-failure-1",
+                "run_id": "scheduled-failure-1",
+                "workflow": "auto_discovery",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "error_code": "NO_OPPORTUNITIES",
+                "error": "No relevant opportunities today.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dispatch.refresh_from_db()
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.FAILED)
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_scaffold_complete_uses_parent_run_thread_context(self, mock_send_message):

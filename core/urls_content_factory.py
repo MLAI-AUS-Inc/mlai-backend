@@ -21,6 +21,8 @@ urlpatterns = [
     # Organization domains listing (for fuzzy matching)
     path('orgs/domains/', views.ContentFactoryOrgDomainsView.as_view(), name='content_factory_org_domains'),
     path('orgs/domains', views.ContentFactoryOrgDomainsView.as_view(), name='content_factory_org_domains_no_slash'),
+    path('scheduled-discovery/replay/', views.ScheduledDiscoveryReplayView.as_view(), name='content_factory_scheduled_discovery_replay'),
+    path('scheduled-discovery/replay', views.ScheduledDiscoveryReplayView.as_view(), name='content_factory_scheduled_discovery_replay_no_slash'),
     # Callback endpoint for content-factory events
     path('callback/', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback'),
     path('callback', views.ContentFactoryCallbackView.as_view(), name='content_factory_callback_no_slash'),

@@ -117,6 +117,12 @@ class OrganizationContentConfig(models.Model):
     organization = models.OneToOneField(
         Organization, on_delete=models.CASCADE, related_name='content_config'
     )
+    default_timezone = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Default IANA timezone for scheduled content suggestions when a user timezone is unavailable",
+    )
     article_template = models.TextField(blank=True, null=True)
     design_guide = models.TextField(blank=True, null=True)
     resource_prompt = models.TextField(blank=True, null=True)
@@ -288,6 +294,7 @@ class ContentFactoryJob(models.Model):
         ('awaiting_approval', 'Awaiting Approval'),
         ('generating', 'Generating'),
         ('confirmed', 'Confirmed'),
+        ('cancelled', 'Cancelled'),
         ('completed', 'Completed'),
         ('error', 'Error'),
         ('auth_required', 'Auth Required'),
@@ -338,6 +345,57 @@ class ContentFactoryJob(models.Model):
 
     def __str__(self):
         return f"{self.job_id} ({self.status}) - {self.domain}"
+
+
+class ScheduledDiscoveryDispatchState(models.TextChoices):
+    QUEUED = "queued", "Queued"
+    TOPIC_SELECTION_SENT = "topic_selection_sent", "Topic Selection Sent"
+    CONFIRMED = "confirmed", "Confirmed"
+    CANCELLED = "cancelled", "Cancelled"
+    FAILED = "failed", "Failed"
+    FAILED_TIMEOUT = "failed_timeout", "Failed Timeout"
+
+
+class ScheduledDiscoveryDispatch(models.Model):
+    """
+    Tracks one scheduled daily discovery attempt per user/domain/local date.
+    """
+
+    slack_user_id = models.CharField(max_length=50, db_index=True)
+    domain = models.CharField(max_length=255, db_index=True)
+    timezone = models.CharField(max_length=64, default="Australia/Melbourne")
+    local_date = models.DateField(db_index=True)
+    trigger_source = models.CharField(max_length=50, default="daily_scheduler", db_index=True)
+    state = models.CharField(
+        max_length=30,
+        choices=ScheduledDiscoveryDispatchState.choices,
+        default=ScheduledDiscoveryDispatchState.QUEUED,
+        db_index=True,
+    )
+    content_factory_job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    last_error = models.TextField(blank=True, default="")
+    slack_channel_id = models.CharField(max_length=100, blank=True, default="")
+    slack_message_ts = models.CharField(max_length=50, blank=True, default="")
+    slack_thread_ts = models.CharField(max_length=50, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "scheduled_discovery_dispatch"
+        ordering = ["-local_date", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["slack_user_id", "domain", "local_date", "trigger_source"],
+                name="scheduled_discovery_dispatch_unique_target_day",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["state", "updated_at"], name="sched_disc_state_updated_idx"),
+            models.Index(fields=["domain", "slack_user_id", "state"], name="sched_disc_target_state_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.domain}/{self.slack_user_id}/{self.local_date} ({self.state})"
 
 
 # =============================================================================

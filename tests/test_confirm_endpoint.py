@@ -3,10 +3,16 @@ import uuid
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryJob, User
+from core.models import (
+    ContentFactoryJob,
+    ScheduledDiscoveryDispatch,
+    ScheduledDiscoveryDispatchState,
+    User,
+)
 from roo.models import Ledger
 
 
@@ -141,3 +147,59 @@ class ContentJobConfirmTest(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("integrations.services.article_generation.confirm_topic")
+    def test_confirm_allows_deferred_scheduled_job_and_marks_dispatch_confirmed(self, mock_confirm_topic):
+        mock_confirm_topic.return_value = {"job_id": "child-job-789", "status": "queued"}
+        self.job.billing_status = "deferred"
+        self.job.request_meta = {"trigger_source": "scheduled_daily"}
+        self.job.save(update_fields=["billing_status", "request_meta"])
+        dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="example.com",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT,
+            content_factory_job_id=self.job_id,
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "slack_user_id": "U123",
+                "domain": "example.com",
+                "option_index": 0,
+                "request_source": "roo_slackbot",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dispatch.refresh_from_db()
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.CONFIRMED)
+        mock_confirm_topic.assert_called_once()
+
+    def test_cancel_marks_job_and_dispatch_cancelled(self):
+        dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="example.com",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT,
+            content_factory_job_id=self.job_id,
+        )
+
+        response = self.client.post(
+            f"/api/v1/content/jobs/{self.job_id}/cancel",
+            {
+                "slack_user_id": "U123",
+                "request_source": "roo_slackbot",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.job.refresh_from_db()
+        dispatch.refresh_from_db()
+        self.assertEqual(self.job.status, "cancelled")
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.CANCELLED)

@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from datetime import date as calendar_date
 from urllib.parse import urlparse
 from django.db import OperationalError, connection, transaction
 from django.contrib.auth import get_user_model
@@ -846,6 +847,7 @@ class ContentFactoryOrgConfigView(APIView):
             'domain': org.domain,
             'competitors': org.competitors,
             'seed_keywords': org.seed_keywords,
+            'default_timezone': config.default_timezone if config else "",
             'article_template': config.article_template if config else None,
             'design_guide': config.design_guide if config else None,
             'resource_prompt': config.resource_prompt if config else None,
@@ -916,6 +918,7 @@ class ContentFactoryOrgConfigView(APIView):
         # Only include fields that are present in the request data
         defaults = {}
         target_fields = [
+            'default_timezone',
             'article_template',
             'design_guide',
             'resource_prompt',
@@ -1496,6 +1499,49 @@ class ContentFactoryGitHubStatusView(APIView):
             response_data['expires_at'] = config.github_token_expires_at.isoformat()
 
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+class ScheduledDiscoveryReplayView(APIView):
+    """
+    Force a scheduled discovery enqueue for a specific user/domain/date.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from integrations.services.daily_discovery import enqueue_scheduled_discovery
+
+        domain = request.data.get("domain")
+        slack_user_id = request.data.get("slack_user_id")
+        local_date_raw = request.data.get("local_date")
+        force = bool(request.data.get("force"))
+
+        if not domain or not slack_user_id:
+            return Response(
+                {"error": "domain and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        local_date = None
+        if local_date_raw:
+            try:
+                local_date = calendar_date.fromisoformat(str(local_date_raw))
+            except ValueError:
+                return Response(
+                    {"error": "local_date must use YYYY-MM-DD format"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        result = enqueue_scheduled_discovery(
+            slack_user_id=slack_user_id,
+            domain=domain,
+            local_date=local_date,
+            force=force,
+        )
+        result_status = str(result.get("status") or "").strip().lower()
+        http_status = status.HTTP_202_ACCEPTED if result_status == "queued" else status.HTTP_200_OK
+        return Response(result, status=http_status)
 
 
 class ContentFactoryOAuthInitiateView(APIView):
@@ -2606,6 +2652,10 @@ class ContentFactoryCallbackView(APIView):
             get_content_factory_article_cost_points,
             maybe_auto_refund_terminal_failure,
         )
+        from integrations.services.daily_discovery import (
+            is_scheduled_daily_job,
+            mark_scheduled_dispatch_failed,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -2633,6 +2683,7 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
+        scheduled_daily_job = is_scheduled_daily_job(job)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
@@ -2659,6 +2710,19 @@ class ContentFactoryCallbackView(APIView):
                 error_code=error_code,
                 error_message=error_message,
             )
+
+        mark_scheduled_dispatch_failed(
+            job_id=job_id,
+            error_message=f"[{error_code}] {error_message}",
+        )
+
+        if scheduled_daily_job:
+            return Response({
+                'status': 'received',
+                'message': 'Generation failed callback processed',
+                'job_id': job_id,
+                'scheduled_daily_suppressed': True,
+            }, status=status.HTTP_200_OK)
 
         if slack_user_id:
             try:
@@ -3056,6 +3120,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
         from .models import ContentFactoryJob, Organization
+        from integrations.services.daily_discovery import mark_scheduled_dispatch_topic_selection_sent
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -3088,6 +3153,12 @@ class ContentFactoryCallbackView(APIView):
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
         job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+        mark_scheduled_dispatch_topic_selection_sent(
+            job_id=job_id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+        )
         
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
         

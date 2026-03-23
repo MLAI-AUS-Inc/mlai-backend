@@ -10,6 +10,7 @@ from integrations.services.slack import SlackService
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 QUIET_RUN_THRESHOLD = timedelta(minutes=10)
+SCHEDULED_DAILY_TRIGGER_SOURCE = "scheduled_daily"
 
 MILESTONE_SUMMARIES = {
     "queued": "Preparing the run and loading context.",
@@ -49,7 +50,20 @@ def get_content_factory_article_cost_points(domain: str | None) -> int:
     return CONTENT_FACTORY_ARTICLE_COST_POINTS
 
 
-def build_content_factory_live_cost_text(domain: str | None) -> str:
+def build_content_factory_live_cost_text(job_or_domain) -> str:
+    if hasattr(job_or_domain, "domain"):
+        job = job_or_domain
+        domain = getattr(job, "domain", None)
+        request_meta = getattr(job, "request_meta", {}) or {}
+        if (
+            str(getattr(job, "billing_status", "") or "").strip() in {"", "deferred"}
+            and str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
+        ):
+            return "💳 This scheduled suggestion has not charged Roo points yet. Points will only be deducted if you confirm writing."
+    else:
+        job = None
+        domain = job_or_domain
+
     cost_points = get_content_factory_article_cost_points(domain)
     if cost_points == 0:
         normalized_domain = normalize_content_factory_domain(domain) or "this domain"
@@ -189,7 +203,7 @@ def build_live_card_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": build_content_factory_live_cost_text(job.domain),
+                    "text": build_content_factory_live_cost_text(job),
                 }
             ],
         },
