@@ -118,3 +118,43 @@ class HasRooApiKey(permissions.BasePermission):
             masked_key = api_key[:4] + "***" if len(api_key) > 4 else "***"
             logger.warning(f"HasRooApiKey: Invalid API Key received: {masked_key}. Allowed count: {len(allowed_keys)}")
             return False
+
+
+class HasStrictRooApiKey(permissions.BasePermission):
+    """
+    Allows access only when the provided API key matches ROO_API_KEY.
+    Rejects INTERNAL_API_KEY and MLAI_API_KEY even if they are otherwise valid.
+    """
+
+    def has_permission(self, request, view):
+        from django.conf import settings
+        import logging
+
+        logger = logging.getLogger(__name__)
+        api_key = request.META.get('HTTP_X_API_KEY')
+
+        if not api_key:
+            auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+            if auth_header.startswith('Api-Key '):
+                api_key = auth_header.split('Api-Key ')[1].strip()
+
+        allowed_keys = [
+            getattr(settings, 'ROO_API_KEY', None),
+            os.environ.get('ROO_API_KEY'),
+        ]
+        allowed_keys = list({key for key in allowed_keys if key})
+
+        if not api_key:
+            logger.warning("HasStrictRooApiKey: No HTTP_X_API_KEY or Authorization: Api-Key header found.")
+            return False
+
+        if not allowed_keys:
+            logger.error("HasStrictRooApiKey: No ROO_API_KEY configured on backend.")
+            return False
+
+        if api_key in allowed_keys:
+            return True
+
+        masked_key = api_key[:4] + "***" if len(api_key) > 4 else "***"
+        logger.warning("HasStrictRooApiKey: Invalid Roo API key received: %s", masked_key)
+        return False

@@ -192,6 +192,7 @@ class Ledger(models.Model):
         ('COWORKING', 'Coworking'),
         ('EVENT', 'Event'),
         ('MERCH', 'Merch'),
+        ('CONTENT_FACTORY', 'Content Factory'),
         ('TOOLS', 'Tools'),
         ('DONATION', 'Donation'),
         ('MANUAL', 'Manual'),
