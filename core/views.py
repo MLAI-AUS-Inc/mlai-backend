@@ -2594,10 +2594,14 @@ class ContentFactoryCallbackView(APIView):
                         f"If this keeps happening, please contact support."
                     )
                 if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'}:
-                    message += (
-                        "\n\nIf this run failed and you want your 6 Roo points back, "
-                        "message Dr Sam on Slack."
-                    )
+                    from integrations.services.article_generation import get_content_factory_article_cost_points
+
+                    refund_points = get_content_factory_article_cost_points(domain)
+                    if refund_points > 0:
+                        message += (
+                            f"\n\nIf this run failed and you want your {refund_points} Roo points back, "
+                            "message Dr Sam on Slack."
+                        )
                 # Reply in-thread if we have context, fall back to DM
                 if channel_id and thread_ts:
                     SlackService.send_message(channel_id, message, thread_ts=thread_ts)
@@ -3174,14 +3178,26 @@ class ContentFactoryCallbackView(APIView):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": (
-                                "You can try again by requesting a new article.\n\n"
-                                "If this run failed and you want your 6 Roo points back, "
-                                "message Dr Sam on Slack."
-                            )
+                            "text": "You can try again by requesting a new article."
                         }
                     }
                 ]
+                from integrations.services.article_generation import get_content_factory_article_cost_points
+
+                refund_points = get_content_factory_article_cost_points(domain)
+                if refund_points > 0:
+                    blocks.append(
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"If this run failed and you want your {refund_points} Roo points back, "
+                                    "message Dr Sam on Slack."
+                                )
+                            },
+                        }
+                    )
                 self._send_job_message(
                     job=job,
                     data=data,

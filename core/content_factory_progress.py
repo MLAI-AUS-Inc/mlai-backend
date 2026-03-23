@@ -8,10 +8,11 @@ from django.utils import timezone
 from integrations.services.slack import SlackService
 
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 QUIET_RUN_THRESHOLD = timedelta(minutes=10)
 
 MILESTONE_SUMMARIES = {
-    "queued": "Preparing the paid run and loading context.",
+    "queued": "Preparing the run and loading context.",
     "research_started": "Researching candidate topics.",
     "candidate_pool_ready": "Shortlisting the strongest opportunities.",
     "awaiting_confirmation": "Research complete. Waiting for your topic choice.",
@@ -20,6 +21,44 @@ MILESTONE_SUMMARIES = {
     "finishing_pass": "Running final checks and packaging delivery.",
     "completed": "Run complete.",
 }
+
+
+def normalize_content_factory_domain(domain: str | None) -> str:
+    if not domain:
+        return ""
+
+    normalized = domain.strip().lower()
+    if normalized.startswith("https://"):
+        normalized = normalized[8:]
+    elif normalized.startswith("http://"):
+        normalized = normalized[7:]
+
+    if normalized.startswith("www."):
+        normalized = normalized[4:]
+
+    if "/" in normalized:
+        normalized = normalized.split("/", 1)[0]
+
+    return normalized
+
+
+def get_content_factory_article_cost_points(domain: str | None) -> int:
+    normalized_domain = normalize_content_factory_domain(domain)
+    if normalized_domain in FREE_CONTENT_FACTORY_DOMAINS:
+        return 0
+    return CONTENT_FACTORY_ARTICLE_COST_POINTS
+
+
+def build_content_factory_live_cost_text(domain: str | None) -> str:
+    cost_points = get_content_factory_article_cost_points(domain)
+    if cost_points == 0:
+        normalized_domain = normalize_content_factory_domain(domain) or "this domain"
+        return f"💳 Articles for {normalized_domain} are free. No Roo points will be deducted for this run."
+
+    return (
+        f"💳 This paid run costs {cost_points} Roo points. "
+        "They were deducted when the run started."
+    )
 
 
 def resolve_job_thread_context(job, data=None):
@@ -150,10 +189,7 @@ def build_live_card_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": (
-                        f"💳 This paid run costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points. "
-                        "They were deducted when the run started."
-                    ),
+                    "text": build_content_factory_live_cost_text(job.domain),
                 }
             ],
         },

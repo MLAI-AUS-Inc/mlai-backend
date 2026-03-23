@@ -1138,7 +1138,7 @@ class TopicConfirmTests(TestCase):
         }
 
         job.billing_status = "charged"
-        job.billing_amount = 6
+        job.billing_amount = 0
         job.billing_source_job_id = "job-index"
         job.save(update_fields=["billing_status", "billing_amount", "billing_source_job_id"])
 

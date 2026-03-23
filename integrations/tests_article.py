@@ -110,10 +110,10 @@ class ArticleGenerationServiceTest(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job_123")
         self.assertEqual(job.client_request_id, "content-factory-service-request")
         self.assertEqual(job.billing_status, "charged")
-        self.assertEqual(job.billing_amount, 6)
+        self.assertEqual(job.billing_amount, 0)
         self.assertEqual(job.billing_source_job_id, "job_123")
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 14)
+        self.assertEqual(self.user.points_account.balance, 20)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
@@ -274,7 +274,7 @@ class ArticleGenerationServiceTest(TestCase):
             status="awaiting_confirmation",
             client_request_id="content-factory-service-request",
             billing_source_job_id="existing-job-123",
-            billing_amount=6,
+            billing_amount=0,
             billing_status="charged",
             request_meta={"domain": "mlai.au"},
         )

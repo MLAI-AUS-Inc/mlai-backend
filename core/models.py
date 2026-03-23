@@ -411,8 +411,8 @@ class ContentFactoryRun(models.Model):
         db_table = "content_factory_run"
         ordering = ["-updated_at"]
         indexes = [
-            models.Index(fields=["workflow", "status"]),
-            models.Index(fields=["domain", "status"]),
+            models.Index(fields=["workflow", "status"], name="cf_run_workflow_status_idx"),
+            models.Index(fields=["domain", "status"], name="cf_run_domain_status_idx"),
         ]
 
     def __str__(self):
@@ -451,8 +451,8 @@ class ContentFactoryRunStep(models.Model):
         unique_together = ["run", "step_key"]
         ordering = ["display_order", "id"]
         indexes = [
-            models.Index(fields=["run", "display_order"]),
-            models.Index(fields=["run", "status"]),
+            models.Index(fields=["run", "display_order"], name="cf_step_run_order_idx"),
+            models.Index(fields=["run", "status"], name="cf_step_run_status_idx"),
         ]
 
     def __str__(self):
@@ -676,7 +676,7 @@ class ResearchedKeyword(models.Model):
             models.Index(fields=['organization', 'tier']),
             models.Index(fields=['organization', 'opportunity_index']),
             models.Index(fields=['organization', 'status', 'opportunity_index']),
-            models.Index(fields=['organization', 'cooldown_until']),
+            models.Index(fields=['organization', 'cooldown_until'], name='seo_kw_org_cooldown_idx'),
         ]
 
     def save(self, *args, **kwargs):

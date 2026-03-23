@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 
 # Configuration
@@ -11,11 +11,13 @@ echo "🚀 Deploying to $DROPLET_IP..."
 
 # 1. Sync files to the server
 echo "📦 Syncing files..."
-rsync -avz --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . $USER@$DROPLET_IP:$PROJECT_DIR
+rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . $USER@$DROPLET_IP:$PROJECT_DIR
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
 ssh $USER@$DROPLET_IP << EOF
+    set -euo pipefail
+
     # Install Docker if not exists
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -37,13 +39,61 @@ ssh $USER@$DROPLET_IP << EOF
     sed -i 's|CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://mlai.au,https://www.mlai.au|' .env
     sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://api.mlai.au|' .env
 
-    # Build and start containers
-    echo "🐳 Starting containers..."
-    docker compose up -d --build
-    
-    # Run migrations
+    migration_applied() {
+        local app_label="\$1"
+        local migration_name="\$2"
+        docker compose run --rm --no-deps web python manage.py shell -c "
+from django.db.migrations.recorder import MigrationRecorder
+from django.db import connections
+recorder = MigrationRecorder(connections['default'])
+print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migration_name}').exists() else 'no')
+" | tail -n 1
+    }
+
+    inspect_stale_migration() {
+        local app_label="\$1"
+        local migration_name="\$2"
+        local file_path="\$3"
+        local applied
+
+        applied=\$(migration_applied "\$app_label" "\$migration_name")
+        if [ -f "\$file_path" ] && [ "\$applied" != "yes" ]; then
+            echo "🧹 Removing stale unapplied migration \$app_label.\$migration_name (\$file_path)"
+            rm -f "\$file_path"
+            return
+        fi
+
+        if [ ! -f "\$file_path" ] && [ "\$applied" = "yes" ]; then
+            echo "❌ Migration \$app_label.\$migration_name is applied in the database but the file is missing on disk."
+            echo "   Restore the migration file before redeploying so Django sees a consistent graph."
+            exit 1
+        fi
+    }
+
+    echo "🐘 Starting database..."
+    docker compose up -d db
+
+    echo "🏗️ Building web image..."
+    docker compose build web
+
+    echo "🔍 Inspecting for stale generated migrations..."
+    inspect_stale_migration \
+        core \
+        0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more \
+        core/migrations/0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more.py
+    inspect_stale_migration \
+        roo \
+        0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more \
+        roo/migrations/0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more.py
+
+    echo "🗺️ Migration plan..."
+    docker compose run --rm --no-deps web python manage.py migrate --plan
+
     echo "🗄️ Running migrations..."
-    docker compose run --rm web python manage.py migrate
+    docker compose run --rm --no-deps web python manage.py migrate --noinput
+
+    echo "🌐 Starting web service..."
+    docker compose up -d web
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"
