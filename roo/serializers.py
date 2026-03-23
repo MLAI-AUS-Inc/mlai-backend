@@ -3,6 +3,7 @@ from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
+    PointsRequest,
 )
 
 
@@ -141,6 +142,38 @@ class RewardRedemptionSerializer(serializers.ModelSerializer):
         return obj.reward.cost_points * obj.quantity
 
 
+class PointsRequestSerializer(serializers.ModelSerializer):
+    ledger_entry_id = serializers.IntegerField(read_only=True, allow_null=True)
+
+    class Meta:
+        model = PointsRequest
+        fields = [
+            'id',
+            'requester_slack_id',
+            'target_slack_id',
+            'points',
+            'reason',
+            'status',
+            'approved_by_slack_id',
+            'approved_at',
+            'ledger_entry_id',
+            'slack_channel_id',
+            'slack_thread_ts',
+            'slack_summary_message_ts',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'status',
+            'approved_by_slack_id',
+            'approved_at',
+            'ledger_entry_id',
+            'created_at',
+            'updated_at',
+        ]
+
+
 class PointsBalanceSerializer(serializers.Serializer):
     """Legacy serializer for backwards compatibility."""
     slack_user_id = serializers.CharField()
@@ -167,4 +200,3 @@ class QuestProgressInputSerializer(serializers.Serializer):
 class QuestCompleteInputSerializer(serializers.Serializer):
     slack_user_id = serializers.CharField(max_length=50)
     quest_id = serializers.CharField(max_length=50)
-

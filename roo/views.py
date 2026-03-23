@@ -1,3 +1,5 @@
+import time
+
 from rest_framework import viewsets, status, mixins
 from rest_framework.permissions import AllowAny
 # Removed mixins as they are not used in new code usually, but kept if needed for legacy.
@@ -10,11 +12,12 @@ from django.utils import timezone
 from django.db.models import Sum
 from django.conf import settings
 from datetime import date, timedelta
+from typing import Optional, Tuple
 
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest
 )
 
 from .services import PointsService, CoworkingService, TaskService, RewardsService
@@ -30,11 +33,11 @@ from integrations.services import SlackService
 
 # Additional imports for Activity & Quests
 import logging
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate,
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest,
     # Activity & Quests
     ChannelFirstPost, QuestProgress
 )
@@ -43,12 +46,85 @@ from .serializers import (
     PointsAccountSerializer, PointsBalanceSerializer, TaskSubmissionSerializer,
     CoworkingBookingSerializer, CoworkingAvailabilitySerializer,
     CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer,
-    TaskTemplateSerializer,
+    TaskTemplateSerializer, PointsRequestSerializer,
     # Quests
     QuestProgressSerializer, QuestProgressInputSerializer, QuestCompleteInputSerializer
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
+    """Resolve a Slack user to a local user, creating a placeholder when needed."""
+    if not slack_user_id:
+        raise ValueError('target_slack_id is required')
+
+    slack_user_id = slack_user_id.strip()
+    user = PointsService.get_user_by_slack_id(slack_user_id)
+    if user:
+        return user
+
+    profile = SlackService.get_user_profile(slack_user_id)
+    if profile:
+        email = profile.get('email') or f"{slack_user_id}@slack.placeholder.com"
+        real_name = profile.get('real_name', 'Unknown')
+
+        existing_user = User.objects.filter(email=email).first()
+        if existing_user:
+            if not existing_user.slack_id:
+                existing_user.slack_id = slack_user_id
+                existing_user.save(update_fields=['slack_id'])
+                return existing_user
+            if existing_user.slack_id == slack_user_id:
+                return existing_user
+            email = f"{slack_user_id}@slack.placeholder.com"
+
+        return User.objects.create(
+            email=email,
+            slack_id=slack_user_id,
+            first_name=real_name.split()[0],
+            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+            avatar_url=profile.get('image_url'),
+            role='participant',
+        )
+
+    return User.objects.create(
+        email=f"{slack_user_id}@slack.placeholder.com",
+        slack_id=slack_user_id,
+        first_name="Unknown Slack User",
+        role='participant',
+    )
+
+
+def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple[bool, Optional[int]]:
+    """Create the first-post marker and award the intro bonus atomically."""
+    with transaction.atomic():
+        _, created = ChannelFirstPost.objects.get_or_create(
+            slack_user_id=slack_user_id,
+            channel_id=channel_id,
+        )
+        if not created:
+            return False, None
+
+        user = get_or_create_user_for_slack_id(slack_user_id)
+        _, awarded = PointsService.award(
+            user=user,
+            delta=2,
+            source='EVENT',
+            description='Completed quest: First Contact',
+            created_by_slack_id='SYSTEM',
+            idempotency_key=f"first_post_award:{slack_user_id}:{channel_id}",
+            reference_type='FIRST_CHANNEL_POST',
+            reference_id=f"{slack_user_id}:{channel_id}",
+        )
+        balance = PointsService.get_balance(user)
+        return awarded, balance['balance']
+
+
+def is_retryable_sqlite_lock(exc: Exception) -> bool:
+    """Return whether a DB error is a transient SQLite lock."""
+    message = str(exc).lower()
+    return connection.vendor == 'sqlite' and 'locked' in message
 
 
 class RateCardView(viewsets.ReadOnlyModelViewSet):
@@ -894,6 +970,150 @@ class RewardsViewSet(viewsets.ViewSet):
         return Response(RewardRedemptionSerializer(redemptions, many=True).data)
 
 
+class PointsRequestViewSet(viewsets.ViewSet):
+    """Slack-driven pending points requests that admins can approve later."""
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def create(self, request):
+        requester_slack_id = (request.data.get('requester_slack_id') or '').strip()
+        target_slack_id = (request.data.get('target_slack_id') or '').strip()
+        reason = (request.data.get('reason') or '').strip()
+        points = request.data.get('points')
+
+        if not requester_slack_id or not target_slack_id or points is None or not reason:
+            return Response(
+                {'error': 'requester_slack_id, target_slack_id, points and reason are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            points = int(points)
+        except (TypeError, ValueError):
+            return Response({'error': 'Points must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if points <= 0:
+            return Response({'error': 'Points must be a positive integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        points_request = PointsRequest.objects.create(
+            requester_slack_id=requester_slack_id,
+            target_slack_id=target_slack_id,
+            points=points,
+            reason=reason,
+            slack_channel_id=request.data.get('slack_channel_id'),
+            slack_thread_ts=request.data.get('slack_thread_ts'),
+        )
+        return Response(PointsRequestSerializer(points_request).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch'], url_path='slack-summary')
+    def attach_slack_summary(self, request, pk=None):
+        try:
+            points_request = PointsRequest.objects.get(pk=pk)
+        except PointsRequest.DoesNotExist:
+            return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        slack_channel_id = (request.data.get('slack_channel_id') or '').strip()
+        slack_summary_message_ts = (request.data.get('slack_summary_message_ts') or '').strip()
+
+        if not slack_channel_id or not slack_summary_message_ts:
+            return Response(
+                {'error': 'slack_channel_id and slack_summary_message_ts are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        points_request.slack_channel_id = slack_channel_id
+        points_request.slack_thread_ts = request.data.get('slack_thread_ts') or points_request.slack_thread_ts
+        points_request.slack_summary_message_ts = slack_summary_message_ts
+        points_request.save(
+            update_fields=[
+                'slack_channel_id',
+                'slack_thread_ts',
+                'slack_summary_message_ts',
+                'updated_at',
+            ]
+        )
+        return Response(PointsRequestSerializer(points_request).data)
+
+    @action(detail=False, methods=['get'], url_path='by-slack-message')
+    def by_slack_message(self, request):
+        slack_channel_id = (request.query_params.get('slack_channel_id') or '').strip()
+        slack_message_ts = (request.query_params.get('slack_message_ts') or '').strip()
+
+        if not slack_channel_id or not slack_message_ts:
+            return Response(
+                {'error': 'slack_channel_id and slack_message_ts are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        points_request = PointsRequest.objects.filter(
+            slack_channel_id=slack_channel_id,
+            slack_summary_message_ts=slack_message_ts,
+        ).first()
+        if not points_request:
+            return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(PointsRequestSerializer(points_request).data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        admin_slack_id = (request.data.get('admin_slack_id') or '').strip()
+        if not admin_slack_id:
+            return Response({'error': 'admin_slack_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not is_points_admin(admin_slack_id):
+            return Response({'error': 'Not a points admin'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            with transaction.atomic():
+                points_request = PointsRequest.objects.select_for_update().get(pk=pk)
+                if points_request.status != 'pending':
+                    return Response(
+                        {'error': f'Points request is already {points_request.status}'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                user = get_or_create_user_for_slack_id(points_request.target_slack_id)
+                ledger, _ = PointsService.award(
+                    user=user,
+                    delta=points_request.points,
+                    source='MANUAL',
+                    description=points_request.reason,
+                    created_by_slack_id=admin_slack_id,
+                    idempotency_key=f"points_request:{points_request.id}:approve",
+                    reference_type='POINTS_REQUEST',
+                    reference_id=str(points_request.id),
+                )
+
+                points_request.status = 'approved'
+                points_request.approved_by_slack_id = admin_slack_id
+                points_request.approved_at = timezone.now()
+                points_request.ledger_entry = ledger
+                points_request.save(
+                    update_fields=[
+                        'status',
+                        'approved_by_slack_id',
+                        'approved_at',
+                        'ledger_entry',
+                        'updated_at',
+                    ]
+                )
+        except PointsRequest.DoesNotExist:
+            return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Failed to approve points request %s", pk)
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        balance = PointsService.get_balance(user)
+        return Response(
+            {
+                **PointsRequestSerializer(points_request).data,
+                'points_awarded': ledger.delta,
+                'new_balance': balance['balance'],
+            }
+        )
+
+
 class ManualAwardView(APIView):
     """
     Admin: Manual points award/deduct.
@@ -946,54 +1166,7 @@ class ManualAwardView(APIView):
             )
 
         # 2. User Lookup & Auto-Creation
-        user = PointsService.get_user_by_slack_id(target_slack_id)
-        if not user:
-            # Attempt to fetch from Slack
-            profile = SlackService.get_user_profile(target_slack_id)
-            
-            if profile:
-                # Create user from Slack profile
-                email = profile.get('email')
-                real_name = profile.get('real_name', 'Unknown')
-                
-                # Handle email collisions or missing email
-                if not email:
-                    email = f"{target_slack_id}@slack.placeholder.com"
-                
-                # Check if email already exists (e.g. linked to another slack ID or no slack ID)
-                if User.objects.filter(email=email).exists():
-                    user = User.objects.get(email=email)
-                    if not user.slack_id:
-                        user.slack_id = target_slack_id
-                        user.save()
-                    elif user.slack_id != target_slack_id:
-                         # Edge case: Email collision with different Slack ID
-                         # Fallback to stub email
-                         email = f"{target_slack_id}@slack.placeholder.com"
-                         user = User.objects.create(
-                            email=email,
-                            slack_id=target_slack_id,
-                            first_name=real_name.split()[0],
-                            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
-                            role='participant'
-                        )
-                else:
-                    user = User.objects.create(
-                        email=email,
-                        slack_id=target_slack_id,
-                        first_name=real_name.split()[0],
-                        last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
-                        avatar_url=profile.get('image_url'),
-                        role='participant'
-                    )
-            else:
-                # Fallback: Create stub user
-                user = User.objects.create(
-                    email=f"{target_slack_id}@slack.placeholder.com",
-                    slack_id=target_slack_id,
-                    first_name="Unknown Slack User",
-                    role='participant'
-                )
+        user = get_or_create_user_for_slack_id(target_slack_id)
 
         # 3. Transaction Execution
         idempotency_key = f"manual:{admin_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
@@ -1111,6 +1284,51 @@ class ChannelActivityView(APIView):
             "status": "recorded", 
             "points_awarded": points_awarded
         }, status=status.HTTP_201_CREATED)
+
+
+class FirstChannelPostAwardView(APIView):
+    """Idempotently award the intro bonus for a first top-level channel post."""
+    authentication_classes = []
+    permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def post(self, request):
+        slack_user_id = (request.data.get('slack_user_id') or '').strip()
+        channel_id = (request.data.get('channel_id') or '').strip()
+
+        if not slack_user_id or not channel_id:
+            return Response(
+                {'error': 'slack_user_id and channel_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        max_attempts = 3 if connection.vendor == 'sqlite' else 1
+        for attempt in range(max_attempts):
+            try:
+                awarded, new_balance = award_first_channel_post_bonus(slack_user_id, channel_id)
+                break
+            except ValueError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except OperationalError as exc:
+                if not is_retryable_sqlite_lock(exc) or attempt == max_attempts - 1:
+                    logger.exception(
+                        "Failed to award first channel post bonus for %s in %s",
+                        slack_user_id,
+                        channel_id,
+                    )
+                    return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                time.sleep(0.05 * (attempt + 1))
+            except Exception as exc:
+                logger.exception(
+                    "Failed to award first channel post bonus for %s in %s",
+                    slack_user_id,
+                    channel_id,
+                )
+                return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        response_data = {'awarded': awarded}
+        if awarded and new_balance is not None:
+            response_data['new_balance'] = new_balance
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 # ============================================================

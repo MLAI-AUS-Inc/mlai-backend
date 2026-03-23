@@ -251,6 +251,7 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "slack_channel_id": "C123",
                 "slack_thread_ts": "123.456",
                 "slack_root_message_ts": "123.456",
+                "progress_message_ts": None,
                 "request_source": "roo_slackbot",
                 "client_request_id": "content-factory-test-request",
                 "user_email": self.user_email,
@@ -425,6 +426,7 @@ class ContentFactoryCallbackTests(TestCase):
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_topic_selection_callback_posts_to_thread_when_context_exists(self, mock_send_dm, mock_send_message):
+        mock_send_message.return_value = (True, "live-topic-card")
         ContentFactoryJob.objects.create(
             job_id="job-topic-thread",
             domain="mlai.au",
@@ -454,9 +456,15 @@ class ContentFactoryCallbackTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
+        self.assertIn(
+            "Research complete. Choose one of the topic options below to continue.",
+            mock_send_message.call_args_list[0][1]["blocks"][0]["text"]["text"],
+        )
+        self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
         mock_send_dm.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_dm')
@@ -701,6 +709,7 @@ class ContentFactoryCallbackTests(TestCase):
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-progress-card")
         ContentFactoryJob.objects.create(
             job_id="job-progress",
             domain="mlai.au",
@@ -732,13 +741,21 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.last_progress_milestone_index, 1)
         mock_send_message.assert_called_once()
         self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertIn("Research locked", mock_send_message.call_args[0][1])
+        self.assertIn(
+            "Research complete. Sources are gathered and the outline is locked.",
+            mock_send_message.call_args[0][1],
+        )
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
         blocks = mock_send_message.call_args[1]["blocks"]
-        self.assertEqual(blocks[0]["text"]["text"], "*Research locked*\nResearch complete. Sources are gathered and the outline is locked.")
+        self.assertIn("Content Factory for mlai.au", blocks[0]["text"]["text"])
+        self.assertIn(
+            "Research complete. Sources are gathered and the outline is locked.",
+            blocks[0]["text"]["text"],
+        )
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-discovery-card")
         ContentFactoryJob.objects.create(
             job_id="job-discovery-progress",
             domain="mlai.au",
@@ -772,8 +789,15 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.last_progress_milestone_index, 1)
         mock_send_message.assert_called_once()
         self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertIn("Research started", mock_send_message.call_args[0][1])
+        self.assertIn(
+            "Research started. Context, competitors, and prior topic history are loaded.",
+            mock_send_message.call_args[0][1],
+        )
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertIn(
+            "Research started. Context, competitors, and prior topic history are loaded.",
+            mock_send_message.call_args[1]["blocks"][0]["text"]["text"],
+        )
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_dedupes_progress_id(self, mock_send_message):
@@ -951,6 +975,7 @@ class ContentFactoryCallbackTests(TestCase):
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_content_ready_callback_uses_root_message_ts_as_thread_fallback(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-content-card")
         ContentFactoryJob.objects.create(
             job_id="job-content-threaded",
             domain="mlai.au",
@@ -975,12 +1000,19 @@ class ContentFactoryCallbackTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
+        self.assertIn(
+            "Article content is ready.",
+            mock_send_message.call_args_list[0][1]["blocks"][0]["text"]["text"],
+        )
+        self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_publish_bundle_ready_callback_posts_thread_reply(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-bundle-card")
         ContentFactoryJob.objects.create(
             job_id="job-bundle-ready",
             domain="mlai.au",
@@ -1008,9 +1040,15 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-bundle-ready")
         self.assertEqual(job.status, "completed")
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
+        self.assertIn(
+            "Publish bundle is ready.",
+            mock_send_message.call_args_list[0][1]["blocks"][0]["text"]["text"],
+        )
+        self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
+        self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
 
 
 class TopicConfirmTests(TestCase):
@@ -1073,6 +1111,7 @@ class TopicConfirmTests(TestCase):
             slack_channel_id=None,
             slack_thread_ts=None,
             slack_root_message_ts=None,
+            progress_message_ts=None,
             request_source="roo_slackbot",
         )
 
