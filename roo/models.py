@@ -417,8 +417,8 @@ class PointsRequest(models.Model):
         verbose_name_plural = "Points Requests"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['status', 'created_at']),
-            models.Index(fields=['slack_channel_id', 'slack_summary_message_ts']),
+            models.Index(fields=['status', 'created_at'], name='roo_pointsr_status_8f1eab_idx'),
+            models.Index(fields=['slack_channel_id', 'slack_summary_message_ts'], name='roo_pointsr_slack_c7c99b_idx'),
         ]
 
     def __str__(self):

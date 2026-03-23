@@ -23,6 +23,7 @@ FAILURE_RUN_STATUSES = {"failed", "error", "blocked", "blocked_verification", "d
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
 CONTENT_FACTORY_BILLING_STATUS_CHARGED = "charged"
 CONTENT_FACTORY_BILLING_STATUS_REUSED = "reused"
@@ -86,9 +87,24 @@ def _raise_article_system_action_required(
     )
 
 
-def _append_refund_instruction(message: str) -> str:
+def get_content_factory_article_cost_points(domain: Optional[str]) -> int:
+    normalized_domain = normalize_domain(domain or "")
+    if normalized_domain in FREE_CONTENT_FACTORY_DOMAINS:
+        return 0
+    return CONTENT_FACTORY_ARTICLE_COST_POINTS
+
+
+def is_free_content_factory_domain(domain: Optional[str]) -> bool:
+    return get_content_factory_article_cost_points(domain) == 0
+
+
+def _append_refund_instruction(message: str, domain: Optional[str]) -> str:
+    cost_points = get_content_factory_article_cost_points(domain)
+    if cost_points == 0:
+        return message
+
     refund_line = (
-        f"If this run failed and you want your {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points back, "
+        f"If this run failed and you want your {cost_points} Roo points back, "
         "message Dr Sam on Slack."
     )
     if refund_line in message:
@@ -173,6 +189,7 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
+    cost_points = get_content_factory_article_cost_points(resolved_domain)
     existing_refunded = (
         ContentFactoryJob.objects.filter(
             client_request_id=client_request_id,
@@ -187,10 +204,13 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
         )
 
     user = _ensure_content_factory_user(slack_user_id, article_request)
+    if cost_points == 0:
+        return user, None, 0
+
     try:
         ledger, _ = PointsService.spend(
             user=user,
-            delta=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+            delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
             description=_build_content_factory_charge_description(resolved_domain, article_request),
             created_by_slack_id=slack_user_id,
@@ -200,10 +220,10 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
         )
     except InsufficientBalanceError:
         raise ArticleGenerationError(
-            f"Creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points, and this user does not have enough."
+            f"Creating an article costs {cost_points} Roo points, and this user does not have enough."
         )
 
-    return user, ledger
+    return user, ledger, cost_points
 
 
 def _refund_content_factory_request(
@@ -218,9 +238,13 @@ def _refund_content_factory_request(
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
+    cost_points = get_content_factory_article_cost_points(resolved_domain)
+    if cost_points == 0:
+        return None
+
     ledger, _ = PointsService.refund(
         user=user,
-        delta=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+        delta=cost_points,
         source=CONTENT_FACTORY_LEDGER_SOURCE,
         description=f"Automatic refund for failed Content Factory start for {resolved_domain}: {reason}",
         created_by_slack_id=slack_user_id,
@@ -230,7 +254,7 @@ def _refund_content_factory_request(
     )
     ContentFactoryJob.objects.filter(client_request_id=client_request_id).update(
         billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
-        billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+        billing_amount=cost_points,
         billing_ledger_id=ledger.id,
     )
     return ledger
@@ -791,7 +815,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
         discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
-        charged_user, charge_ledger = _charge_content_factory_request(
+        charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
             slack_user_id,
             article_request,
             resolved_domain,
@@ -847,9 +871,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 default_status="queued",
                 client_request_id=client_request_id,
                 billing_source_job_id=job_id,
-                billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+                billing_amount=charge_amount,
                 billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
-                billing_ledger_id=charge_ledger.id,
+                billing_ledger_id=charge_ledger.id if charge_ledger else None,
                 progress_message_ts=progress_message_ts,
                 last_progress_milestone_key="queued",
                 last_progress_updated_at=timezone.now(),
@@ -949,7 +973,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     masked_payload = payload.copy()
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
-    charged_user, charge_ledger = _charge_content_factory_request(
+    charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
         slack_user_id,
         article_request,
         resolved_domain,
@@ -988,9 +1012,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 default_status="queued",
                 client_request_id=client_request_id,
                 billing_source_job_id=job_id,
-                billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+                billing_amount=charge_amount,
                 billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
-                billing_ledger_id=charge_ledger.id,
+                billing_ledger_id=charge_ledger.id if charge_ledger else None,
                 progress_message_ts=progress_message_ts,
                 last_progress_milestone_key="queued",
                 last_progress_updated_at=timezone.now(),
@@ -1088,7 +1112,7 @@ def _handle_status_failure(job_id: str, result: dict):
                 oauth_url = build_github_oauth_url(job.domain, job.slack_user_id)
                 slack_text += f"\n\n<{oauth_url}|Connect GitHub for {job.domain}>"
 
-            slack_text = _append_refund_instruction(slack_text)
+            slack_text = _append_refund_instruction(slack_text, job.domain)
             SlackService.send_dm(job.slack_user_id, slack_text)
         except Exception as e:
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
