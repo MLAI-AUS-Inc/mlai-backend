@@ -20,6 +20,25 @@ services:
           - mlai-backend-web
     restart: unless-stopped
 
+  scheduler:
+    build: .
+    command: sh -c "while true; do python manage.py run_scheduled_discovery; sleep 300; done"
+    environment:
+      APP_ENV: local
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-scheduler
+    restart: unless-stopped
+
 networks:
   local-shared:
     name: mlai-local-shared

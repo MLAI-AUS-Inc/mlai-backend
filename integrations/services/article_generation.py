@@ -28,6 +28,12 @@ CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
 CONTENT_FACTORY_BILLING_STATUS_CHARGED = "charged"
 CONTENT_FACTORY_BILLING_STATUS_REUSED = "reused"
 CONTENT_FACTORY_BILLING_STATUS_REFUNDED = "refunded"
+CONTENT_FACTORY_BILLING_STATUS_DEFERRED = "deferred"
+SCHEDULED_DAILY_TRIGGER_SOURCE = "scheduled_daily"
+AUTO_REFUND_ERROR_CODES = {
+    "NO_OPPORTUNITIES",
+    "PUBLISH_TARGET_ACTION_REQUIRED",
+}
 
 
 class ArticleGenerationError(Exception):
@@ -112,6 +118,61 @@ def _append_refund_instruction(message: str, domain: Optional[str]) -> str:
     return f"{message}\n\n{refund_line}"
 
 
+def _append_auto_refund_message(message: str, refund_points: int) -> str:
+    if refund_points <= 0:
+        return message
+
+    refund_line = f"Your {refund_points} Roo points were refunded automatically."
+    if refund_line in message:
+        return message
+    return f"{message}\n\n{refund_line}"
+
+
+def _normalize_requested_delivery_mode(value: Optional[str]) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized not in VALID_ARTICLE_DELIVERY_MODES:
+        raise ArticleGenerationError(f"Unsupported delivery mode: {normalized}")
+    return normalized
+
+
+def _is_scheduled_daily_request(article_request: Optional[dict]) -> bool:
+    if not isinstance(article_request, dict):
+        return False
+    return str(article_request.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
+
+
+def _resolve_delivery_mode_confirmation(article_request: Optional[dict], *, requested_mode: Optional[str]) -> bool:
+    if not isinstance(article_request, dict):
+        return False
+
+    raw_confirmation = article_request.get("delivery_mode_confirmed")
+    if raw_confirmation is None:
+        return bool(requested_mode)
+    return bool(raw_confirmation)
+
+
+def resolve_article_delivery_mode(
+    *,
+    article_request: Optional[dict] = None,
+    article_system: Optional[dict] = None,
+) -> tuple[str, bool]:
+    requested_mode = _normalize_requested_delivery_mode(
+        article_request.get("delivery_mode") if isinstance(article_request, dict) else None
+    )
+    if requested_mode:
+        return requested_mode, _resolve_delivery_mode_confirmation(
+            article_request,
+            requested_mode=requested_mode,
+        )
+
+    if not article_system_ready(article_system or {}):
+        return "content_only", False
+
+    return get_default_article_delivery_mode(), False
+
+
 def _require_roo_request_source(article_request: dict) -> str:
     request_source = str(article_request.get("request_source") or "").strip()
     if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
@@ -129,6 +190,11 @@ def _get_client_request_id(article_request: dict) -> str:
 def _ensure_content_factory_user(slack_user_id: str, article_request: dict):
     from core.slack_users import ensure_slack_user
     from roo.services import PointsService
+
+    existing_user = PointsService.get_user_by_slack_id(slack_user_id)
+    if existing_user:
+        PointsService.get_or_create_account(existing_user)
+        return existing_user
 
     email = str(article_request.get("user_email") or "").strip().lower()
     if not email:
@@ -258,6 +324,166 @@ def _refund_content_factory_request(
         billing_ledger_id=ledger.id,
     )
     return ledger
+
+
+def _get_content_factory_user_for_job(job):
+    from django.contrib.auth import get_user_model
+
+    UserModel = get_user_model()
+    slack_user_id = str(getattr(job, "slack_user_id", "") or "").strip()
+    if slack_user_id:
+        user = UserModel.objects.filter(slack_id=slack_user_id).first()
+        if user:
+            return user
+
+    request_meta = getattr(job, "request_meta", {}) or {}
+    user_email = str(request_meta.get("user_email") or "").strip().lower()
+    if user_email:
+        return UserModel.objects.filter(email__iexact=user_email).first()
+
+    return None
+
+
+def maybe_auto_refund_terminal_failure(job, *, error_code: Optional[str], error_message: Optional[str]) -> tuple[bool, int]:
+    if not job:
+        return False, 0
+
+    resolved_error_code = str(error_code or "").strip().upper()
+    if resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+        return False, 0
+
+    client_request_id = str(getattr(job, "client_request_id", "") or "").strip()
+    if not client_request_id:
+        return False, 0
+
+    billed_job = job
+    if getattr(job, "billing_status", "") != CONTENT_FACTORY_BILLING_STATUS_CHARGED:
+        billed_job = _get_existing_billed_source_job(client_request_id)
+        if not billed_job:
+            return False, 0
+
+    if getattr(billed_job, "billing_status", "") != CONTENT_FACTORY_BILLING_STATUS_CHARGED:
+        return False, 0
+
+    user = _get_content_factory_user_for_job(billed_job)
+    if not user:
+        logger.warning(
+            "Unable to auto-refund Content Factory failure for %s: no user resolved",
+            client_request_id,
+        )
+        return False, 0
+
+    request_meta = dict(getattr(billed_job, "request_meta", {}) or {})
+    request_meta.setdefault("client_request_id", client_request_id)
+    resolved_domain = getattr(billed_job, "domain", "") or request_meta.get("domain")
+    refund_points = get_content_factory_article_cost_points(resolved_domain)
+    if refund_points <= 0:
+        return False, 0
+
+    refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
+    _refund_content_factory_request(
+        user=user,
+        slack_user_id=getattr(billed_job, "slack_user_id", "") or getattr(job, "slack_user_id", ""),
+        article_request=request_meta,
+        resolved_domain=resolved_domain,
+        reason=refund_reason,
+    )
+    return True, refund_points
+
+
+def _job_uses_deferred_billing(job) -> bool:
+    if not job:
+        return False
+    if getattr(job, "billing_status", "") not in {"", CONTENT_FACTORY_BILLING_STATUS_DEFERRED}:
+        return False
+    request_meta = getattr(job, "request_meta", {}) or {}
+    return _is_scheduled_daily_request(request_meta)
+
+
+def _charge_deferred_discovery_job_if_needed(
+    *,
+    source_job,
+    slack_user_id: str,
+    domain: str,
+    confirmed_keyword: str,
+    custom_title: Optional[str] = None,
+):
+    if not _job_uses_deferred_billing(source_job):
+        return source_job
+
+    request_meta = dict(getattr(source_job, "request_meta", {}) or {})
+    request_meta.setdefault("domain", normalize_domain(domain))
+    request_meta.setdefault("topic", custom_title or confirmed_keyword)
+    request_meta.setdefault("target_keyword", confirmed_keyword)
+    request_meta.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
+    request_meta.setdefault(
+        "client_request_id",
+        getattr(source_job, "client_request_id", "") or f"scheduled-confirm:{source_job.job_id}",
+    )
+
+    charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
+        slack_user_id,
+        request_meta,
+        normalize_domain(domain),
+    )
+    source_job.billing_source_job_id = source_job.job_id
+    source_job.billing_amount = charge_amount
+    source_job.billing_status = CONTENT_FACTORY_BILLING_STATUS_CHARGED
+    source_job.billing_ledger = charge_ledger
+    if getattr(source_job, "client_request_id", "") != request_meta.get("client_request_id"):
+        source_job.client_request_id = request_meta["client_request_id"]
+    source_job.request_meta = request_meta
+    source_job.save(
+        update_fields=[
+            "billing_source_job_id",
+            "billing_amount",
+            "billing_status",
+            "billing_ledger",
+            "client_request_id",
+            "request_meta",
+            "updated_at",
+        ]
+    )
+    return source_job
+
+
+def _refund_deferred_discovery_job_on_confirm_failure(
+    *,
+    source_job,
+    slack_user_id: str,
+    domain: str,
+    reason: str,
+):
+    if not source_job:
+        return None
+
+    refreshed_source_job = source_job.__class__.objects.filter(pk=source_job.pk).first()
+    if not refreshed_source_job:
+        return None
+    if getattr(refreshed_source_job, "billing_status", "") != CONTENT_FACTORY_BILLING_STATUS_CHARGED:
+        return None
+
+    user = _get_content_factory_user_for_job(refreshed_source_job)
+    if not user:
+        logger.warning(
+            "Unable to refund deferred scheduled discovery job %s after confirm failure: no user resolved",
+            getattr(refreshed_source_job, "job_id", ""),
+        )
+        return None
+
+    request_meta = dict(getattr(refreshed_source_job, "request_meta", {}) or {})
+    request_meta.setdefault(
+        "client_request_id",
+        getattr(refreshed_source_job, "client_request_id", "") or f"scheduled-confirm:{refreshed_source_job.job_id}",
+    )
+    request_meta.setdefault("domain", normalize_domain(domain))
+    return _refund_content_factory_request(
+        user=user,
+        slack_user_id=slack_user_id,
+        article_request=request_meta,
+        resolved_domain=normalize_domain(domain),
+        reason=reason,
+    )
 
 
 def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
@@ -815,11 +1041,17 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
         discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
-        charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
-            slack_user_id,
-            article_request,
-            resolved_domain,
-        )
+        scheduled_daily_request = _is_scheduled_daily_request(article_request)
+        charged_user = None
+        charge_ledger = None
+        charge_amount = 0
+        billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED if scheduled_daily_request else CONTENT_FACTORY_BILLING_STATUS_CHARGED
+        if not scheduled_daily_request:
+            charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
+                slack_user_id,
+                article_request,
+                resolved_domain,
+            )
         payload = {
             "domain": resolved_domain,
             "slack_user_id": slack_user_id,
@@ -838,26 +1070,28 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
             if response.status_code not in [200, 202]:
                 logger.error(f"Content Factory discovery failed: {response.text}")
-                _refund_content_factory_request(
-                    user=charged_user,
-                    slack_user_id=slack_user_id,
-                    article_request=article_request,
-                    resolved_domain=resolved_domain,
-                    reason=f"discovery queue failed with status {response.status_code}",
-                )
+                if charged_user is not None:
+                    _refund_content_factory_request(
+                        user=charged_user,
+                        slack_user_id=slack_user_id,
+                        article_request=article_request,
+                        resolved_domain=resolved_domain,
+                        reason=f"discovery queue failed with status {response.status_code}",
+                    )
                 raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
 
             data = response.json()
             job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
             if not job_id:
                 logger.warning("Content Factory returned discovery success but no job_id")
-                _refund_content_factory_request(
-                    user=charged_user,
-                    slack_user_id=slack_user_id,
-                    article_request=article_request,
-                    resolved_domain=resolved_domain,
-                    reason="missing job id from discovery queue response",
-                )
+                if charged_user is not None:
+                    _refund_content_factory_request(
+                        user=charged_user,
+                        slack_user_id=slack_user_id,
+                        article_request=article_request,
+                        resolved_domain=resolved_domain,
+                        reason="missing job id from discovery queue response",
+                    )
                 raise ArticleGenerationError("Content Factory did not return a run id for the discovery request.")
 
             _store_job_tracking_record(
@@ -872,7 +1106,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 client_request_id=client_request_id,
                 billing_source_job_id=job_id,
                 billing_amount=charge_amount,
-                billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+                billing_status=billing_status,
                 billing_ledger_id=charge_ledger.id if charge_ledger else None,
                 progress_message_ts=progress_message_ts,
                 last_progress_milestone_key="queued",
@@ -890,13 +1124,14 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             raise
         except http_requests.exceptions.RequestException as e:
             logger.error(f"Failed to connect to Content Factory discovery endpoint: {e}")
-            _refund_content_factory_request(
-                user=charged_user,
-                slack_user_id=slack_user_id,
-                article_request=article_request,
-                resolved_domain=resolved_domain,
-                reason=f"discovery request exception: {e}",
-            )
+            if charged_user is not None:
+                _refund_content_factory_request(
+                    user=charged_user,
+                    slack_user_id=slack_user_id,
+                    article_request=article_request,
+                    resolved_domain=resolved_domain,
+                    reason=f"discovery request exception: {e}",
+                )
             raise ArticleGenerationError(f"Failed to trigger discovery: {str(e)}")
 
     article_system, article_system_source = resolve_article_system_with_source(config)
@@ -907,12 +1142,10 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         article_system.get('state'),
         article_system.get('directory_path') or article_system.get('directory_name'),
     )
-    if not article_system_ready(article_system):
-        _raise_article_system_action_required(
-            resolved_domain,
-            article_system,
-            resolution_source=article_system_source,
-        )
+    delivery_mode, delivery_mode_confirmed = resolve_article_delivery_mode(
+        article_request=article_request,
+        article_system=article_system,
+    )
 
     creds = get_github_credentials_for_domain(domain, slack_user_id)
     fresh_token = creds['token']
@@ -961,7 +1194,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
         "competitors": competitors,
-        "delivery_mode": get_default_article_delivery_mode(),
+        "delivery_mode": delivery_mode,
+        "delivery_mode_confirmed": delivery_mode_confirmed,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
     }
     if article_request.get("custom_title"):
@@ -1092,10 +1326,17 @@ def _handle_status_failure(job_id: str, result: dict):
         return
 
     error_message = result.get('error') or result.get('error_message') or 'Unknown error'
+    error_code = str(result.get("error_code") or "INTERNAL_ERROR")
     job.status = 'error'
-    job.error_message = error_message
-    job.save()
-    logger.info(f"Updated job {job_id} to error: {error_message}")
+    job.error_message = f"[{error_code}] {error_message}"
+    job.save(update_fields=['status', 'error_message', 'updated_at'])
+    logger.info(f"Updated job {job_id} to error: {error_code}: {error_message}")
+
+    auto_refunded, refund_points = maybe_auto_refund_terminal_failure(
+        job,
+        error_code=error_code,
+        error_message=error_message,
+    )
 
     # Send Slack notification
     if job.slack_user_id:
@@ -1112,7 +1353,10 @@ def _handle_status_failure(job_id: str, result: dict):
                 oauth_url = build_github_oauth_url(job.domain, job.slack_user_id)
                 slack_text += f"\n\n<{oauth_url}|Connect GitHub for {job.domain}>"
 
-            slack_text = _append_refund_instruction(slack_text, job.domain)
+            if auto_refunded:
+                slack_text = _append_auto_refund_message(slack_text, refund_points)
+            else:
+                slack_text = _append_refund_instruction(slack_text, job.domain)
             SlackService.send_dm(job.slack_user_id, slack_text)
         except Exception as e:
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
@@ -1122,9 +1366,24 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
     """
     Select a delivery mode for an article run paused before queueing.
     """
-    selected_mode = delivery_mode or get_default_article_delivery_mode()
-    if selected_mode not in VALID_ARTICLE_DELIVERY_MODES:
-        raise ArticleGenerationError(f"Unsupported delivery mode: {selected_mode}")
+    if delivery_mode:
+        selected_mode = _normalize_requested_delivery_mode(delivery_mode)
+    else:
+        from core.models import ContentFactoryJob, Organization
+
+        selected_mode = get_default_article_delivery_mode()
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if job:
+            article_system = {}
+            domain = str(job.domain or "").strip()
+            if domain:
+                org = Organization.objects.filter(domain=normalize_domain(domain)).first()
+                config = getattr(org, "content_config", None) if org else None
+                article_system = resolve_article_system_with_source(config)[0]
+            selected_mode, _ = resolve_article_delivery_mode(
+                article_request=job.request_meta or {},
+                article_system=article_system,
+            )
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/delivery-mode"
@@ -1301,6 +1560,8 @@ def confirm_topic(
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
     progress_message_ts: str = "",
+    delivery_mode: str = None,
+    delivery_mode_confirmed: Optional[bool] = None,
     request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
 ) -> dict:
     """
@@ -1331,7 +1592,15 @@ def confirm_topic(
             slack_channel_id = source_job.slack_channel_id or ""
             slack_thread_ts = source_job.slack_thread_ts or ""
             slack_root_message_ts = source_job.slack_root_message_ts or slack_thread_ts
+    deferred_charge_started = bool(source_job and _job_uses_deferred_billing(source_job))
     if source_job:
+        source_job = _charge_deferred_discovery_job_if_needed(
+            source_job=source_job,
+            slack_user_id=slack_user_id,
+            domain=normalized_domain,
+            confirmed_keyword=confirmed_keyword,
+            custom_title=custom_title,
+        )
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
     config = None
@@ -1356,12 +1625,14 @@ def confirm_topic(
         article_system.get('state'),
         article_system.get('directory_path') or article_system.get('directory_name'),
     )
-    if not article_system_ready(article_system):
-        _raise_article_system_action_required(
-            normalized_domain,
-            article_system,
-            resolution_source=article_system_source,
-        )
+    request_context = {
+        "delivery_mode": delivery_mode,
+        "delivery_mode_confirmed": delivery_mode_confirmed,
+    }
+    delivery_mode, delivery_mode_confirmed = resolve_article_delivery_mode(
+        article_request=request_context,
+        article_system=article_system,
+    )
 
     # Get GitHub repo context (server-side credentials stay in mlai-backend/content-factory)
     creds = get_github_credentials_for_domain(domain, slack_user_id)
@@ -1375,7 +1646,8 @@ def confirm_topic(
         "topic": custom_title or confirmed_keyword,
         "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
-        "delivery_mode": get_default_article_delivery_mode(),
+        "delivery_mode": delivery_mode,
+        "delivery_mode_confirmed": delivery_mode_confirmed,
         "request_source": request_source,
     }
 
@@ -1439,8 +1711,22 @@ def confirm_topic(
             return data
         else:
             logger.error(f"Content Factory confirm topic failed: {response.text}")
+            if deferred_charge_started:
+                _refund_deferred_discovery_job_on_confirm_failure(
+                    source_job=source_job,
+                    slack_user_id=slack_user_id,
+                    domain=normalized_domain,
+                    reason=response.text,
+                )
             raise ArticleGenerationError(f"Topic confirmation failed: {response.text}")
             
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
+        if deferred_charge_started:
+            _refund_deferred_discovery_job_on_confirm_failure(
+                source_job=source_job,
+                slack_user_id=slack_user_id,
+                domain=normalized_domain,
+                reason=str(e),
+            )
         raise ArticleGenerationError(f"Failed to confirm topic: {str(e)}")

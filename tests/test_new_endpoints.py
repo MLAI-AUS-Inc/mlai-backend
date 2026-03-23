@@ -11,10 +11,16 @@ from rest_framework import status
 from django.urls import reverse
 from requests import Response
 
-from core.models import Organization, OrganizationContentConfig, ResearchedKeyword
+from core.models import (
+    ContentFactoryJob,
+    Organization,
+    OrganizationContentConfig,
+    ResearchedKeyword,
+    ScheduledDiscoveryDispatch,
+    ScheduledDiscoveryDispatchState,
+)
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
-from core.models import ContentFactoryJob
 
 User = get_user_model()
 
@@ -215,17 +221,18 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
         self.assertEqual(generate_payload.get('request_source'), 'roo_slackbot')
 
-    def test_generate_with_topic_returns_article_system_action_required_when_missing(self):
+    def test_generate_with_topic_defaults_to_content_only_when_article_system_missing(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic="best ai coding agents")
 
-        response = self.client.post(url, data, format='json')
+        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
+            mock_post.return_value = self._mock_response(202, {"job_id": "job-article-456"})
+            response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_412_PRECONDITION_FAILED)
-        self.assertEqual(response.data['error_code'], 'ARTICLE_SYSTEM_ACTION_REQUIRED')
-        self.assertEqual(response.data['recommended_action'], 'scaffold')
-        self.assertEqual(response.data['article_system_resolution_source'], 'default_missing')
-        self.assertTrue(response.data['pending_intent_stored'])
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        payload = mock_post.call_args.kwargs.get('json') or {}
+        self.assertEqual(payload.get('delivery_mode'), 'content_only')
+        self.assertFalse(payload.get('delivery_mode_confirmed'))
 
     @patch('integrations.api_views_content.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -248,6 +255,8 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "topic": "best ai coding agents",
                 "target_keyword": None,
                 "context": None,
+                "delivery_mode": None,
+                "delivery_mode_confirmed": None,
                 "slack_channel_id": "C123",
                 "slack_thread_ts": "123.456",
                 "slack_root_message_ts": "123.456",
@@ -391,6 +400,14 @@ class ContentFactoryCallbackTests(TestCase):
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_topic_selection_callback(self, mock_send_dm):
+        ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="mlai.au",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.QUEUED,
+            content_factory_job_id="job-123",
+        )
         url = reverse('content_factory_callback')
         data = {
             "event_type": "topic_selection",
@@ -417,6 +434,8 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, 'awaiting_confirmation')
         self.assertEqual(job.selected_keyword, "ai agents")
         self.assertEqual(job.slack_user_id, "U123")
+        dispatch = ScheduledDiscoveryDispatch.objects.get(content_factory_job_id="job-123")
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT)
         
         mock_send_dm.assert_called_once()
         call_args = mock_send_dm.call_args
@@ -565,6 +584,67 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertIsNone(mock_send_dm.call_args[1].get("blocks"))
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
+        organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            scan_summary="scan complete",
+            article_system={
+                "state": "existing",
+                "directory_name": "articles",
+                "directory_path": "app/articles",
+                "confidence": "high",
+                "reason": "Detected existing article system",
+                "source": "scan",
+                "verified_at": "2026-03-20T00:00:00+00:00",
+            },
+            publish_targets=[
+                {
+                    "target_id": "react:app/articles",
+                    "kind": "react_article_system",
+                }
+            ],
+            default_publish_target_id="react:app/articles",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-woofya-1",
+                "run_id": "scan-woofya-1",
+                "workflow": "repo_scan",
+                "domain": "woofya.com.au",
+                "slack_user_id": "U123",
+                "components_generated": False,
+                "components_count": 0,
+                "article_system": {
+                    "state": "missing",
+                    "directory_name": None,
+                    "directory_path": None,
+                    "confidence": "low",
+                    "reason": "No existing article or blog system detected",
+                    "source": "scan",
+                    "verified_at": "2026-03-23T07:00:00+00:00",
+                },
+                "publish_targets": [],
+                "default_publish_target_id": None,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        self.assertEqual(config.article_system["state"], "missing")
+        self.assertEqual(config.publish_targets, [])
+        self.assertIsNone(config.default_publish_target_id)
+
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertNotIn("app/articles", message)
+        self.assertNotIn("existing article system", message)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_generation_failed_auto_discovery_no_opportunities_mentions_research_scope(self, mock_send_dm):
         response = self.client.post(
             reverse('content_factory_callback'),
@@ -577,6 +657,17 @@ class ContentFactoryCallbackTests(TestCase):
                 "slack_user_id": "U123",
                 "error_code": "NO_OPPORTUNITIES",
                 "error": "No relevant keywords found after filtering.",
+                "diagnostics": {
+                    "seed_count": 20,
+                    "competitor_count": 5,
+                    "keyword_ideas_count": 0,
+                    "keyword_suggestions_count": 0,
+                    "related_keywords_count": 0,
+                    "ai_question_count": 0,
+                    "competitor_candidate_count": 7,
+                    "competitor_relevance_rejected_count": 7,
+                    "remaining_opportunity_count": 0,
+                },
             },
             format='json',
         )
@@ -585,8 +676,99 @@ class ContentFactoryCallbackTests(TestCase):
         mock_send_dm.assert_called_once()
         message = mock_send_dm.call_args[0][1]
         self.assertIn("Research for mlai.au", message)
+        self.assertIn("Checked 20 seed keywords and 5 competitors.", message)
+        self.assertIn("write an article for mlai.au about [topic]", message)
         self.assertIn("doesn't affect any scan or scaffold work already in progress", message)
         self.assertNotIn("Task failed for", message)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_publish_target_action_required_auto_refunds(self, mock_send_dm):
+        user = User.objects.create_user(email="refund@example.com", password="password", slack_id="U123")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="publish-target-run-1",
+            domain="woofya.com.au",
+            slack_user_id="U123",
+            status="generating",
+            client_request_id="publish-target-request-1",
+            billing_source_job_id="publish-target-run-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "woofya.com.au",
+                "client_request_id": "publish-target-request-1",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "publish-target-run-1",
+                "run_id": "publish-target-run-1",
+                "workflow": "direct_generate",
+                "domain": "woofya.com.au",
+                "slack_user_id": "U123",
+                "error_code": "PUBLISH_TARGET_ACTION_REQUIRED",
+                "error": "No compatible delivery adapter could be resolved from the repository/article-system signals. Use content_only until a supported publish target is configured.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertIn("needs a supported publish target", message)
+        self.assertIn("`.content-factory/target.yml`", message)
+        self.assertIn("refunded automatically", message)
+
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+        job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
+        self.assertEqual(job.billing_status, "refunded")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_scheduled_daily_updates_dispatch_and_suppresses_user_message(self, mock_send_dm, mock_send_message):
+        ContentFactoryJob.objects.create(
+            job_id="scheduled-failure-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            request_meta={
+                "domain": "mlai.au",
+                "trigger_source": "scheduled_daily",
+            },
+        )
+        dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U123",
+            domain="mlai.au",
+            timezone="Australia/Melbourne",
+            local_date=timezone.now().date(),
+            state=ScheduledDiscoveryDispatchState.QUEUED,
+            content_factory_job_id="scheduled-failure-1",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "scheduled-failure-1",
+                "run_id": "scheduled-failure-1",
+                "workflow": "auto_discovery",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "error_code": "NO_OPPORTUNITIES",
+                "error": "No relevant opportunities today.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dispatch.refresh_from_db()
+        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.FAILED)
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_scaffold_complete_uses_parent_run_thread_context(self, mock_send_message):
@@ -641,7 +823,7 @@ class ContentFactoryCallbackTests(TestCase):
         mock_set_delivery_mode.return_value = {
             "job_id": "job-delivery-mode",
             "status": "queued",
-            "delivery_mode": "publish_code",
+            "delivery_mode": "content_only",
         }
 
         url = reverse('content_factory_callback')
@@ -657,7 +839,7 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-delivery-mode")
         self.assertEqual(job.status, "generating")
-        mock_set_delivery_mode.assert_called_once_with("job-delivery-mode", "publish_code")
+        mock_set_delivery_mode.assert_called_once_with("job-delivery-mode", "content_only")
 
     @patch('integrations.services.article_generation.publish_article')
     def test_preview_ready_callback_auto_approves(self, mock_publish_article):
@@ -1112,6 +1294,8 @@ class TopicConfirmTests(TestCase):
             slack_thread_ts=None,
             slack_root_message_ts=None,
             progress_message_ts=None,
+            delivery_mode=None,
+            delivery_mode_confirmed=None,
             request_source="roo_slackbot",
         )
 

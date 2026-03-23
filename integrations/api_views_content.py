@@ -14,6 +14,8 @@ from integrations.services.article_generation import (
     confirm_topic,
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
+    CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+    SCHEDULED_DAILY_TRIGGER_SOURCE,
 )
 from core.content_factory_progress import maybe_send_still_working_ping, upsert_live_progress_card
 
@@ -154,6 +156,8 @@ class ContentGenerateView(APIView):
             "topic": request.data.get('topic'),
             "target_keyword": request.data.get('target_keyword'),
             "context": request.data.get('context'),
+            "delivery_mode": request.data.get('delivery_mode'),
+            "delivery_mode_confirmed": request.data.get('delivery_mode_confirmed'),
             "slack_channel_id": request.data.get('slack_channel_id'),
             "slack_thread_ts": request.data.get('slack_thread_ts'),
             "slack_root_message_ts": request.data.get('slack_root_message_ts') or request.data.get('slack_thread_ts'),
@@ -297,6 +301,8 @@ class ContentConfirmView(APIView):
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
                 progress_message_ts=progress_message_ts,
+                delivery_mode=request.data.get("delivery_mode"),
+                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
@@ -332,6 +338,10 @@ class ContentConfirmView(APIView):
                         "billing_ledger_id": source_job.billing_ledger_id,
                         },
                     )
+            if source_run_id:
+                from integrations.services.daily_discovery import mark_scheduled_dispatch_confirmed
+
+                mark_scheduled_dispatch_confirmed(job_id=source_run_id)
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleSystemActionRequiredError as e:
             return _handle_article_system_action_required(e, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
@@ -405,7 +415,12 @@ class ContentJobConfirmView(APIView):
             return Response({"error": "No keyword specified and job has no selected_keyword"}, status=status.HTTP_400_BAD_REQUEST)
         if not resolved_domain:
             return Response({"error": "No domain specified and job has no domain"}, status=status.HTTP_400_BAD_REQUEST)
-        if job.billing_status not in {"charged", "reused"}:
+        request_meta = job.request_meta or {}
+        uses_deferred_billing = (
+            str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
+            and str(job.billing_status or "").strip() in {"", CONTENT_FACTORY_BILLING_STATUS_DEFERRED}
+        )
+        if job.billing_status not in {"charged", "reused"} and not uses_deferred_billing:
             return Response(
                 {"error": "Job has not been billed for Content Factory generation."},
                 status=status.HTTP_409_CONFLICT,
@@ -437,6 +452,8 @@ class ContentJobConfirmView(APIView):
                 slack_thread_ts=job.slack_thread_ts,
                 slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
                 progress_message_ts=job.progress_message_ts,
+                delivery_mode=request.data.get("delivery_mode"),
+                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
@@ -480,6 +497,9 @@ class ContentJobConfirmView(APIView):
                     target_job,
                     summary_text="Topic confirmed. Roo is writing the draft now.",
                 )
+            from integrations.services.daily_discovery import mark_scheduled_dispatch_confirmed
+
+            mark_scheduled_dispatch_confirmed(job_id=job.job_id)
             return Response({
                 "status": "confirmed",
                 "job_id": active_job_id,
@@ -500,6 +520,61 @@ class ContentJobConfirmView(APIView):
         except Exception as e:
             logger.exception(f"Unexpected error triggering generation for job {job_id}: {e}")
             return Response({"error": "Failed to trigger generation"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContentJobCancelView(APIView):
+    """
+    Mark a discovery job as cancelled.
+    POST /api/v1/content/jobs/{job_id}/cancel
+    """
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request, job_id):
+        from core.models import ContentFactoryJob
+        from integrations.services.daily_discovery import mark_scheduled_dispatch_cancelled
+
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
+
+        slack_user_id = request.data.get("slack_user_id")
+        if not job_id or not slack_user_id:
+            return Response(
+                {"error": "job_id and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            job = ContentFactoryJob.objects.get(job_id=job_id)
+        except ContentFactoryJob.DoesNotExist:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        job.status = "cancelled"
+        job.slack_user_id = slack_user_id
+        job.last_progress_milestone_key = "cancelled"
+        job.last_progress_updated_at = timezone.now()
+        job.still_working_pinged_at = None
+        job.save(
+            update_fields=[
+                "status",
+                "slack_user_id",
+                "last_progress_milestone_key",
+                "last_progress_updated_at",
+                "still_working_pinged_at",
+                "updated_at",
+            ]
+        )
+        mark_scheduled_dispatch_cancelled(job_id=job_id)
+
+        return Response(
+            {
+                "status": "cancelled",
+                "job_id": job_id,
+                "message": "Topic selection cancelled.",
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ArticleSystemDecisionView(APIView):

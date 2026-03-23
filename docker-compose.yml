@@ -13,6 +13,16 @@ services:
     depends_on:
       - db
 
+  scheduler:
+    build: .
+    command: sh -c "while true; do python manage.py run_scheduled_discovery; sleep 300; done"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+    env_file:
+      - .env
+    depends_on:
+      - db
+
   db:
     image: postgres:15
     volumes:

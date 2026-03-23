@@ -10,7 +10,6 @@ from core.models import ContentFactoryJob, ContentFactoryRun, Organization, Orga
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleGenerationError,
-    ArticleSystemActionRequiredError,
     check_generation_status,
     confirm_topic,
     publish_article,
@@ -104,6 +103,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["github_repo"], self.repo_name)
         self.assertEqual(payload["slack_user_id"], self.slack_user_id)
         self.assertEqual(payload["delivery_mode"], "publish_code")
+        self.assertFalse(payload["delivery_mode_confirmed"])
         self.assertEqual(payload["request_source"], "roo_slackbot")
         self.assertNotIn("github_token", payload)
 
@@ -172,6 +172,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertIn("/api/runs/article", args[0])
         payload = kwargs["json"]
         self.assertEqual(payload["delivery_mode"], "publish_code")
+        self.assertFalse(payload["delivery_mode_confirmed"])
         self.assertEqual(payload["request_source"], "roo_slackbot")
 
     @patch("integrations.services.article_generation.http_requests.post")
@@ -194,17 +195,44 @@ class ArticleGenerationServiceTest(TestCase):
         args, _ = mock_post.call_args
         self.assertIn("/api/runs/job_123/approve", args[0])
 
-    def test_trigger_generation_requires_article_system_when_missing(self):
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_defaults_to_content_only_when_article_system_missing(self, mock_post):
         self.config.article_system = {}
         self.config.save(update_fields=["article_system"])
 
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_content_only_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
         article_request = self._article_request()
+        result = trigger_article_generation(self.slack_user_id, article_request)
 
-        with self.assertRaises(ArticleSystemActionRequiredError) as exc:
-            trigger_article_generation(self.slack_user_id, article_request)
+        self.assertEqual(result["job_id"], "job_content_only_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["delivery_mode"], "content_only")
+        self.assertFalse(payload["delivery_mode_confirmed"])
 
-        self.assertEqual(exc.exception.recommended_action, "scaffold")
-        self.assertEqual(exc.exception.resolution_source, "default_missing")
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_preserves_explicit_delivery_mode_confirmation(self, mock_post):
+        self.config.article_system = {}
+        self.config.save(update_fields=["article_system"])
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_explicit_publish_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = self._article_request(
+            delivery_mode="publish_code",
+            delivery_mode_confirmed=True,
+        )
+        result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_explicit_publish_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["delivery_mode"], "publish_code")
+        self.assertTrue(payload["delivery_mode_confirmed"])
 
     @patch("integrations.services.article_generation.get_github_credentials_for_domain")
     @patch("integrations.services.article_generation.http_requests.post")

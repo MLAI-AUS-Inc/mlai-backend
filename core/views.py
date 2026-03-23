@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from datetime import date as calendar_date
 from urllib.parse import urlparse
 from django.db import OperationalError, connection, transaction
 from django.contrib.auth import get_user_model
@@ -119,6 +120,91 @@ def _frontend_base_url(app_context):
     if app_context == 'esafety':
         return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), fallback)
     return fallback
+
+
+def _normalize_discovery_diagnostics(value):
+    if not isinstance(value, dict):
+        return {}
+
+    diagnostics = {}
+    for key, raw_value in value.items():
+        try:
+            diagnostics[str(key)] = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return diagnostics
+
+
+def _format_discovery_diagnostics(diagnostics):
+    normalized = _normalize_discovery_diagnostics(diagnostics)
+    if not normalized:
+        return ""
+
+    seed_count = normalized.get("seed_count", 0)
+    competitor_count = normalized.get("competitor_count", 0)
+    seed_results = (
+        normalized.get("keyword_ideas_count", 0)
+        + normalized.get("keyword_suggestions_count", 0)
+        + normalized.get("related_keywords_count", 0)
+        + normalized.get("ai_question_count", 0)
+    )
+    competitor_candidates = normalized.get("competitor_candidate_count", 0)
+    relevance_rejections = (
+        normalized.get("keyword_relevance_rejected_count", 0)
+        + normalized.get("competitor_relevance_rejected_count", 0)
+    )
+    already_used = (
+        normalized.get("written_exclusion_count", 0)
+        + normalized.get("already_used_exclusion_count", 0)
+        + normalized.get("semantic_dedup_exclusion_count", 0)
+    )
+    remaining = normalized.get("remaining_opportunity_count", normalized.get("deduplicated_count", 0))
+
+    lines = []
+    if seed_count or competitor_count:
+        lines.append(
+            f"Checked {seed_count} seed keywords and {competitor_count} competitors."
+        )
+    if seed_results or competitor_candidates:
+        lines.append(
+            f"Found {seed_results} seed-derived candidates and {competitor_candidates} competitor candidates."
+        )
+    if relevance_rejections:
+        lines.append(f"Filtered out {relevance_rejections} candidates as irrelevant.")
+    if already_used:
+        lines.append(f"Excluded {already_used} candidates that were already used or too close to existing topics.")
+    lines.append(f"{remaining} viable topics remained.")
+    return "\n".join(lines)
+
+
+def _scan_destination_summary(article_system, publish_targets):
+    resolved = normalize_article_system(article_system)
+    location = resolved.get("directory_path") or resolved.get("directory_name") or "your content directory"
+    targets = [item for item in (publish_targets or []) if isinstance(item, dict)]
+
+    if any(
+        str(item.get("kind") or "").strip() == "bundle_only_article_directory"
+        or str(item.get("publish_capability") or "").strip() == "bundle_only"
+        for item in targets
+    ):
+        return (
+            f"I found a content directory at `{location}`.\n\n"
+            f"Roo can draft content for it now, and direct publish can be added later with a supported target or `.content-factory/target.yml`."
+        )
+
+    if any(str(item.get("kind") or "").strip() == "hook_publish" for item in targets):
+        return (
+            f"I found a configured content target at `{location}`.\n\n"
+            f"This repo can publish through the existing Content Factory hook configuration."
+        )
+
+    if article_system_ready(resolved):
+        return (
+            f"I found a ready article system at "
+            f"`{location}`."
+        )
+
+    return ""
 
 class SendMagicLinkView(APIView):
     authentication_classes = []
@@ -761,6 +847,7 @@ class ContentFactoryOrgConfigView(APIView):
             'domain': org.domain,
             'competitors': org.competitors,
             'seed_keywords': org.seed_keywords,
+            'default_timezone': config.default_timezone if config else "",
             'article_template': config.article_template if config else None,
             'design_guide': config.design_guide if config else None,
             'resource_prompt': config.resource_prompt if config else None,
@@ -831,6 +918,7 @@ class ContentFactoryOrgConfigView(APIView):
         # Only include fields that are present in the request data
         defaults = {}
         target_fields = [
+            'default_timezone',
             'article_template',
             'design_guide',
             'resource_prompt',
@@ -1413,6 +1501,49 @@ class ContentFactoryGitHubStatusView(APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
+class ScheduledDiscoveryReplayView(APIView):
+    """
+    Force a scheduled discovery enqueue for a specific user/domain/date.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from integrations.services.daily_discovery import enqueue_scheduled_discovery
+
+        domain = request.data.get("domain")
+        slack_user_id = request.data.get("slack_user_id")
+        local_date_raw = request.data.get("local_date")
+        force = bool(request.data.get("force"))
+
+        if not domain or not slack_user_id:
+            return Response(
+                {"error": "domain and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        local_date = None
+        if local_date_raw:
+            try:
+                local_date = calendar_date.fromisoformat(str(local_date_raw))
+            except ValueError:
+                return Response(
+                    {"error": "local_date must use YYYY-MM-DD format"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        result = enqueue_scheduled_discovery(
+            slack_user_id=slack_user_id,
+            domain=domain,
+            local_date=local_date,
+            force=force,
+        )
+        result_status = str(result.get("status") or "").strip().lower()
+        http_status = status.HTTP_202_ACCEPTED if result_status == "queued" else status.HTTP_200_OK
+        return Response(result, status=http_status)
+
+
 class ContentFactoryOAuthInitiateView(APIView):
     """
     Initiate GitHub OAuth flow for a specific domain.
@@ -1868,20 +1999,31 @@ class ContentFactoryCallbackView(APIView):
     def _handle_delivery_mode_required(self, data):
         from integrations.services.article_generation import (
             ArticleGenerationError,
-            get_default_article_delivery_mode,
+            resolve_article_delivery_mode,
             set_article_delivery_mode,
         )
+        from .models import Organization
 
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
-        selected_mode = get_default_article_delivery_mode()
-
         job = self._update_content_factory_job(
             job_id=job_id,
             domain=domain,
             slack_user_id=slack_user_id,
             status_value='awaiting_delivery_mode',
+        )
+
+        article_system = {}
+        if domain:
+            from integrations.utils import normalize_domain
+
+            org = Organization.objects.filter(domain=normalize_domain(domain)).first()
+            config = getattr(org, 'content_config', None) if org else None
+            article_system = resolve_article_system(config) if config else {}
+        selected_mode, _ = resolve_article_delivery_mode(
+            article_request=job.request_meta or {},
+            article_system=article_system,
         )
 
         try:
@@ -2262,6 +2404,8 @@ class ContentFactoryCallbackView(APIView):
         component_names = data.get('component_names', [])
         pillar_count = data.get('pillar_count', 0)
         pillar_names = data.get('pillar_names', [])
+        publish_targets = data.get('publish_targets') if isinstance(data.get('publish_targets'), list) else []
+        default_publish_target_id = data.get('default_publish_target_id')
 
         # Update job record if one exists
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
@@ -2288,14 +2432,45 @@ class ContentFactoryCallbackView(APIView):
         article_system = normalize_article_system(data.get('article_system'))
         try:
             from integrations.utils import normalize_domain
+
             org = Organization.objects.get(domain=normalize_domain(domain))
             config = org.content_config
             has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
             if data.get('article_system') is not None:
-                merged_article_system = merge_article_system(resolve_article_system(config), data.get('article_system'))
+                current_article_system = resolve_article_system(config)
+                incoming_article_system = normalize_article_system(data.get('article_system'))
+                if incoming_article_system.get('source') == 'scan':
+                    if (
+                        current_article_system.get('source') == 'manual_confirmed'
+                        and current_article_system.get('state') in {'existing', 'roo_scaffolded'}
+                        and incoming_article_system.get('state') in {'missing', 'ambiguous'}
+                    ):
+                        merged_article_system = current_article_system
+                    elif (
+                        current_article_system.get('state') == 'roo_scaffolded'
+                        and incoming_article_system.get('state') == 'missing'
+                        and incoming_article_system.get('confidence') == 'low'
+                    ):
+                        merged_article_system = current_article_system
+                    else:
+                        merged_article_system = incoming_article_system
+                else:
+                    merged_article_system = merge_article_system(current_article_system, incoming_article_system)
+
+                update_fields = []
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
-                    config.save(update_fields=['article_system', 'updated_at'])
+                    update_fields.append('article_system')
+                if publish_targets != (config.publish_targets or []):
+                    config.publish_targets = publish_targets
+                    update_fields.append('publish_targets')
+                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                if normalized_default_target_id != config.default_publish_target_id:
+                    config.default_publish_target_id = normalized_default_target_id
+                    update_fields.append('default_publish_target_id')
+                if update_fields:
+                    update_fields.append('updated_at')
+                    config.save(update_fields=update_fields)
                 article_system = merged_article_system
             else:
                 article_system = resolve_article_system(config)
@@ -2303,10 +2478,10 @@ class ContentFactoryCallbackView(APIView):
             pass
 
         article_system_state = article_system.get('state', 'missing')
-        article_system_is_ready = article_system_ready(article_system)
+        destination_summary = _scan_destination_summary(article_system, publish_targets)
 
         pending_resumed = False
-        if slack_user_id and article_system_is_ready:
+        if slack_user_id:
             try:
                 from integrations.models import UserIntegration
                 from integrations.services.article_generation import trigger_article_generation
@@ -2343,15 +2518,14 @@ class ContentFactoryCallbackView(APIView):
                 elif pillar_count:
                     pillar_line = f"\n\n*{pillar_count} content pillars* identified"
 
-                if article_system_is_ready:
+                if destination_summary:
                     text_body = (
                         f"✅ *Scan complete for {domain}!*\\n\\n"
                         f"I've analysed your codebase and generated "
                         f"*{components_count} article components* "
                         f"matched to your website's design:\\n"
                         f"{component_list}{pillar_line}\\n\\n"
-                        f"I found an existing article system at "
-                        f"`{article_system.get('directory_path') or article_system.get('directory_name') or 'your content directory'}`."
+                        f"{destination_summary}"
                     )
                     if pending_resumed:
                         text_body += "\\n\\n🔄 *Resuming your article request automatically!* You'll get a notification shortly."
@@ -2433,11 +2607,10 @@ class ContentFactoryCallbackView(APIView):
                     )
                     blocks = None
             else:
-                if article_system_is_ready:
+                if destination_summary:
                     fallback_text = (
                         f"✅ *Scan complete for {domain}!*\n\n"
-                        f"I found an existing article system at "
-                        f"`{article_system.get('directory_path') or article_system.get('directory_name') or 'your content directory'}`.\n\n"
+                        f"{destination_summary}\n\n"
                         f"You can now ask me to research or write an article."
                     )
                     if pending_resumed:
@@ -2475,6 +2648,14 @@ class ContentFactoryCallbackView(APIView):
     def _handle_generation_failed(self, data):
         """Handle generation_failed event from content-factory."""
         from .models import ContentFactoryJob
+        from integrations.services.article_generation import (
+            get_content_factory_article_cost_points,
+            maybe_auto_refund_terminal_failure,
+        )
+        from integrations.services.daily_discovery import (
+            is_scheduled_daily_job,
+            mark_scheduled_dispatch_failed,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -2484,6 +2665,13 @@ class ContentFactoryCallbackView(APIView):
         error_code = data.get('error_code', 'INTERNAL_ERROR')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
+        diagnostics = _normalize_discovery_diagnostics(data.get('diagnostics'))
+        diagnostics_text = _format_discovery_diagnostics(diagnostics)
+        try:
+            refund_points = int(data.get('refund_points') or 0)
+        except (TypeError, ValueError):
+            refund_points = 0
+        auto_refunded = bool(data.get('auto_refunded'))
 
         # Update job record
         job, created = ContentFactoryJob.objects.update_or_create(
@@ -2495,6 +2683,7 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
+        scheduled_daily_job = is_scheduled_daily_job(job)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
@@ -2514,6 +2703,26 @@ class ContentFactoryCallbackView(APIView):
             summary_text=f"Run failed: {error_message}",
             failed=True,
         )
+
+        if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'} and not auto_refunded:
+            auto_refunded, refund_points = maybe_auto_refund_terminal_failure(
+                job,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        mark_scheduled_dispatch_failed(
+            job_id=job_id,
+            error_message=f"[{error_code}] {error_message}",
+        )
+
+        if scheduled_daily_job:
+            return Response({
+                'status': 'received',
+                'message': 'Generation failed callback processed',
+                'job_id': job_id,
+                'scheduled_daily_suppressed': True,
+            }, status=status.HTTP_200_OK)
 
         if slack_user_id:
             try:
@@ -2556,6 +2765,12 @@ class ContentFactoryCallbackView(APIView):
                             f"{error_message}\n\n"
                             f"Ask me to scaffold articles for {domain}, or confirm the detected structure if one already exists."
                         )
+                elif error_code == 'PUBLISH_TARGET_ACTION_REQUIRED':
+                    message = (
+                        f"⚠️ *{domain} needs a supported publish target before direct publish can continue.*\n\n"
+                        f"{error_message}\n\n"
+                        f"Roo stopped before changing the repository. You can retry in content-only mode, or add a supported publish target such as `.content-factory/target.yml`."
+                    )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
                         f"❌ *Failed for {domain}*\n\n"
@@ -2566,7 +2781,13 @@ class ContentFactoryCallbackView(APIView):
                 elif workflow == 'auto_discovery' and error_code == 'NO_OPPORTUNITIES':
                     message = (
                         f"⚠️ *Research for {domain} didn't find viable topics yet*\n\n"
-                        f"{error_message}\n\n"
+                        f"{error_message}"
+                    )
+                    if diagnostics_text:
+                        message += f"\n\n{diagnostics_text}"
+                    message += (
+                        "\n\nYou can still ask Roo to write about a specific topic, for example:\n"
+                        f"  `@Roo write an article for {domain} about [topic]`\n\n"
                         f"This doesn't affect any scan or scaffold work already in progress."
                     )
                 elif workflow == 'auto_discovery':
@@ -2594,14 +2815,15 @@ class ContentFactoryCallbackView(APIView):
                         f"If this keeps happening, please contact support."
                     )
                 if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'}:
-                    from integrations.services.article_generation import get_content_factory_article_cost_points
-
-                    refund_points = get_content_factory_article_cost_points(domain)
-                    if refund_points > 0:
-                        message += (
-                            f"\n\nIf this run failed and you want your {refund_points} Roo points back, "
-                            "message Dr Sam on Slack."
-                        )
+                    if auto_refunded and refund_points > 0:
+                        message += f"\n\nYour {refund_points} Roo points were refunded automatically."
+                    else:
+                        manual_refund_points = get_content_factory_article_cost_points(domain)
+                        if manual_refund_points > 0:
+                            message += (
+                                f"\n\nIf this run failed and you want your {manual_refund_points} Roo points back, "
+                                "message Dr Sam on Slack."
+                            )
                 # Reply in-thread if we have context, fall back to DM
                 if channel_id and thread_ts:
                     SlackService.send_message(channel_id, message, thread_ts=thread_ts)
@@ -2898,6 +3120,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
         from .models import ContentFactoryJob, Organization
+        from integrations.services.daily_discovery import mark_scheduled_dispatch_topic_selection_sent
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -2930,6 +3153,12 @@ class ContentFactoryCallbackView(APIView):
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
         job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+        mark_scheduled_dispatch_topic_selection_sent(
+            job_id=job_id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+        )
         
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
         

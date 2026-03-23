@@ -46,6 +46,7 @@ class ContentFactoryOrgConfigTests(TestCase):
             "/api/content-factory/org/config/",
             {
                 "domain": "mlai.au",
+                "default_timezone": "Australia/Melbourne",
                 "article_path_pattern": "app/articles/content/{category}/{slug}.tsx",
                 "registry_path": "app/articles/registry.ts",
                 "publish_targets": publish_targets,
@@ -57,6 +58,7 @@ class ContentFactoryOrgConfigTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.config.refresh_from_db()
+        self.assertEqual(self.config.default_timezone, "Australia/Melbourne")
         self.assertEqual(self.config.article_path_pattern, "app/articles/content/{category}/{slug}.tsx")
         self.assertEqual(self.config.publish_targets, publish_targets)
         self.assertEqual(self.config.default_publish_target_id, publish_targets[0]["target_id"])
@@ -67,6 +69,7 @@ class ContentFactoryOrgConfigTests(TestCase):
         )
 
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["default_timezone"], "Australia/Melbourne")
         self.assertEqual(get_response.data["article_path_pattern"], "app/articles/content/{category}/{slug}.tsx")
         self.assertEqual(get_response.data["publish_targets"], publish_targets)
         self.assertEqual(
