@@ -285,6 +285,17 @@ class ContentFactoryJob(models.Model):
 
     # Request metadata for retry (populated on creation)
     request_meta = models.JSONField(default=dict, blank=True, help_text="Original request parameters for retry")
+    client_request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    billing_source_job_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    billing_amount = models.IntegerField(default=0)
+    billing_status = models.CharField(max_length=20, blank=True, default="")
+    billing_ledger = models.ForeignKey(
+        'roo.Ledger',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='content_factory_jobs',
+    )
 
     # Topic selection data (populated on topic_selection callback)
     selected_keyword = models.CharField(max_length=255, blank=True, null=True)

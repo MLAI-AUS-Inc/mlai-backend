@@ -13,7 +13,7 @@ from requests import Response
 
 from core.models import Organization, OrganizationContentConfig, ResearchedKeyword
 from integrations.models import UserIntegration
-from roo.models import ChannelFirstPost
+from roo.models import ChannelFirstPost, PointsAccount
 from core.models import ContentFactoryJob
 
 User = get_user_model()
@@ -133,14 +133,23 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.client = APIClient()
         self.api_key = "test_roo_key"
         os.environ['ROO_API_KEY'] = self.api_key
-        os.environ['INTERNAL_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = "test_internal_key"
+        os.environ['MLAI_API_KEY'] = "test_mlai_key"
 
         from django.conf import settings
         settings.ROO_API_KEY = self.api_key
-        settings.INTERNAL_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = "test_internal_key"
+        settings.MLAI_API_KEY = "test_mlai_key"
         settings.CONTENT_FACTORY_URL = "http://content-factory.test"
 
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        self.user_email = "auto@example.com"
+        self.user = User.objects.create_user(
+            email=self.user_email,
+            password="password",
+            slack_id="U-AUTO",
+        )
+        PointsAccount.objects.create(user=self.user, balance=20)
 
         self.integration = UserIntegration.objects.create(
             slack_user_id="U-AUTO",
@@ -159,6 +168,20 @@ class ContentGenerateAutoWriteTests(TestCase):
             scan_summary="scan complete",
         )
 
+    def _generate_request_data(self, **overrides):
+        data = {
+            "slack_user_id": self.integration.slack_user_id,
+            "domain": self.organization.domain,
+            "request_source": "roo_slackbot",
+            "client_request_id": "content-factory-test-request",
+            "user_email": self.user_email,
+            "user_first_name": "Auto",
+            "user_last_name": "Writer",
+            "user_avatar_url": "https://avatar.test/auto.png",
+        }
+        data.update(overrides)
+        return data
+
     def _mock_response(self, status_code, body):
         response = Response()
         response.status_code = status_code
@@ -168,11 +191,7 @@ class ContentGenerateAutoWriteTests(TestCase):
 
     def test_generate_auto_write_uses_discovery_endpoint_after_scan(self):
         url = reverse('content_generate')
-        data = {
-            "slack_user_id": self.integration.slack_user_id,
-            "domain": self.organization.domain,
-            "topic": None,
-        }
+        data = self._generate_request_data(topic=None)
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.side_effect = [
@@ -194,14 +213,11 @@ class ContentGenerateAutoWriteTests(TestCase):
         generate_payload = generate_call.kwargs.get('json') or {}
         self.assertEqual(generate_payload.get('domain'), self.organization.domain)
         self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
+        self.assertEqual(generate_payload.get('request_source'), 'roo_slackbot')
 
     def test_generate_with_topic_returns_article_system_action_required_when_missing(self):
         url = reverse('content_generate')
-        data = {
-            "slack_user_id": self.integration.slack_user_id,
-            "domain": self.organization.domain,
-            "topic": "best ai coding agents",
-        }
+        data = self._generate_request_data(topic="best ai coding agents")
 
         response = self.client.post(url, data, format='json')
 
@@ -216,13 +232,11 @@ class ContentGenerateAutoWriteTests(TestCase):
         mock_trigger.return_value = {"job_id": "job-thread", "status": "queued"}
 
         url = reverse('content_generate')
-        data = {
-            "slack_user_id": self.integration.slack_user_id,
-            "domain": self.organization.domain,
-            "topic": "best ai coding agents",
-            "slack_channel_id": "C123",
-            "slack_thread_ts": "123.456",
-        }
+        data = self._generate_request_data(
+            topic="best ai coding agents",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+        )
 
         response = self.client.post(url, data, format='json')
 
@@ -237,6 +251,12 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "slack_channel_id": "C123",
                 "slack_thread_ts": "123.456",
                 "slack_root_message_ts": "123.456",
+                "request_source": "roo_slackbot",
+                "client_request_id": "content-factory-test-request",
+                "user_email": self.user_email,
+                "user_first_name": "Auto",
+                "user_last_name": "Writer",
+                "user_avatar_url": "https://avatar.test/auto.png",
             },
         )
 
@@ -263,16 +283,38 @@ class ContentGenerateAutoWriteTests(TestCase):
         mock_post.return_value = mock_response
 
         url = reverse('content_generate')
-        data = {
-            "slack_user_id": self.integration.slack_user_id,
-            "domain": self.organization.domain,
-            "topic": "best ai coding agents",
-        }
+        data = self._generate_request_data(topic="best ai coding agents")
 
         response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(response.data['job_id'], 'job-article-123')
+
+    def test_generate_rejects_missing_request_source(self):
+        response = self.client.post(
+            reverse('content_generate'),
+            {
+                "slack_user_id": self.integration.slack_user_id,
+                "domain": self.organization.domain,
+                "client_request_id": "content-factory-test-request",
+                "user_email": self.user_email,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_generate_rejects_non_roo_key(self):
+        other_client = APIClient()
+        other_client.credentials(HTTP_X_API_KEY="test_internal_key")
+
+        response = other_client.post(
+            reverse('content_generate'),
+            self._generate_request_data(),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class ArticleSystemDecisionTests(TestCase):
@@ -1010,6 +1052,7 @@ class TopicConfirmTests(TestCase):
             "domain": "mlai.au",
             "confirmed_keyword": "ai agents",
             "slack_user_id": "U-CONFIRM",
+            "request_source": "roo_slackbot",
         }
         
         with patch('integrations.api_views_content.confirm_topic') as mock_confirm_topic:
@@ -1030,6 +1073,7 @@ class TopicConfirmTests(TestCase):
             slack_channel_id=None,
             slack_thread_ts=None,
             slack_root_message_ts=None,
+            request_source="roo_slackbot",
         )
 
     def test_confirm_topic_with_index(self):
@@ -1050,8 +1094,14 @@ class TopicConfirmTests(TestCase):
         url = reverse('content_job_confirm', args=["job-index"])
         data = {
             "slack_user_id": "U-CONFIRM",
-            "option_index": 1
+            "option_index": 1,
+            "request_source": "roo_slackbot",
         }
+
+        job.billing_status = "charged"
+        job.billing_amount = 6
+        job.billing_source_job_id = "job-index"
+        job.save(update_fields=["billing_status", "billing_amount", "billing_source_job_id"])
 
         with patch('integrations.services.article_generation.confirm_topic') as mock_confirm_topic:
             mock_confirm_topic.return_value = {"job_id": "job-article", "status": "queued"}

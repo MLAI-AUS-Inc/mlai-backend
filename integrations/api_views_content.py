@@ -1,7 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from core.permissions import HasRooApiKey
+from core.permissions import HasRooApiKey, HasStrictRooApiKey
 from django.utils import timezone
 from typing import Optional
 import logging
@@ -16,6 +16,24 @@ from integrations.services.article_generation import (
 )
 
 logger = logging.getLogger(__name__)
+CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+
+
+def _validate_roo_content_request(request, *, require_client_request_id: bool = False) -> Optional[Response]:
+    request_source = str(request.data.get("request_source") or "").strip()
+    if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
+        return Response(
+            {"error": "request_source must be roo_slackbot"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if require_client_request_id and not str(request.data.get("client_request_id") or "").strip():
+        return Response(
+            {"error": "client_request_id is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return None
 
 
 def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_request: dict = None) -> Response:
@@ -116,10 +134,13 @@ class ContentGenerateView(APIView):
     POST /api/v1/content/generate
     """
     authentication_classes = []
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
         slack_user_id = request.data.get('slack_user_id')
+        validation_error = _validate_roo_content_request(request, require_client_request_id=True)
+        if validation_error:
+            return validation_error
         
         # Validate required fields
         if not slack_user_id:
@@ -134,6 +155,12 @@ class ContentGenerateView(APIView):
             "slack_channel_id": request.data.get('slack_channel_id'),
             "slack_thread_ts": request.data.get('slack_thread_ts'),
             "slack_root_message_ts": request.data.get('slack_root_message_ts') or request.data.get('slack_thread_ts'),
+            "request_source": request.data.get("request_source"),
+            "client_request_id": request.data.get("client_request_id"),
+            "user_email": request.data.get("user_email"),
+            "user_first_name": request.data.get("user_first_name"),
+            "user_last_name": request.data.get("user_last_name"),
+            "user_avatar_url": request.data.get("user_avatar_url"),
         }
 
         try:
@@ -223,9 +250,14 @@ class ContentConfirmView(APIView):
         skip_alternatives: list[str] (optional) - Keywords to mark as temporarily rejected/cooldown topics
     """
     authentication_classes = []
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
+        from core.models import ContentFactoryJob
+
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
         domain = request.data.get('domain')
         confirmed_keyword = request.data.get('confirmed_keyword')
         slack_user_id = request.data.get('slack_user_id')
@@ -260,7 +292,40 @@ class ContentConfirmView(APIView):
                 slack_channel_id=slack_channel_id,
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
+                request_source=request.data.get("request_source"),
             )
+            new_job_id = result.get("job_id") or result.get("run_id")
+            if source_run_id and new_job_id:
+                source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
+                if source_job:
+                    ContentFactoryJob.objects.update_or_create(
+                        job_id=new_job_id,
+                        defaults={
+                            "domain": domain,
+                            "slack_user_id": slack_user_id,
+                            "status": "generating",
+                            "request_meta": {
+                                "domain": domain,
+                                "topic": custom_title or confirmed_keyword,
+                                "target_keyword": confirmed_keyword,
+                                "custom_title": custom_title,
+                                "skip_alternatives": skip_alternatives,
+                                "source_run_id": source_run_id,
+                                "request_source": request.data.get("request_source"),
+                                "slack_channel_id": slack_channel_id,
+                                "slack_thread_ts": slack_thread_ts,
+                                "slack_root_message_ts": slack_root_message_ts,
+                            },
+                            "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
+                            "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
+                            "slack_root_message_ts": slack_root_message_ts or source_job.slack_root_message_ts or source_job.slack_thread_ts,
+                            "client_request_id": source_job.client_request_id,
+                            "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
+                            "billing_amount": source_job.billing_amount,
+                            "billing_status": "reused",
+                            "billing_ledger_id": source_job.billing_ledger_id,
+                        },
+                    )
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ArticleSystemActionRequiredError as e:
             return _handle_article_system_action_required(e, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
@@ -284,12 +349,15 @@ class ContentJobConfirmView(APIView):
     future research runs without being permanently skipped.
     """
     authentication_classes = []
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
 
     def post(self, request, job_id):
         from core.models import ContentFactoryJob
         from integrations.services.article_generation import confirm_topic, ArticleGenerationError
 
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
         keyword = request.data.get('keyword')
         option_index = request.data.get('option_index')
         slack_user_id = request.data.get('slack_user_id')
@@ -331,6 +399,11 @@ class ContentJobConfirmView(APIView):
             return Response({"error": "No keyword specified and job has no selected_keyword"}, status=status.HTTP_400_BAD_REQUEST)
         if not resolved_domain:
             return Response({"error": "No domain specified and job has no domain"}, status=status.HTTP_400_BAD_REQUEST)
+        if job.billing_status not in {"charged", "reused"}:
+            return Response(
+                {"error": "Job has not been billed for Content Factory generation."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # Build skip_alternatives: all options except the confirmed keyword
         skip_alternatives = []
@@ -357,6 +430,7 @@ class ContentJobConfirmView(APIView):
                 slack_channel_id=job.slack_channel_id,
                 slack_thread_ts=job.slack_thread_ts,
                 slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
+                request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
@@ -374,6 +448,7 @@ class ContentJobConfirmView(APIView):
                             "custom_title": custom_title,
                             "skip_alternatives": skip_alternatives,
                             "source_run_id": job_id,
+                            "request_source": request.data.get("request_source"),
                             "slack_channel_id": job.slack_channel_id,
                             "slack_thread_ts": job.slack_thread_ts,
                             "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
@@ -381,6 +456,11 @@ class ContentJobConfirmView(APIView):
                         "slack_channel_id": job.slack_channel_id,
                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
+                        "client_request_id": job.client_request_id,
+                        "billing_source_job_id": job.billing_source_job_id or job.job_id,
+                        "billing_amount": job.billing_amount,
+                        "billing_status": "reused",
+                        "billing_ledger_id": job.billing_ledger_id,
                     },
                 )
             return Response({

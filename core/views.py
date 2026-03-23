@@ -1149,65 +1149,22 @@ class GetOrCreateSlackUserView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Try to find existing user by slack_id first (most specific)
-        user = User.objects.filter(slack_id=slack_id).first()
-
-        if user:
-            # Update email if it changed
-            if user.email.lower() != email.lower():
-                user.email = email.lower()
-                user.save()
-
-            return Response({
-                "user_id": user.id,
-                "email": user.email,
-                "slack_id": user.slack_id,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "created": False
-            }, status=status.HTTP_200_OK)
-
-        # Try to find by email (case-insensitive)
-        user = User.objects.filter(email__iexact=email).first()
-
-        if user:
-            # Link slack_id to existing email account
-            user.slack_id = slack_id
-            if first_name and not user.first_name:
-                user.first_name = first_name
-            if last_name and not user.last_name:
-                user.last_name = last_name
-            if avatar_url and not user.avatar_url:
-                user.avatar_url = avatar_url
-            user.save()
-
-            logger.info(f"Linked Slack ID {slack_id} to existing user {email}")
-
-            return Response({
-                "user_id": user.id,
-                "email": user.email,
-                "slack_id": user.slack_id,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "created": False,
-                "linked": True
-            }, status=status.HTTP_200_OK)
-
-        # Create new user
         try:
-            user = User.objects.create_user(
-                email=email.lower(),
-                role='participant',
+            from .slack_users import ensure_slack_user
+
+            result = ensure_slack_user(
+                slack_id=slack_id,
+                email=email,
                 first_name=first_name,
                 last_name=last_name,
-                slack_id=slack_id
+                avatar_url=avatar_url,
             )
-            user.is_active = True  # Auto-activate for Slack users
-            if avatar_url:
-                user.avatar_url = avatar_url
-            user.save()
+            user = result.user
 
-            logger.info(f"Auto-created user from Slack: {email} (Slack ID: {slack_id})")
+            if result.linked:
+                logger.info(f"Linked Slack ID {slack_id} to existing user {email}")
+            elif result.created:
+                logger.info(f"Auto-created user from Slack: {email} (Slack ID: {slack_id})")
 
             return Response({
                 "user_id": user.id,
@@ -1215,8 +1172,9 @@ class GetOrCreateSlackUserView(APIView):
                 "slack_id": user.slack_id,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "created": True
-            }, status=status.HTTP_201_CREATED)
+                "created": result.created,
+                "linked": result.linked,
+            }, status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK)
 
         except Exception as e:
             logger.exception(f"Error creating user from Slack data: {str(e)}")
@@ -2597,6 +2555,11 @@ class ContentFactoryCallbackView(APIView):
                         f"{error_message}\n\n"
                         f"If this keeps happening, please contact support."
                     )
+                if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'}:
+                    message += (
+                        "\n\nIf this run failed and you want your 6 Roo points back, "
+                        "message Dr Sam on Slack."
+                    )
                 # Reply in-thread if we have context, fall back to DM
                 if channel_id and thread_ts:
                     SlackService.send_message(channel_id, message, thread_ts=thread_ts)
@@ -3158,7 +3121,11 @@ class ContentFactoryCallbackView(APIView):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": "You can try again by requesting a new article, or contact support if the issue persists."
+                            "text": (
+                                "You can try again by requesting a new article.\n\n"
+                                "If this run failed and you want your 6 Roo points back, "
+                                "message Dr Sam on Slack."
+                            )
                         }
                     }
                 ]

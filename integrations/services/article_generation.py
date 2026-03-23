@@ -21,6 +21,12 @@ DEFAULT_ARTICLE_DELIVERY_MODE = "publish_code"
 VALID_ARTICLE_DELIVERY_MODES = {"publish_code", "content_only"}
 FAILURE_RUN_STATUSES = {"failed", "error", "blocked", "blocked_verification", "denied"}
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
+CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
+CONTENT_FACTORY_BILLING_STATUS_CHARGED = "charged"
+CONTENT_FACTORY_BILLING_STATUS_REUSED = "reused"
+CONTENT_FACTORY_BILLING_STATUS_REFUNDED = "refunded"
 
 
 class ArticleGenerationError(Exception):
@@ -80,6 +86,156 @@ def _raise_article_system_action_required(
     )
 
 
+def _append_refund_instruction(message: str) -> str:
+    refund_line = (
+        f"If this run failed and you want your {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points back, "
+        "message Dr Sam on Slack."
+    )
+    if refund_line in message:
+        return message
+    return f"{message}\n\n{refund_line}"
+
+
+def _require_roo_request_source(article_request: dict) -> str:
+    request_source = str(article_request.get("request_source") or "").strip()
+    if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
+        raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
+    return request_source
+
+
+def _get_client_request_id(article_request: dict) -> str:
+    client_request_id = str(article_request.get("client_request_id") or "").strip()
+    if not client_request_id:
+        raise ArticleGenerationError("client_request_id is required for Content Factory article requests.")
+    return client_request_id
+
+
+def _ensure_content_factory_user(slack_user_id: str, article_request: dict):
+    from core.slack_users import ensure_slack_user
+    from roo.services import PointsService
+
+    email = str(article_request.get("user_email") or "").strip().lower()
+    if not email:
+        raise ArticleGenerationError("A Slack email is required before starting this Content Factory run.")
+
+    user = ensure_slack_user(
+        slack_id=slack_user_id,
+        email=email,
+        first_name=article_request.get("user_first_name") or "",
+        last_name=article_request.get("user_last_name") or "",
+        avatar_url=article_request.get("user_avatar_url"),
+    ).user
+    PointsService.get_or_create_account(user)
+    return user
+
+
+def _build_content_factory_charge_description(resolved_domain: str, article_request: dict) -> str:
+    topic = str(article_request.get("topic") or article_request.get("target_keyword") or "").strip()
+    if topic:
+        return f"Content Factory article run for {resolved_domain}: {topic}"
+    return f"Content Factory article research for {resolved_domain}"
+
+
+def _get_existing_billed_source_job(client_request_id: str):
+    from core.models import ContentFactoryJob
+
+    return (
+        ContentFactoryJob.objects.filter(
+            client_request_id=client_request_id,
+            billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+        )
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+
+
+def _serialize_existing_billed_job(job) -> dict:
+    request_meta = job.request_meta or {}
+    if request_meta.get("source_run_id"):
+        workflow = "confirmed_topic"
+    elif request_meta.get("topic"):
+        workflow = "direct_generate"
+    else:
+        workflow = "auto_discovery"
+
+    return {
+        "job_id": job.job_id,
+        "run_id": job.job_id,
+        "workflow": workflow,
+        "status": job.status or "queued",
+        "message": "Article request already started",
+    }
+
+
+def _charge_content_factory_request(slack_user_id: str, article_request: dict, resolved_domain: str):
+    from core.models import ContentFactoryJob
+    from roo.permissions import InsufficientBalanceError
+    from roo.services import PointsService
+
+    client_request_id = _get_client_request_id(article_request)
+    existing_refunded = (
+        ContentFactoryJob.objects.filter(
+            client_request_id=client_request_id,
+            billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
+        )
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if existing_refunded:
+        raise ArticleGenerationError(
+            "This Content Factory run was already refunded after a failed start. Please start a new article request."
+        )
+
+    user = _ensure_content_factory_user(slack_user_id, article_request)
+    try:
+        ledger, _ = PointsService.spend(
+            user=user,
+            delta=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+            source=CONTENT_FACTORY_LEDGER_SOURCE,
+            description=_build_content_factory_charge_description(resolved_domain, article_request),
+            created_by_slack_id=slack_user_id,
+            idempotency_key=f"content_factory:charge:{client_request_id}",
+            reference_type="CONTENT_FACTORY",
+            reference_id=client_request_id,
+        )
+    except InsufficientBalanceError:
+        raise ArticleGenerationError(
+            f"Creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points, and this user does not have enough."
+        )
+
+    return user, ledger
+
+
+def _refund_content_factory_request(
+    *,
+    user,
+    slack_user_id: str,
+    article_request: dict,
+    resolved_domain: str,
+    reason: str,
+):
+    from core.models import ContentFactoryJob
+    from roo.services import PointsService
+
+    client_request_id = _get_client_request_id(article_request)
+    ledger, _ = PointsService.refund(
+        user=user,
+        delta=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+        source=CONTENT_FACTORY_LEDGER_SOURCE,
+        description=f"Automatic refund for failed Content Factory start for {resolved_domain}: {reason}",
+        created_by_slack_id=slack_user_id,
+        idempotency_key=f"content_factory:refund:{client_request_id}",
+        reference_type="CONTENT_FACTORY",
+        reference_id=client_request_id,
+    )
+    ContentFactoryJob.objects.filter(client_request_id=client_request_id).update(
+        billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
+        billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+        billing_ledger_id=ledger.id,
+    )
+    return ledger
+
+
 def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
     """
     Build a GitHub App OAuth URL for domain-level authentication.
@@ -129,6 +285,11 @@ def _store_job_tracking_record(
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
     default_status: str = "queued",
+    client_request_id: Optional[str] = None,
+    billing_source_job_id: Optional[str] = None,
+    billing_amount: Optional[int] = None,
+    billing_status: Optional[str] = None,
+    billing_ledger_id: Optional[int] = None,
 ):
     from core.models import ContentFactoryJob
 
@@ -142,6 +303,11 @@ def _store_job_tracking_record(
         "slack_channel_id": slack_channel_id or "",
         "slack_thread_ts": slack_thread_ts or "",
         "slack_root_message_ts": resolved_root_message_ts,
+        "client_request_id": client_request_id,
+        "billing_source_job_id": billing_source_job_id,
+        "billing_amount": billing_amount or 0,
+        "billing_status": billing_status or "",
+        "billing_ledger_id": billing_ledger_id,
     }
     job, created = ContentFactoryJob.objects.get_or_create(job_id=job_id, defaults=defaults)
 
@@ -170,6 +336,21 @@ def _store_job_tracking_record(
         if merged_request_meta != (job.request_meta or {}):
             job.request_meta = merged_request_meta
             update_fields.append("request_meta")
+    if client_request_id is not None and job.client_request_id != client_request_id:
+        job.client_request_id = client_request_id
+        update_fields.append("client_request_id")
+    if billing_source_job_id is not None and job.billing_source_job_id != billing_source_job_id:
+        job.billing_source_job_id = billing_source_job_id
+        update_fields.append("billing_source_job_id")
+    if billing_amount is not None and job.billing_amount != billing_amount:
+        job.billing_amount = billing_amount
+        update_fields.append("billing_amount")
+    if billing_status is not None and job.billing_status != billing_status:
+        job.billing_status = billing_status
+        update_fields.append("billing_status")
+    if billing_ledger_id is not None and job.billing_ledger_id != billing_ledger_id:
+        job.billing_ledger_id = billing_ledger_id
+        update_fields.append("billing_ledger")
 
     if update_fields:
         update_fields.append("updated_at")
@@ -442,6 +623,16 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     """
     domain = article_request.get('domain')
     resolved_domain = normalize_domain(domain)
+    _require_roo_request_source(article_request)
+    client_request_id = _get_client_request_id(article_request)
+    existing_job = _get_existing_billed_source_job(client_request_id)
+    if existing_job:
+        logger.info(
+            "Reusing existing Content Factory source job %s for client_request_id=%s",
+            existing_job.job_id,
+            client_request_id,
+        )
+        return _serialize_existing_billed_job(existing_job)
 
     config = None
     if resolved_domain:
@@ -502,9 +693,15 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
         discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
+        charged_user, charge_ledger = _charge_content_factory_request(
+            slack_user_id,
+            article_request,
+            resolved_domain,
+        )
         payload = {
             "domain": resolved_domain,
             "slack_user_id": slack_user_id,
+            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
 
         logger.info(f"Research mode enabled for {resolved_domain}. Triggering discovery at {discovery_endpoint}.")
@@ -519,17 +716,27 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
             if response.status_code not in [200, 202]:
                 logger.error(f"Content Factory discovery failed: {response.text}")
+                _refund_content_factory_request(
+                    user=charged_user,
+                    slack_user_id=slack_user_id,
+                    article_request=article_request,
+                    resolved_domain=resolved_domain,
+                    reason=f"discovery queue failed with status {response.status_code}",
+                )
                 raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
 
             data = response.json()
             job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
             if not job_id:
                 logger.warning("Content Factory returned discovery success but no job_id")
-                return {
-                    "job_id": "unknown",
-                    "status": "completed",
-                    "message": "Discovery completed immediately (unexpected)",
-                }
+                _refund_content_factory_request(
+                    user=charged_user,
+                    slack_user_id=slack_user_id,
+                    article_request=article_request,
+                    resolved_domain=resolved_domain,
+                    reason="missing job id from discovery queue response",
+                )
+                raise ArticleGenerationError("Content Factory did not return a run id for the discovery request.")
 
             _store_job_tracking_record(
                 job_id,
@@ -540,6 +747,11 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
                 default_status="queued",
+                client_request_id=client_request_id,
+                billing_source_job_id=job_id,
+                billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+                billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+                billing_ledger_id=charge_ledger.id,
             )
             return {
                 "job_id": job_id,
@@ -549,8 +761,17 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "message": "Discovery started",
                 "job_status_url": f"{content_factory_url.rstrip('/')}/api/runs/{job_id}",
             }
+        except ArticleGenerationError:
+            raise
         except http_requests.exceptions.RequestException as e:
             logger.error(f"Failed to connect to Content Factory discovery endpoint: {e}")
+            _refund_content_factory_request(
+                user=charged_user,
+                slack_user_id=slack_user_id,
+                article_request=article_request,
+                resolved_domain=resolved_domain,
+                reason=f"discovery request exception: {e}",
+            )
             raise ArticleGenerationError(f"Failed to trigger discovery: {str(e)}")
 
     article_system, article_system_source = resolve_article_system_with_source(config)
@@ -614,6 +835,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "github_repo": github_repo,
         "competitors": competitors,
         "delivery_mode": get_default_article_delivery_mode(),
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
     }
     if article_request.get("custom_title"):
         payload["custom_title"] = article_request["custom_title"]
@@ -624,6 +846,11 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
     masked_payload = payload.copy()
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
+    charged_user, charge_ledger = _charge_content_factory_request(
+        slack_user_id,
+        article_request,
+        resolved_domain,
+    )
 
     try:
         response = http_requests.post(
@@ -638,8 +865,14 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
             if not job_id:
                 logger.warning("Content Factory returned success but no job_id")
-                # If CF returns completed result immediately
-                return {"job_id": "unknown", "status": "completed", "message": "Generation completed immediately (unexpected)"}
+                _refund_content_factory_request(
+                    user=charged_user,
+                    slack_user_id=slack_user_id,
+                    article_request=article_request,
+                    resolved_domain=resolved_domain,
+                    reason="missing job id from article queue response",
+                )
+                raise ArticleGenerationError("Content Factory did not return a run id for the article request.")
             # Create or refresh job tracking without clobbering callback-driven state.
             _store_job_tracking_record(
                 job_id,
@@ -650,6 +883,11 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
                 default_status="queued",
+                client_request_id=client_request_id,
+                billing_source_job_id=job_id,
+                billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
+                billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+                billing_ledger_id=charge_ledger.id,
             )
 
             status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
@@ -670,15 +908,38 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             except Exception:
                 missing_step = 'unknown'
                 cf_message = response.text
+            _refund_content_factory_request(
+                user=charged_user,
+                slack_user_id=slack_user_id,
+                article_request=article_request,
+                resolved_domain=resolved_domain,
+                reason=f"article prerequisite response {missing_step}",
+            )
             raise ArticleGenerationError(
                 f"PREREQUISITE_MISSING:{missing_step}:{resolved_domain}:{cf_message}"
             )
         else:
             logger.error(f"Content Factory generate failed: {response.text}")
+            _refund_content_factory_request(
+                user=charged_user,
+                slack_user_id=slack_user_id,
+                article_request=article_request,
+                resolved_domain=resolved_domain,
+                reason=f"article queue failed with status {response.status_code}",
+            )
             raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
 
+    except ArticleGenerationError:
+        raise
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory: {e}")
+        _refund_content_factory_request(
+            user=charged_user,
+            slack_user_id=slack_user_id,
+            article_request=article_request,
+            resolved_domain=resolved_domain,
+            reason=f"article request exception: {e}",
+        )
         raise ArticleGenerationError(f"Failed to trigger generation: {str(e)}")
 
 
@@ -721,6 +982,7 @@ def _handle_status_failure(job_id: str, result: dict):
                 oauth_url = build_github_oauth_url(job.domain, job.slack_user_id)
                 slack_text += f"\n\n<{oauth_url}|Connect GitHub for {job.domain}>"
 
+            slack_text = _append_refund_instruction(slack_text)
             SlackService.send_dm(job.slack_user_id, slack_text)
         except Exception as e:
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
@@ -907,6 +1169,7 @@ def confirm_topic(
     slack_channel_id: str = "",
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
+    request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -924,6 +1187,8 @@ def confirm_topic(
         dict: { "job_id": "...", "status": "queued", ... }
     """
     normalized_domain = normalize_domain(domain)
+    if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
+        raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
     if source_run_id and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
         from core.models import ContentFactoryJob
 
@@ -975,6 +1240,7 @@ def confirm_topic(
         "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
         "delivery_mode": get_default_article_delivery_mode(),
+        "request_source": request_source,
     }
 
     # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
@@ -1021,6 +1287,7 @@ def confirm_topic(
                         "custom_title": custom_title,
                         "skip_alternatives": skip_alternatives or [],
                         "source_run_id": source_run_id,
+                        "request_source": request_source,
                         "slack_channel_id": slack_channel_id or "",
                         "slack_thread_ts": slack_thread_ts or "",
                         "slack_root_message_ts": slack_root_message_ts or slack_thread_ts or "",
