@@ -3,9 +3,9 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
-    RateCardView, AdminAllowanceView,
+    RateCardView, AdminAllowanceView, PointsRequestViewSet,
     # Activity views
-    ChannelActivityView,
+    ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
     QuestProgressView, UserQuestProgressView, QuestIncrementView,
     QuestCompleteView, QuestCompletionStatusView,
@@ -16,6 +16,7 @@ router.register(r'admins', PointsAdminViewSet, basename='points-admin')
 router.register(r'minters', MinterViewSet, basename='minter')  # Backwards compat
 router.register(r'tasks', TaskViewSet)
 router.register(r'ledger', LedgerViewSet, basename='ledger')
+router.register(r'requests', PointsRequestViewSet, basename='points-request')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -57,6 +58,7 @@ urlpatterns = [
     # ============================================================
     # Activity Tracking
     # ============================================================
+    path('activity/first-post-award/', FirstChannelPostAwardView.as_view(), name='first_post_award'),
     path('activity/first-post/', ChannelActivityView.as_view(), name='first_post_record'),
     path('activity/first-post/<str:slack_user_id>/<str:channel_id>/', ChannelActivityView.as_view(), name='first_post_check'),
     

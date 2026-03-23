@@ -22,6 +22,11 @@ from .article_system import (
     normalize_article_system,
     resolve_article_system,
 )
+from .content_factory_progress import (
+    live_card_summary_for_job,
+    maybe_send_still_working_ping,
+    upsert_live_progress_card,
+)
 from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
 from hospital.models import Team as HospitalTeam
@@ -1779,25 +1784,26 @@ class ContentFactoryCallbackView(APIView):
 
         stage_title = stage_titles.get(milestone_key, 'Progress update')
         fallback_text = f"{stage_title}: {message}"
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{stage_title}*\n{message}",
-                },
-            }
-        ]
+        summary_text = message
 
         try:
-            self._send_job_message(
-                job=job,
+            job.last_progress_milestone_key = milestone_key
+            job.last_progress_updated_at = timezone.now()
+            job.still_working_pinged_at = None
+            sent, _message_ts = upsert_live_progress_card(
+                job,
                 data=data,
-                slack_user_id=slack_user_id,
-                text=fallback_text,
-                blocks=blocks,
-                allow_dm_fallback=False,
+                summary_text=summary_text,
             )
+            if not sent:
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=fallback_text,
+                    blocks=None,
+                    allow_dm_fallback=True,
+                )
         except Exception as exc:
             logger.warning("Failed to send %s notification for %s: %s", event_name, job_id, exc)
             return Response(
@@ -1813,7 +1819,16 @@ class ContentFactoryCallbackView(APIView):
         job.posted_progress_ids = posted_progress_ids + [progress_id]
         if milestone_index:
             job.last_progress_milestone_index = milestone_index
-        job.save(update_fields=['posted_progress_ids', 'last_progress_milestone_index', 'updated_at'])
+        job.save(
+            update_fields=[
+                'posted_progress_ids',
+                'last_progress_milestone_index',
+                'last_progress_milestone_key',
+                'last_progress_updated_at',
+                'still_working_pinged_at',
+                'updated_at',
+            ]
+        )
 
         return Response(
             {
@@ -1957,6 +1972,12 @@ class ContentFactoryCallbackView(APIView):
 
         logger.info("Content-only article complete for job %s (%s)", job_id, domain)
 
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text="Article content is ready.",
+        )
+
         if slack_user_id:
             details = f"\n\n*Artifact:* `{article_markdown_path}`" if article_markdown_path else ""
             text = f"✅ *Article content ready* for {domain}\n\n*{title}*{details}"
@@ -2011,6 +2032,12 @@ class ContentFactoryCallbackView(APIView):
         )
 
         logger.info("Publish bundle ready for job %s (%s)", job_id, domain)
+
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text="Publish bundle is ready.",
+        )
 
         if slack_user_id:
             details = []
@@ -2481,6 +2508,13 @@ class ContentFactoryCallbackView(APIView):
             error_message,
         )
 
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text=f"Run failed: {error_message}",
+            failed=True,
+        )
+
         if slack_user_id:
             try:
                 if error_code == 'PREREQUISITE_MISSING':
@@ -2888,6 +2922,10 @@ class ContentFactoryCallbackView(APIView):
                 'selection_data': selection,
             }
         )
+        job.last_progress_milestone_key = 'awaiting_confirmation'
+        job.last_progress_updated_at = timezone.now()
+        job.still_working_pinged_at = None
+        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
         
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
         
@@ -2999,6 +3037,11 @@ class ContentFactoryCallbackView(APIView):
                 "elements": action_elements
             })
 
+            upsert_live_progress_card(
+                job,
+                data=data,
+                summary_text="Research complete. Choose one of the topic options below to continue.",
+            )
             self._send_job_message(
                 job=job,
                 data=data,
@@ -3043,6 +3086,12 @@ class ContentFactoryCallbackView(APIView):
         thread_ts = (job.slack_thread_ts if job else None) or data.get('slack_thread_ts') or ''
 
         logger.info(f"Article complete for job {job_id}: pr_url={pr_url}, title={article_title}")
+
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text="Article published and ready for review.",
+        )
 
         if slack_user_id:
             title_line = f"*{article_title}*\n\n" if article_title else ""

@@ -290,6 +290,10 @@ def _store_job_tracking_record(
     billing_amount: Optional[int] = None,
     billing_status: Optional[str] = None,
     billing_ledger_id: Optional[int] = None,
+    progress_message_ts: Optional[str] = None,
+    last_progress_milestone_key: Optional[str] = None,
+    last_progress_updated_at=None,
+    still_working_pinged_at=None,
 ):
     from core.models import ContentFactoryJob
 
@@ -308,6 +312,10 @@ def _store_job_tracking_record(
         "billing_amount": billing_amount or 0,
         "billing_status": billing_status or "",
         "billing_ledger_id": billing_ledger_id,
+        "progress_message_ts": progress_message_ts or "",
+        "last_progress_milestone_key": last_progress_milestone_key or "",
+        "last_progress_updated_at": last_progress_updated_at,
+        "still_working_pinged_at": still_working_pinged_at,
     }
     job, created = ContentFactoryJob.objects.get_or_create(job_id=job_id, defaults=defaults)
 
@@ -351,12 +359,99 @@ def _store_job_tracking_record(
     if billing_ledger_id is not None and job.billing_ledger_id != billing_ledger_id:
         job.billing_ledger_id = billing_ledger_id
         update_fields.append("billing_ledger")
+    if progress_message_ts is not None and job.progress_message_ts != (progress_message_ts or ""):
+        job.progress_message_ts = progress_message_ts or ""
+        update_fields.append("progress_message_ts")
+    if last_progress_milestone_key is not None and job.last_progress_milestone_key != (last_progress_milestone_key or ""):
+        job.last_progress_milestone_key = last_progress_milestone_key or ""
+        update_fields.append("last_progress_milestone_key")
+    if last_progress_updated_at is not None and job.last_progress_updated_at != last_progress_updated_at:
+        job.last_progress_updated_at = last_progress_updated_at
+        update_fields.append("last_progress_updated_at")
+    if still_working_pinged_at is not None and job.still_working_pinged_at != still_working_pinged_at:
+        job.still_working_pinged_at = still_working_pinged_at
+        update_fields.append("still_working_pinged_at")
 
     if update_fields:
         update_fields.append("updated_at")
         job.save(update_fields=update_fields)
 
     return job
+
+
+def attach_progress_message(
+    job_id: str,
+    *,
+    progress_message_ts: str,
+    slack_channel_id: str = "",
+    slack_thread_ts: str = "",
+    slack_root_message_ts: str = "",
+):
+    from core.models import ContentFactoryJob
+
+    progress_ts = str(progress_message_ts or "").strip()
+    if not progress_ts:
+        raise ArticleGenerationError("progress_message_ts is required.")
+
+    job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+    if not job:
+        raise ArticleGenerationError(f"Job not found: {job_id}")
+
+    update_fields = []
+    if job.progress_message_ts != progress_ts:
+        job.progress_message_ts = progress_ts
+        update_fields.append("progress_message_ts")
+
+    resolved_thread_ts = str(slack_thread_ts or "").strip()
+    resolved_root_ts = str(slack_root_message_ts or "").strip() or resolved_thread_ts
+    resolved_channel_id = str(slack_channel_id or "").strip()
+
+    if resolved_channel_id and job.slack_channel_id != resolved_channel_id:
+        job.slack_channel_id = resolved_channel_id
+        update_fields.append("slack_channel_id")
+    if resolved_thread_ts and job.slack_thread_ts != resolved_thread_ts:
+        job.slack_thread_ts = resolved_thread_ts
+        update_fields.append("slack_thread_ts")
+    if resolved_root_ts and job.slack_root_message_ts != resolved_root_ts:
+        job.slack_root_message_ts = resolved_root_ts
+        update_fields.append("slack_root_message_ts")
+
+    now = timezone.now()
+    if not job.last_progress_updated_at:
+        job.last_progress_updated_at = now
+        update_fields.append("last_progress_updated_at")
+    if not job.last_progress_milestone_key:
+        job.last_progress_milestone_key = "queued"
+        update_fields.append("last_progress_milestone_key")
+    if job.still_working_pinged_at is not None:
+        job.still_working_pinged_at = None
+        update_fields.append("still_working_pinged_at")
+
+    if update_fields:
+        update_fields.append("updated_at")
+        job.save(update_fields=update_fields)
+
+    return job
+
+
+def augment_status_with_job_tracking(job_id: str, result: Optional[dict]) -> dict:
+    from core.models import ContentFactoryJob
+
+    payload = dict(result or {})
+    job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+    if not job:
+        return payload
+
+    payload.setdefault("job_id", job_id)
+    payload["progress_message_ts"] = job.progress_message_ts or ""
+    payload["last_progress_milestone_key"] = job.last_progress_milestone_key or ""
+    payload["last_progress_updated_at"] = (
+        job.last_progress_updated_at.isoformat() if job.last_progress_updated_at else None
+    )
+    payload["still_working_pinged_at"] = (
+        job.still_working_pinged_at.isoformat() if job.still_working_pinged_at else None
+    )
+    return payload
 
 
 def _serialize_local_run_snapshot(run) -> dict:
@@ -667,6 +762,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     slack_channel_id = article_request.get('slack_channel_id') or ''
     slack_thread_ts = article_request.get('slack_thread_ts') or ''
     slack_root_message_ts = article_request.get('slack_root_message_ts') or slack_thread_ts
+    progress_message_ts = article_request.get('progress_message_ts') or ''
 
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
@@ -754,6 +850,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
                 billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
                 billing_ledger_id=charge_ledger.id,
+                progress_message_ts=progress_message_ts,
+                last_progress_milestone_key="queued",
+                last_progress_updated_at=timezone.now(),
             )
             return {
                 "job_id": job_id,
@@ -892,6 +991,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 billing_amount=CONTENT_FACTORY_ARTICLE_COST_POINTS,
                 billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
                 billing_ledger_id=charge_ledger.id,
+                progress_message_ts=progress_message_ts,
+                last_progress_milestone_key="queued",
+                last_progress_updated_at=timezone.now(),
             )
 
             status_url = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
@@ -1078,7 +1180,7 @@ def check_generation_status(job_id: str) -> dict:
     try:
         response = http_requests.get(status_endpoint, headers=headers, timeout=30)
         if response.status_code == 200:
-            result = _maybe_auto_advance_run(job_id, response.json())
+            result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
             # Detect failure and update local state + notify user
             if result.get('status') in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, result)
@@ -1090,13 +1192,14 @@ def check_generation_status(job_id: str) -> dict:
                 timeout=30
             )
             if response.status_code == 200:
-                result = _maybe_auto_advance_run(job_id, response.json())
+                result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
                 if result.get('status') in FAILURE_RUN_STATUSES:
                     _handle_status_failure(job_id, result)
                 return result
 
         local_result = _load_local_run_snapshot(job_id)
         if local_result:
+            local_result = augment_status_with_job_tracking(job_id, local_result)
             if local_result.get("status") in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, local_result)
             return local_result
@@ -1173,6 +1276,7 @@ def confirm_topic(
     slack_channel_id: str = "",
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
+    progress_message_ts: str = "",
     request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
 ) -> dict:
     """
@@ -1193,14 +1297,18 @@ def confirm_topic(
     normalized_domain = normalize_domain(domain)
     if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
         raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
-    if source_run_id and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
+    source_job = None
+    if source_run_id:
         from core.models import ContentFactoryJob
 
         source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
+    if source_job and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):
         if source_job:
             slack_channel_id = source_job.slack_channel_id or ""
             slack_thread_ts = source_job.slack_thread_ts or ""
             slack_root_message_ts = source_job.slack_root_message_ts or slack_thread_ts
+    if source_job:
+        progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
     config = None
     try:
@@ -1300,6 +1408,9 @@ def confirm_topic(
                     slack_thread_ts=slack_thread_ts,
                     slack_root_message_ts=slack_root_message_ts,
                     default_status="queued",
+                    progress_message_ts=progress_message_ts,
+                    last_progress_milestone_key="queued",
+                    last_progress_updated_at=timezone.now(),
                 )
             return data
         else:

@@ -1,7 +1,11 @@
+import threading
+
+from django.db import close_old_connections
+from django.test import TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
-from .models import PointsAdmin
+from rest_framework.test import APIClient, APITestCase
+from .models import ChannelFirstPost, Ledger, PointsAdmin, PointsRequest
 from django.contrib.auth import get_user_model
 from unittest.mock import patch
 
@@ -288,3 +292,249 @@ class PointsAdminManagementViewSetTests(APITestCase):
         admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
         self.assertTrue(admin.is_active)
         self.assertIn('super admin', response.data['error'])
+
+
+class PointsRequestViewSetTests(APITestCase):
+    def setUp(self):
+        self.requester = User.objects.create_user(
+            email='requester@example.com',
+            slack_id='UREQUESTER',
+        )
+        self.admin = User.objects.create_user(
+            email='admin@example.com',
+            slack_id='UADMIN123',
+        )
+        PointsAdmin.objects.create(
+            slack_user_id='UADMIN123',
+            user=self.admin,
+            role='admin',
+            is_active=True,
+        )
+        self.list_url = reverse('points-request-list')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_create_points_request(self, mock_permission):
+        response = self.client.post(
+            self.list_url,
+            {
+                'requester_slack_id': 'UREQUESTER',
+                'target_slack_id': 'UREQUESTER',
+                'points': 12,
+                'reason': 'Running the 21st x MLAI event',
+                'slack_channel_id': 'C123',
+                'slack_thread_ts': '111.222',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        points_request = PointsRequest.objects.get()
+        self.assertEqual(points_request.status, 'pending')
+        self.assertEqual(points_request.points, 12)
+        self.assertEqual(points_request.slack_channel_id, 'C123')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_attach_and_lookup_points_request_by_slack_message(self, mock_permission):
+        points_request = PointsRequest.objects.create(
+            requester_slack_id='UREQUESTER',
+            target_slack_id='UREQUESTER',
+            points=12,
+            reason='Running the 21st x MLAI event',
+            slack_channel_id='C123',
+            slack_thread_ts='111.222',
+        )
+
+        attach_url = reverse('points-request-attach-slack-summary', args=[points_request.id])
+        response = self.client.patch(
+            attach_url,
+            {
+                'slack_channel_id': 'C123',
+                'slack_thread_ts': '111.222',
+                'slack_summary_message_ts': '222.333',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        points_request.refresh_from_db()
+        self.assertEqual(points_request.slack_summary_message_ts, '222.333')
+
+        lookup_url = reverse('points-request-by-slack-message')
+        response = self.client.get(
+            lookup_url,
+            {
+                'slack_channel_id': 'C123',
+                'slack_message_ts': '222.333',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], points_request.id)
+        self.assertEqual(response.data['status'], 'pending')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_approve_points_request_awards_points(self, mock_permission):
+        points_request = PointsRequest.objects.create(
+            requester_slack_id='UREQUESTER',
+            target_slack_id='UREQUESTER',
+            points=12,
+            reason='Running the 21st x MLAI event',
+            slack_channel_id='C123',
+            slack_thread_ts='111.222',
+            slack_summary_message_ts='222.333',
+        )
+
+        approve_url = reverse('points-request-approve', args=[points_request.id])
+        response = self.client.post(
+            approve_url,
+            {'admin_slack_id': 'UADMIN123'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        points_request.refresh_from_db()
+        self.requester.refresh_from_db()
+        self.assertEqual(points_request.status, 'approved')
+        self.assertEqual(points_request.approved_by_slack_id, 'UADMIN123')
+        self.assertEqual(response.data['points_awarded'], 12)
+        self.assertEqual(response.data['new_balance'], 12)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_approve_points_request_requires_points_admin(self, mock_permission):
+        points_request = PointsRequest.objects.create(
+            requester_slack_id='UREQUESTER',
+            target_slack_id='UREQUESTER',
+            points=12,
+            reason='Running the 21st x MLAI event',
+        )
+
+        approve_url = reverse('points-request-approve', args=[points_request.id])
+        response = self.client.post(
+            approve_url,
+            {'admin_slack_id': 'UNOTADMIN'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data['error'], 'Not a points admin')
+
+
+class FirstChannelPostAwardViewTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='intro@example.com',
+            slack_id='UINTRO',
+        )
+        self.url = reverse('first_post_award')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_first_post_award_creates_marker_and_ledger_entry(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['awarded'], True)
+        self.assertEqual(response.data['new_balance'], 2)
+        self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 1)
+
+        ledger = Ledger.objects.get(idempotency_key='first_post_award:UINTRO:CSTART')
+        self.assertEqual(ledger.delta, 2)
+        self.assertEqual(ledger.description, 'Completed quest: First Contact')
+        self.assertEqual(ledger.created_by_slack_id, 'SYSTEM')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_first_post_award_is_idempotent_on_repeat_request(self, mock_permission):
+        first_response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+        second_response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['awarded'], True)
+        self.assertEqual(second_response.data['awarded'], False)
+        self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 1)
+        self.assertEqual(Ledger.objects.filter(idempotency_key='first_post_award:UINTRO:CSTART').count(), 1)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.PointsService.award', side_effect=RuntimeError('boom'))
+    def test_first_post_award_rolls_back_marker_when_points_award_fails(self, mock_award, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 0)
+        self.assertEqual(Ledger.objects.filter(idempotency_key='first_post_award:UINTRO:CSTART').count(), 0)
+
+
+class FirstChannelPostAwardConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='intro-concurrency@example.com',
+            slack_id='UINTRO',
+        )
+        self.url = reverse('first_post_award')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_first_post_award_is_idempotent_under_concurrency(self, mock_permission):
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def worker():
+            close_old_connections()
+            client = APIClient()
+            try:
+                barrier.wait(timeout=5)
+                response = client.post(
+                    self.url,
+                    {
+                        'slack_user_id': 'UINTRO',
+                        'channel_id': 'CSTART',
+                    },
+                    format='json',
+                )
+                results.append(response.data)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 1)
+        self.assertEqual(Ledger.objects.filter(idempotency_key='first_post_award:UINTRO:CSTART').count(), 1)
+        self.assertEqual(sum(1 for result in results if result.get('awarded') is True), 1)
+        self.assertEqual(sum(1 for result in results if result.get('awarded') is False), 1)

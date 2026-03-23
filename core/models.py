@@ -317,8 +317,12 @@ class ContentFactoryJob(models.Model):
     slack_channel_id = models.CharField(max_length=100, blank=True, default="")
     slack_root_message_ts = models.CharField(max_length=50, blank=True, default="")
     slack_thread_ts = models.CharField(max_length=50, blank=True, default="")
+    progress_message_ts = models.CharField(max_length=50, blank=True, default="")
     posted_progress_ids = models.JSONField(default=list, blank=True)
     last_progress_milestone_index = models.IntegerField(default=0)
+    last_progress_milestone_key = models.CharField(max_length=100, blank=True, default="")
+    last_progress_updated_at = models.DateTimeField(blank=True, null=True)
+    still_working_pinged_at = models.DateTimeField(blank=True, null=True)
 
     # Result data (populated on article_complete callback)
     article_url = models.URLField(blank=True, null=True)

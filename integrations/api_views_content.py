@@ -7,6 +7,7 @@ from typing import Optional
 import logging
 
 from integrations.services.article_generation import (
+    attach_progress_message,
     trigger_article_generation,
     check_generation_status,
     publish_article,
@@ -14,6 +15,7 @@ from integrations.services.article_generation import (
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
 )
+from core.content_factory_progress import maybe_send_still_working_ping, upsert_live_progress_card
 
 logger = logging.getLogger(__name__)
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
@@ -155,6 +157,7 @@ class ContentGenerateView(APIView):
             "slack_channel_id": request.data.get('slack_channel_id'),
             "slack_thread_ts": request.data.get('slack_thread_ts'),
             "slack_root_message_ts": request.data.get('slack_root_message_ts') or request.data.get('slack_thread_ts'),
+            "progress_message_ts": request.data.get('progress_message_ts'),
             "request_source": request.data.get("request_source"),
             "client_request_id": request.data.get("client_request_id"),
             "user_email": request.data.get("user_email"),
@@ -267,6 +270,7 @@ class ContentConfirmView(APIView):
         slack_channel_id = request.data.get('slack_channel_id')
         slack_thread_ts = request.data.get('slack_thread_ts')
         slack_root_message_ts = request.data.get('slack_root_message_ts') or slack_thread_ts
+        progress_message_ts = request.data.get('progress_message_ts')
 
         if not all([domain, confirmed_keyword, slack_user_id]):
             return Response(
@@ -292,6 +296,7 @@ class ContentConfirmView(APIView):
                 slack_channel_id=slack_channel_id,
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
+                progress_message_ts=progress_message_ts,
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
@@ -312,18 +317,19 @@ class ContentConfirmView(APIView):
                                 "skip_alternatives": skip_alternatives,
                                 "source_run_id": source_run_id,
                                 "request_source": request.data.get("request_source"),
-                                "slack_channel_id": slack_channel_id,
-                                "slack_thread_ts": slack_thread_ts,
-                                "slack_root_message_ts": slack_root_message_ts,
-                            },
-                            "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
-                            "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
-                            "slack_root_message_ts": slack_root_message_ts or source_job.slack_root_message_ts or source_job.slack_thread_ts,
-                            "client_request_id": source_job.client_request_id,
-                            "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
-                            "billing_amount": source_job.billing_amount,
-                            "billing_status": "reused",
-                            "billing_ledger_id": source_job.billing_ledger_id,
+                            "slack_channel_id": slack_channel_id,
+                            "slack_thread_ts": slack_thread_ts,
+                            "slack_root_message_ts": slack_root_message_ts,
+                        },
+                        "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
+                        "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
+                        "slack_root_message_ts": slack_root_message_ts or source_job.slack_root_message_ts or source_job.slack_thread_ts,
+                        "progress_message_ts": progress_message_ts or source_job.progress_message_ts,
+                        "client_request_id": source_job.client_request_id,
+                        "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
+                        "billing_amount": source_job.billing_amount,
+                        "billing_status": "reused",
+                        "billing_ledger_id": source_job.billing_ledger_id,
                         },
                     )
             return Response(result, status=status.HTTP_202_ACCEPTED)
@@ -430,6 +436,7 @@ class ContentJobConfirmView(APIView):
                 slack_channel_id=job.slack_channel_id,
                 slack_thread_ts=job.slack_thread_ts,
                 slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
+                progress_message_ts=job.progress_message_ts,
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
@@ -456,12 +463,22 @@ class ContentJobConfirmView(APIView):
                         "slack_channel_id": job.slack_channel_id,
                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
+                        "progress_message_ts": job.progress_message_ts,
                         "client_request_id": job.client_request_id,
                         "billing_source_job_id": job.billing_source_job_id or job.job_id,
                         "billing_amount": job.billing_amount,
                         "billing_status": "reused",
                         "billing_ledger_id": job.billing_ledger_id,
                     },
+                )
+                child_job = ContentFactoryJob.objects.filter(job_id=new_job_id).first()
+                target_job = child_job
+            else:
+                target_job = ContentFactoryJob.objects.filter(job_id=active_job_id).first()
+            if target_job:
+                upsert_live_progress_card(
+                    target_job,
+                    summary_text="Topic confirmed. Roo is writing the draft now.",
                 )
             return Response({
                 "status": "confirmed",
@@ -569,4 +586,62 @@ class ArticleSystemDecisionView(APIView):
                 "job": scaffold_result,
             },
             status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class ContentJobProgressMessageView(APIView):
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request, job_id):
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
+
+        progress_message_ts = str(request.data.get("progress_message_ts") or "").strip()
+        if not progress_message_ts:
+            return Response({"error": "progress_message_ts is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            job = attach_progress_message(
+                job_id,
+                progress_message_ts=progress_message_ts,
+                slack_channel_id=request.data.get("slack_channel_id") or "",
+                slack_thread_ts=request.data.get("slack_thread_ts") or "",
+                slack_root_message_ts=request.data.get("slack_root_message_ts") or "",
+            )
+            return Response(
+                {
+                    "status": "attached",
+                    "job_id": job.job_id,
+                    "progress_message_ts": job.progress_message_ts,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ArticleGenerationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ContentJobStillWorkingView(APIView):
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request, job_id):
+        from core.models import ContentFactoryJob
+
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
+
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if not job:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        sent = maybe_send_still_working_ping(job)
+        return Response(
+            {
+                "status": "updated" if sent else "noop",
+                "job_id": job_id,
+            },
+            status=status.HTTP_200_OK,
         )

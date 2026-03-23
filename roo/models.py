@@ -381,6 +381,53 @@ class RewardRedemption(models.Model):
         return f"{self.user.email} - {self.reward.name} x{self.quantity} ({self.status})"
 
 
+class PointsRequest(models.Model):
+    """
+    Pending points requests created in Slack and later approved by an admin.
+    """
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled'),
+    )
+
+    requester_slack_id = models.CharField(max_length=50)
+    target_slack_id = models.CharField(max_length=50)
+    points = models.IntegerField()
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    approved_by_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+    ledger_entry = models.ForeignKey(
+        Ledger,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='points_requests',
+    )
+    slack_channel_id = models.CharField(max_length=50, blank=True, null=True)
+    slack_thread_ts = models.CharField(max_length=50, blank=True, null=True)
+    slack_summary_message_ts = models.CharField(max_length=50, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Points Request"
+        verbose_name_plural = "Points Requests"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['slack_channel_id', 'slack_summary_message_ts']),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.requester_slack_id} requested {self.points} pts for "
+            f"{self.target_slack_id} ({self.status})"
+        )
+
+
 class ChannelFirstPost(models.Model):
     """
     Track first posts in channels for point awards.
