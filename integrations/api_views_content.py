@@ -154,6 +154,8 @@ class ContentGenerateView(APIView):
             "topic": request.data.get('topic'),
             "target_keyword": request.data.get('target_keyword'),
             "context": request.data.get('context'),
+            "delivery_mode": request.data.get('delivery_mode'),
+            "delivery_mode_confirmed": request.data.get('delivery_mode_confirmed'),
             "slack_channel_id": request.data.get('slack_channel_id'),
             "slack_thread_ts": request.data.get('slack_thread_ts'),
             "slack_root_message_ts": request.data.get('slack_root_message_ts') or request.data.get('slack_thread_ts'),
@@ -297,6 +299,8 @@ class ContentConfirmView(APIView):
                 slack_thread_ts=slack_thread_ts,
                 slack_root_message_ts=slack_root_message_ts,
                 progress_message_ts=progress_message_ts,
+                delivery_mode=request.data.get("delivery_mode"),
+                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")
@@ -437,6 +441,8 @@ class ContentJobConfirmView(APIView):
                 slack_thread_ts=job.slack_thread_ts,
                 slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
                 progress_message_ts=job.progress_message_ts,
+                delivery_mode=request.data.get("delivery_mode"),
+                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
                 request_source=request.data.get("request_source"),
             )
             new_job_id = result.get("job_id") or result.get("run_id")

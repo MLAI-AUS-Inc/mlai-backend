@@ -88,6 +88,8 @@ class ContentJobConfirmTest(TestCase):
             slack_thread_ts="",
             slack_root_message_ts="",
             progress_message_ts="",
+            delivery_mode=None,
+            delivery_mode_confirmed=None,
             request_source="roo_slackbot",
         )
 
