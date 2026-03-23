@@ -768,6 +768,8 @@ class ContentFactoryOrgConfigView(APIView):
             'pillar_strategy': config.pillar_strategy if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
+            'publish_targets': config.publish_targets if config else [],
+            'default_publish_target_id': config.default_publish_target_id if config else None,
             'article_system': resolve_article_system(config),
         }
 
@@ -836,6 +838,8 @@ class ContentFactoryOrgConfigView(APIView):
             'pillar_strategy',
             'article_path_pattern',
             'registry_path',
+            'publish_targets',
+            'default_publish_target_id',
         ]
         
         for field in target_fields:

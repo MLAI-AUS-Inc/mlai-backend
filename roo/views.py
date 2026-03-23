@@ -78,7 +78,9 @@ class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, views
         return str(value).strip()
 
     def _require_super_admin_requester(self, request):
-        requester_slack_id = self._clean_slack_id(request.data.get('requester_slack_id'))
+        requester_slack_id = self._clean_slack_id(
+            request.data.get('requester_slack_id') or request.query_params.get('requester_slack_id')
+        )
         if not requester_slack_id:
             return None, Response(
                 {'error': 'requester_slack_id is required'},
@@ -200,6 +202,39 @@ class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, views
             'weekly_allowance': admin.weekly_allowance,
         })
         return Response(data, status=status.HTTP_200_OK)
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft-revoke a specific Points Admin."""
+        requester_slack_id, error_response = self._require_super_admin_requester(request)
+        if error_response:
+            return error_response
+
+        target_slack_id = self.kwargs.get(self.lookup_field)
+        admin = PointsAdmin.objects.filter(slack_user_id=target_slack_id).first()
+        if not admin:
+            return Response({'error': 'Not a points admin'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not admin.is_active:
+            return Response(
+                {
+                    'requester_slack_id': requester_slack_id,
+                    'target_slack_id': target_slack_id,
+                    'revoked': False,
+                    'already_revoked': True,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        admin.is_active = False
+        admin.save(update_fields=['is_active'])
+        return Response(
+            {
+                'requester_slack_id': requester_slack_id,
+                'target_slack_id': target_slack_id,
+                'revoked': True,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminAllowanceView(APIView):
