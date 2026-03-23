@@ -120,6 +120,33 @@ class PointsAdminManagementViewSetTests(APITestCase):
         self.assertFalse(response.data['created'])
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_promote_points_admin_reactivates_inactive_admin_and_preserves_allowance(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=False,
+            added_by_slack_id='UOLDER',
+            weekly_allowance=175,
+        )
+
+        response = self.client.post(
+            self.list_url,
+            {
+                'requester_slack_id': self.super_admin_slack_id,
+                'target_slack_id': self.target_slack_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
+        self.assertTrue(admin.is_active)
+        self.assertEqual(admin.weekly_allowance, 175)
+        self.assertEqual(admin.added_by_slack_id, self.super_admin_slack_id)
+        self.assertFalse(response.data['already_admin'])
+        self.assertFalse(response.data['created'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_promote_points_admin_requires_super_admin_requester(self, mock_permission):
         response = self.client.post(
             self.list_url,
@@ -189,3 +216,75 @@ class PointsAdminManagementViewSetTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data['error'], 'Not a points admin')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_delete_points_admin_revokes_active_admin(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=True,
+        )
+
+        response = self.client.delete(
+            self.detail_url,
+            {'requester_slack_id': self.super_admin_slack_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
+        self.assertFalse(admin.is_active)
+        self.assertEqual(response.data['target_slack_id'], self.target_slack_id)
+        self.assertTrue(response.data['revoked'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_delete_points_admin_is_idempotent_when_already_inactive(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=False,
+        )
+
+        response = self.client.delete(
+            self.detail_url,
+            {'requester_slack_id': self.super_admin_slack_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['target_slack_id'], self.target_slack_id)
+        self.assertTrue(response.data['already_revoked'])
+        self.assertFalse(response.data['revoked'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_delete_points_admin_requires_existing_admin(self, mock_permission):
+        response = self.client.delete(
+            self.detail_url,
+            {'requester_slack_id': self.super_admin_slack_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error'], 'Not a points admin')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_delete_points_admin_requires_super_admin_requester(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id=self.target_slack_id,
+            user=self.target_user,
+            role='committee',
+            is_active=True,
+        )
+
+        response = self.client.delete(
+            self.detail_url,
+            {'requester_slack_id': self.other_slack_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        admin = PointsAdmin.objects.get(slack_user_id=self.target_slack_id)
+        self.assertTrue(admin.is_active)
+        self.assertIn('super admin', response.data['error'])

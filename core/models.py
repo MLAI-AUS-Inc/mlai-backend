@@ -134,6 +134,17 @@ class OrganizationContentConfig(models.Model):
         max_length=255, default="app/articles/content/{category}/{slug}.tsx"
     )
     registry_path = models.CharField(max_length=255, default="app/articles/registry.ts")
+    publish_targets = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Cached publish target metadata derived from repository scans or live repo hints",
+    )
+    default_publish_target_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Preferred publish target identifier for direct preview runs",
+    )
     scan_summary = models.TextField(blank=True, null=True)
     tech_stack = models.JSONField(default=dict, blank=True)
     installed_packages = models.JSONField(
