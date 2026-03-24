@@ -1,6 +1,4 @@
 import logging
-import secrets
-import urllib.parse
 from typing import Optional
 import requests as http_requests
 from django.conf import settings
@@ -14,6 +12,7 @@ from integrations.models import UserIntegration
 from core.models import OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
 from integrations.services.github import ensure_valid_token, TokenRefreshError
+from integrations.services.github_connections import build_github_oauth_url
 
 logger = logging.getLogger(__name__)
 
@@ -486,22 +485,6 @@ def _refund_deferred_discovery_job_on_confirm_failure(
     )
 
 
-def build_github_oauth_url(domain: str, slack_user_id: str = '') -> str:
-    """
-    Build a GitHub App OAuth URL for domain-level authentication.
-
-    Returns a URL the user can visit to connect GitHub for the given domain.
-    """
-    normalized_domain = normalize_domain(domain) if domain else ''
-    rand_token = secrets.token_urlsafe(16)
-    state = f"{normalized_domain}::{rand_token}::{slack_user_id}::org"
-
-    app_slug = "mlai-tools"
-    install_url = f"https://github.com/apps/{app_slug}/installations/new"
-    params = {"state": state}
-    return install_url + "?" + urllib.parse.urlencode(params)
-
-
 def get_default_article_delivery_mode() -> str:
     """
     Resolve the default Content Factory article delivery mode.
@@ -888,15 +871,27 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
             org = Organization.objects.get(domain=normalized_domain)
             config = getattr(org, 'content_config', None)
             if config and config.github_token_encrypted and config.github_repo:
-                # Ensure token is valid (refresh if needed)
-                fresh_token = ensure_valid_org_token(normalized_domain)
-                logger.info(f"Using org-level GitHub credentials for {normalized_domain}")
-                return {
-                    'token': fresh_token,
-                    'repo': config.github_repo,
-                    'source': 'org',
-                    'config': config,
-                }
+                if (
+                    slack_user_id
+                    and config.connected_slack_user_id
+                    and config.connected_slack_user_id != slack_user_id
+                ):
+                    logger.info(
+                        "Skipping org-level GitHub credentials for %s: owned by %s, requested by %s",
+                        normalized_domain,
+                        config.connected_slack_user_id,
+                        slack_user_id,
+                    )
+                else:
+                    # Ensure token is valid (refresh if needed)
+                    fresh_token = ensure_valid_org_token(normalized_domain)
+                    logger.info(f"Using org-level GitHub credentials for {normalized_domain}")
+                    return {
+                        'token': fresh_token,
+                        'repo': config.github_repo,
+                        'source': 'org',
+                        'config': config,
+                    }
         except Organization.DoesNotExist:
             logger.debug(f"No organization found for domain {normalized_domain}")
         except (TokenRefreshError, ArticleGenerationError) as e:

@@ -17,6 +17,7 @@ class SmartScanTests(TestCase):
         self.organization = Organization.objects.create(domain=self.domain, name='MLAI')
         self.config = OrganizationContentConfig.objects.create(
             organization=self.organization,
+            connected_slack_user_id=self.user_id,
             github_repo="owner/repo",
             github_token_encrypted="gh_token",
             scan_summary="scan complete",
@@ -70,6 +71,9 @@ class SmartScanTests(TestCase):
         self.assertTrue(self.integration.project_scanned)
         self.assertEqual(self.integration.last_scanned_sha, 'commit_sha_xyz')
         self.assertIsNotNone(self.integration.last_scanned_at)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.last_scanned_sha, 'commit_sha_xyz')
+        self.assertIsNotNone(self.config.last_scanned_at)
 
     @patch('integrations.services.github.get_latest_repo_sha')
     @patch('integrations.services.github.http_requests.post')
@@ -100,6 +104,8 @@ class SmartScanTests(TestCase):
         # Setup: Last scan was old
         self.integration.last_scanned_sha = 'old_sha_111'
         self.integration.save()
+        self.config.scan_summary = ""
+        self.config.save(update_fields=['scan_summary'])
 
         # Mock: GitHub has new SHA
         mock_get_sha.return_value = 'new_sha_999'
@@ -258,4 +264,82 @@ class SmartScanTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['error'], "GitHub token expired")
         self.assertTrue("auth-url" in response.data or "auth_url" in response.data)
-        self.assertIn(f"?slack_user_id={self.user_id}", response.data['auth_url'])
+        self.assertIn("https://github.com/apps/mlai-tools/installations/new", response.data['auth_url'])
+        self.assertIn("mlai.au", response.data['auth_url'])
+
+    def test_status_endpoint_requires_domain_selection_for_multi_domain_users(self):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        second_org = Organization.objects.create(domain="two.example", name="Two")
+        OrganizationContentConfig.objects.create(
+            organization=second_org,
+            connected_slack_user_id=self.user_id,
+            github_repo="owner/two",
+            github_token_encrypted="gh_token_two",
+        )
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/')
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['requires_domain_selection'])
+        self.assertEqual(response.data['recommended_next_action'], 'select_domain')
+        self.assertIsNone(response.data['github_repo'])
+        self.assertEqual(len(response.data['connected_domains']), 2)
+
+    @patch('integrations.services.github.get_latest_repo_sha')
+    def test_status_endpoint_domain_specific_uses_owned_config_not_stale_user_repo(self, mock_get_sha):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        self.integration.github_repo = "owner/stale-repo"
+        self.integration.last_scanned_sha = "stale_sha"
+        self.integration.save(update_fields=['github_repo', 'last_scanned_sha'])
+
+        self.config.last_scanned_sha = "domain_sha"
+        self.config.save(update_fields=['last_scanned_sha'])
+        mock_get_sha.return_value = "domain_sha"
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/?domain={self.domain}')
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['github_repo'], 'owner/repo')
+        self.assertEqual(response.data['last_scanned_sha'], 'domain_sha')
+        self.assertFalse(response.data['has_updates'])
+        self.assertTrue(response.data['domain_connected'])
+
+    def test_connected_domains_are_filtered_by_owner_not_github_user_name(self):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        second_org = Organization.objects.create(domain="other-owner.example", name="Other Owner")
+        OrganizationContentConfig.objects.create(
+            organization=second_org,
+            connected_slack_user_id="U99999",
+            github_repo="owner/other-owner",
+            github_token_encrypted="gh_token_other",
+            github_user_name=self.integration.github_user_name,
+        )
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/')
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item['domain'] for item in response.data['connected_domains']],
+            [self.domain],
+        )

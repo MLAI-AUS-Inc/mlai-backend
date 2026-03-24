@@ -1,18 +1,50 @@
-import secrets
 import logging
+from datetime import timedelta
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
+from django.db.models import Q
 from django.urls import reverse
 
 from .models import UserIntegration
 from core.article_system import article_system_ready, recommended_next_action as derive_recommended_next_action, resolve_article_system
 from core.permissions import HasRooApiKey
+from integrations.services.github_connections import build_github_oauth_url, get_owned_org_configs
 from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_connection_state(config) -> str:
+    state = getattr(config, "github_connection_state", None)
+    if state:
+        return state
+
+    has_token = bool(str(getattr(config, "github_token_encrypted", "") or "").strip())
+    has_repo = bool(str(getattr(config, "github_repo", "") or "").strip())
+    if has_token and has_repo:
+        return "connected"
+    if has_token:
+        return "repo_selection_required"
+    return "auth_required"
+
+
+def _serialize_connected_domain(config) -> dict:
+    article_system = resolve_article_system(config)
+    connection_state = _derive_connection_state(config)
+    return {
+        "domain": config.organization.domain,
+        "github_repo": config.github_repo,
+        "scanned": bool(config.scan_summary),
+        "articles_scaffolded": config.articles_scaffolded,
+        "article_system": article_system,
+        "article_system_ready": article_system_ready(article_system),
+        "connection_state": connection_state,
+        "needs_github_auth": connection_state == "auth_required",
+        "last_scanned_at": getattr(config, "last_scanned_at", None),
+        "last_scanned_sha": getattr(config, "last_scanned_sha", None),
+    }
 
 class GithubTokenIdentityView(APIView):
     authentication_classes = []
@@ -60,216 +92,255 @@ class GithubTokenIdentityView(APIView):
         if not slack_user_id:
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Domain-aware credential check (optional)
-        requested_domain = request.query_params.get('domain')
+        requested_domain = normalize_domain(request.query_params.get('domain') or "")
+        requested_domain = requested_domain or None
+
+        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+        owned_configs = list(get_owned_org_configs(slack_user_id))
+        connected_domains = [
+            _serialize_connected_domain(config)
+            for config in owned_configs
+            if getattr(config, "organization", None)
+        ]
+
+        active_config = None
+        active_domain = requested_domain
+        requires_domain_selection = False
+
+        if requested_domain:
+            for config in owned_configs:
+                if config.organization and config.organization.domain == requested_domain:
+                    active_config = config
+                    break
+            if active_config is None:
+                try:
+                    from core.models import Organization
+                    org = Organization.objects.filter(domain=requested_domain).first()
+                    fallback_config = getattr(org, "content_config", None) if org else None
+                    if fallback_config and not fallback_config.connected_slack_user_id:
+                        active_config = fallback_config
+                except Exception as e:
+                    logger.warning(f"Failed to resolve transitional config for {requested_domain}: {e}")
+        elif len(owned_configs) == 1:
+            active_config = owned_configs[0]
+            active_domain = active_config.organization.domain
+        elif len(owned_configs) > 1:
+            requires_domain_selection = True
+
+        token = integration.github_access_token if integration else None
+        token_expires_at = integration.github_token_expires_at if integration else None
+        user_name = integration.github_user_name if integration else None
+        scopes = integration.github_scopes if integration else []
+        github_repo = integration.github_repo if integration else None
+        github_installation_id = integration.github_installation_id if integration else None
+        project_scanned = bool(integration.project_scanned) if integration else False
+        last_scanned_at = integration.last_scanned_at if integration else None
+        last_scanned_sha = integration.last_scanned_sha if integration else None
+        pending_intent = integration.pending_intent if integration else None
+
+        if active_config is not None:
+            token = active_config.github_token_encrypted
+            token_expires_at = active_config.github_token_expires_at
+            user_name = active_config.github_user_name or user_name
+            scopes = active_config.github_scopes or []
+            github_repo = active_config.github_repo
+            github_installation_id = active_config.github_installation_id
+            project_scanned = bool(active_config.scan_summary)
+            last_scanned_at = getattr(active_config, "last_scanned_at", None) or last_scanned_at
+            last_scanned_sha = getattr(active_config, "last_scanned_sha", None) or last_scanned_sha
+
         domain_info = {}
         if requested_domain:
-            try:
-                from integrations.services.article_generation import get_github_credentials_for_domain, build_github_oauth_url, ArticleGenerationError
-                creds = get_github_credentials_for_domain(requested_domain, slack_user_id)
-                domain_info = {
-                    "domain": requested_domain,
-                    "domain_connected": True,
-                    "domain_github_repo": creds['repo'],
-                    "domain_source": creds['source'],
-                }
-            except (ArticleGenerationError, Exception):
-                from integrations.services.article_generation import build_github_oauth_url
-                domain_info = {
-                    "domain": requested_domain,
-                    "domain_connected": False,
-                    "needs_github_auth": True,
-                    "oauth_url": build_github_oauth_url(requested_domain, slack_user_id),
-                }
-
-        try:
-            integration = UserIntegration.objects.get(slack_user_id=slack_user_id)
-
-            # Check for updates on GitHub
-            has_updates = False
-            latest_sha = None
-            auth_url = None
-            error_message = None
-            access_revoked = False
-            token_refreshed = False
-
-            try:
-                from integrations.services.github import get_latest_repo_sha, is_token_expired, refresh_github_token, TokenRefreshError
-                import requests
-
-                # Auto-refresh token if expired
-                if integration.github_access_token and is_token_expired(integration):
-                    if integration.github_refresh_token:
-                        try:
-                            logger.info(f"Auto-refreshing expired token for {slack_user_id}")
-                            refresh_github_token(slack_user_id)
-                            integration.refresh_from_db()  # Reload to get new token
-                            token_refreshed = True
-                        except TokenRefreshError as e:
-                            logger.warning(f"Auto-refresh failed for {slack_user_id}: {e}")
-                            error_message = "Token expired, refresh failed"
-                            access_revoked = True
-
-                if integration.github_access_token and integration.github_repo and not access_revoked:
-                    latest_sha = get_latest_repo_sha(integration.github_access_token, integration.github_repo)
-                    if latest_sha and latest_sha != integration.last_scanned_sha:
-                        has_updates = True
-
-                    # Check if recently scanned (within 5 minutes) - avoid re-scanning
-                    # even if there are minor updates
-                    if has_updates and integration.last_scanned_at:
-                        from django.utils import timezone
-                        from datetime import timedelta
-                        scan_cooldown = timedelta(minutes=5)
-                        if timezone.now() - integration.last_scanned_at < scan_cooldown:
-                            # Mark as recently scanned - bot can skip re-scan
-                            has_updates = False  # Override: don't trigger re-scan
-                            logger.info(f"Suppressing has_updates for {slack_user_id}: scanned {(timezone.now() - integration.last_scanned_at).seconds}s ago")
-            except requests.exceptions.HTTPError as e:
-                # Handle expired token (401) or revoked access (404)
-                if e.response.status_code == 401:
-                    logger.warning(f"GitHub Token Expired for {slack_user_id}")
-                    error_message = "GitHub token expired"
-                    access_revoked = True
-                elif e.response.status_code in [403, 404]:
-                    logger.warning(f"GitHub Access Revoked for {slack_user_id}: {e.response.status_code}")
-                    error_message = "GitHub access revoked or repository not found"
-                    access_revoked = True
-                else:
-                    logger.warning(f"Status check failed to fetch GH SHA: {e}")
-
-                # Generate Re-Auth URL for any access issue
-                if access_revoked:
-                    try:
-                        from integrations.services.github import build_github_auth_url
-                        auth_url = build_github_auth_url(slack_user_id, request=request)
-                    except Exception as url_err:
-                        logger.error(f"Failed to build auth url: {url_err}")
-            except Exception as e:
-                logger.warning(f"Status check failed to fetch GH SHA: {e}")
-
-            # Get last generated article (Task)
-            last_article = None
-            # Assuming 'Task' model is in roo.models and has a clear way to identify "articles" for this user
-            # For now, we'll fetch the most recent completed task for this user
-            try:
-                from roo.models import Task
-                from roo.services import PointsService
-                user = PointsService.get_user_by_slack_id(slack_user_id)
-                if user:
-                    recent_task = Task.objects.filter(
-                        assigned_user=user, 
-                        status='approved'
-                    ).order_by('-closed_at').first()
-                    
-                    if recent_task:
-                        last_article = {
-                            "title": recent_task.title,
-                            "date": recent_task.closed_at,
-                            "points": recent_task.points
-                        }
-            except Exception as e:
-                logger.warning(f"Failed to fetch last article: {e}")
-
-            # Fetch all connected domains for this user (org-level configs with valid tokens)
-            connected_domains = []
-            try:
-                from core.models import OrganizationContentConfig
-                org_configs = (
-                    OrganizationContentConfig.objects
-                    .select_related('organization')
-                    .filter(
-                        github_user_name=integration.github_user_name,
-                        github_token_encrypted__isnull=False,
-                    )
-                    .exclude(github_token_encrypted='')
-                )
-                connected_domains = [
-                    {
-                        "domain": c.organization.domain,
-                        "github_repo": c.github_repo,
-                        "scanned": bool(c.scan_summary),
-                        "articles_scaffolded": c.articles_scaffolded,
-                        "article_system": resolve_article_system(c),
-                        "article_system_ready": article_system_ready(resolve_article_system(c)),
-                    }
-                    for c in org_configs
-                    if c.organization
-                ]
-            except Exception as e:
-                logger.warning(f"Failed to fetch connected domains for {slack_user_id}: {e}")
-
-            scan_completed = bool(integration.project_scanned)
-            articles_scaffolded = False
-            article_system = {}
-            article_system_ready_flag = False
-            repo_has_new_commits = has_updates
-
-            try:
-                from core.models import GeneratedComponent, Organization
-
-                normalized_requested_domain = normalize_domain(requested_domain) if requested_domain else None
-                if normalized_requested_domain:
-                    org = Organization.objects.filter(domain=normalized_requested_domain).first()
-                    config = getattr(org, 'content_config', None) if org else None
-                    if config:
-                        scan_completed = bool(config.scan_summary)
-                        if not scan_completed:
-                            scan_completed = GeneratedComponent.objects.filter(organization=org).exists()
-                        articles_scaffolded = bool(config.articles_scaffolded)
-                        article_system = resolve_article_system(config)
-                        article_system_ready_flag = article_system_ready(article_system)
-            except Exception as e:
-                logger.warning(f"Failed to derive scan readiness for {requested_domain}: {e}")
-
-            # Repo drift should not force a re-scan for article research once a usable scan exists.
-            if scan_completed:
-                has_updates = False
-
-            if access_revoked:
-                recommended_next_action = "connect_github"
-            else:
-                recommended_next_action = derive_recommended_next_action(scan_completed, article_system)
-
-            response_data = {
-                "slack_user_id": integration.slack_user_id,
-                "token": integration.github_access_token,
-                "token_expires_at": integration.github_token_expires_at,
-                "token_refreshed": token_refreshed,
-                "user_name": integration.github_user_name,
-                "scopes": integration.github_scopes,
-                "github_repo": integration.github_repo,
-                "github_installation_id": integration.github_installation_id,
-                "project_scanned": integration.project_scanned,
-                "last_scanned_at": integration.last_scanned_at,
-                "last_scanned_sha": integration.last_scanned_sha,
-                "has_updates": has_updates,
-                "repo_has_new_commits": repo_has_new_commits,
-                "current_sha": latest_sha,
-                "scan_completed": scan_completed,
-                "scan_required": not scan_completed,
-                "content_research_ready": scan_completed,
-                "articles_scaffolded": articles_scaffolded,
-                "article_system": article_system,
-                "article_system_ready": article_system_ready_flag,
-                "recommended_next_action": recommended_next_action,
-                "last_article": last_article,
-                "pending_intent": integration.pending_intent,
-                "error": error_message,
-                "auth_url": auth_url,
-                "access_revoked": access_revoked,
-                "connected_domains": connected_domains,
+            connection_state = _derive_connection_state(active_config) if active_config else "auth_required"
+            domain_info = {
+                "domain": requested_domain,
+                "domain_connected": bool(active_config and connection_state == "connected"),
+                "needs_github_auth": connection_state == "auth_required",
+                "connection_state": connection_state,
+                "oauth_url": build_github_oauth_url(requested_domain, slack_user_id),
             }
-            if domain_info:
-                response_data.update(domain_info)
-            return Response(response_data)
-        except UserIntegration.DoesNotExist:
-            # If a domain was requested, still return domain info even without user integration
+            if active_config and active_config.github_repo:
+                domain_info["domain_github_repo"] = active_config.github_repo
+                domain_info["domain_source"] = "org"
+
+        if integration is None and not connected_domains:
             if domain_info:
                 error_data = {"error": "Integration not found"}
                 error_data.update(domain_info)
                 return Response(error_data, status=status.HTTP_404_NOT_FOUND)
             return Response({"error": "Integration not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get last generated article (Task)
+        last_article = None
+        try:
+            from roo.models import Task
+            from roo.services import PointsService
+            user = PointsService.get_user_by_slack_id(slack_user_id)
+            if user:
+                recent_task = Task.objects.filter(
+                    assigned_user=user,
+                    status='approved'
+                ).order_by('-closed_at').first()
+
+                if recent_task:
+                    last_article = {
+                        "title": recent_task.title,
+                        "date": recent_task.closed_at,
+                        "points": recent_task.points
+                    }
+        except Exception as e:
+            logger.warning(f"Failed to fetch last article: {e}")
+
+        has_updates = False
+        repo_has_new_commits = False
+        latest_sha = None
+        auth_url = None
+        error_message = None
+        access_revoked = False
+        token_refreshed = False
+
+        if not requires_domain_selection:
+            try:
+                from integrations.services.article_generation import ArticleGenerationError, get_github_credentials_for_domain
+                from integrations.services.github import get_latest_repo_sha, is_token_expired, refresh_github_token, TokenRefreshError
+                import requests
+
+                resolved_repo = github_repo
+                resolved_token = token
+
+                if active_domain:
+                    try:
+                        creds = get_github_credentials_for_domain(active_domain, slack_user_id)
+                        resolved_repo = creds['repo']
+                        resolved_token = creds['token']
+                        if active_config is not None:
+                            domain_info["domain_connected"] = True
+                            domain_info["domain_github_repo"] = resolved_repo
+                            domain_info["domain_source"] = creds['source']
+                            domain_info["connection_state"] = _derive_connection_state(active_config)
+                            domain_info.pop("needs_github_auth", None)
+                    except ArticleGenerationError:
+                        resolved_repo = None
+                        resolved_token = None
+                        auth_url = build_github_oauth_url(active_domain, slack_user_id)
+                elif integration and integration.github_access_token and is_token_expired(integration):
+                    if integration.github_refresh_token:
+                        try:
+                            logger.info(f"Auto-refreshing expired token for {slack_user_id}")
+                            refresh_github_token(slack_user_id)
+                            integration.refresh_from_db()
+                            token_refreshed = True
+                            resolved_token = integration.github_access_token
+                            token_expires_at = integration.github_token_expires_at
+                            github_installation_id = integration.github_installation_id
+                            user_name = integration.github_user_name
+                            scopes = integration.github_scopes
+                        except TokenRefreshError as e:
+                            logger.warning(f"Auto-refresh failed for {slack_user_id}: {e}")
+                            error_message = "Token expired, refresh failed"
+                            access_revoked = True
+
+                if resolved_token and resolved_repo and not access_revoked:
+                    latest_sha = get_latest_repo_sha(resolved_token, resolved_repo)
+                    repo_has_new_commits = bool(latest_sha and latest_sha != last_scanned_sha)
+                    has_updates = repo_has_new_commits
+
+                    if has_updates and last_scanned_at:
+                        scan_cooldown = timedelta(minutes=5)
+                        from django.utils import timezone
+                        if timezone.now() - last_scanned_at < scan_cooldown:
+                            has_updates = False
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 401:
+                    error_message = "GitHub token expired"
+                    access_revoked = True
+                elif e.response.status_code in [403, 404]:
+                    error_message = "GitHub access revoked or repository not found"
+                    access_revoked = True
+                else:
+                    logger.warning(f"Status check failed to fetch GH SHA: {e}")
+
+                if access_revoked:
+                    try:
+                        from integrations.services.github import build_github_auth_url
+                        auth_url = build_github_auth_url(slack_user_id, domain=active_domain, request=request)
+                    except Exception as url_err:
+                        logger.error(f"Failed to build auth url: {url_err}")
+            except Exception as e:
+                logger.warning(f"Status check failed to fetch GH SHA: {e}")
+
+        scan_completed = bool(project_scanned)
+        articles_scaffolded = False
+        article_system = {}
+        article_system_ready_flag = False
+
+        try:
+            from core.models import GeneratedComponent, Organization
+
+            if active_domain:
+                org = Organization.objects.filter(domain=active_domain).first()
+                config = getattr(org, 'content_config', None) if org else None
+                if config:
+                    scan_completed = bool(config.scan_summary)
+                    if not scan_completed:
+                        scan_completed = GeneratedComponent.objects.filter(organization=org).exists()
+                    articles_scaffolded = bool(config.articles_scaffolded)
+                    article_system = resolve_article_system(config)
+                    article_system_ready_flag = article_system_ready(article_system)
+                    last_scanned_at = getattr(config, "last_scanned_at", None) or last_scanned_at
+                    last_scanned_sha = getattr(config, "last_scanned_sha", None) or last_scanned_sha
+            elif requires_domain_selection:
+                scan_completed = False
+                article_system = {}
+                article_system_ready_flag = False
+        except Exception as e:
+            logger.warning(f"Failed to derive scan readiness for {active_domain}: {e}")
+
+        if scan_completed:
+            has_updates = False
+
+        if requires_domain_selection:
+            recommended_next_action = "select_domain"
+            error_message = error_message or "Multiple domains connected. Please specify which domain to use."
+        elif access_revoked or (requested_domain and domain_info.get("domain_connected") is False):
+            recommended_next_action = "connect_github"
+        else:
+            recommended_next_action = derive_recommended_next_action(scan_completed, article_system)
+
+        response_data = {
+            "slack_user_id": slack_user_id,
+            "token": token,
+            "token_expires_at": token_expires_at,
+            "token_refreshed": token_refreshed,
+            "user_name": user_name,
+            "scopes": scopes,
+            "github_repo": None if requires_domain_selection else github_repo,
+            "github_installation_id": None if requires_domain_selection else github_installation_id,
+            "project_scanned": project_scanned,
+            "last_scanned_at": last_scanned_at,
+            "last_scanned_sha": last_scanned_sha,
+            "has_updates": False if requires_domain_selection else has_updates,
+            "repo_has_new_commits": False if requires_domain_selection else repo_has_new_commits,
+            "current_sha": latest_sha,
+            "scan_completed": scan_completed,
+            "scan_required": not scan_completed,
+            "content_research_ready": scan_completed,
+            "articles_scaffolded": articles_scaffolded,
+            "article_system": article_system,
+            "article_system_ready": article_system_ready_flag,
+            "recommended_next_action": recommended_next_action,
+            "last_article": last_article,
+            "pending_intent": pending_intent,
+            "error": error_message,
+            "auth_url": auth_url,
+            "access_revoked": access_revoked,
+            "connected_domains": connected_domains,
+            "requires_domain_selection": requires_domain_selection,
+            "selected_domain": active_domain,
+        }
+        if domain_info:
+            response_data.update(domain_info)
+        return Response(response_data)
 
     def patch(self, request, slack_user_id=None):
         """
@@ -436,46 +507,21 @@ class GithubReauthUrlView(APIView):
 
     def get(self, request):
         slack_user_id = request.query_params.get('slack_user_id')
+        domain = normalize_domain(request.query_params.get('domain') or "")
+        domain = domain or None
         if not slack_user_id:
             return Response(
                 {"error": "slack_user_id is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check if user has an existing integration with installation_id
-        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-
-        # Build the OAuth authorization URL (not the app installation URL)
-        # This allows re-authorization without reinstalling the app
-        rand_token = secrets.token_urlsafe(16)
-        state = f"{slack_user_id}::{rand_token}"
-
-        # Store state in response for client to handle (stateless approach)
-        # Or we can use the existing github_connect flow
-
-        # Option 1: Direct OAuth URL (faster, no session needed)
-        if integration and integration.github_installation_id:
-            # If already installed, we can use a simpler re-auth flow
-            oauth_url = (
-                f"https://github.com/login/oauth/authorize?"
-                f"client_id={settings.GITHUB_OAUTH_CLIENT_ID}&"
-                f"state={state}"
-            )
-            return Response({
-                "reauth_url": oauth_url,
-                "message": "Use this URL to quickly re-authorize without reinstalling the app.",
-                "has_existing_installation": True,
-            })
-
-        # Option 2: Full connect flow (if no installation exists)
-        connect_path = reverse('github_connect')
-        full_connect_url = request.build_absolute_uri(connect_path)
-        auth_url = f"{full_connect_url}?slack_user_id={slack_user_id}"
+        from integrations.services.github import build_github_auth_url
+        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request)
 
         return Response({
             "reauth_url": auth_url,
-            "message": "Use this URL to connect GitHub (will show app installation flow).",
-            "has_existing_installation": False,
+            "message": "Use this URL to reconnect GitHub via the GitHub App installation flow.",
+            "has_existing_installation": bool(domain or UserIntegration.objects.filter(slack_user_id=slack_user_id, github_installation_id__isnull=False).exclude(github_installation_id='').exists()),
         })
 
 
@@ -545,6 +591,8 @@ class GithubScanView(APIView):
                         config.github_installation_id = integration.github_installation_id
                     if not config.github_repo:
                         config.github_repo = integration.github_repo
+                    if not config.connected_slack_user_id:
+                        config.connected_slack_user_id = slack_user_id
                     config.save()
                     github_repo = config.github_repo
                     has_credentials = True
@@ -552,7 +600,6 @@ class GithubScanView(APIView):
                 elif integration and integration.github_access_token and not integration.github_repo:
                     # User has connected GitHub but hasn't selected a repo yet
                     logger.warning(f"User {slack_user_id} has GitHub token but no repo set - cannot bootstrap domain {normalized_domain}")
-                    from integrations.services.article_generation import build_github_oauth_url
                     oauth_url = build_github_oauth_url(normalized_domain, slack_user_id)
                     return Response({
                         "error": f"Please complete GitHub setup for {normalized_domain}. You need to select a repository.",
@@ -567,36 +614,24 @@ class GithubScanView(APIView):
         if not has_credentials and not normalized_domain:
             # Check if user has multiple connected domains — if so, require domain selection
             # rather than silently using the default repo (which may be the wrong one).
-            integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-            if integration and integration.github_user_name:
-                from core.models import OrganizationContentConfig as OCC
-                user_org_configs = list(
-                    OCC.objects
-                    .select_related('organization')
-                    .filter(
-                        github_user_name=integration.github_user_name,
-                        github_token_encrypted__isnull=False,
-                    )
-                    .exclude(github_token_encrypted='')
-                )
-                if len(user_org_configs) > 1:
-                    # User has multiple domains — require explicit domain selection
-                    available = [
-                        {"domain": c.organization.domain, "github_repo": c.github_repo}
-                        for c in user_org_configs if c.organization
-                    ]
-                    return Response({
-                        "error": "You have multiple connected codebases. Please specify which domain to scan.",
-                        "available_domains": available,
-                        "hint": "Try: scan my codebase <domain>",
-                    }, status=status.HTTP_400_BAD_REQUEST)
+            user_org_configs = list(get_owned_org_configs(slack_user_id))
+            if len(user_org_configs) > 1:
+                available = [
+                    {"domain": c.organization.domain, "github_repo": c.github_repo}
+                    for c in user_org_configs if c.organization
+                ]
+                return Response({
+                    "error": "You have multiple connected codebases. Please specify which domain to scan.",
+                    "available_domains": available,
+                    "hint": "Try: scan my codebase <domain>",
+                }, status=status.HTTP_400_BAD_REQUEST)
 
+            integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
             if integration and integration.github_access_token and integration.github_repo:
                 github_repo = integration.github_repo
                 has_credentials = True
 
         if not has_credentials:
-            from integrations.services.article_generation import build_github_oauth_url
             oauth_url = build_github_oauth_url(normalized_domain or '', slack_user_id)
             return Response({
                 "error": f"No GitHub credentials found for domain '{normalized_domain or 'unknown'}'. Please connect GitHub first.",
@@ -613,6 +648,10 @@ class GithubScanView(APIView):
                     OrganizationContentConfig.objects
                     .select_related('organization')
                     .filter(github_repo=github_repo)
+                    .filter(
+                        Q(connected_slack_user_id=slack_user_id)
+                        | Q(connected_slack_user_id__isnull=True)
+                    )
                     .first()
                 )
                 if config and config.organization and config.organization.domain:
@@ -637,9 +676,15 @@ class GithubScanView(APIView):
             )
             config, created = OrganizationContentConfig.objects.get_or_create(organization=org)
             # Only set github_repo if the config doesn't already have one
+            update_fields = []
+            if not config.connected_slack_user_id:
+                config.connected_slack_user_id = slack_user_id
+                update_fields.append('connected_slack_user_id')
             if not config.github_repo and github_repo:
                 config.github_repo = github_repo
-                config.save(update_fields=['github_repo'])
+                update_fields.append('github_repo')
+            if update_fields:
+                config.save(update_fields=update_fields)
         except Exception as e:
             logger.warning(f"Failed to persist organization mapping for scan: {e}")
 

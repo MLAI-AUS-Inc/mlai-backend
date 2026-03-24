@@ -6,9 +6,11 @@ import urllib.parse
 import requests as http_requests
 from django.conf import settings
 from django.urls import reverse
+from django.db.models import Q
 
 from integrations.models import UserIntegration
 from integrations.utils import normalize_domain
+from integrations.services.github_connections import build_github_oauth_url
 from core.article_system import merge_article_system, resolve_article_system
 from core.models import GeneratedComponent, ComponentMapping
 
@@ -42,7 +44,6 @@ def build_github_auth_url(slack_user_id: str, domain: str = None, request=None) 
     normalized_domain = normalize_domain(domain) if domain else ''
 
     if normalized_domain:
-        from integrations.services.article_generation import build_github_oauth_url
         return build_github_oauth_url(normalized_domain, slack_user_id)
 
     connect_path = reverse('github_connect')
@@ -337,12 +338,17 @@ def scan_github_project(
             except Organization.DoesNotExist:
                 pass
         if config is None:
-            config = (
+            config_qs = (
                 OrganizationContentConfig.objects
                 .select_related('organization')
                 .filter(github_repo=github_repo)
-                .first()
             )
+            if slack_user_id:
+                config_qs = config_qs.filter(
+                    Q(connected_slack_user_id=slack_user_id)
+                    | Q(connected_slack_user_id__isnull=True)
+                )
+            config = config_qs.first()
         if config:
             if config.article_template:
                 existing_artifacts['article_template'] = config.article_template
@@ -485,6 +491,7 @@ def scan_github_project(
 
     # Update project_scanned status and tracking info on UserIntegration (if available)
     from django.utils import timezone
+    final_sha = current_sha
     if integration:
         integration.project_scanned = True
 
@@ -528,6 +535,11 @@ def scan_github_project(
             config.github_repo = github_repo
         if not config.github_token_encrypted:
             config.github_token_encrypted = github_token
+        if slack_user_id and not config.connected_slack_user_id:
+            config.connected_slack_user_id = slack_user_id
+        if final_sha:
+            config.last_scanned_sha = final_sha
+        config.last_scanned_at = timezone.now()
 
         # Save artifacts if present (check top-level first, then nested 'config')
         if 'article_template' in cf_data:

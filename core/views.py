@@ -4,6 +4,7 @@ import time
 from datetime import date as calendar_date
 from urllib.parse import urlparse
 from django.db import OperationalError, connection, transaction
+from django.db.models import Q
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -46,6 +47,7 @@ from .models import (
     Organization,
     OrganizationContentConfig,
 )
+from integrations.services.github_connections import get_owned_org_configs
 from .serializers import (
     ContentFactoryRunControlSerializer,
     ContentFactoryRunSyncSerializer,
@@ -803,22 +805,42 @@ class ContentFactoryOrgConfigView(APIView):
         
         org = None
 
-        # 0. Try lookup via slack_user_id -> UserIntegration -> github_repo
-        if slack_user_id and not github_repo:
+        # 0. Try lookup via explicit owned-domain mapping when only slack_user_id is provided
+        if slack_user_id and not github_repo and not domain:
             try:
-                from integrations.models import UserIntegration
-                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-                if integration and integration.github_repo:
-                    github_repo = integration.github_repo
-                    logger.info(f"Resolved github_repo={github_repo} from slack_user_id={slack_user_id}")
+                owned_configs = list(get_owned_org_configs(slack_user_id))
+                if len(owned_configs) == 1:
+                    org = owned_configs[0].organization
+                elif len(owned_configs) > 1:
+                    return Response(
+                        {
+                            'error': 'Multiple domains found for this Slack user. Please provide a domain.',
+                            'requires_domain_selection': True,
+                            'connected_domains': [
+                                {
+                                    'domain': cfg.organization.domain,
+                                    'github_repo': cfg.github_repo,
+                                }
+                                for cfg in owned_configs
+                                if cfg.organization
+                            ],
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             except Exception as e:
-                logger.warning(f"Error looking up integration by slack_user_id {slack_user_id}: {e}")
+                logger.warning(f"Error looking up owned domains for slack_user_id {slack_user_id}: {e}")
 
         # 1. Try lookup by github_repo if provided
-        if github_repo:
+        if github_repo and not org:
             try:
                 # Find the config that matches this repo
-                config = OrganizationContentConfig.objects.filter(github_repo=github_repo).first()
+                config_qs = OrganizationContentConfig.objects.filter(github_repo=github_repo)
+                if slack_user_id:
+                    config_qs = config_qs.filter(
+                        Q(connected_slack_user_id=slack_user_id)
+                        | Q(connected_slack_user_id__isnull=True)
+                    )
+                config = config_qs.first()
                 if config:
                     org = config.organization
             except Exception as e:
@@ -1661,6 +1683,7 @@ class ContentFactoryConnectGitHubView(APIView):
         data = request.data
         domain = data.get('domain')
         github_token = data.get('github_token')
+        slack_user_id = data.get('slack_user_id')
 
         if not domain:
             return Response(
@@ -1713,6 +1736,9 @@ class ContentFactoryConnectGitHubView(APIView):
 
         if 'github_scopes' in data:
             config.github_scopes = data['github_scopes']
+
+        if slack_user_id:
+            config.connected_slack_user_id = slack_user_id
 
         config.save()
 

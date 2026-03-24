@@ -92,6 +92,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗄️ Running migrations..."
     docker compose run --rm --no-deps web python manage.py migrate --noinput
 
+    echo "✅ Verifying migration readiness..."
+    docker compose run --rm --no-deps web python manage.py migrate --check --noinput
+
     echo "🌐 Starting web and scheduler services..."
     docker compose up -d web scheduler
 EOF
