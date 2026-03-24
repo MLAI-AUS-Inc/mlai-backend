@@ -53,6 +53,24 @@ class SlackService:
         except Exception as e:
             logger.error(f"Exception fetching Slack user {slack_user_id}: {str(e)}")
             return None
+
+    @classmethod
+    def open_dm_channel(cls, slack_user_id: str) -> Optional[str]:
+        """Open or resolve a DM channel for the given Slack user."""
+        client = cls.get_client()
+        try:
+            response = client.conversations_open(users=[slack_user_id])
+            if not response['ok']:
+                logger.error(f"Failed to open DM with {slack_user_id}: {response.get('error')}")
+                return None
+            return response['channel']['id']
+        except SlackApiError as e:
+            logger.error(f"Slack API error opening DM for {slack_user_id}: {e.response['error']}")
+            return None
+        except Exception as e:
+            logger.error(f"Exception opening DM for {slack_user_id}: {str(e)}")
+            return None
+
     @classmethod
     def send_dm(cls, slack_user_id: str, text: str, blocks: list = None, thread_ts: str = None) -> tuple[bool, Optional[str]]:
         """
@@ -70,14 +88,10 @@ class SlackService:
         """
         client = cls.get_client()
         try:
-            # Open DM channel
-            response = client.conversations_open(users=[slack_user_id])
-            if not response['ok']:
-                logger.error(f"Failed to open DM with {slack_user_id}: {response.get('error')}")
+            channel_id = cls.open_dm_channel(slack_user_id)
+            if not channel_id:
                 return False, None
-            
-            channel_id = response['channel']['id']
-            
+
             # Build message kwargs
             msg_kwargs = {
                 "channel": channel_id,
