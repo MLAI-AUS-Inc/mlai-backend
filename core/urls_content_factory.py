@@ -32,6 +32,8 @@ urlpatterns = [
     # Durable run state endpoints
     path('runs/<str:run_id>/', views.ContentFactoryRunView.as_view(), name='content_factory_run'),
     path('runs/<str:run_id>', views.ContentFactoryRunView.as_view(), name='content_factory_run_no_slash'),
+    path('runs/<str:run_id>/preview/', views.ContentFactoryRunPreviewView.as_view(), name='content_factory_run_preview'),
+    path('runs/<str:run_id>/preview', views.ContentFactoryRunPreviewView.as_view(), name='content_factory_run_preview_no_slash'),
     path('runs/<str:run_id>/artifacts/', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts'),
     path('runs/<str:run_id>/artifacts', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts_no_slash'),
     path('runs/<str:run_id>/<str:action>/', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control'),

@@ -4,6 +4,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core import signing
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -11,8 +12,10 @@ from rest_framework import status
 from django.urls import reverse
 from requests import Response
 
+from core.content_factory_delivery import build_content_factory_preview_signature
 from core.models import (
     ContentFactoryJob,
+    ContentFactoryRun,
     Organization,
     OrganizationContentConfig,
     ResearchedKeyword,
@@ -24,7 +27,113 @@ from roo.models import ChannelFirstPost, PointsAccount
 
 User = get_user_model()
 
-class EndpointTests(TestCase):
+class ContentFactoryTestDataMixin:
+    def _sample_content_package(self, *, long_section: bool = False, include_images: bool = True):
+        long_paragraph = " ".join(["Reliable livestock weight data improves management decisions."] * 80)
+        section_paragraphs = [
+            "Accurate weighing helps track growth and make calmer handling decisions on farm.",
+            long_paragraph if long_section else "Choose equipment that matches your yards, herd size, and handling flow.",
+        ]
+        hero_image = {
+            "kind": "hero",
+            "status": "generated",
+            "url": "https://cdn.example.com/hero.jpg" if include_images else "",
+            "alt_text": "Cattle scales in a livestock yard",
+            "caption": "Reliable livestock weighing starts with the right setup.",
+        }
+        inline_images = [
+            {
+                "kind": "inline",
+                "status": "generated",
+                "url": "https://cdn.example.com/inline-1.jpg" if include_images else "",
+                "alt_text": "Livestock scale beside cattle yards",
+                "caption": "Compare layout and flow before choosing a system.",
+                "section_id": "types-of-scales",
+                "section_heading": "Common Types of Cattle Scales",
+            }
+        ]
+        references = [
+            {"source_id": "src-1", "title": "Farmstyle livestock scales guide", "url": "https://example.com/farmstyle"},
+            {"source_id": "src-2", "title": "Gallagher auto weigher", "url": "https://example.com/gallagher"},
+        ]
+        article_json = {
+            "title": "How to Choose Cattle Scales for Accurate Livestock Weighing",
+            "meta_title": "How to Choose Cattle Scales for Accurate Livestock Weighing",
+            "meta_description": "Compare cattle scales, weigh bars, and auto weighers to choose a setup that suits your farm.",
+            "slug": "how-to-choose-cattle-scales-for-accurate-livestock-weighing",
+            "category": "featured",
+            "target_keyword": "cattle scales",
+            "summary_items": [
+                {"label": "Why weigh", "description": "Measured data beats estimates when tracking herd performance."},
+                {"label": "What to compare", "description": "Capacity, build quality, flow, and record-keeping matter most."},
+            ],
+            "sections": [
+                {
+                    "section_id": "types-of-scales",
+                    "heading": "Common Types of Cattle Scales",
+                    "section_type": "prose",
+                    "paragraphs": section_paragraphs,
+                    "bullets": ["Weigh bars fit existing handling equipment.", "Auto systems reduce manual handling."],
+                    "subsections": [
+                        {
+                            "heading": "When weigh bars make sense",
+                            "paragraphs": ["They work well when you already have a crush or fixed weighing point."],
+                            "bullets": [],
+                        }
+                    ],
+                },
+                {
+                    "section_id": "accuracy-and-installation",
+                    "heading": "Best Practices for Installation and Accuracy",
+                    "section_type": "prose",
+                    "paragraphs": ["A firm, level base helps the scale read consistently over time."],
+                    "bullets": ["Keep debris away from the weighing points.", "Check calibration as part of maintenance."],
+                    "subsections": [],
+                },
+            ],
+            "faq_items": [
+                {"question": "What is the difference between weigh bars and auto weighers?", "answer": "Auto systems reduce manual handling, while weigh bars suit existing setups."},
+                {"question": "How often should cattle scales be checked?", "answer": "Check regularly and after moving equipment between sites."},
+            ],
+            "cta": {
+                "title": "Compare your weighing setup before you buy",
+                "body": "Match scale type, layout, and herd needs before choosing a system.",
+                "button_text": "Review scale options",
+                "button_href": "https://livestockmerchant.com.au",
+            },
+            "references": references,
+        }
+        return {
+            "title": article_json["title"],
+            "slug": article_json["slug"],
+            "category": article_json["category"],
+            "target_keyword": article_json["target_keyword"],
+            "meta_title": article_json["meta_title"],
+            "meta_description": article_json["meta_description"],
+            "article_html": "<article><h1>How to Choose Cattle Scales for Accurate Livestock Weighing</h1><p>Compare cattle scales, weigh bars, and auto weighers to choose a setup that suits your farm.</p></article>",
+            "article_markdown": "# How to Choose Cattle Scales for Accurate Livestock Weighing\n\nCompare cattle scales, weigh bars, and auto weighers.",
+            "article_json": article_json,
+            "hero_image": hero_image,
+            "inline_images": inline_images,
+            "references": references,
+        }
+
+    def _create_content_factory_run(self, run_id: str, *, content_package=None, domain: str = "mlai.au"):
+        return ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow="direct_generate",
+            domain=domain,
+            status="completed",
+            current_step="finalize",
+            artifact_root=f"/tmp/content-factory-runs/{run_id}",
+            result={"status": "success", "content_package": content_package or self._sample_content_package()},
+            run_request={"domain": domain},
+            acceptance_summary={"content_packaged": True},
+            verification_summary={"all_required_passed": True},
+        )
+
+
+class EndpointTests(ContentFactoryTestDataMixin, TestCase):
     def setUp(self):
         self.client = APIClient()
         self.api_key = "test_api_key"
@@ -417,7 +526,7 @@ class ArticleSystemDecisionTests(TestCase):
         mock_trigger.assert_called_once()
 
 
-class ContentFactoryCallbackTests(TestCase):
+class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
     def setUp(self):
         self.client = APIClient()
         self.api_key = "test_roo_key"
@@ -910,6 +1019,10 @@ class ContentFactoryCallbackTests(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job-content-ready")
         self.assertEqual(job.status, "completed")
         mock_send_dm.assert_called_once()
+        self.assertNotIn("/tmp/run/article.md", mock_send_dm.call_args[0][1])
+        blocks = mock_send_dm.call_args[1]["blocks"]
+        self.assertIn("How to Find a Technical Cofounder", blocks[0]["text"]["text"])
+        self.assertNotIn("Artifact", blocks[0]["text"]["text"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
@@ -1177,9 +1290,12 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(response.data["reason"], "missing_thread_context")
         mock_send_message.assert_not_called()
 
+    @patch('integrations.services.slack.SlackService.update_message')
     @patch('integrations.services.slack.SlackService.send_message')
-    def test_content_ready_callback_uses_root_message_ts_as_thread_fallback(self, mock_send_message):
+    def test_content_ready_callback_uses_root_message_ts_as_thread_fallback(self, mock_send_message, mock_update_message):
         mock_send_message.return_value = (True, "live-content-card")
+        mock_update_message.return_value = True
+        self._create_content_factory_run("job-content-threaded", content_package=self._sample_content_package(long_section=True))
         ContentFactoryJob.objects.create(
             job_id="job-content-threaded",
             domain="mlai.au",
@@ -1188,6 +1304,7 @@ class ContentFactoryCallbackTests(TestCase):
             slack_channel_id="C123",
             slack_root_message_ts="123.456",
             slack_thread_ts="",
+            progress_message_ts="progress-ts",
         )
 
         response = self.client.post(
@@ -1198,21 +1315,78 @@ class ContentFactoryCallbackTests(TestCase):
                 "domain": "mlai.au",
                 "slack_user_id": "U123",
                 "title": "How to Find a Technical Cofounder",
-                "article_markdown_path": "/tmp/run/article.md",
             },
             format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(mock_send_message.call_count, 2)
-        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
-        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
-        self.assertIn(
-            "Article content is ready.",
-            mock_send_message.call_args_list[0][1]["blocks"][0]["text"]["text"],
+        self.assertTrue(mock_update_message.called)
+        self.assertGreaterEqual(mock_send_message.call_count, 5)
+        first_call = mock_send_message.call_args_list[0]
+        self.assertEqual(first_call[0][0], "C123")
+        self.assertEqual(first_call[1]["thread_ts"], "123.456")
+        first_blocks = first_call[1]["blocks"]
+        self.assertIn("Article content ready", first_blocks[0]["text"]["text"])
+        self.assertEqual(first_blocks[-1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertIn("/api/content-factory/runs/job-content-threaded/preview", first_blocks[-1]["elements"][0]["url"])
+        combined_text = "\n".join(
+            json.dumps(call[1].get("blocks") or [])
+            for call in mock_send_message.call_args_list
         )
-        self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
-        self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
+        self.assertNotIn("/tmp/run/article.md", combined_text)
+        self.assertIn("inline-1.jpg", combined_text)
+        self.assertIn("Quick Summary", combined_text)
+
+    def test_content_preview_route_renders_signed_article_html(self):
+        self._create_content_factory_run("run-preview-1")
+        signature = build_content_factory_preview_signature("run-preview-1")
+
+        response = self.client.get(
+            reverse("content_factory_run_preview", args=["run-preview-1"]),
+            {"sig": signature},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "How to Choose Cattle Scales for Accurate Livestock Weighing")
+        self.assertContains(response, "Delivered by MLAI Content Factory")
+
+    def test_content_preview_route_rejects_invalid_signature(self):
+        self._create_content_factory_run("run-preview-invalid")
+
+        response = self.client.get(
+            reverse("content_factory_run_preview", args=["run-preview-invalid"]),
+            {"sig": "bad-signature"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertContains(response, "preview link is invalid", status_code=status.HTTP_403_FORBIDDEN)
+
+    @patch("core.views.validate_content_factory_preview_signature", side_effect=signing.SignatureExpired("expired"))
+    def test_content_preview_route_rejects_expired_signature(self, _mock_validate):
+        self._create_content_factory_run("run-preview-expired")
+
+        response = self.client.get(
+            reverse("content_factory_run_preview", args=["run-preview-expired"]),
+            {"sig": "expired"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_410_GONE)
+        self.assertContains(response, "preview link has expired", status_code=status.HTTP_410_GONE)
+
+    def test_content_preview_route_handles_missing_images(self):
+        self._create_content_factory_run(
+            "run-preview-no-images",
+            content_package=self._sample_content_package(include_images=False),
+        )
+        signature = build_content_factory_preview_signature("run-preview-no-images")
+
+        response = self.client.get(
+            reverse("content_factory_run_preview", args=["run-preview-no-images"]),
+            {"sig": signature},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "How to Choose Cattle Scales for Accurate Livestock Weighing")
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_publish_bundle_ready_callback_posts_thread_reply(self, mock_send_message):

@@ -2,10 +2,14 @@ import logging
 import os
 import time
 from datetime import date as calendar_date
+from typing import Optional
 from urllib.parse import urlparse
+from django.core import signing
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, login as auth_login
+from django.http import HttpResponse
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -15,6 +19,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.views.decorators.csrf import csrf_exempt
+from django.views import View
 
 from .serializers import MyTokenObtainPairSerializer
 from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
@@ -28,6 +33,14 @@ from .content_factory_progress import (
     live_card_summary_for_job,
     maybe_send_still_working_ping,
     upsert_live_progress_card,
+)
+from .content_factory_delivery import (
+    build_content_factory_preview_url,
+    build_content_ready_blocks,
+    build_content_thread_messages,
+    render_content_preview_error_page,
+    render_content_preview_page,
+    validate_content_factory_preview_signature,
 )
 from .models import Hackathon
 from esafety.models import Team as EsafetyTeam
@@ -117,11 +130,12 @@ def _frontend_base_url(app_context):
     from django.conf import settings
 
     fallback = "http://localhost:5173" if settings.DEBUG else "https://mlai.au"
+    default_origin = _origin_from_url(getattr(settings, 'DEFAULT_FRONTEND_URL', None), fallback)
     if app_context == 'hospital':
-        return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), fallback)
+        return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), default_origin)
     if app_context == 'esafety':
-        return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), fallback)
-    return fallback
+        return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), default_origin)
+    return default_origin
 
 
 def _normalize_discovery_diagnostics(value):
@@ -348,6 +362,12 @@ class MagicLinkVerifyView(APIView):
                     user.is_active = True
                     user.save()
                     logger.info(f"Activated user account for {email}")
+
+                auth_login(
+                    request._request,
+                    user,
+                    backend="django.contrib.auth.backends.ModelBackend",
+                )
 
                 # Generate JWT tokens
                 refresh = RefreshToken.for_user(user)
@@ -1754,6 +1774,27 @@ class ContentFactoryConnectGitHubView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+def _content_package_from_run(run: Optional[ContentFactoryRun]) -> dict:
+    if not run:
+        return {}
+    result = run.result or {}
+    package = result.get("content_package") or {}
+    return package if isinstance(package, dict) else {}
+
+
+def _load_content_package_for_callback(run_id: str, *, attempts: int = 3, delay_seconds: float = 0.35):
+    run = None
+    package = {}
+    for attempt in range(1, attempts + 1):
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        package = _content_package_from_run(run)
+        if package:
+            return run, package
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    return run, package
+
+
 class ContentFactoryCallbackView(APIView):
     """
     Receives callbacks from content-factory for various pipeline events.
@@ -2095,11 +2136,12 @@ class ContentFactoryCallbackView(APIView):
             )
 
     def _handle_content_ready(self, data):
+        from integrations.services.slack import SlackService
+
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         title = data.get('title') or data.get('topic') or 'Untitled article'
-        article_markdown_path = data.get('article_markdown_path')
 
         job = self._update_content_factory_job(
             job_id=job_id,
@@ -2117,25 +2159,60 @@ class ContentFactoryCallbackView(APIView):
             summary_text="Article content is ready.",
         )
 
-        if slack_user_id:
-            details = f"\n\n*Artifact:* `{article_markdown_path}`" if article_markdown_path else ""
-            text = f"✅ *Article content ready* for {domain}\n\n*{title}*{details}"
+        run, content_package = _load_content_package_for_callback(job_id)
+        preview_url = ""
+        if content_package:
             try:
-                self._send_job_message(
-                    job=job,
-                    data=data,
-                    slack_user_id=slack_user_id,
-                    text=f"Article content ready for {domain}",
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": text,
-                            },
-                        }
-                    ],
+                preview_url = build_content_factory_preview_url(
+                    request=self.request,
+                    run_id=(run.run_id if run else job_id),
                 )
+            except Exception as exc:
+                logger.warning("Failed to build preview URL for %s: %s", job_id, exc)
+        else:
+            logger.warning(
+                "Content-only article ready for %s but durable content_package was unavailable after retries.",
+                job_id,
+            )
+            content_package = {
+                "title": title,
+                "meta_description": data.get("meta_description") or "",
+                "hero_image": data.get("hero_image") or {},
+                "inline_images": data.get("inline_images") or [],
+                "references": [],
+                "article_json": {},
+            }
+
+        if slack_user_id:
+            blocks = build_content_ready_blocks(
+                domain=domain,
+                content_package=content_package,
+                preview_url=preview_url,
+            )
+            fallback_text = f"Article content ready for {domain}"
+            channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+            try:
+                if channel_id and thread_ts:
+                    sent, _message_ts = SlackService.send_message(
+                        channel_id,
+                        fallback_text,
+                        blocks=blocks,
+                        thread_ts=thread_ts,
+                    )
+                    if sent and _content_package_from_run(run):
+                        for message in build_content_thread_messages(content_package):
+                            SlackService.send_message(
+                                channel_id,
+                                message["text"],
+                                blocks=message.get("blocks"),
+                                thread_ts=thread_ts,
+                            )
+                else:
+                    SlackService.send_dm(
+                        slack_user_id,
+                        fallback_text,
+                        blocks=blocks,
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to send content_ready notification to {slack_user_id}: {exc}")
 
@@ -4252,6 +4329,77 @@ class ContentFactoryRunView(APIView):
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryRunPreviewView(View):
+    """
+    Public signed preview for content-only article runs.
+
+    GET /api/content-factory/runs/<run_id>/preview?sig=...
+    """
+
+    def get(self, request, run_id: str):
+        signature = str(request.GET.get("sig") or "").strip()
+        if not signature:
+            return HttpResponse(
+                render_content_preview_error_page(
+                    title="Preview unavailable",
+                    message="This preview link is missing its signature.",
+                ),
+                status=403,
+                content_type="text/html; charset=utf-8",
+            )
+
+        try:
+            validate_content_factory_preview_signature(run_id, signature)
+        except signing.SignatureExpired:
+            return HttpResponse(
+                render_content_preview_error_page(
+                    title="Preview link expired",
+                    message="This content preview link has expired. Ask Roo to generate a fresh one from Slack.",
+                ),
+                status=410,
+                content_type="text/html; charset=utf-8",
+            )
+        except signing.BadSignature:
+            return HttpResponse(
+                render_content_preview_error_page(
+                    title="Preview unavailable",
+                    message="This content preview link is invalid.",
+                ),
+                status=403,
+                content_type="text/html; charset=utf-8",
+            )
+
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if not run:
+            return HttpResponse(
+                render_content_preview_error_page(
+                    title="Preview unavailable",
+                    message="The requested content preview could not be found.",
+                ),
+                status=404,
+                content_type="text/html; charset=utf-8",
+            )
+
+        content_package = _content_package_from_run(run)
+        if not content_package:
+            return HttpResponse(
+                render_content_preview_error_page(
+                    title="Preview unavailable",
+                    message="This run does not have a stored content package yet.",
+                ),
+                status=404,
+                content_type="text/html; charset=utf-8",
+            )
+
+        return HttpResponse(
+            render_content_preview_page(
+                domain=run.domain,
+                content_package=content_package,
+            ),
+            content_type="text/html; charset=utf-8",
         )
 
 
