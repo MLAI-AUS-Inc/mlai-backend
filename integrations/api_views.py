@@ -16,6 +16,12 @@ from integrations.utils import normalize_domain
 logger = logging.getLogger(__name__)
 
 
+def trigger_scan_async(*args, **kwargs):
+    from integrations.services.github import trigger_scan_async as _trigger_scan_async
+
+    return _trigger_scan_async(*args, **kwargs)
+
+
 def _derive_connection_state(config) -> str:
     state = getattr(config, "github_connection_state", None)
     if state:
@@ -36,6 +42,7 @@ def _serialize_connected_domain(config) -> dict:
     return {
         "domain": config.organization.domain,
         "github_repo": config.github_repo,
+        "article_delivery_mode": getattr(config, "article_delivery_mode", None),
         "scanned": bool(config.scan_summary),
         "articles_scaffolded": config.articles_scaffolded,
         "article_system": article_system,
@@ -325,6 +332,7 @@ class GithubTokenIdentityView(APIView):
             "scan_completed": scan_completed,
             "scan_required": not scan_completed,
             "content_research_ready": scan_completed,
+            "article_delivery_mode": getattr(active_config, "article_delivery_mode", None) if active_config else None,
             "articles_scaffolded": articles_scaffolded,
             "article_system": article_system,
             "article_system_ready": article_system_ready_flag,
@@ -534,7 +542,6 @@ class GithubScanView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        from integrations.services.github import trigger_scan_async, ScanError
         from integrations.models import UserIntegration
         from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
 
@@ -573,6 +580,13 @@ class GithubScanView(APIView):
                     logger.info(f"Found UserIntegration for {slack_user_id}: has_token={bool(integration.github_access_token)}, has_repo={bool(integration.github_repo)}, repo={integration.github_repo}")
                 else:
                     logger.info(f"No UserIntegration found for {slack_user_id}")
+                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id)
+                    return Response({
+                        "error": "Integration not found",
+                        "needs_github_auth": True,
+                        "oauth_url": oauth_url,
+                        "domain": normalized_domain,
+                    }, status=status.HTTP_404_NOT_FOUND)
                 
                 if integration and integration.github_access_token and integration.github_repo:
                     from core.models import Organization, OrganizationContentConfig

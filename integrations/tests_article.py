@@ -77,6 +77,8 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_payload(self, mock_post):
+        self.config.article_delivery_mode = "publish_code"
+        self.config.save(update_fields=["article_delivery_mode"])
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"job_id": "job_123", "status": "queued"}
@@ -84,10 +86,7 @@ class ArticleGenerationServiceTest(TestCase):
 
         article_request = self._article_request()
 
-        with self.settings(
-            CONTENT_FACTORY_API_KEY="test-key",
-            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
-        ):
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
             result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_123")
@@ -117,6 +116,8 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
+        self.config.article_delivery_mode = "publish_code"
+        self.config.save(update_fields=["article_delivery_mode"])
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"job_id": "job_thread_123", "status": "queued"}
@@ -128,10 +129,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_root_message_ts="123.456",
         )
 
-        with self.settings(
-            CONTENT_FACTORY_API_KEY="test-key",
-            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
-        ):
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
             result = trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(result["job_id"], "job_thread_123")
@@ -149,15 +147,14 @@ class ArticleGenerationServiceTest(TestCase):
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirm_topic_payload_includes_delivery_mode(self, mock_post):
+        self.config.article_delivery_mode = "publish_code"
+        self.config.save(update_fields=["article_delivery_mode"])
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = {"job_id": "job_confirm_123", "status": "queued"}
         mock_post.return_value = mock_response
 
-        with self.settings(
-            CONTENT_FACTORY_API_KEY="test-key",
-            CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE="publish_code",
-        ):
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
             result = confirm_topic(
                 domain="mlai.au",
                 confirmed_keyword="agentic ai",
@@ -196,9 +193,10 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertIn("/api/runs/job_123/approve", args[0])
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_generation_defaults_to_content_only_when_article_system_missing(self, mock_post):
+    def test_trigger_generation_omits_delivery_mode_when_no_preference_exists(self, mock_post):
         self.config.article_system = {}
-        self.config.save(update_fields=["article_system"])
+        self.config.article_delivery_mode = None
+        self.config.save(update_fields=["article_system", "article_delivery_mode"])
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -210,8 +208,85 @@ class ArticleGenerationServiceTest(TestCase):
 
         self.assertEqual(result["job_id"], "job_content_only_123")
         payload = mock_post.call_args.kwargs["json"]
+        self.assertIsNone(payload.get("delivery_mode"))
+        self.assertIsNone(payload.get("delivery_mode_confirmed"))
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_uses_saved_article_delivery_mode_without_repo(self, mock_post):
+        self.config.github_repo = ""
+        self.config.article_delivery_mode = "content_only"
+        self.config.save(update_fields=["github_repo", "article_delivery_mode"])
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_saved_content_only_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = self._article_request()
+        result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_saved_content_only_123")
+        payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["delivery_mode"], "content_only")
         self.assertFalse(payload["delivery_mode_confirmed"])
+        self.assertIsNone(payload.get("github_repo"))
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_allows_repo_less_domain_without_scan_summary(self, mock_post):
+        self.config.github_repo = ""
+        self.config.scan_summary = None
+        self.config.article_system = {}
+        self.config.article_delivery_mode = "content_only"
+        self.config.save(
+            update_fields=[
+                "github_repo",
+                "scan_summary",
+                "article_system",
+                "article_delivery_mode",
+            ]
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_repo_less_direct_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        result = trigger_article_generation(self.slack_user_id, self._article_request())
+
+        self.assertEqual(result["job_id"], "job_repo_less_direct_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["delivery_mode"], "content_only")
+        self.assertFalse(payload["delivery_mode_confirmed"])
+        self.assertIsNone(payload.get("github_repo"))
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_discovery_allows_repo_less_domain_without_scan_summary(self, mock_post):
+        self.config.github_repo = ""
+        self.config.scan_summary = None
+        self.config.article_system = {}
+        self.config.article_delivery_mode = "content_only"
+        self.config.save(
+            update_fields=[
+                "github_repo",
+                "scan_summary",
+                "article_system",
+                "article_delivery_mode",
+            ]
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "job_repo_less_discovery_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        result = trigger_article_generation(self.slack_user_id, self._article_request(topic=None))
+
+        self.assertEqual(result["job_id"], "job_repo_less_discovery_123")
+        args, kwargs = mock_post.call_args
+        self.assertIn("/api/runs/discovery", args[0])
+        payload = kwargs["json"]
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["slack_user_id"], self.slack_user_id)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_preserves_explicit_delivery_mode_confirmation(self, mock_post):
@@ -232,6 +307,38 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "job_explicit_publish_123")
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["delivery_mode"], "publish_code")
+        self.assertTrue(payload["delivery_mode_confirmed"])
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirm_topic_reuses_saved_delivery_mode_from_source_job(self, mock_post):
+        source_job = ContentFactoryJob.objects.create(
+            job_id="job-source-123",
+            domain="mlai.au",
+            slack_user_id=self.slack_user_id,
+            status="awaiting_confirmation",
+            request_meta={
+                "domain": "mlai.au",
+                "delivery_mode": "content_only",
+                "delivery_mode_confirmed": True,
+            },
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "job-confirm-source-123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        result = confirm_topic(
+            domain="mlai.au",
+            confirmed_keyword="agentic ai",
+            slack_user_id=self.slack_user_id,
+            source_run_id=source_job.job_id,
+            request_source="roo_slackbot",
+        )
+
+        self.assertEqual(result["job_id"], "job-confirm-source-123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["delivery_mode"], "content_only")
         self.assertTrue(payload["delivery_mode_confirmed"])
 
     @patch("integrations.services.article_generation.get_github_credentials_for_domain")
@@ -312,9 +419,8 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "existing-job-123")
         mock_post.assert_not_called()
 
-    @patch("integrations.services.article_generation.set_article_delivery_mode")
     @patch("integrations.services.article_generation.http_requests.get")
-    def test_check_generation_status_auto_selects_delivery_mode(self, mock_get, mock_set_delivery_mode):
+    def test_check_generation_status_preserves_awaiting_delivery_mode(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -322,16 +428,10 @@ class ArticleGenerationServiceTest(TestCase):
             "status": "awaiting_delivery_mode",
         }
         mock_get.return_value = mock_response
-        mock_set_delivery_mode.return_value = {
-            "job_id": "job_waiting_mode",
-            "status": "queued",
-            "delivery_mode": "publish_code",
-        }
 
         result = check_generation_status("job_waiting_mode")
 
-        self.assertEqual(result["status"], "queued")
-        mock_set_delivery_mode.assert_called_once_with("job_waiting_mode")
+        self.assertEqual(result["status"], "awaiting_delivery_mode")
 
     @patch("integrations.services.article_generation.http_requests.get")
     def test_check_generation_status_falls_back_to_local_run_when_cf_unavailable(self, mock_get):

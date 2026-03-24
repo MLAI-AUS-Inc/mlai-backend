@@ -143,6 +143,7 @@ class OrganizationContentConfig(models.Model):
     github_user_name = models.CharField(max_length=255, blank=True, null=True)
     github_installation_id = models.CharField(max_length=50, blank=True, null=True)
     github_scopes = models.JSONField(default=list, blank=True)
+    article_delivery_mode = models.CharField(max_length=32, blank=True, null=True)
     article_path_pattern = models.CharField(
         max_length=255, default="app/articles/content/{category}/{slug}.tsx"
     )

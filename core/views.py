@@ -875,6 +875,7 @@ class ContentFactoryOrgConfigView(APIView):
             'resource_prompt': config.resource_prompt if config else None,
             'company_context': config.company_context if config else None,
             'github_repo': config.github_repo if config else None,
+            'article_delivery_mode': config.article_delivery_mode if config else None,
             'brand_name': config.brand_name if config else None,
             'scan_summary': config.scan_summary if config else None,
             'tech_stack': config.tech_stack if config else {},
@@ -946,6 +947,7 @@ class ContentFactoryOrgConfigView(APIView):
             'resource_prompt',
             'company_context',
             'github_repo',
+            'article_delivery_mode',
             'brand_name',
             'scan_summary',
             'tech_stack',
@@ -2023,13 +2025,6 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_delivery_mode_required(self, data):
-        from integrations.services.article_generation import (
-            ArticleGenerationError,
-            resolve_article_delivery_mode,
-            set_article_delivery_mode,
-        )
-        from .models import Organization
-
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -2039,47 +2034,23 @@ class ContentFactoryCallbackView(APIView):
             slack_user_id=slack_user_id,
             status_value='awaiting_delivery_mode',
         )
+        request_meta = dict(job.request_meta or {})
+        if data.get('recommended_delivery_mode'):
+            request_meta['recommended_delivery_mode'] = data.get('recommended_delivery_mode')
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
 
-        article_system = {}
-        if domain:
-            from integrations.utils import normalize_domain
-
-            org = Organization.objects.filter(domain=normalize_domain(domain)).first()
-            config = getattr(org, 'content_config', None) if org else None
-            article_system = resolve_article_system(config) if config else {}
-        selected_mode, _ = resolve_article_delivery_mode(
-            article_request=job.request_meta or {},
-            article_system=article_system,
+        return Response(
+            {
+                'status': 'processed',
+                'job_id': job_id,
+                'delivery_mode': None,
+                'recommended_delivery_mode': data.get('recommended_delivery_mode'),
+                'auto_selected': False,
+            },
+            status=status.HTTP_200_OK,
         )
-
-        try:
-            result = set_article_delivery_mode(job_id, selected_mode)
-            job.status = 'generating'
-            job.error_message = ''
-            job.save(update_fields=['status', 'error_message', 'updated_at'])
-            logger.info("Auto-selected delivery mode %s for job %s", selected_mode, job_id)
-            return Response(
-                {
-                    'status': 'processed',
-                    'job_id': job_id,
-                    'delivery_mode': result.get('delivery_mode', selected_mode),
-                    'auto_selected': True,
-                },
-                status=status.HTTP_200_OK,
-            )
-        except ArticleGenerationError as exc:
-            logger.warning("Failed to auto-select delivery mode for %s: %s", job_id, exc)
-            job.error_message = str(exc)
-            job.save(update_fields=['error_message', 'updated_at'])
-            return Response(
-                {
-                    'status': 'deferred',
-                    'job_id': job_id,
-                    'delivery_mode': selected_mode,
-                    'message': str(exc),
-                },
-                status=status.HTTP_200_OK,
-            )
 
     def _handle_preview_ready(self, data):
         from integrations.services.article_generation import ArticleGenerationError, publish_article
