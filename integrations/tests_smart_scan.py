@@ -1,7 +1,9 @@
 from django.test import TestCase
 from unittest.mock import patch, MagicMock
+from urllib.parse import parse_qs, urlparse
 from integrations.models import UserIntegration
 from integrations.services.github import scan_github_project, get_latest_repo_sha
+from integrations.services.github_connections import parse_github_oauth_state
 from core.models import Organization, OrganizationContentConfig
 
 class SmartScanTests(TestCase):
@@ -265,7 +267,9 @@ class SmartScanTests(TestCase):
         self.assertEqual(response.data['error'], "GitHub token expired")
         self.assertTrue("auth-url" in response.data or "auth_url" in response.data)
         self.assertIn("https://github.com/apps/mlai-tools/installations/new", response.data['auth_url'])
-        self.assertIn("mlai.au", response.data['auth_url'])
+        state = parse_qs(urlparse(response.data['auth_url']).query)["state"][0]
+        parsed_state = parse_github_oauth_state(state)
+        self.assertEqual(parsed_state.domain, "mlai.au")
 
     def test_status_endpoint_requires_domain_selection_for_multi_domain_users(self):
         from rest_framework.test import APIRequestFactory

@@ -19,9 +19,19 @@ class GitHubCallbackTests(TestCase):
     def setUp(self):
         self.client = Client()
 
-    def _callback(self, *, domain: str, slack_user_id: str, installation_id: str, repos: list[dict], github_login: str = "octocat"):
+    def _callback(
+        self,
+        *,
+        domain: str,
+        slack_user_id: str,
+        installation_id: str,
+        repos: list[dict],
+        github_login: str = "octocat",
+        store_state: bool = True,
+    ):
         oauth_state = build_github_oauth_state(domain=domain, slack_user_id=slack_user_id)
-        store_github_oauth_state(oauth_state)
+        if store_state:
+            store_github_oauth_state(oauth_state)
 
         token_payload = {
             "access_token": "gh-access",
@@ -81,6 +91,22 @@ class GitHubCallbackTests(TestCase):
         self.assertEqual(integration.github_repo, "owner/mlai-au")
 
         mock_trigger_scan.assert_called_once_with("U123", domain="mlai.au")
+        mock_send_dm.assert_called_once()
+
+    def test_org_level_callback_accepts_signed_state_without_cache_or_session(self):
+        response, mock_trigger_scan, mock_send_dm = self._callback(
+            domain="worker-safe.com",
+            slack_user_id="U123",
+            installation_id="inst-signed",
+            repos=[{"full_name": "owner/worker-safe"}],
+            store_state=False,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        config = OrganizationContentConfig.objects.get(organization__domain="worker-safe.com")
+        self.assertEqual(config.connected_slack_user_id, "U123")
+        self.assertEqual(config.github_repo, "owner/worker-safe")
+        mock_trigger_scan.assert_called_once_with("U123", domain="worker-safe.com")
         mock_send_dm.assert_called_once()
 
     def test_callback_preserves_existing_domain_connection_when_connecting_new_domain(self):
