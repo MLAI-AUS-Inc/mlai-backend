@@ -5,10 +5,15 @@ from datetime import timedelta
 from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
-from django.middleware.csrf import get_token
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from .models import GoogleConnection, UserIntegration
+from integrations.services.github_connections import (
+    build_github_installation_url,
+    build_github_oauth_state,
+    store_github_oauth_state,
+    validate_github_oauth_state,
+)
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -117,28 +122,14 @@ def github_connect(request):
     if not slack_user_id:
         return HttpResponseBadRequest("Missing slack_user_id")
 
-    rand_token = secrets.token_urlsafe(16)
-
     if domain:
-        # Org-level OAuth — preserves domain through the callback
-        state = f"{domain}::{rand_token}::{slack_user_id}::org"
+        oauth_state = build_github_oauth_state(domain=domain, slack_user_id=slack_user_id)
     else:
-        # Legacy user-level OAuth
         job_id = request.GET.get('job_id', '')
-        state = f"{slack_user_id}::{rand_token}::{job_id}"
+        oauth_state = build_github_oauth_state(slack_user_id=slack_user_id, job_id=job_id)
 
-    request.session["github_oauth_state"] = state
-
-    # GitHub App installation URL - this shows the native repo selector
-    app_slug = "mlai-tools"
-    install_url = f"https://github.com/apps/{app_slug}/installations/new"
-
-    params = {
-        "state": state,
-    }
-
-    url = install_url + "?" + urllib.parse.urlencode(params)
-    return redirect(url)
+    store_github_oauth_state(oauth_state, request=request)
+    return redirect(build_github_installation_url(oauth_state.raw))
 
 import logging
 logger = logging.getLogger(__name__)
@@ -158,40 +149,28 @@ def github_callback(request):
     - Org-level: domain::random_token::slack_user_id::org
     """
     code = request.GET.get("code")
-    state = request.GET.get("state")
+    raw_state = request.GET.get("state")
     installation_id = request.GET.get("installation_id")
-    setup_action = request.GET.get("setup_action")
+    setup_action = request.GET.get("setup_action") or "install"
 
     if not code:
         return HttpResponseBadRequest("Missing code")
 
+    if not raw_state:
+        return HttpResponseBadRequest("Missing state")
+
     if not installation_id:
         return HttpResponseBadRequest("Missing installation_id - this endpoint requires GitHub App installation")
 
-    # Parse state to determine OAuth type (user vs org)
-    is_org_oauth = False
-    slack_user_id = None
-    job_id = None
-    domain = None
-
     try:
-        parts = state.split("::")
-        # Check if this is org-level OAuth (state ends with "org")
-        if len(parts) >= 4 and parts[3] == 'org':
-            is_org_oauth = True
-            domain = parts[0]
-            # parts[1] is rand_token
-            slack_user_id = parts[2] if parts[2] else None
-        else:
-            # Legacy user-level OAuth
-            slack_user_id = parts[0]
-            # parts[1] is rand_token
-            if len(parts) >= 3:
-                job_id = parts[2]
-                if job_id == 'None' or job_id == '':
-                    job_id = None
-    except (ValueError, AttributeError):
-        return HttpResponseBadRequest("Invalid state format")
+        oauth_state = validate_github_oauth_state(raw_state, request=request)
+    except ValueError:
+        return HttpResponseBadRequest("Invalid or expired state")
+
+    is_org_oauth = oauth_state.is_org_oauth
+    slack_user_id = oauth_state.slack_user_id
+    job_id = oauth_state.job_id
+    normalized_domain = oauth_state.domain
 
     # Exchange code for user access token
     token_resp = requests.post(
@@ -246,37 +225,20 @@ def github_callback(request):
         repos_resp.raise_for_status()
         repos_data = repos_resp.json()
         repos = repos_data.get("repositories", [])
-    except Exception as e:
+    except Exception:
         repos = []
-    
-    # If user selected exactly one repo, auto-link it
-    # Otherwise, show selection UI or list what they selected
-    selected_repo = None
-    if len(repos) == 1:
-        selected_repo = repos[0]["full_name"]
-    elif len(repos) > 1:
-        # Multiple repos selected - pick the first one or show selection
-        # For now, we'll use the first one but show a message
-        selected_repo = repos[0]["full_name"]
+
+    selected_repo = repos[0]["full_name"] if len(repos) == 1 else None
 
     retry_message = ""
     domain_display = ""
-
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
         # Store credentials in OrganizationContentConfig for the domain
         from core.models import Organization, OrganizationContentConfig
 
-        # Normalize domain
-        normalized_domain = domain.lower().strip()
-        if normalized_domain.startswith('https://'):
-            normalized_domain = normalized_domain[8:]
-        elif normalized_domain.startswith('http://'):
-            normalized_domain = normalized_domain[7:]
-        if normalized_domain.startswith('www.'):
-            normalized_domain = normalized_domain[4:]
-        if '/' in normalized_domain:
-            normalized_domain = normalized_domain.split('/')[0]
+        if not normalized_domain:
+            return HttpResponseBadRequest("Missing domain in state")
 
         # Get or create organization
         org, _ = Organization.objects.get_or_create(
@@ -290,12 +252,19 @@ def github_callback(request):
         config.github_refresh_token_encrypted = refresh_token
         config.github_token_expires_at = token_expires_at
         config.github_user_name = github_login
-        config.github_repo = selected_repo
+        config.connected_slack_user_id = slack_user_id or config.connected_slack_user_id
+        config.github_repo = selected_repo if selected_repo else None
         config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
 
-        logger.info(f"Org-level GitHub connected for {normalized_domain}: repo={selected_repo}, user={github_login}")
+        logger.info(
+            "Org-level GitHub %s for %s: repo=%s, user=%s",
+            setup_action,
+            normalized_domain,
+            selected_repo,
+            github_login,
+        )
         domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
 
         # Also update UserIntegration if slack_user_id provided.
@@ -324,7 +293,7 @@ def github_callback(request):
                     github_scopes=[],
                 )
 
-        # Notify via Slack and auto-trigger scan
+        # Notify via Slack and auto-trigger scan only when the installation is bound to one repo.
         if slack_user_id and selected_repo:
             try:
                 from integrations.services.slack import SlackService
@@ -341,6 +310,18 @@ def github_callback(request):
                 trigger_scan_async(slack_user_id, domain=normalized_domain)
             except Exception as e:
                 logger.warning(f"Failed to auto-trigger scan for {normalized_domain}: {e}")
+        elif slack_user_id:
+            try:
+                from integrations.services.slack import SlackService
+                SlackService.send_dm(
+                    slack_user_id,
+                    (
+                        f"⚠️ GitHub connected for *{normalized_domain}*, but Roo needs exactly one repository selected "
+                        "for this domain. Update the installation and select a single repo, then reconnect."
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send GitHub repo-selection warning: {e}")
 
     else:
         # ====== USER-LEVEL OAUTH (Legacy) ======
@@ -383,9 +364,14 @@ def github_callback(request):
     # Build success message
     if selected_repo:
         repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
-        if len(repos) > 1:
-            other_repos = [r["full_name"] for r in repos[1:]]
-            repo_list_html += f"<p style='color: #666; font-size: 0.9em;'>Other selected repos: {', '.join(other_repos)}</p>"
+    elif len(repos) > 1:
+        repo_names = ", ".join(r["full_name"] for r in repos)
+        repo_list_html = (
+            "<p style='color: orange;'>⚠️ Multiple repositories are selected for this installation.</p>"
+            "<p>Roo requires exactly one repository per domain binding. Update the GitHub App installation "
+            "and reconnect after narrowing it to a single repository.</p>"
+            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names}</p>"
+        )
     else:
         repo_list_html = "<p style='color: orange;'>⚠️ No repositories were selected. Please reinstall the app and select at least one repository.</p>"
 

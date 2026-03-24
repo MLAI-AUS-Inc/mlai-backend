@@ -117,6 +117,13 @@ class OrganizationContentConfig(models.Model):
     organization = models.OneToOneField(
         Organization, on_delete=models.CASCADE, related_name='content_config'
     )
+    connected_slack_user_id = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Slack user ID that owns this domain-to-GitHub connection",
+    )
     default_timezone = models.CharField(
         max_length=64,
         blank=True,
@@ -179,11 +186,29 @@ class OrganizationContentConfig(models.Model):
         blank=True,
         help_text="Canonical article/blog system readiness state for this organization"
     )
+    last_scanned_sha = models.CharField(max_length=40, blank=True, null=True)
+    last_scanned_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'content_factory_org_config'
+
+    @property
+    def has_github_token(self) -> bool:
+        return bool(str(self.github_token_encrypted or "").strip())
+
+    @property
+    def has_github_repo(self) -> bool:
+        return bool(str(self.github_repo or "").strip())
+
+    @property
+    def github_connection_state(self) -> str:
+        if self.has_github_token and self.has_github_repo:
+            return "connected"
+        if self.has_github_token:
+            return "repo_selection_required"
+        return "auth_required"
 
 
 class GeneratedComponent(models.Model):

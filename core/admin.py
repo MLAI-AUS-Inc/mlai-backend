@@ -65,15 +65,15 @@ class OrganizationAdmin(admin.ModelAdmin):
 
 @admin.register(OrganizationContentConfig)
 class OrganizationContentConfigAdmin(admin.ModelAdmin):
-    list_display = ('organization', 'brand_name', 'github_repo', 'has_scan', 'articles_scaffolded', 'updated_at')
-    search_fields = ('organization__name', 'organization__domain', 'brand_name', 'github_repo')
+    list_display = ('organization', 'connected_slack_user_id', 'brand_name', 'github_repo', 'has_scan', 'articles_scaffolded', 'updated_at')
+    search_fields = ('organization__name', 'organization__domain', 'connected_slack_user_id', 'brand_name', 'github_repo')
     list_select_related = ('organization',)
     list_filter = ('updated_at',)
     readonly_fields = ('created_at', 'updated_at', 'tech_stack_display', 'installed_packages_display', 'pillar_strategy_display', 'article_template_preview', 'design_guide_preview')
 
     fieldsets = (
         ('Organization', {
-            'fields': ('organization', 'brand_name')
+            'fields': ('organization', 'connected_slack_user_id', 'brand_name')
         }),
         ('GitHub Integration', {
             'fields': ('github_repo', 'github_token_encrypted', 'article_path_pattern', 'registry_path')
@@ -526,4 +526,3 @@ class PAQuestionAdmin(admin.ModelAdmin):
     def question_truncated(self, obj):
         return obj.question[:80] + '...' if len(obj.question) > 80 else obj.question
     question_truncated.short_description = 'Question'
-
