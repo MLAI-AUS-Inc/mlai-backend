@@ -27,20 +27,7 @@ from roo.models import ChannelFirstPost, PointsAccount
 
 User = get_user_model()
 
-class EndpointTests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-        self.api_key = "test_api_key"
-        os.environ['ROO_API_KEY'] = self.api_key
-        os.environ['INTERNAL_API_KEY'] = self.api_key
-        from django.conf import settings
-        settings.INTERNAL_API_KEY = self.api_key
-        settings.ROO_API_KEY = self.api_key
-        self.client.credentials(HTTP_X_API_KEY=self.api_key)
-        
-        # Create a test user
-        self.user = User.objects.create_user(email="test@example.com", password="password")
-
+class ContentFactoryTestDataMixin:
     def _sample_content_package(self, *, long_section: bool = False, include_images: bool = True):
         long_paragraph = " ".join(["Reliable livestock weight data improves management decisions."] * 80)
         section_paragraphs = [
@@ -144,6 +131,21 @@ class EndpointTests(TestCase):
             acceptance_summary={"content_packaged": True},
             verification_summary={"all_required_passed": True},
         )
+
+
+class EndpointTests(ContentFactoryTestDataMixin, TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_api_key"
+        os.environ['ROO_API_KEY'] = self.api_key
+        os.environ['INTERNAL_API_KEY'] = self.api_key
+        from django.conf import settings
+        settings.INTERNAL_API_KEY = self.api_key
+        settings.ROO_API_KEY = self.api_key
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        
+        # Create a test user
+        self.user = User.objects.create_user(email="test@example.com", password="password")
 
     def test_integrations_endpoints(self):
         # 1. Create Token
@@ -524,7 +526,7 @@ class ArticleSystemDecisionTests(TestCase):
         mock_trigger.assert_called_once()
 
 
-class ContentFactoryCallbackTests(TestCase):
+class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
     def setUp(self):
         self.client = APIClient()
         self.api_key = "test_roo_key"

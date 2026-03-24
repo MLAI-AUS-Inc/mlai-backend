@@ -57,6 +57,21 @@ class AuthContractTests(TestCase):
         mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
         mock_send.assert_called_once()
 
+    @override_settings(MEDHACK_URL='', DEFAULT_FRONTEND_URL='http://localhost:3000')
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_falls_back_to_default_frontend_origin(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='default-origin@example.com', role='participant')
+
+        self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': 'default-origin@example.com', 'app': 'hospital', 'next': '/hospital/app'},
+            format='json',
+        )
+
+        mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
+        mock_send.assert_called_once()
+
     @patch('core.views.verify_magic_link', return_value='verify@example.com')
     def test_verify_magic_link_returns_redirect_and_user_id(self, mock_verify):
         user = User.objects.create_user(

@@ -128,7 +128,41 @@ class GoogleOAuthViewTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, "http://localhost:5173/settings?gmail_connected=true")
+        self.assertEqual(response.url, "http://localhost:3000/settings?gmail_connected=true")
+
+    @override_settings(
+        GOOGLE_OAUTH_REDIRECT_URI="https://api.mlai.au/integrations/callback/google",
+        DEFAULT_FRONTEND_URL="https://mlai.au",
+        MEDHACK_URL="https://app.mlai.au",
+        ESAFETY_URL="https://esafety.mlai.au",
+    )
+    def test_google_callback_uses_prod_redirect_uri_and_frontend_origin(self):
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                }
+            ),
+        ) as mock_post, patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "https://app.mlai.au/settings?gmail_connected=true")
+        self.assertEqual(
+            mock_post.call_args.kwargs["data"]["redirect_uri"],
+            "https://api.mlai.au/integrations/callback/google",
+        )
 
     def test_google_callback_preserves_existing_refresh_token(self):
         GoogleConnection.objects.create(

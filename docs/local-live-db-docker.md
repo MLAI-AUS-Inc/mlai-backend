@@ -95,6 +95,7 @@ The generated overrides do three important things:
 - point local `mlai-backend` at the inspected live DB target
 - point local `mlai-backend` at local `content-factory` on `http://host.docker.internal:8001`
 - point local `content-factory` at local `mlai-backend` on `http://host.docker.internal:8000` and local Redis on `redis://redis:6379/0`
+- set `DEFAULT_FRONTEND_URL` and `MEDHACK_URL` to `http://localhost:3000` so local auth and Gmail OAuth redirect back to the real local frontend
 
 ## 3. Start Or Stop The DB Tunnel
 
@@ -149,6 +150,7 @@ Before testing Gmail locally:
 
 - make sure [`mlai-backend/.env`](/Users/samdonegan/Documents/Code/mlai-backend/.env) contains `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
 - keep `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/integrations/callback/google` in `mlai-backend/.env.local-docker`
+- keep `DEFAULT_FRONTEND_URL=http://localhost:3000` and `MEDHACK_URL=http://localhost:3000` in `mlai-backend/.env.local-docker`
 - add `http://localhost:8000/integrations/callback/google` to the Google Cloud console's authorized redirect URIs for the current OAuth client
 
 Use the same browser session for both auth steps so the Django `sessionid` cookie issued by magic-link verification is present when you hit the Gmail connect route.

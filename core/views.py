@@ -130,11 +130,12 @@ def _frontend_base_url(app_context):
     from django.conf import settings
 
     fallback = "http://localhost:5173" if settings.DEBUG else "https://mlai.au"
+    default_origin = _origin_from_url(getattr(settings, 'DEFAULT_FRONTEND_URL', None), fallback)
     if app_context == 'hospital':
-        return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), fallback)
+        return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), default_origin)
     if app_context == 'esafety':
-        return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), fallback)
-    return fallback
+        return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), default_origin)
+    return default_origin
 
 
 def _normalize_discovery_diagnostics(value):
