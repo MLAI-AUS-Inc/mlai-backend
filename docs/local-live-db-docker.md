@@ -141,7 +141,33 @@ The local ports are:
 
 The local compose files intentionally do not start `mlai-backend`'s local Postgres service, and they do not reuse production Redis.
 
-## 5. Safe Django Commands
+## 5. Local Gmail OAuth
+
+Local Gmail OAuth reuses the existing Google OAuth client configuration.
+
+Before testing Gmail locally:
+
+- make sure [`mlai-backend/.env`](/Users/samdonegan/Documents/Code/mlai-backend/.env) contains `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
+- keep `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/integrations/callback/google` in `mlai-backend/.env.local-docker`
+- add `http://localhost:8000/integrations/callback/google` to the Google Cloud console's authorized redirect URIs for the current OAuth client
+
+Use the same browser session for both auth steps so the Django `sessionid` cookie issued by magic-link verification is present when you hit the Gmail connect route.
+
+Recommended local flow:
+
+1. start the stack with `scripts/local-live-db/up-local-stack.sh`
+2. authenticate through `GET /api/v1/auth/verify-magic-link/` in the browser
+3. visit `http://localhost:8000/integrations/connect/google`
+4. confirm a [`GoogleConnection`](/Users/samdonegan/Documents/Code/mlai-backend/integrations/models.py) exists for your user
+5. create or retry the startup update run and verify it advances past `gmail_backfill`
+
+Example check:
+
+```bash
+scripts/local-live-db/django.sh shell -c "from integrations.models import GoogleConnection; print(list(GoogleConnection.objects.values('user__email', 'google_email')))"
+```
+
+## 6. Safe Django Commands
 
 Use the wrapper instead of calling `python manage.py` directly:
 

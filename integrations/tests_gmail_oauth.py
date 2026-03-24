@@ -1,0 +1,215 @@
+from unittest.mock import MagicMock, patch
+import urllib.parse
+
+from django.contrib.auth import get_user_model
+from django.test import Client, TestCase, override_settings
+from django.urls import reverse
+
+from integrations.models import GoogleConnection
+
+
+User = get_user_model()
+
+
+def _json_response(payload):
+    response = MagicMock()
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    return response
+
+
+@override_settings(
+    GOOGLE_OAUTH_CLIENT_ID="google-client-id",
+    GOOGLE_OAUTH_CLIENT_SECRET="google-client-secret",
+    GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/google",
+    DEFAULT_FRONTEND_URL="http://localhost:5173",
+    MEDHACK_URL="http://localhost:3000",
+    ESAFETY_URL="http://localhost:3001",
+)
+class GoogleOAuthViewTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(email="founder@example.com", role="participant")
+
+    def _login_and_seed_oauth_state(self, *, next_url=None):
+        self.client.force_login(self.user)
+        session = self.client.session
+        session["google_oauth_state"] = "google-state"
+        if next_url is not None:
+            session["google_oauth_next"] = next_url
+        else:
+            session.pop("google_oauth_next", None)
+        session.save()
+
+    def test_google_connect_stores_state_and_validated_next(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("google_connect"),
+            {"next": "http://localhost:5173/settings?from=gmail"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(response.url).query)
+        self.assertEqual(params["client_id"], ["google-client-id"])
+        self.assertEqual(params["redirect_uri"], ["http://localhost:8000/integrations/callback/google"])
+
+        session = self.client.session
+        self.assertEqual(
+            session.get("google_oauth_next"),
+            "http://localhost:5173/settings?from=gmail",
+        )
+        self.assertEqual(params["state"], [session["google_oauth_state"]])
+
+    def test_google_connect_ignores_invalid_next(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("google_connect"),
+            {"next": "https://evil.example/phish"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn("google_oauth_next", self.client.session)
+
+    def test_google_callback_creates_connection_and_redirects_to_next(self):
+        self._login_and_seed_oauth_state(next_url="/app/settings")
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly openid",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/app/settings")
+
+        connection = GoogleConnection.objects.get(user=self.user)
+        self.assertEqual(connection.google_email, "founder@gmail.com")
+        self.assertEqual(connection.refresh_token, "refresh-token")
+        self.assertEqual(
+            connection.scope,
+            "https://www.googleapis.com/auth/gmail.readonly openid",
+        )
+        self.assertNotIn("google_oauth_state", self.client.session)
+        self.assertNotIn("google_oauth_next", self.client.session)
+
+    def test_google_callback_uses_default_frontend_when_next_missing(self):
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "http://localhost:5173/settings?gmail_connected=true")
+
+    def test_google_callback_preserves_existing_refresh_token(self):
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="stored-refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly openid",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder+updated@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        connection = GoogleConnection.objects.get(user=self.user)
+        self.assertEqual(connection.refresh_token, "stored-refresh-token")
+        self.assertEqual(connection.google_email, "founder+updated@gmail.com")
+        self.assertEqual(
+            connection.scope,
+            "https://www.googleapis.com/auth/gmail.readonly openid",
+        )
+
+    def test_google_callback_requires_refresh_token_for_first_connection(self):
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response({"access_token": "access-token"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"refresh token", response.content)
+        self.assertFalse(GoogleConnection.objects.filter(user=self.user).exists())
+
+    def test_google_callback_rejects_invalid_state(self):
+        self._login_and_seed_oauth_state()
+
+        response = self.client.get(
+            reverse("google_callback"),
+            {"state": "wrong-state", "code": "oauth-code"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Invalid state", response.content)
+
+    def test_google_callback_rejects_missing_code(self):
+        self._login_and_seed_oauth_state()
+
+        response = self.client.get(
+            reverse("google_callback"),
+            {"state": "google-state"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Missing code", response.content)
+
+    def test_google_callback_rejects_provider_error(self):
+        self._login_and_seed_oauth_state()
+
+        response = self.client.get(
+            reverse("google_callback"),
+            {"state": "google-state", "error": "access_denied"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"OAuth error: access_denied", response.content)

@@ -1,7 +1,9 @@
 import secrets
 import urllib.parse
+import logging
 import requests
 from datetime import timedelta
+from typing import Optional, Set
 from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
@@ -17,6 +19,66 @@ from integrations.services.github_connections import (
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_OAUTH_STATE_SESSION_KEY = "google_oauth_state"
+GOOGLE_OAUTH_NEXT_SESSION_KEY = "google_oauth_next"
+GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
+
+logger = logging.getLogger(__name__)
+
+
+def _origin_from_url(url: Optional[str]) -> str:
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(str(url).strip())
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
+def _known_frontend_origins() -> Set[str]:
+    origins = {
+        origin
+        for origin in (
+            _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
+            _origin_from_url(getattr(settings, "MEDHACK_URL", None)),
+            _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
+        )
+        if origin
+    }
+    if origins:
+        return origins
+
+    fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+    origin = _origin_from_url(fallback)
+    return {origin} if origin else set()
+
+
+def _normalize_google_next(next_url: Optional[str]) -> Optional[str]:
+    if not next_url:
+        return None
+
+    normalized = str(next_url).strip()
+    if not normalized or normalized.startswith("//"):
+        return None
+
+    parsed = urllib.parse.urlparse(normalized)
+    if not parsed.scheme and not parsed.netloc:
+        return normalized if normalized.startswith("/") else f"/{normalized}"
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    return normalized if _origin_from_url(normalized) in _known_frontend_origins() else None
+
+
+def _default_google_success_url() -> str:
+    for setting_name in ("DEFAULT_FRONTEND_URL", "MEDHACK_URL", "ESAFETY_URL"):
+        origin = _origin_from_url(getattr(settings, setting_name, None))
+        if origin:
+            return f"{origin}{GOOGLE_OAUTH_SUCCESS_PATH}"
+
+    fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+    return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
 
 @login_required
 def google_connect(request):
@@ -24,7 +86,13 @@ def google_connect(request):
     Initiates the Google OAuth flow.
     """
     state = secrets.token_urlsafe(32)
-    request.session["google_oauth_state"] = state
+    request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
+
+    next_url = _normalize_google_next(request.GET.get("next"))
+    if next_url:
+        request.session[GOOGLE_OAUTH_NEXT_SESSION_KEY] = next_url
+    else:
+        request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
@@ -47,8 +115,11 @@ def google_callback(request):
     """
     # 1) Validate state
     state = request.GET.get("state")
-    if not state or state != request.session.get("google_oauth_state"):
+    if not state or state != request.session.get(GOOGLE_OAUTH_STATE_SESSION_KEY):
         return HttpResponseBadRequest("Invalid state")
+
+    request.session.pop(GOOGLE_OAUTH_STATE_SESSION_KEY, None)
+    success_url = _normalize_google_next(request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None))
 
     # 2) Handle errors
     if request.GET.get("error"):
@@ -58,55 +129,66 @@ def google_callback(request):
     if not code:
         return HttpResponseBadRequest("Missing code")
 
+    existing_connection = GoogleConnection.objects.filter(user=request.user).first()
+
     # 3) Exchange code for tokens
-    token_resp = requests.post(
-        TOKEN_URL,
-        data={
-            "code": code,
-            "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-            "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
-            "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
-            "grant_type": "authorization_code",
-        },
-        timeout=20,
-    )
-    token_resp.raise_for_status()
-    token_data = token_resp.json()
+    try:
+        token_resp = requests.post(
+            TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=20,
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+    except requests.RequestException:
+        logger.exception("Failed to exchange Google OAuth code for user %s", request.user_id)
+        return HttpResponseBadRequest("Failed to exchange Google OAuth code.")
 
-    access_token = token_data["access_token"]
-    refresh_token = token_data.get("refresh_token")
-    scope = token_data.get("scope", "")
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return HttpResponseBadRequest("Missing access token in Google OAuth response.")
 
-    # 4) Fetch the user's Google email
-    ui_resp = requests.get(
-        USERINFO_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=20,
-    )
-    ui_resp.raise_for_status()
-    google_email = ui_resp.json().get("email")
+    refresh_token = token_data.get("refresh_token") or (existing_connection.refresh_token if existing_connection else None)
+    scope = token_data.get("scope") or (existing_connection.scope if existing_connection else "")
 
     if not refresh_token:
-        # If user reconnects/modifies scope without prompt=consent, refresh token might be missing.
-        # But we force prompt=consent in google_connect, so it should be there.
-        # If still missing, we might want to check if we already have one.
-        pass
+        return HttpResponseBadRequest(
+            "Google did not return a refresh token. Revoke Gmail access in Google and reconnect with consent."
+        )
+
+    # 4) Fetch the user's Google email
+    try:
+        ui_resp = requests.get(
+            USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        ui_resp.raise_for_status()
+        google_email = ui_resp.json().get("email")
+    except requests.RequestException:
+        logger.exception("Failed to fetch Google userinfo for user %s", request.user_id)
+        return HttpResponseBadRequest("Failed to fetch Google account details.")
 
     # Update or create the connection
     defaults = {
-        "google_email": google_email or "",
+        "google_email": google_email or (existing_connection.google_email if existing_connection else ""),
         "scope": scope,
+        "refresh_token": refresh_token,
     }
-    if refresh_token:
-        defaults["refresh_token"] = refresh_token
-        
+
     GoogleConnection.objects.update_or_create(
         user=request.user,
         defaults=defaults,
     )
 
     # Redirect to frontend
-    return redirect(f"{settings.FRONTEND_URL}/settings?gmail_connected=true")
+    return redirect(success_url or _default_google_success_url())
 
 def github_connect(request):
     """
@@ -130,9 +212,6 @@ def github_connect(request):
 
     store_github_oauth_state(oauth_state, request=request)
     return redirect(build_github_installation_url(oauth_state.raw))
-
-import logging
-logger = logging.getLogger(__name__)
 
 def github_callback(request):
     """

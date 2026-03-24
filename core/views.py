@@ -5,7 +5,7 @@ from datetime import date as calendar_date
 from urllib.parse import urlparse
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, login as auth_login
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -348,6 +348,12 @@ class MagicLinkVerifyView(APIView):
                     user.is_active = True
                     user.save()
                     logger.info(f"Activated user account for {email}")
+
+                auth_login(
+                    request._request,
+                    user,
+                    backend="django.contrib.auth.backends.ModelBackend",
+                )
 
                 # Generate JWT tokens
                 refresh = RefreshToken.for_user(user)

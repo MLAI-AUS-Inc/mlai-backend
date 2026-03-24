@@ -79,6 +79,8 @@ class AuthContractTests(TestCase):
         self.assertTrue(response.data['next_url'].endswith('/hospital/app'))
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
+        self.assertIn('sessionid', response.cookies)
+        self.assertEqual(str(user.id), self.client.session.get('_auth_user_id'))
 
         user.refresh_from_db()
         self.assertTrue(user.is_active)
