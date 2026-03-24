@@ -96,6 +96,7 @@ The generated overrides do three important things:
 - point local `mlai-backend` at local `content-factory` on `http://host.docker.internal:8001`
 - point local `content-factory` at local `mlai-backend` on `http://host.docker.internal:8000` and local Redis on `redis://redis:6379/0`
 - set `DEFAULT_FRONTEND_URL` and `MEDHACK_URL` to `http://localhost:3000` so local auth and Gmail OAuth redirect back to the real local frontend
+- set `VALLEY_HARNESS_URL=http://valley-api:8080` so Gmail OAuth can auto-start the local Valley harness when the Valley stack is running on the shared Docker network
 
 ## 3. Start Or Stop The DB Tunnel
 
@@ -161,7 +162,8 @@ Recommended local flow:
 2. authenticate through `GET /api/v1/auth/verify-magic-link/` in the browser
 3. visit `http://localhost:8000/integrations/connect/google`
 4. confirm a [`GoogleConnection`](/Users/samdonegan/Documents/Code/mlai-backend/integrations/models.py) exists for your user
-5. create or retry the startup update run and verify it advances past `gmail_backfill`
+5. if a default [`UserStartupBinding`](/Users/samdonegan/Documents/Code/mlai-backend/integrations/models.py) already exists for the user, the callback will auto-create the startup update run and notify Valley
+6. otherwise create or retry the startup update run manually and verify it advances past `gmail_backfill`
 
 Example check:
 

@@ -20,6 +20,7 @@ from integrations.models import (
     StartupProfile,
     UserStartupBinding,
 )
+from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
 
 
@@ -275,6 +276,18 @@ def get_default_binding_for_domain(*, user, domain: str) -> Optional[UserStartup
     )
 
 
+def get_default_gmail_binding(*, user) -> Optional[UserStartupBinding]:
+    bindings = UserStartupBinding.objects.select_related("organization", "google_connection").filter(user=user)
+    default_binding = bindings.filter(is_default_for_gmail=True).order_by("-updated_at").first()
+    if default_binding is not None:
+        return default_binding
+
+    candidates = list(bindings.order_by("-updated_at")[:2])
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def get_open_startup_update_run(*, organization: Organization) -> Optional[ContentFactoryRun]:
     return (
         ContentFactoryRun.objects.filter(
@@ -337,6 +350,36 @@ def create_startup_update_run(
             "backfill_window_end": now,
         },
     )
+    return run
+
+
+def maybe_start_startup_update_for_google_connection(
+    *,
+    user,
+    google_connection,
+    window_months: int = DEFAULT_BACKFILL_MONTHS,
+) -> Optional[ContentFactoryRun]:
+    if google_connection is None:
+        return None
+
+    binding = get_default_gmail_binding(user=user)
+    if binding is None:
+        return None
+
+    if binding.google_connection_id != google_connection.id:
+        binding.google_connection = google_connection
+        binding.save(update_fields=["google_connection", "updated_at"])
+
+    organization = binding.organization
+    resolve_or_create_profile(domain=organization.domain)
+    existing_run = get_open_startup_update_run(organization=organization)
+    run = create_startup_update_run(
+        organization=organization,
+        binding=binding,
+        window_months=window_months,
+    )
+    if existing_run is None:
+        transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
     return run
 
 
