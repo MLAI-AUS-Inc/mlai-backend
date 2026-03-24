@@ -164,7 +164,8 @@ def github_callback(request):
 
     try:
         oauth_state = validate_github_oauth_state(raw_state, request=request)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("Rejected GitHub callback state: %s", exc)
         return HttpResponseBadRequest("Invalid or expired state")
 
     is_org_oauth = oauth_state.is_org_oauth
