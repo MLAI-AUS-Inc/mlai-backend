@@ -5,7 +5,6 @@ from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
 from core.article_system import (
-    article_system_ready,
     resolve_article_system_with_source,
 )
 from integrations.models import UserIntegration
@@ -152,11 +151,17 @@ def _resolve_delivery_mode_confirmation(article_request: Optional[dict], *, requ
     return bool(raw_confirmation)
 
 
+def _resolve_saved_article_delivery_mode(config: Optional[OrganizationContentConfig]) -> Optional[str]:
+    if not config:
+        return None
+    return _normalize_requested_delivery_mode(getattr(config, "article_delivery_mode", None))
+
+
 def resolve_article_delivery_mode(
     *,
     article_request: Optional[dict] = None,
-    article_system: Optional[dict] = None,
-) -> tuple[str, bool]:
+    config: Optional[OrganizationContentConfig] = None,
+) -> tuple[Optional[str], bool]:
     requested_mode = _normalize_requested_delivery_mode(
         article_request.get("delivery_mode") if isinstance(article_request, dict) else None
     )
@@ -166,10 +171,11 @@ def resolve_article_delivery_mode(
             requested_mode=requested_mode,
         )
 
-    if not article_system_ready(article_system or {}):
-        return "content_only", False
+    saved_mode = _resolve_saved_article_delivery_mode(config)
+    if saved_mode:
+        return saved_mode, False
 
-    return get_default_article_delivery_mode(), False
+    return None, False
 
 
 def _require_roo_request_source(article_request: dict) -> str:
@@ -849,6 +855,36 @@ def ensure_valid_org_token(domain: str) -> str:
     return config.github_token_encrypted
 
 
+def _resolve_github_repo_for_domain(
+    domain: str,
+    slack_user_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[OrganizationContentConfig], str]:
+    normalized_domain = normalize_domain(domain) if domain else None
+    config = None
+
+    if normalized_domain:
+        try:
+            org = Organization.objects.get(domain=normalized_domain)
+            config = getattr(org, "content_config", None)
+            github_repo = str(getattr(config, "github_repo", "") or "").strip()
+            if github_repo:
+                return github_repo, config, "org"
+        except Organization.DoesNotExist:
+            config = None
+
+    if slack_user_id and normalized_domain:
+        integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+        if integration and integration.github_repo:
+            repo_matches_domain = OrganizationContentConfig.objects.filter(
+                github_repo=integration.github_repo,
+                organization__domain=normalized_domain,
+            ).exists()
+            if repo_matches_domain:
+                return integration.github_repo, config, "user"
+
+    return None, config, "unresolved"
+
+
 def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) -> dict:
     """
     Get GitHub credentials for a domain, preferring org-level tokens.
@@ -1012,14 +1048,6 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if not resolved_domain:
         raise ArticleGenerationError("Domain is required.")
 
-    # Check prerequisites: scan must have completed before discovery or article generation.
-    if not config or not config.scan_summary:
-        raise ArticleGenerationError(
-            f"PREREQUISITE_MISSING:scan:{resolved_domain}:"
-            f"Repository must be scanned before writing articles. "
-            f"Ask me to scan your codebase first."
-        )
-
     # Retrieve competitors and seed_keywords early for Auto-Write or Payload
     competitors = []
     seed_keywords = []
@@ -1139,21 +1167,18 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     )
     delivery_mode, delivery_mode_confirmed = resolve_article_delivery_mode(
         article_request=article_request,
-        article_system=article_system,
+        config=config,
     )
-
-    creds = get_github_credentials_for_domain(domain, slack_user_id)
-    fresh_token = creds['token']
-    github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub credentials for article generation")
-
+    github_repo, resolved_config, github_repo_source = _resolve_github_repo_for_domain(
+        resolved_domain,
+        slack_user_id,
+    )
     if config is None:
-        config = (
-            OrganizationContentConfig.objects
-            .select_related('organization')
-            .filter(github_repo=github_repo)
-            .first()
-        )
+        config = resolved_config
+    if github_repo:
+        logger.info("Using %s-level GitHub repo context for article generation", github_repo_source)
+    else:
+        logger.info("No GitHub repo context resolved for article generation on %s", resolved_domain)
 
     if config and not existing_artifacts:
         if config.article_template: existing_artifacts['article_template'] = config.article_template
@@ -1187,12 +1212,14 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "target_keyword": target_keyword,
         "context": context,
         "slack_user_id": slack_user_id,
-        "github_repo": github_repo,
         "competitors": competitors,
-        "delivery_mode": delivery_mode,
-        "delivery_mode_confirmed": delivery_mode_confirmed,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
     }
+    if github_repo:
+        payload["github_repo"] = github_repo
+    if delivery_mode is not None:
+        payload["delivery_mode"] = delivery_mode
+        payload["delivery_mode_confirmed"] = delivery_mode_confirmed
     if article_request.get("custom_title"):
         payload["custom_title"] = article_request["custom_title"]
     if article_request.get("skip_alternatives"):
@@ -1369,16 +1396,18 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
         selected_mode = get_default_article_delivery_mode()
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if job:
-            article_system = {}
             domain = str(job.domain or "").strip()
             if domain:
                 org = Organization.objects.filter(domain=normalize_domain(domain)).first()
                 config = getattr(org, "content_config", None) if org else None
-                article_system = resolve_article_system_with_source(config)[0]
-            selected_mode, _ = resolve_article_delivery_mode(
+            else:
+                config = None
+            resolved_mode, _ = resolve_article_delivery_mode(
                 article_request=job.request_meta or {},
-                article_system=article_system,
+                config=config,
             )
+            if resolved_mode:
+                selected_mode = resolved_mode
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
     endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/delivery-mode"
@@ -1397,8 +1426,10 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
             headers=headers,
             timeout=120,
         )
-        if response.status_code == 200:
-            return response.json()
+        if response.status_code in {200, 412}:
+            payload = response.json()
+            payload["status_code"] = response.status_code
+            return payload
 
         logger.error(f"Content Factory delivery mode selection failed: {response.text}")
         raise ArticleGenerationError(f"Delivery mode selection failed: {response.text}")
@@ -1409,16 +1440,6 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
 
 def _maybe_auto_advance_run(job_id: str, result: dict) -> dict:
     status_value = str(result.get("status") or "").strip().lower()
-
-    if status_value == "awaiting_delivery_mode":
-        try:
-            auto_result = set_article_delivery_mode(job_id)
-            auto_result.setdefault("job_id", job_id)
-            auto_result.setdefault("run_id", job_id)
-            return auto_result
-        except ArticleGenerationError as exc:
-            logger.warning("Auto-selecting delivery mode for %s failed: %s", job_id, exc)
-            return result
 
     if status_value in APPROVAL_PENDING_STATUSES:
         try:
@@ -1605,13 +1626,6 @@ def confirm_topic(
     except Organization.DoesNotExist:
         config = None
 
-    if not config or not config.scan_summary:
-        raise ArticleGenerationError(
-            f"PREREQUISITE_MISSING:scan:{normalized_domain}:"
-            f"Repository must be scanned before writing articles. "
-            f"Ask me to scan your codebase first."
-        )
-
     article_system, article_system_source = resolve_article_system_with_source(config)
     logger.info(
         "Confirmed-topic article-system readiness for %s resolved via %s: state=%s path=%s",
@@ -1620,31 +1634,42 @@ def confirm_topic(
         article_system.get('state'),
         article_system.get('directory_path') or article_system.get('directory_name'),
     )
+    source_request_meta = dict(getattr(source_job, "request_meta", {}) or {}) if source_job else {}
     request_context = {
-        "delivery_mode": delivery_mode,
-        "delivery_mode_confirmed": delivery_mode_confirmed,
+        "delivery_mode": delivery_mode if delivery_mode is not None else source_request_meta.get("delivery_mode"),
+        "delivery_mode_confirmed": (
+            delivery_mode_confirmed
+            if delivery_mode_confirmed is not None
+            else source_request_meta.get("delivery_mode_confirmed")
+        ),
     }
     delivery_mode, delivery_mode_confirmed = resolve_article_delivery_mode(
         article_request=request_context,
-        article_system=article_system,
+        config=config,
     )
 
-    # Get GitHub repo context (server-side credentials stay in mlai-backend/content-factory)
-    creds = get_github_credentials_for_domain(domain, slack_user_id)
-    github_repo = creds['repo']
-    logger.info(f"Using {creds['source']}-level GitHub repo context for topic confirmation")
+    github_repo, _resolved_config, github_repo_source = _resolve_github_repo_for_domain(
+        normalized_domain,
+        slack_user_id,
+    )
+    if github_repo:
+        logger.info("Using %s-level GitHub repo context for topic confirmation", github_repo_source)
+    else:
+        logger.info("No GitHub repo context resolved for topic confirmation on %s", normalized_domain)
 
     payload = {
         "domain": domain,
         "slack_user_id": slack_user_id,
-        "github_repo": github_repo,
         "topic": custom_title or confirmed_keyword,
         "target_keyword": confirmed_keyword,
         "custom_title": custom_title,
-        "delivery_mode": delivery_mode,
-        "delivery_mode_confirmed": delivery_mode_confirmed,
         "request_source": request_source,
     }
+    if github_repo:
+        payload["github_repo"] = github_repo
+    if delivery_mode is not None:
+        payload["delivery_mode"] = delivery_mode
+        payload["delivery_mode_confirmed"] = delivery_mode_confirmed
 
     # Include skip_alternatives if provided (temporary rejection/cooldown feedback)
     if skip_alternatives:

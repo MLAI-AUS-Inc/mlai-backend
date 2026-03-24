@@ -221,7 +221,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
         self.assertEqual(generate_payload.get('request_source'), 'roo_slackbot')
 
-    def test_generate_with_topic_defaults_to_content_only_when_article_system_missing(self):
+    def test_generate_with_topic_omits_delivery_mode_when_no_preference_exists(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic="best ai coding agents")
 
@@ -231,8 +231,36 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         payload = mock_post.call_args.kwargs.get('json') or {}
+        self.assertIsNone(payload.get('delivery_mode'))
+        self.assertIsNone(payload.get('delivery_mode_confirmed'))
+
+    def test_generate_with_topic_allows_repo_less_domain_without_scan_summary(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_repo = ""
+        config.scan_summary = None
+        config.article_system = {}
+        config.article_delivery_mode = "content_only"
+        config.save(
+            update_fields=[
+                "github_repo",
+                "scan_summary",
+                "article_system",
+                "article_delivery_mode",
+            ]
+        )
+
+        url = reverse('content_generate')
+        data = self._generate_request_data(topic="best ai coding agents")
+
+        with patch('integrations.services.article_generation.http_requests.post') as mock_post:
+            mock_post.return_value = self._mock_response(202, {"job_id": "job-article-repo-less-456"})
+            response = self.client.post(url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
         self.assertFalse(payload.get('delivery_mode_confirmed'))
+        self.assertIsNone(payload.get('github_repo'))
 
     @patch('integrations.api_views_content.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -818,28 +846,22 @@ class ContentFactoryCallbackTests(TestCase):
         self.assertEqual(job.status, 'error')
         self.assertEqual(job.error_message, "Generation failed")
 
-    @patch('integrations.services.article_generation.set_article_delivery_mode')
-    def test_delivery_mode_required_callback_auto_selects_mode(self, mock_set_delivery_mode):
-        mock_set_delivery_mode.return_value = {
-            "job_id": "job-delivery-mode",
-            "status": "queued",
-            "delivery_mode": "content_only",
-        }
-
+    def test_delivery_mode_required_callback_keeps_job_waiting_for_user_choice(self):
         url = reverse('content_factory_callback')
         data = {
             "event_type": "delivery_mode_required",
             "job_id": "job-delivery-mode",
             "domain": "mlai.au",
             "slack_user_id": "U123",
+            "recommended_delivery_mode": "content_only",
         }
 
         response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-delivery-mode")
-        self.assertEqual(job.status, "generating")
-        mock_set_delivery_mode.assert_called_once_with("job-delivery-mode", "content_only")
+        self.assertEqual(job.status, "awaiting_delivery_mode")
+        self.assertEqual(job.request_meta.get("recommended_delivery_mode"), "content_only")
 
     @patch('integrations.services.article_generation.publish_article')
     def test_preview_ready_callback_auto_approves(self, mock_publish_article):
@@ -1338,13 +1360,44 @@ class TopicConfirmTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.selected_keyword, "keyword 1")
         self.assertEqual(job.status, "confirmed")
-
         article_job = ContentFactoryJob.objects.get(job_id="job-article")
         self.assertEqual(article_job.request_meta["source_run_id"], "job-index")
 
         mock_confirm_topic.assert_called_once()
         call_args = mock_confirm_topic.call_args
         self.assertEqual(call_args.kwargs['confirmed_keyword'], "keyword 1")
+
+    @patch('integrations.api_views_content.set_article_delivery_mode')
+    def test_set_delivery_mode_endpoint_updates_job_request_meta(self, mock_set_delivery_mode):
+        job = ContentFactoryJob.objects.create(
+            job_id="job-delivery-mode-set",
+            domain="mlai.au",
+            slack_user_id="U-CONFIRM",
+            status="awaiting_delivery_mode",
+            request_meta={"domain": "mlai.au"},
+        )
+        mock_set_delivery_mode.return_value = {
+            "job_id": "job-delivery-mode-set",
+            "status": "queued",
+            "delivery_mode": "content_only",
+            "status_code": 200,
+        }
+
+        response = self.client.post(
+            reverse('content_job_delivery_mode', args=["job-delivery-mode-set"]),
+            {
+                "delivery_mode": "content_only",
+                "request_source": "roo_slackbot",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "generating")
+        self.assertEqual(job.request_meta["delivery_mode"], "content_only")
+        self.assertTrue(job.request_meta["delivery_mode_confirmed"])
+        mock_set_delivery_mode.assert_called_once_with("job-delivery-mode-set", "content_only")
 
 
 class SEOResearchMemoryTests(TestCase):

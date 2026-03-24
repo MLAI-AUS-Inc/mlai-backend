@@ -12,6 +12,7 @@ from integrations.services.article_generation import (
     check_generation_status,
     publish_article,
     confirm_topic,
+    set_article_delivery_mode,
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
     CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
@@ -456,6 +457,7 @@ class ContentJobConfirmView(APIView):
                 delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
                 request_source=request.data.get("request_source"),
             )
+            result_status = str(result.get("status") or "").strip()
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
             if new_job_id and new_job_id != job.job_id:
@@ -492,14 +494,29 @@ class ContentJobConfirmView(APIView):
                 target_job = child_job
             else:
                 target_job = ContentFactoryJob.objects.filter(job_id=active_job_id).first()
-            if target_job:
+            if target_job and result_status != "awaiting_delivery_mode":
                 upsert_live_progress_card(
                     target_job,
                     summary_text="Topic confirmed. Roo is writing the draft now.",
                 )
+            if target_job and result_status == "awaiting_delivery_mode":
+                target_job.status = "awaiting_delivery_mode"
+                target_job.save(update_fields=["status", "updated_at"])
             from integrations.services.daily_discovery import mark_scheduled_dispatch_confirmed
 
             mark_scheduled_dispatch_confirmed(job_id=job.job_id)
+            if result_status == "awaiting_delivery_mode":
+                return Response(
+                    {
+                        "status": "awaiting_delivery_mode",
+                        "job_id": active_job_id,
+                        "run_id": active_job_id,
+                        **({"source_run_id": job.job_id} if active_job_id != job.job_id else {}),
+                        "message": result.get("message") or "Choose a delivery mode to continue.",
+                        "cf_response": result,
+                    },
+                    status=status.HTTP_200_OK,
+                )
             return Response({
                 "status": "confirmed",
                 "job_id": active_job_id,
@@ -520,6 +537,53 @@ class ContentJobConfirmView(APIView):
         except Exception as e:
             logger.exception(f"Unexpected error triggering generation for job {job_id}: {e}")
             return Response({"error": "Failed to trigger generation"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContentJobDeliveryModeView(APIView):
+    """
+    Select the delivery mode for an awaiting article run.
+    POST /api/v1/content/jobs/{job_id}/delivery-mode
+    """
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def post(self, request, job_id):
+        from core.models import ContentFactoryJob
+
+        validation_error = _validate_roo_content_request(request)
+        if validation_error:
+            return validation_error
+
+        delivery_mode = request.data.get("delivery_mode")
+        if not delivery_mode:
+            return Response({"error": "delivery_mode is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if not job:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        request_meta = dict(job.request_meta or {})
+        request_meta["delivery_mode"] = delivery_mode
+        request_meta["delivery_mode_confirmed"] = True
+        job.request_meta = request_meta
+        job.save(update_fields=["request_meta", "updated_at"])
+
+        try:
+            result = set_article_delivery_mode(job_id, delivery_mode)
+        except ArticleGenerationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        status_code = int(result.pop("status_code", 200) or 200)
+        if status_code == status.HTTP_200_OK:
+            job.status = "generating"
+            job.error_message = ""
+            job.save(update_fields=["status", "error_message", "updated_at"])
+        else:
+            job.status = "awaiting_delivery_mode"
+            job.error_message = result.get("error") or result.get("message") or ""
+            job.save(update_fields=["status", "error_message", "updated_at"])
+
+        return Response(result, status=status_code)
 
 
 class ContentJobCancelView(APIView):
