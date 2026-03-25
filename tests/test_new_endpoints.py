@@ -239,6 +239,30 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         args, _kwargs = mock_post.call_args
         self.assertIn('/api/runs/scan-run-approval-1/approve', args[0])
 
+    def test_github_scaffold_returns_existing_preview_when_already_scaffolded(self):
+        organization = Organization.objects.create(name="Bird Psychology", domain="birdpsychology.com.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            scan_summary="scan complete",
+            articles_scaffolded=True,
+            articles_scaffold_pr_url="https://github.com/acme/site/pull/1",
+            articles_scaffold_preview_url="https://preview.example.com/articles",
+        )
+
+        response = self.client.post(
+            reverse('github_scaffold'),
+            {
+                "domain": "birdpsychology.com.au",
+                "slack_user_id": "U123",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "already_scaffolded")
+        self.assertEqual(response.data["pr_url"], "https://github.com/acme/site/pull/1")
+        self.assertEqual(response.data["preview_url"], "https://preview.example.com/articles")
+
     def test_channel_activity_endpoints(self):
         # Setup: Link user to Slack ID
         self.user.slack_id = "U789"
@@ -1038,6 +1062,46 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_message.assert_called_once()
         self.assertEqual(mock_send_message.call_args[0][0], "C123")
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_scaffold_complete_callback_with_reused_pr_posts_preview_and_build_details(self, mock_send_message):
+        organization = Organization.objects.create(name="Bird Psychology", domain="birdpsychology.com.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            scan_summary="scan complete",
+            article_system={"state": "incomplete"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scaffold_complete",
+                "job_id": "scaffold-run-2",
+                "run_id": "scaffold-run-2",
+                "workflow": "scaffold",
+                "domain": "birdpsychology.com.au",
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "pr_url": "https://github.com/acme/site/pull/2",
+                "preview_url": "https://preview.example.com/articles",
+                "build_verified": True,
+                "files_created": 0,
+                "pillar_count": 4,
+                "component_count": 20,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_message.assert_called_once()
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Reused the existing scaffold branch/PR", blocks[0]["text"]["text"])
+        self.assertIn("Build passed", blocks[0]["text"]["text"])
+        self.assertIn("https://preview.example.com/articles", blocks[0]["text"]["text"])
+        config.refresh_from_db()
+        self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/acme/site/pull/2")
+        self.assertEqual(config.articles_scaffold_preview_url, "https://preview.example.com/articles")
 
     def test_error_callback(self):
         url = reverse('content_factory_callback')

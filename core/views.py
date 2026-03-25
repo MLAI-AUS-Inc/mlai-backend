@@ -3152,14 +3152,23 @@ class ContentFactoryCallbackView(APIView):
             import json as _json
 
             if already_exists:
+                details = []
+                if pr_url:
+                    details.append(f"🔗 *PR:* {pr_url}")
+                if preview_url:
+                    details.append(f"🔗 *Preview:* {preview_url}")
+                detail_block = "\n\n".join(details)
+                detail_suffix = f"{detail_block}\n\n" if detail_block else ""
                 if pending_resumed:
                     _send(
                         f"📁 Articles directory already exists for *{domain}*.\n\n"
+                        f"{detail_suffix}"
                         f"🔄 *Resuming your article request automatically!* You'll get a notification shortly."
                     )
                 else:
                     _send(
                         f"📁 Articles directory already exists for *{domain}*.\n\n"
+                        f"{detail_suffix}"
                         f"You're all set! To write your first article, say:\n"
                         f"  `@Roo write me an article about [topic]`"
                     )
@@ -3168,12 +3177,17 @@ class ContentFactoryCallbackView(APIView):
                 if preview_url:
                     preview_line = f"\n\n🔗 *Preview:* {preview_url}"
                 build_status = "✅ Build passed" if build_verified else "⏳ Build pending"
+                change_line = (
+                    f"  • {files_created} total files\n"
+                    if files_created
+                    else "  • Reused the existing scaffold branch/PR\n"
+                )
                 text_body = (
                     f"📁 *Articles directory created for {domain}!*\n\n"
                     f"I've set up your content structure with:\n"
                     f"  • {pillar_count} content pillar directories\n"
                     f"  • {component_count} article components\n"
-                    f"  • {files_created} total files\n"
+                    f"{change_line}"
                     f"  • {build_status}\n\n"
                     f"*Review the PR:* {pr_url}{preview_line}"
                 )

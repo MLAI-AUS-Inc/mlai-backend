@@ -777,6 +777,7 @@ class GithubScaffoldView(APIView):
                 "status": "already_scaffolded",
                 "message": f"Articles directory already exists for {normalized_domain}",
                 "pr_url": config.articles_scaffold_pr_url,
+                "preview_url": config.articles_scaffold_preview_url,
             }, status=status.HTTP_200_OK)
 
         # Resolve GitHub credentials
