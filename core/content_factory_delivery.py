@@ -378,7 +378,13 @@ def build_content_ready_blocks(*, domain: str, content_package: Dict[str, Any], 
     blocks.append(
         {
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": " • ".join(context_bits)}],
+            "elements": [
+                {"type": "mrkdwn", "text": " • ".join(context_bits)},
+                {
+                    "type": "mrkdwn",
+                    "text": "Reply `@Roo publish this article as a PR` to turn this into a draft PR and preview.",
+                },
+            ],
         }
     )
     if preview_url:

@@ -1565,6 +1565,107 @@ def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) 
         raise ArticleGenerationError(f"Failed to publish: {str(e)}")
 
 
+def promote_article_bundle(
+    job_id: str,
+    *,
+    slack_user_id: str = None,
+    domain: str = None,
+    slack_channel_id: str = "",
+    slack_thread_ts: str = "",
+    slack_root_message_ts: str = "",
+) -> dict:
+    """
+    Promote a completed content package or publish bundle into a child publish run.
+    """
+    from core.models import ContentFactoryJob
+
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    promote_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/promote-bundle"
+
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    source_job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+    resolved_slack_user_id = slack_user_id or (source_job.slack_user_id if source_job else "") or ""
+    resolved_domain = domain or (source_job.domain if source_job else "") or ""
+    resolved_channel_id = slack_channel_id or (source_job.slack_channel_id if source_job else "") or ""
+    resolved_thread_ts = slack_thread_ts or (source_job.slack_thread_ts if source_job else "") or ""
+    resolved_root_ts = (
+        slack_root_message_ts
+        or (source_job.slack_root_message_ts if source_job else "")
+        or resolved_thread_ts
+    )
+
+    logger.info(f"Promoting article bundle via: {promote_endpoint}")
+
+    try:
+        response = http_requests.post(
+            promote_endpoint,
+            json={},
+            headers=headers,
+            timeout=120,
+        )
+
+        if response.status_code != 200:
+            logger.error(f"Content Factory promote-bundle failed: {response.text}")
+            raise ArticleGenerationError(f"Promote bundle failed: {response.text}")
+
+        payload = response.json()
+        child_job_id = str(payload.get("job_id") or payload.get("run_id") or "").strip()
+        if child_job_id:
+            _store_job_tracking_record(
+                child_job_id,
+                domain=resolved_domain,
+                slack_user_id=resolved_slack_user_id,
+                request_meta={
+                    "source_run_id": job_id,
+                    "promotion_source": "promote_bundle",
+                    "requested_delivery_mode": "publish_code",
+                },
+                slack_channel_id=resolved_channel_id,
+                slack_thread_ts=resolved_thread_ts,
+                slack_root_message_ts=resolved_root_ts,
+                default_status="queued",
+            )
+            if source_job:
+                request_meta = dict(source_job.request_meta or {})
+                request_meta["promoted_publish_job_id"] = child_job_id
+                request_meta["publish_stage"] = "promotion_requested"
+                if request_meta != (source_job.request_meta or {}):
+                    source_job.request_meta = request_meta
+                    source_job.save(update_fields=["request_meta", "updated_at"])
+
+        return payload
+
+    except http_requests.exceptions.RequestException as e:
+        logger.error(f"Failed to connect to Content Factory: {e}")
+        raise ArticleGenerationError(f"Failed to promote bundle: {str(e)}")
+
+
+def publish_article_as_pr(
+    job_id: str,
+    *,
+    slack_user_id: str = None,
+    domain: str = None,
+    slack_channel_id: str = "",
+    slack_thread_ts: str = "",
+    slack_root_message_ts: str = "",
+) -> dict:
+    """
+    Promote a completed content-only article into a child publish run that creates a draft PR.
+    """
+    return promote_article_bundle(
+        job_id,
+        slack_user_id=slack_user_id,
+        domain=domain,
+        slack_channel_id=slack_channel_id,
+        slack_thread_ts=slack_thread_ts,
+        slack_root_message_ts=slack_root_message_ts,
+    )
+
+
 def confirm_topic(
     domain: str,
     confirmed_keyword: str,

@@ -11,6 +11,7 @@ from integrations.services.article_generation import (
     trigger_article_generation,
     check_generation_status,
     publish_article,
+    publish_article_as_pr,
     confirm_topic,
     set_article_delivery_mode,
     ArticleGenerationError,
@@ -242,6 +243,42 @@ class ContentPublishView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in publish view: {e}")
+            return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContentPublishPrView(APIView):
+    """
+    Promote a completed content-only article into a child publish run that creates a draft PR.
+    POST /api/v1/content/jobs/{job_id}/publish-pr
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, job_id):
+        from core.models import ContentFactoryJob
+
+        if not job_id:
+            return Response({"error": "job_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        slack_user_id = request.data.get('slack_user_id')
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        if not job:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            result = publish_article_as_pr(
+                job_id,
+                slack_user_id=slack_user_id or job.slack_user_id,
+                domain=job.domain,
+                slack_channel_id=job.slack_channel_id or "",
+                slack_thread_ts=job.slack_thread_ts or "",
+                slack_root_message_ts=job.slack_root_message_ts or "",
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except ArticleGenerationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+        except Exception as e:
+            logger.exception(f"Unexpected error in publish-pr view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

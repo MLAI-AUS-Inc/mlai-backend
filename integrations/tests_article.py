@@ -13,6 +13,8 @@ from integrations.services.article_generation import (
     check_generation_status,
     confirm_topic,
     publish_article,
+    publish_article_as_pr,
+    promote_article_bundle,
     trigger_article_generation,
 )
 from roo.models import PointsAccount
@@ -191,6 +193,67 @@ class ArticleGenerationServiceTest(TestCase):
 
         args, _ = mock_post.call_args
         self.assertIn("/api/runs/job_123/approve", args[0])
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_promote_article_bundle_copies_thread_context_to_child_job(self, mock_post):
+        ContentFactoryJob.objects.create(
+            job_id="job_content_ready",
+            domain="mlai.au",
+            slack_user_id=self.slack_user_id,
+            status="completed",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "queued",
+            "job_id": "job_publish_child",
+            "source_run_id": "job_content_ready",
+        }
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = promote_article_bundle("job_content_ready", slack_user_id=self.slack_user_id, domain="mlai.au")
+
+        self.assertEqual(result["job_id"], "job_publish_child")
+        args, _ = mock_post.call_args
+        self.assertIn("/api/runs/job_content_ready/promote-bundle", args[0])
+
+        child_job = ContentFactoryJob.objects.get(job_id="job_publish_child")
+        self.assertEqual(child_job.slack_channel_id, "C123")
+        self.assertEqual(child_job.slack_thread_ts, "123.456")
+        self.assertEqual(child_job.slack_root_message_ts, "123.456")
+        self.assertEqual(child_job.request_meta["source_run_id"], "job_content_ready")
+        self.assertEqual(child_job.request_meta["promotion_source"], "promote_bundle")
+
+    @patch("integrations.services.article_generation.promote_article_bundle")
+    def test_publish_article_as_pr_delegates_to_promote_bundle(self, mock_promote_article_bundle):
+        mock_promote_article_bundle.return_value = {
+            "status": "queued",
+            "job_id": "job_publish_child",
+        }
+
+        result = publish_article_as_pr(
+            "job_content_ready",
+            slack_user_id=self.slack_user_id,
+            domain="mlai.au",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
+        self.assertEqual(result["job_id"], "job_publish_child")
+        mock_promote_article_bundle.assert_called_once_with(
+            "job_content_ready",
+            slack_user_id=self.slack_user_id,
+            domain="mlai.au",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_omits_delivery_mode_when_no_preference_exists(self, mock_post):
