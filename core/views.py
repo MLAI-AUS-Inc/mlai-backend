@@ -87,6 +87,8 @@ def _normalize_app_context(app_value, default='hospital'):
         return 'hospital'
     if app in ('esafety', 'e-safety'):
         return 'esafety'
+    if app in ('vibe-raising', 'vibe_raising', 'viberaising'):
+        return 'vibe-raising'
     return default
 
 
@@ -135,6 +137,8 @@ def _frontend_base_url(app_context):
         return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), default_origin)
     if app_context == 'esafety':
         return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), default_origin)
+    if app_context == 'vibe-raising':
+        return _origin_from_url(getattr(settings, 'VIBE_RAISING_URL', None), default_origin)
     return default_origin
 
 
@@ -387,6 +391,8 @@ class MagicLinkVerifyView(APIView):
                     redirect_path = next_param
                 elif app_param == 'esafety':
                     redirect_path = "/esafety/dashboard"
+                elif app_param == 'vibe-raising':
+                    redirect_path = "/vibe-raising"
                 else:
                     redirect_path = "/hospital/app"
 

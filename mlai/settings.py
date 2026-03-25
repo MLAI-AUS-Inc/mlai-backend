@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'hospital',
     'core',
     'esafety',
+    'vibe_raising',
     "rest_framework",
     "roo",
 
@@ -226,6 +227,7 @@ DEFAULT_FRONTEND_URL = os.getenv('DEFAULT_FRONTEND_URL') or (
 )
 MEDHACK_URL = os.getenv('MEDHACK_URL') or DEFAULT_FRONTEND_URL
 ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
+VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
