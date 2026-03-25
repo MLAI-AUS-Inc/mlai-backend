@@ -11,6 +11,7 @@ urlpatterns = [
     path('github/reauth-url', api_views.GithubReauthUrlView.as_view(), name='github_reauth_url'),  # GET quick re-auth URL
     path('github/scan', api_views.GithubScanView.as_view(), name='github_scan'),
     path('github/scaffold', api_views.GithubScaffoldView.as_view(), name='github_scaffold'),
+    path('github/scaffold/decision', api_views.GithubScaffoldDecisionView.as_view(), name='github_scaffold_decision'),
     
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save

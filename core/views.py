@@ -1803,6 +1803,7 @@ class ContentFactoryCallbackView(APIView):
     
     Event types:
     - topic_selection: Research complete, topic selected, awaiting confirmation
+    - scan_progress: Non-terminal repository scan milestone update
     - discovery_progress: Non-terminal discovery milestone update
     - article_progress: Non-terminal article milestone update
     - article_complete: Article generated and published successfully
@@ -1862,6 +1863,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_discovery_progress(data)
             elif event_type == 'article_progress':
                 return self._handle_article_progress(data)
+            elif event_type == 'scan_progress':
+                return self._handle_scan_progress(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -2063,6 +2066,19 @@ class ContentFactoryCallbackView(APIView):
                 'candidate_pool_ready': 'Candidate pool ready',
             },
             response_message='Discovery progress callback processed',
+        )
+
+    def _handle_scan_progress(self, data):
+        return self._handle_progress_callback(
+            data,
+            event_name='scan_progress',
+            status_value='researching',
+            stage_titles={
+                'repo_analysis': 'Inspecting repository',
+                'template_generation': 'Generating guidance',
+                'finalizing': 'Finalizing scan',
+            },
+            response_message='Scan progress callback processed',
         )
 
     def _handle_delivery_mode_required(self, data):
@@ -2471,6 +2487,14 @@ class ContentFactoryCallbackView(APIView):
         workflow = data.get('workflow') or 'repo_scan'
         scaffold_queued = bool(data.get('scaffold_queued'))
         scaffold_job_id = data.get('scaffold_job_id') or ''
+        requested_action = str(data.get('requested_action') or '').strip()
+        scaffold_status = str(data.get('scaffold_status') or '').strip()
+        approve_url = str(data.get('approve_url') or '').strip()
+        deny_url = str(data.get('deny_url') or '').strip()
+        approval_required = (
+            requested_action == 'scaffold_publish_route'
+            and scaffold_status == 'approval_required'
+        )
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         components_generated = data.get('components_generated', False)
@@ -2484,8 +2508,21 @@ class ContentFactoryCallbackView(APIView):
         # Update job record if one exists
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if job:
-            job.status = 'completed'
-            job.save()
+            request_meta = dict(job.request_meta or {})
+            request_meta.update(
+                {
+                    'type': request_meta.get('type') or 'scan',
+                    'run_id': run_id,
+                    'requested_action': requested_action,
+                    'scaffold_status': scaffold_status,
+                    'approve_url': approve_url,
+                    'deny_url': deny_url,
+                    'scaffold_plan': data.get('scaffold_plan') or request_meta.get('scaffold_plan'),
+                }
+            )
+            job.status = 'awaiting_confirmation' if approval_required else 'completed'
+            job.request_meta = request_meta
+            job.save(update_fields=['status', 'request_meta', 'updated_at'])
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
@@ -2554,29 +2591,32 @@ class ContentFactoryCallbackView(APIView):
         article_system_state = article_system.get('state', 'missing')
         destination_summary = _scan_destination_summary(article_system, publish_targets)
 
-        pending_resumed = False
-        if slack_user_id:
-            try:
-                from integrations.models import UserIntegration
-                from integrations.services.article_generation import trigger_article_generation
-
-                integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-                if integration and integration.pending_intent:
-                    intent = integration.pending_intent
-                    article_req = intent.get('article_request') or {}
-                    if intent.get('type') == 'write_article' and normalize_domain(article_req.get('domain', '')) == normalize_domain(domain):
-                        integration.pending_intent = None
-                        integration.save(update_fields=['pending_intent'])
-                        trigger_article_generation(slack_user_id, article_req)
-                        pending_resumed = True
-                        logger.info(f"Auto-resumed pending article intent after scan for {slack_user_id}/{domain}")
-            except Exception as e:
-                logger.warning(f"Failed to auto-resume pending intent after scan for {domain}: {e}")
-
         if not slack_user_id:
             return Response({'status': 'received', 'job_id': job_id}, status=status.HTTP_200_OK)
 
         try:
+            pending_resumed = False
+            if slack_user_id and destination_summary and not approval_required and not scaffold_queued:
+                try:
+                    from integrations.models import UserIntegration
+                    from integrations.services.article_generation import trigger_article_generation
+
+                    integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+                    if integration and integration.pending_intent:
+                        intent = integration.pending_intent
+                        article_req = intent.get('article_request') or {}
+                        if (
+                            intent.get('type') == 'write_article'
+                            and normalize_domain(article_req.get('domain', '')) == normalize_domain(domain)
+                        ):
+                            integration.pending_intent = None
+                            integration.save(update_fields=['pending_intent'])
+                            trigger_article_generation(slack_user_id, article_req)
+                            pending_resumed = True
+                            logger.info(f"Auto-resumed pending article intent after scan for {slack_user_id}/{domain}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-resume pending intent after scan for {domain}: {e}")
+
             if components_generated and components_count > 0:
                 component_list = "\n".join(f"  • {name}" for name in component_names[:8])
                 if len(component_names) > 8:
@@ -2592,7 +2632,56 @@ class ContentFactoryCallbackView(APIView):
                 elif pillar_count:
                     pillar_line = f"\n\n*{pillar_count} content pillars* identified"
 
-                if destination_summary:
+                if approval_required:
+                    text_body = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\n"
+                        f"{component_list}{pillar_line}\n\n"
+                        f"The next step is to create an articles directory in your repo. "
+                        f"This will set up content pillar directories, article components, "
+                        f"an index page, and a demo article — submitted as a PR for your review."
+                    )
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": text_body}
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"scaffold_confirm_{domain}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Create Articles Directory"},
+                                    "style": "primary",
+                                    "action_id": "scaffold_confirm",
+                                    "value": _json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Skip for now"},
+                                    "action_id": "scaffold_skip",
+                                    "value": _json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
+                                    })
+                                }
+                            ]
+                        }
+                    ]
+                    fallback_text = f"✅ Scan complete for {domain}! Generated {components_count} components."
+                elif destination_summary:
                     text_body = (
                         f"✅ *Scan complete for {domain}!*\\n\\n"
                         f"I've analysed your codebase and generated "
@@ -2703,7 +2792,7 @@ class ContentFactoryCallbackView(APIView):
                         f"To get started, say:\n"
                         f"  `@Roo write me an article about [topic]`"
                     )
-                blocks = None
+                    blocks = None
 
             # Reply in-thread if we have context, fall back to DM
             if channel_id and thread_ts:

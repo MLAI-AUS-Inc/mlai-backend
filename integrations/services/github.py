@@ -710,7 +710,7 @@ def scaffold_articles_directory(
     from core.models import ContentFactoryJob
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
-    scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scan"
+    scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scaffold"
 
     api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
     headers = {"Content-Type": "application/json"}
@@ -721,7 +721,6 @@ def scaffold_articles_directory(
         "domain": domain,
         "slack_user_id": slack_user_id,
         "github_repo": github_repo,
-        "scaffold_if_missing": True,
     }
 
     logger.info(f"Triggering article scaffolding for {domain}")
@@ -773,6 +772,102 @@ def scaffold_articles_directory(
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Failed to connect to Content Factory for scaffolding: {e}")
         raise ScanError(f"Failed to trigger scaffolding: {str(e)}")
+
+
+def decide_scan_scaffold(
+    *,
+    scan_run_id: str,
+    decision: str,
+    domain: str,
+    slack_user_id: str,
+    slack_channel_id: str = None,
+    slack_thread_ts: str = None,
+) -> dict:
+    """Approve or deny a scaffold proposal for a repo scan run."""
+    from core.models import ContentFactoryJob
+
+    normalized_decision = str(decision or "").strip().lower()
+    if normalized_decision not in {"approve", "deny"}:
+        raise ValueError("decision must be 'approve' or 'deny'")
+
+    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
+    action_endpoint = (
+        f"{content_factory_url.rstrip('/')}/api/runs/{scan_run_id}/approve"
+        if normalized_decision == "approve"
+        else f"{content_factory_url.rstrip('/')}/api/runs/{scan_run_id}/deny"
+    )
+
+    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+
+    logger.info(
+        "Submitting scaffold %s for run %s (%s)",
+        normalized_decision,
+        scan_run_id,
+        domain,
+    )
+
+    try:
+        response = http_requests.post(
+            action_endpoint,
+            headers=headers,
+            timeout=120,
+        )
+        data = response.json() if response.content else {}
+
+        if response.status_code in [200, 202]:
+            parent_job = ContentFactoryJob.objects.filter(job_id=scan_run_id).first()
+            if parent_job:
+                parent_job.status = 'confirmed' if normalized_decision == 'approve' else 'cancelled'
+                parent_meta = dict(parent_job.request_meta or {})
+                parent_meta.update(
+                    {
+                        'type': parent_meta.get('type') or 'scan',
+                        'scaffold_decision': normalized_decision,
+                        'scaffold_status': data.get('status') or parent_meta.get('scaffold_status'),
+                    }
+                )
+                parent_job.request_meta = parent_meta
+                parent_job.save(update_fields=['status', 'request_meta', 'updated_at'])
+
+            scaffold_job_id = data.get('scaffold_job_id')
+            if normalized_decision == 'approve' and scaffold_job_id:
+                ContentFactoryJob.objects.update_or_create(
+                    job_id=scaffold_job_id,
+                    defaults={
+                        'domain': domain,
+                        'slack_user_id': slack_user_id,
+                        'status': 'queued',
+                        'slack_channel_id': slack_channel_id or '',
+                        'slack_thread_ts': slack_thread_ts or '',
+                        'request_meta': {
+                            'type': 'scaffold_articles',
+                            'parent_scan_run_id': scan_run_id,
+                        },
+                    },
+                )
+
+            return {
+                "status_code": response.status_code,
+                "data": data,
+            }
+
+        logger.error(
+            "Content Factory scaffold %s failed for %s: %s - %s",
+            normalized_decision,
+            scan_run_id,
+            response.status_code,
+            response.text,
+        )
+        return {
+            "status_code": response.status_code,
+            "data": data or {"error": response.text or "Unknown Content Factory error"},
+        }
+    except http_requests.exceptions.RequestException as e:
+        logger.error("Failed to connect to Content Factory for scaffold %s: %s", normalized_decision, e)
+        raise ScanError(f"Failed to submit scaffold {normalized_decision}: {str(e)}")
 
 
 def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None, domain: str = None):

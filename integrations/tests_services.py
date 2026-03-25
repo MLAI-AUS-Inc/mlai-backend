@@ -5,7 +5,7 @@ from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
 from core.models import Organization, OrganizationContentConfig
-from integrations.services.github import scan_github_project, ScanError
+from integrations.services.github import scan_github_project, scaffold_articles_directory, ScanError
 
 class GithubServiceTest(TestCase):
     def setUp(self):
@@ -94,3 +94,24 @@ class GithubServiceTest(TestCase):
         self.assertNotIn('slack_channel_id', payload)
         self.assertNotIn('slack_thread_ts', payload)
         self.assertEqual(payload['domain'], self.domain)
+
+    @patch('integrations.services.github.http_requests.post')
+    def test_scaffold_articles_directory_uses_scaffold_endpoint(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "scaffold-job-1", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        result = scaffold_articles_directory(
+            domain=self.domain,
+            slack_user_id=self.slack_user_id,
+            github_token="gh_token_123",
+            github_repo="owner/repo",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+        )
+
+        self.assertEqual(result["status"], "queued")
+        args, kwargs = mock_post.call_args
+        self.assertIn('/api/runs/scaffold', args[0])
+        self.assertNotIn('scaffold_if_missing', kwargs['json'])

@@ -5,7 +5,10 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
+from core.models import ContentFactoryRun, Organization
 from integrations.models import GoogleConnection
+from integrations.models import UserStartupBinding
+from integrations.views import _log_gmail_subject_preview_for_testing
 
 
 User = get_user_model()
@@ -30,6 +33,9 @@ class GoogleOAuthViewTests(TestCase):
     def setUp(self):
         self.client = Client()
         self.user = User.objects.create_user(email="founder@example.com", role="participant")
+        self.subject_preview_patcher = patch("integrations.views._log_gmail_subject_preview_for_testing")
+        self.mock_subject_preview = self.subject_preview_patcher.start()
+        self.addCleanup(self.subject_preview_patcher.stop)
 
     def _login_and_seed_oauth_state(self, *, next_url=None):
         self.client.force_login(self.user)
@@ -88,10 +94,11 @@ class GoogleOAuthViewTests(TestCase):
             "integrations.views.requests.get",
             return_value=_json_response({"email": "founder@gmail.com"}),
         ):
-            response = self.client.get(
-                reverse("google_callback"),
-                {"state": "google-state", "code": "oauth-code"},
-            )
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.get(
+                    reverse("google_callback"),
+                    {"state": "google-state", "code": "oauth-code"},
+                )
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "/app/settings")
@@ -163,6 +170,63 @@ class GoogleOAuthViewTests(TestCase):
             mock_post.call_args.kwargs["data"]["redirect_uri"],
             "https://api.mlai.au/integrations/callback/google",
         )
+
+    def test_google_callback_starts_startup_update_for_default_binding(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            is_default_for_gmail=True,
+        )
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        run = ContentFactoryRun.objects.get(workflow="startup_monthly_update", domain="acme.com")
+        self.assertEqual(run.run_request["organization_id"], organization.id)
+        binding.refresh_from_db()
+        self.assertEqual(binding.google_connection_id, self.user.google_connection.id)
+
+    def test_google_callback_skips_startup_update_without_binding(self):
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
 
     def test_google_callback_preserves_existing_refresh_token(self):
         GoogleConnection.objects.create(
@@ -247,3 +311,24 @@ class GoogleOAuthViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn(b"OAuth error: access_denied", response.content)
+
+    @override_settings(IS_LOCAL_ENV=True, DEBUG=True)
+    def test_log_gmail_subject_preview_for_testing_logs_first_five_subjects(self):
+        with patch(
+            "integrations.views.fetch_recent_subject_lines",
+            return_value=[
+                "Subject 1",
+                "Subject 2",
+                "Subject 3",
+                "Subject 4",
+                "Subject 5",
+                "Subject 6",
+            ],
+        ), patch("integrations.views.logger") as mock_logger:
+            _log_gmail_subject_preview_for_testing(self.user)
+
+        mock_logger.info.assert_called_once_with(
+            "Gmail OAuth subject preview for user %s: %s",
+            self.user.pk,
+            ["Subject 1", "Subject 2", "Subject 3", "Subject 4", "Subject 5"],
+        )

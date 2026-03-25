@@ -821,3 +821,50 @@ class GithubScaffoldView(APIView):
             "message": "Scaffolding started. You will be notified when complete.",
             "domain": normalized_domain,
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class GithubScaffoldDecisionView(APIView):
+    """
+    Record scaffold approval or denial for a scan run.
+    POST /api/v1/integrations/github/scaffold/decision
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from integrations.services.github import decide_scan_scaffold, ScanError
+
+        scan_run_id = str(request.data.get('scan_run_id') or request.data.get('run_id') or '').strip()
+        decision = str(request.data.get('decision') or '').strip().lower()
+        domain = normalize_domain(request.data.get('domain') or '')
+        slack_user_id = str(request.data.get('slack_user_id') or '').strip()
+        slack_channel_id = str(request.data.get('slack_channel_id') or '').strip()
+        slack_thread_ts = str(request.data.get('slack_thread_ts') or '').strip()
+
+        if not scan_run_id or not decision or not slack_user_id:
+            return Response(
+                {"error": "scan_run_id, decision, and slack_user_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if decision not in {'approve', 'deny'}:
+            return Response(
+                {"error": "decision must be 'approve' or 'deny'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = decide_scan_scaffold(
+                scan_run_id=scan_run_id,
+                decision=decision,
+                domain=domain,
+                slack_user_id=slack_user_id,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+            )
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ScanError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response(result.get("data") or {}, status=result.get("status_code", status.HTTP_200_OK))

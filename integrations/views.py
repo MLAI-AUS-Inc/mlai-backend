@@ -10,12 +10,14 @@ from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from .models import GoogleConnection, UserIntegration
+from .services import fetch_recent_subject_lines
 from integrations.services.github_connections import (
     build_github_installation_url,
     build_github_oauth_state,
     store_github_oauth_state,
     validate_github_oauth_state,
 )
+from integrations.services.startup_updates import maybe_start_startup_update_for_google_connection
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -79,6 +81,23 @@ def _default_google_success_url() -> str:
 
     fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
     return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
+
+
+def _log_gmail_subject_preview_for_testing(user, *, limit: int = 5) -> None:
+    if not (getattr(settings, "IS_LOCAL_ENV", False) or getattr(settings, "DEBUG", False)):
+        return
+
+    try:
+        subjects = fetch_recent_subject_lines(user)[:limit]
+    except Exception:
+        logger.exception("Failed to fetch Gmail subject preview after Google OAuth for user %s", user.pk)
+        return
+
+    if not subjects:
+        logger.info("Gmail OAuth subject preview for user %s: no recent emails found", user.pk)
+        return
+
+    logger.info("Gmail OAuth subject preview for user %s: %s", user.pk, subjects)
 
 @login_required
 def google_connect(request):
@@ -182,10 +201,23 @@ def google_callback(request):
         "refresh_token": refresh_token,
     }
 
-    GoogleConnection.objects.update_or_create(
+    google_connection, _ = GoogleConnection.objects.update_or_create(
         user=request.user,
         defaults=defaults,
     )
+
+    _log_gmail_subject_preview_for_testing(request.user)
+
+    try:
+        maybe_start_startup_update_for_google_connection(
+            user=request.user,
+            google_connection=google_connection,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to auto-start startup update after Google OAuth for user %s",
+            request.user.pk,
+        )
 
     # Redirect to frontend
     return redirect(success_url or _default_google_success_url())
@@ -513,7 +545,6 @@ def get_gmail_emails(request):
 
 from django.http import JsonResponse
 from django.contrib.auth import get_user_model
-from .services import fetch_recent_subject_lines
 
 User = get_user_model()
 

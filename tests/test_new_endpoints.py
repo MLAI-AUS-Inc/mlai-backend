@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
@@ -184,6 +184,60 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         response = self.client.delete(url_clear)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(UserIntegration.objects.get(slack_user_id="U456").pending_intent)
+
+    @patch('integrations.services.github.http_requests.post')
+    def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
+        ContentFactoryJob.objects.create(
+            job_id="scan-run-approval-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="awaiting_confirmation",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            request_meta={"type": "scan"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = status.HTTP_200_OK
+        mock_response.content = b'{"status":"queued"}'
+        mock_response.json.return_value = {
+            "status": "queued",
+            "job_id": "scan-run-approval-1",
+            "workflow": "repo_scan",
+            "scaffold_job_id": "scaffold-job-99",
+            "message": "Scaffold approval recorded and scaffold PR creation queued.",
+        }
+        mock_post.return_value = mock_response
+
+        response = self.client.post(
+            reverse('github_scaffold_decision'),
+            {
+                "scan_run_id": "scan-run-approval-1",
+                "decision": "approve",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["scaffold_job_id"], "scaffold-job-99")
+
+        parent_job = ContentFactoryJob.objects.get(job_id="scan-run-approval-1")
+        self.assertEqual(parent_job.status, "confirmed")
+        self.assertEqual(parent_job.request_meta["scaffold_decision"], "approve")
+
+        scaffold_job = ContentFactoryJob.objects.get(job_id="scaffold-job-99")
+        self.assertEqual(scaffold_job.domain, "mlai.au")
+        self.assertEqual(scaffold_job.status, "queued")
+        self.assertEqual(scaffold_job.slack_channel_id, "C123")
+        self.assertEqual(scaffold_job.slack_thread_ts, "123.456")
+        self.assertEqual(scaffold_job.request_meta["parent_scan_run_id"], "scan-run-approval-1")
+
+        args, _kwargs = mock_post.call_args
+        self.assertIn('/api/runs/scan-run-approval-1/approve', args[0])
 
     def test_channel_activity_endpoints(self):
         # Setup: Link user to Slack ID
@@ -721,6 +775,52 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIsNone(mock_send_dm.call_args[1].get("blocks"))
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_posts_scaffold_approval_buttons(self, mock_send_dm):
+        ContentFactoryJob.objects.create(
+            job_id="scan-run-awaiting-approval",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="researching",
+            request_meta={"type": "scan"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-awaiting-approval",
+                "run_id": "scan-run-awaiting-approval",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "components_generated": True,
+                "components_count": 3,
+                "component_names": ["ArticleHeroHeader", "ArticleFAQ", "ArticleFooterNav"],
+                "pillar_count": 2,
+                "pillar_names": ["SEO", "Trust"],
+                "requested_action": "scaffold_publish_route",
+                "scaffold_status": "approval_required",
+                "approve_url": "/api/runs/scan-run-awaiting-approval/approve",
+                "deny_url": "/api/runs/scan-run-awaiting-approval/deny",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="scan-run-awaiting-approval")
+        self.assertEqual(job.status, "awaiting_confirmation")
+        self.assertEqual(job.request_meta["requested_action"], "scaffold_publish_route")
+
+        mock_send_dm.assert_called_once()
+        blocks = mock_send_dm.call_args[1]["blocks"]
+        self.assertIsNotNone(blocks)
+        self.assertEqual(blocks[1]["type"], "actions")
+        confirm_value = json.loads(blocks[1]["elements"][0]["value"])
+        skip_value = json.loads(blocks[1]["elements"][1]["value"])
+        self.assertEqual(confirm_value["scan_run_id"], "scan-run-awaiting-approval")
+        self.assertEqual(skip_value["scan_run_id"], "scan-run-awaiting-approval")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
         config = OrganizationContentConfig.objects.create(
@@ -1148,6 +1248,55 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["reason"], "duplicate_progress_id")
         mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_scan_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-scan-card")
+        ContentFactoryJob.objects.create(
+            job_id="job-scan-progress",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="queued",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"type": "scan", "github_repo": "acme/site"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_progress",
+                "job_id": "job-scan-progress",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-scan-progress:repo_analysis",
+                "milestone_key": "repo_analysis",
+                "milestone_index": 1,
+                "milestone_count": 3,
+                "message": "Scan started. Inspecting repository structure and dependencies.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-scan-progress")
+        self.assertEqual(job.status, "researching")
+        self.assertEqual(job.posted_progress_ids, ["job-scan-progress:repo_analysis"])
+        self.assertEqual(job.last_progress_milestone_index, 1)
+        self.assertEqual(job.last_progress_milestone_key, "repo_analysis")
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertIn(
+            "Scan started. Inspecting repository structure and dependencies.",
+            mock_send_message.call_args[0][1],
+        )
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Content Factory for mlai.au", blocks[0]["text"]["text"])
+        self.assertIn("Preparing scan", blocks[0]["text"]["text"])
+        self.assertIn("Inspecting repo", blocks[0]["text"]["text"])
+        self.assertNotIn("Writing draft", blocks[0]["text"]["text"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_ignores_stale_milestone(self, mock_send_message):

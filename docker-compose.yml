@@ -12,6 +12,11 @@ services:
       - .env
     depends_on:
       - db
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-web
 
   scheduler:
     build: .
@@ -22,6 +27,11 @@ services:
       - .env
     depends_on:
       - db
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-scheduler
 
   db:
     image: postgres:15
@@ -29,6 +39,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     env_file:
       - .env
+
+networks:
+  mlai-shared:
+    external: true
 
 volumes:
   postgres_data:
