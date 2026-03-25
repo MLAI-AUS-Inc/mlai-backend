@@ -8,6 +8,7 @@ from django.urls import reverse
 from core.models import ContentFactoryRun, Organization
 from integrations.models import GoogleConnection
 from integrations.models import UserStartupBinding
+from integrations.views import _log_gmail_subject_preview_for_testing
 
 
 User = get_user_model()
@@ -32,6 +33,9 @@ class GoogleOAuthViewTests(TestCase):
     def setUp(self):
         self.client = Client()
         self.user = User.objects.create_user(email="founder@example.com", role="participant")
+        self.subject_preview_patcher = patch("integrations.views._log_gmail_subject_preview_for_testing")
+        self.mock_subject_preview = self.subject_preview_patcher.start()
+        self.addCleanup(self.subject_preview_patcher.stop)
 
     def _login_and_seed_oauth_state(self, *, next_url=None):
         self.client.force_login(self.user)
@@ -307,3 +311,24 @@ class GoogleOAuthViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn(b"OAuth error: access_denied", response.content)
+
+    @override_settings(IS_LOCAL_ENV=True, DEBUG=True)
+    def test_log_gmail_subject_preview_for_testing_logs_first_five_subjects(self):
+        with patch(
+            "integrations.views.fetch_recent_subject_lines",
+            return_value=[
+                "Subject 1",
+                "Subject 2",
+                "Subject 3",
+                "Subject 4",
+                "Subject 5",
+                "Subject 6",
+            ],
+        ), patch("integrations.views.logger") as mock_logger:
+            _log_gmail_subject_preview_for_testing(self.user)
+
+        mock_logger.info.assert_called_once_with(
+            "Gmail OAuth subject preview for user %s: %s",
+            self.user.pk,
+            ["Subject 1", "Subject 2", "Subject 3", "Subject 4", "Subject 5"],
+        )

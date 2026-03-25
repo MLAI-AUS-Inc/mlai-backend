@@ -10,6 +10,7 @@ from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from .models import GoogleConnection, UserIntegration
+from .services import fetch_recent_subject_lines
 from integrations.services.github_connections import (
     build_github_installation_url,
     build_github_oauth_state,
@@ -80,6 +81,23 @@ def _default_google_success_url() -> str:
 
     fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
     return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
+
+
+def _log_gmail_subject_preview_for_testing(user, *, limit: int = 5) -> None:
+    if not (getattr(settings, "IS_LOCAL_ENV", False) or getattr(settings, "DEBUG", False)):
+        return
+
+    try:
+        subjects = fetch_recent_subject_lines(user)[:limit]
+    except Exception:
+        logger.exception("Failed to fetch Gmail subject preview after Google OAuth for user %s", user.pk)
+        return
+
+    if not subjects:
+        logger.info("Gmail OAuth subject preview for user %s: no recent emails found", user.pk)
+        return
+
+    logger.info("Gmail OAuth subject preview for user %s: %s", user.pk, subjects)
 
 @login_required
 def google_connect(request):
@@ -187,6 +205,8 @@ def google_callback(request):
         user=request.user,
         defaults=defaults,
     )
+
+    _log_gmail_subject_preview_for_testing(request.user)
 
     try:
         maybe_start_startup_update_for_google_connection(
@@ -525,7 +545,6 @@ def get_gmail_emails(request):
 
 from django.http import JsonResponse
 from django.contrib.auth import get_user_model
-from .services import fetch_recent_subject_lines
 
 User = get_user_model()
 
