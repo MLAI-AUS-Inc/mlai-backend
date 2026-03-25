@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlencode
 
@@ -341,7 +342,13 @@ def build_preview_ready_blocks(
     ]
 
 
-def build_content_ready_blocks(*, domain: str, content_package: Dict[str, Any], preview_url: str = "") -> List[Dict[str, Any]]:
+def build_content_ready_blocks(
+    *,
+    domain: str,
+    content_package: Dict[str, Any],
+    preview_url: str = "",
+    publish_button_value: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     title = _string(content_package.get("title")) or "Untitled article"
     summary = _summary_text(content_package) or "The full article is ready below."
     references = _list(content_package.get("references"))
@@ -382,11 +389,30 @@ def build_content_ready_blocks(*, domain: str, content_package: Dict[str, Any], 
                 {"type": "mrkdwn", "text": " • ".join(context_bits)},
                 {
                     "type": "mrkdwn",
-                    "text": "Reply `@Roo publish this article as a PR` to turn this into a draft PR and preview.",
+                    "text": (
+                        "Use the *Publish as Draft PR* button to promote this article into the repo flow. "
+                        "If needed, replying `@Roo publish this article as a PR` in this thread still works as a fallback."
+                    ),
                 },
             ],
         }
     )
+    if publish_button_value:
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": "content_ready_publish_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Publish as Draft PR"},
+                        "style": "primary",
+                        "value": json.dumps(publish_button_value),
+                        "action_id": "publish_content_pr",
+                    }
+                ],
+            }
+        )
     if preview_url:
         blocks.append(
             {

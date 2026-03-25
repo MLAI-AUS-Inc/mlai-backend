@@ -4,6 +4,7 @@ from integrations import api_views_content as views
 urlpatterns = [
     path('generate', views.ContentGenerateView.as_view(), name='content_generate'),
     path('article-system/decision', views.ArticleSystemDecisionView.as_view(), name='content_article_system_decision'),
+    path('jobs/resolve-thread', views.ContentResolveThreadView.as_view(), name='content_job_resolve_thread'),
     path('jobs/<str:job_id>', views.ContentStatusView.as_view(), name='content_status'),
     path('jobs/<str:job_id>/delivery-mode', views.ContentJobDeliveryModeView.as_view(), name='content_job_delivery_mode'),
     path('jobs/<str:job_id>/progress-message', views.ContentJobProgressMessageView.as_view(), name='content_job_progress_message'),

@@ -34,6 +34,7 @@ from integrations.services.startup_updates import (
     create_startup_update_run,
     render_monthly_update_markdown,
     score_message_for_profile,
+    sync_startup_profile_from_company,
 )
 
 User = get_user_model()
@@ -82,18 +83,20 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
                     "domain": self.organization.domain,
                     "company_aliases": ["Acme", "Acme AI"],
                     "product_names": ["FlowPilot"],
-                    "founder_names": ["Alice Founder"],
-                    "investor_domains": ["fund.example"],
-                    "kpi_definitions": [{"key": "arr", "label": "ARR"}],
-                },
-                format="json",
-                **self.headers,
+                        "founder_names": ["Alice Founder"],
+                        "investor_domains": ["fund.example"],
+                        "kpi_definitions": [{"key": "arr", "label": "ARR"}],
+                        "stage": "seed",
+                    },
+                    format="json",
+                    **self.headers,
             )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         profile = StartupProfile.objects.get(organization=self.organization)
         binding = UserStartupBinding.objects.get(user=self.user, organization=self.organization)
         self.assertEqual(profile.product_names, ["FlowPilot"])
+        self.assertEqual(profile.stage, "seed")
         self.assertEqual(binding.google_connection, self.google_connection)
         self.assertTrue(binding.is_default_for_gmail)
 
@@ -117,6 +120,8 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(run.run_request["google_connection_id"], self.google_connection.id)
         self.assertEqual(run.run_request["window_months"], 6)
         self.assertEqual(len(run.run_request["draft_months"]), 3)
+        self.assertEqual(run.run_request["startup_context"]["stage"], "seed")
+        self.assertEqual(run.run_request["startup_context"]["company_aliases"], ["Acme", "Acme AI"])
         self.assertTrue(
             GmailSyncCursor.objects.filter(
                 organization=self.organization,
@@ -564,3 +569,53 @@ class StartupUpdateServiceHelpersTest(TestCase):
         self.assertGreaterEqual(score, 80)
         self.assertEqual(label, GmailRelevanceLabel.RELEVANT)
         self.assertIn("matched_company_domain", reasons)
+
+    def test_sync_startup_profile_from_company_merges_existing_org_context(self):
+        user = User.objects.create_user(
+            email="merge-founder@example.com",
+            password="password123",
+            first_name="Alicia",
+            last_name="Founder",
+        )
+        organization = Organization.objects.create(
+            name="Legacy Co",
+            domain="legacy.example",
+            competitors=[{"name": "RivalOne", "domain": "rival.one"}],
+            seed_keywords=["workflow", "back office"],
+        )
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            brand_name="Legacy AI",
+            company_context="Legacy AI automates back-office operations.",
+        )
+        profile = StartupProfile.objects.create(
+            organization=organization,
+            company_aliases=["Legacy Co"],
+            founder_names=["Existing Founder"],
+            team_names=["Existing Founder"],
+            notes="Manual founder notes.",
+            stage="series_a",
+        )
+        company = SimpleNamespace(name="Legacy Labs", domain="legacy.example")
+
+        sync_startup_profile_from_company(
+            startup_profile=profile,
+            organization=organization,
+            company=company,
+            user=user,
+        )
+
+        profile.refresh_from_db()
+        organization.refresh_from_db()
+        self.assertEqual(organization.name, "Legacy Labs")
+        self.assertEqual(profile.stage, "series_a")
+        self.assertIn("Legacy Labs", profile.company_aliases)
+        self.assertIn("Legacy AI", profile.company_aliases)
+        self.assertIn("legacy.example", profile.domain_aliases)
+        self.assertIn("Alicia Founder", profile.founder_names)
+        self.assertIn("Alicia Founder", profile.team_names)
+        self.assertIn("RivalOne", profile.competitor_names)
+        self.assertIn("rival.one", profile.competitor_domains)
+        self.assertIn("workflow", profile.positive_keywords)
+        self.assertIn("Manual founder notes.", profile.notes)
+        self.assertIn("Legacy AI automates back-office operations.", profile.notes)

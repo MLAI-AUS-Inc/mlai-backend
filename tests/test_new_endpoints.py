@@ -1684,6 +1684,15 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(first_call[1]["thread_ts"], "123.456")
         first_blocks = first_call[1]["blocks"]
         self.assertIn("Article content ready", first_blocks[0]["text"]["text"])
+        publish_block = next(block for block in first_blocks if block.get("block_id") == "content_ready_publish_actions")
+        publish_button = publish_block["elements"][0]
+        self.assertEqual(publish_button["action_id"], "publish_content_pr")
+        publish_value = json.loads(publish_button["value"])
+        self.assertEqual(publish_value["job_id"], "job-content-threaded")
+        self.assertEqual(publish_value["domain"], "mlai.au")
+        self.assertEqual(publish_value["slack_user_id"], "U123")
+        self.assertEqual(publish_value["channel_id"], "C123")
+        self.assertEqual(publish_value["thread_ts"], "123.456")
         self.assertEqual(first_blocks[-1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertIn("/api/content-factory/runs/job-content-threaded/preview", first_blocks[-1]["elements"][0]["url"])
         combined_text = "\n".join(
@@ -1693,6 +1702,108 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertNotIn("/tmp/run/article.md", combined_text)
         self.assertIn("inline-1.jpg", combined_text)
         self.assertIn("Quick Summary", combined_text)
+
+    def test_resolve_thread_returns_ready_source_job(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"publish_stage": "content_ready"},
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "publish_pr",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["resolution"], "ready")
+        self.assertEqual(response.data["job_id"], "job-content-ready")
+        self.assertEqual(response.data["publish_stage"], "content_ready")
+
+    def test_resolve_thread_returns_existing_publish_child_when_promotion_in_progress(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "publish_stage": "promotion_requested",
+                "promoted_publish_job_id": "job-publish-child",
+            },
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-publish-child",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "source_run_id": "job-content-ready",
+                "publish_stage": "awaiting_preview",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "publish_pr",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["resolution"], "in_progress")
+        self.assertEqual(response.data["job_id"], "job-content-ready")
+        self.assertEqual(response.data["promoted_publish_job_id"], "job-publish-child")
+        self.assertEqual(response.data["publish_stage"], "awaiting_preview")
+
+    def test_resolve_thread_returns_404_when_no_promotable_source_job_exists(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-publish-child",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "source_run_id": "job-content-ready",
+                "publish_stage": "awaiting_preview",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "publish_pr",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn("No promotable content-ready article", response.data["error"])
 
     def test_content_preview_route_renders_signed_article_html(self):
         self._create_content_factory_run("run-preview-1")

@@ -78,6 +78,7 @@ def _serialize_profile(profile) -> dict:
         "negative_keywords": profile.negative_keywords,
         "kpi_definitions": profile.kpi_definitions,
         "default_currency": profile.default_currency,
+        "stage": profile.stage,
         "notes": profile.notes,
         "created_at": profile.created_at.isoformat(),
         "updated_at": profile.updated_at.isoformat(),
@@ -266,6 +267,7 @@ class StartupProfileView(APIView):
             "negative_keywords",
             "kpi_definitions",
             "default_currency",
+            "stage",
             "notes",
         ]:
             if field_name in data and getattr(profile, field_name) != data[field_name]:

@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from core.permissions import HasRooApiKey, HasStrictRooApiKey
+from django.db.models import Q
 from django.utils import timezone
 from typing import Optional
 import logging
@@ -134,6 +135,81 @@ def _handle_article_system_action_required(error: ArticleSystemActionRequiredErr
         status=status.HTTP_412_PRECONDITION_FAILED,
     )
 
+
+def _resolve_publishable_job_for_thread(
+    *,
+    slack_user_id: str,
+    slack_channel_id: str,
+    slack_thread_ts: str,
+    domain: Optional[str] = None,
+):
+    from core.models import ContentFactoryJob
+
+    resolved_user_id = str(slack_user_id or "").strip()
+    resolved_channel_id = str(slack_channel_id or "").strip()
+    resolved_thread_ts = str(slack_thread_ts or "").strip()
+    resolved_domain = str(domain or "").strip().lower()
+
+    if not (resolved_user_id and resolved_channel_id and resolved_thread_ts):
+        return None
+
+    jobs = list(
+        ContentFactoryJob.objects.filter(
+            slack_user_id=resolved_user_id,
+            slack_channel_id=resolved_channel_id,
+        ).filter(
+            Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
+        )
+    )
+    if resolved_domain:
+        domain_matched = [job for job in jobs if str(job.domain or "").strip().lower() == resolved_domain]
+        if domain_matched:
+            jobs = domain_matched
+
+    source_jobs = [job for job in jobs if not str((job.request_meta or {}).get("source_run_id") or "").strip()]
+    if not source_jobs:
+        return None
+
+    def sort_key(job):
+        request_meta = dict(job.request_meta or {})
+        publish_stage = str(request_meta.get("publish_stage") or "").strip()
+        promoted_publish_job_id = str(request_meta.get("promoted_publish_job_id") or "").strip()
+        return (
+            0 if publish_stage == "content_ready" else 1,
+            0 if publish_stage == "promotion_requested" else 1,
+            0 if promoted_publish_job_id else 1,
+            -int(job.created_at.timestamp()),
+        )
+
+    source_job = sorted(source_jobs, key=sort_key)[0]
+    source_meta = dict(source_job.request_meta or {})
+    source_publish_stage = str(source_meta.get("publish_stage") or "").strip() or "unknown"
+    promoted_publish_job_id = str(source_meta.get("promoted_publish_job_id") or "").strip()
+
+    if source_publish_stage == "content_ready":
+        return {
+            "resolution": "ready",
+            "job_id": source_job.job_id,
+            "domain": source_job.domain,
+            "publish_stage": source_publish_stage,
+        }
+
+    if source_publish_stage in {"promotion_requested", "awaiting_preview", "preview_ready", "auto_approved"} and promoted_publish_job_id:
+        child_job = ContentFactoryJob.objects.filter(job_id=promoted_publish_job_id).first()
+        child_meta = dict(getattr(child_job, "request_meta", {}) or {})
+        child_publish_stage = str(child_meta.get("publish_stage") or "").strip()
+        effective_publish_stage = child_publish_stage or source_publish_stage
+        if child_publish_stage in {"awaiting_preview", "preview_ready", "auto_approved"} or source_publish_stage in {"promotion_requested", "awaiting_preview", "preview_ready", "auto_approved"}:
+            return {
+                "resolution": "in_progress",
+                "job_id": source_job.job_id,
+                "domain": source_job.domain,
+                "publish_stage": effective_publish_stage,
+                "promoted_publish_job_id": promoted_publish_job_id,
+            }
+
+    return None
+
 class ContentGenerateView(APIView):
     """
     Trigger content generation pipeline.
@@ -220,6 +296,47 @@ class ContentStatusView(APIView):
         except Exception as e:
             logger.exception(f"Unexpected error in status view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContentResolveThreadView(APIView):
+    """
+    Resolve the promotable content job for a Slack thread.
+    POST /api/v1/content/jobs/resolve-thread
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        slack_user_id = str(request.data.get("slack_user_id") or "").strip()
+        slack_channel_id = str(request.data.get("slack_channel_id") or "").strip()
+        slack_thread_ts = str(request.data.get("slack_thread_ts") or "").strip()
+        domain = str(request.data.get("domain") or "").strip()
+        requested_action = str(request.data.get("requested_action") or "").strip()
+
+        if requested_action != "publish_pr":
+            return Response({"error": "requested_action must be publish_pr"}, status=status.HTTP_400_BAD_REQUEST)
+        if not all([slack_user_id, slack_channel_id, slack_thread_ts]):
+            return Response(
+                {"error": "slack_user_id, slack_channel_id, and slack_thread_ts are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        resolved = _resolve_publishable_job_for_thread(
+            slack_user_id=slack_user_id,
+            slack_channel_id=slack_channel_id,
+            slack_thread_ts=slack_thread_ts,
+            domain=domain or None,
+        )
+        if not resolved:
+            return Response(
+                {
+                    "error": "No promotable content-ready article was found for this Slack thread.",
+                    "requested_action": requested_action,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(resolved, status=status.HTTP_200_OK)
 
 
 class ContentPublishView(APIView):

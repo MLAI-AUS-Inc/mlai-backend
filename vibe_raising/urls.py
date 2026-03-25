@@ -3,6 +3,9 @@ from django.urls import path
 from .views import (
     VibeRaisingActiveCompanyView,
     VibeRaisingCompanyView,
+    VibeRaisingEmailDraftLatestView,
+    VibeRaisingEmailDraftStartView,
+    VibeRaisingEmailDraftStatusView,
     VibeRaisingProfileView,
     VibeRaisingStartupUpdateBootstrapView,
     VibeRaisingStartupUpdateRunView,
@@ -28,5 +31,20 @@ urlpatterns = [
         "startup-update/status/",
         VibeRaisingStartupUpdateStatusView.as_view(),
         name="vibe-raising-startup-update-status",
+    ),
+    path(
+        "email-draft/start/",
+        VibeRaisingEmailDraftStartView.as_view(),
+        name="vibe-raising-email-draft-start",
+    ),
+    path(
+        "email-draft/status/",
+        VibeRaisingEmailDraftStatusView.as_view(),
+        name="vibe-raising-email-draft-status",
+    ),
+    path(
+        "email-draft/latest/",
+        VibeRaisingEmailDraftLatestView.as_view(),
+        name="vibe-raising-email-draft-latest",
     ),
 ]

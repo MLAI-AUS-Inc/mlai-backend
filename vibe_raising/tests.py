@@ -5,8 +5,9 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryRun, Organization
-from integrations.models import GoogleConnection, MonthlyUpdateDraft, UserStartupBinding
+from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
+from integrations.models import GoogleConnection, MonthlyUpdateDraft, StartupProfile, UserStartupBinding
+from integrations.services.startup_updates import create_startup_update_run
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
 
@@ -216,7 +217,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["company"]["domain"], "acme.com")
         self.assertIn("/integrations/connect/google?next=", response.data["oauthUrl"])
         self.assertIn(
-            "http%3A%2F%2Flocalhost%3A5173%2Fvibe-raising%2Fcreate-update%3Fgmail_connected%3D1%26draft_from_email%3D1",
+            "http%3A%2F%2Flocalhost%3A5173%2Fvibe-raising%2Fcreate-update%3Femail_draft%3D1",
             response.data["oauthUrl"],
         )
 
@@ -356,6 +357,265 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotIn("ARR", response.data["draft"]["metrics"])
         self.assertEqual(len(response.data["draft"]["pastMonths"]), 2)
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+
+    def test_email_draft_start_returns_auth_required_until_gmail_connected(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "auth_required")
+        self.assertFalse(response.data["gmailConnected"])
+        self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
+        self.assertEqual(UserStartupBinding.objects.count(), 1)
+
+    def test_email_draft_status_returns_auth_required_until_gmail_connected(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+
+        response = self.client.get("/api/v1/vibe-raising/email-draft/status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "auth_required")
+        self.assertFalse(response.data["gmailConnected"])
+        self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
+        self.assertIsNone(response.data["runId"])
+        self.assertEqual(response.data["pastMonths"], [])
+
+    def test_email_draft_start_creates_or_reuses_open_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {},
+                    format="json",
+                )
+            second = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.data["state"], "queued")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        self.assertEqual(first.data["runId"], second.data["runId"])
+        mock_notify.assert_called_once()
+
+    def test_email_draft_status_reports_queued_then_running_for_open_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+
+        queued_response = self.client.get("/api/v1/vibe-raising/email-draft/status/")
+
+        self.assertEqual(queued_response.status_code, 200)
+        self.assertEqual(queued_response.data["state"], "queued")
+        self.assertEqual(queued_response.data["runId"], run.run_id)
+        self.assertEqual(queued_response.data["status"], ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(queued_response.data["stepStates"], {})
+
+        run.status = ContentFactoryRunStatus.RUNNING
+        run.current_step = "event_extraction"
+        run.save(update_fields=["status", "current_step", "updated_at"])
+
+        running_response = self.client.get("/api/v1/vibe-raising/email-draft/status/")
+
+        self.assertEqual(running_response.status_code, 200)
+        self.assertEqual(running_response.data["state"], "running")
+        self.assertEqual(running_response.data["runId"], run.run_id)
+        self.assertEqual(running_response.data["status"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(running_response.data["currentStep"], "event_extraction")
+
+    def test_email_draft_status_returns_completed_payload_with_editor_shape(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company()
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["Closed two new pilots", "Revenue expanded"],
+                "lowlights": ["Hiring is still slow"],
+                "asks": ["Customer intros"],
+                "kpi_snapshot": [
+                    {"metric_key": "revenue", "label": "Revenue", "value": "$45,000"},
+                    {"metric_key": "activeUsers", "label": "Active Users", "value": "1250"},
+                ],
+            },
+            rendered_markdown="# March Update",
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["Launched v2"],
+                "lowlights": ["Long onboarding"],
+                "asks": ["Hiring referrals"],
+                "kpi_snapshot": [{"metric_key": "mrr", "label": "MRR", "value": "$10,000"}],
+            },
+            rendered_markdown="# February Update",
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 1, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["Signed first customers"],
+                "lowlights": ["Needed bug fixes"],
+                "asks": ["Fundraising advice"],
+                "kpi_snapshot": [{"metric_key": "runway", "label": "Runway", "value": "18 months"}],
+            },
+            rendered_markdown="# January Update",
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/email-draft/status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "completed")
+        self.assertTrue(response.data["gmailConnected"])
+        self.assertEqual(response.data["company"]["id"], str(company.id))
+        self.assertEqual(response.data["currentMonth"]["month"], "March")
+        self.assertEqual(response.data["currentMonth"]["year"], 2026)
+        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(response.data["currentMonth"]["metrics"]["activeUsers"], "1250")
+        self.assertEqual([item["month"] for item in response.data["pastMonths"]], ["January", "February"])
+        self.assertEqual(response.data["draft"]["month"], "March")
+        self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+
+    def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["Closed two new pilots"],
+                "lowlights": ["Hiring is still slow"],
+                "asks": ["Customer intros"],
+                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
+            },
+            rendered_markdown="# March Update",
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "completed")
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
+        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+
+    def test_email_draft_start_merges_existing_startup_profile_context(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, _company = self._create_founder_company()
+        organization = Organization.objects.create(
+            name="Acme Legacy",
+            domain="acme.com",
+            competitors=[{"name": "CompeteCo", "domain": "compete.co"}],
+            seed_keywords=["workflow"],
+        )
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            brand_name="Acme AI",
+            company_context="Acme AI automates operations for finance teams.",
+        )
+        StartupProfile.objects.create(
+            organization=organization,
+            company_aliases=["Manual Alias"],
+            founder_names=["Existing Founder"],
+            team_names=["Existing Founder"],
+            notes="Manual note",
+            stage="seed",
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "auth_required")
+        profile = StartupProfile.objects.get(organization=organization)
+        organization.refresh_from_db()
+        self.assertEqual(organization.name, "Acme Inc.")
+        self.assertEqual(profile.stage, "seed")
+        self.assertIn("Manual Alias", profile.company_aliases)
+        self.assertIn("Acme Inc.", profile.company_aliases)
+        self.assertIn("Acme AI", profile.company_aliases)
+        self.assertIn("Founder User", profile.founder_names)
+        self.assertIn("Founder User", profile.team_names)
+        self.assertIn("CompeteCo", profile.competitor_names)
+        self.assertIn("compete.co", profile.competitor_domains)
+        self.assertIn("workflow", profile.positive_keywords)
+        self.assertIn("Manual note", profile.notes)
+        self.assertIn("Acme AI automates operations for finance teams.", profile.notes)
 
     def test_investor_gets_403_on_startup_update_endpoints(self):
         self.client.force_authenticate(user=self.user)

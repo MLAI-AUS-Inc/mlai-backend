@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Iterable, Optional, Union
@@ -23,6 +24,8 @@ from integrations.models import (
 from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
 
+
+logger = logging.getLogger(__name__)
 
 STARTUP_UPDATE_WORKFLOW = "startup_monthly_update"
 DEFAULT_BACKFILL_MONTHS = 6
@@ -98,6 +101,18 @@ def _uniq(values: Iterable[str]) -> list[str]:
         seen.add(key)
         deduped.append(value)
     return deduped
+
+
+def _append_note(existing: str, addition: str) -> str:
+    existing_text = str(existing or "").strip()
+    addition_text = str(addition or "").strip()
+    if not addition_text:
+        return existing_text
+    if not existing_text:
+        return addition_text
+    if addition_text.lower() in existing_text.lower():
+        return existing_text
+    return f"{existing_text}\n\n{addition_text}"
 
 
 def _competitor_name_domain_lists(raw_competitors) -> tuple[list[str], list[str]]:
@@ -237,6 +252,111 @@ def seed_startup_profile(profile: StartupProfile) -> StartupProfile:
     return profile
 
 
+def sync_startup_profile_from_company(
+    *,
+    startup_profile: StartupProfile,
+    organization: Organization,
+    company,
+    user,
+) -> StartupProfile:
+    startup_profile = seed_startup_profile(startup_profile)
+    config = getattr(organization, "content_config", None)
+
+    company_name = str(getattr(company, "name", "") or "").strip()
+    if company_name and organization.name != company_name:
+        organization.name = company_name
+        organization.save(update_fields=["name"])
+
+    founder_name = str(getattr(user, "full_name", "") or "").strip()
+    competitor_names, competitor_domains = _competitor_name_domain_lists(
+        getattr(organization, "competitors", []) or []
+    )
+    seed_keywords = list(getattr(organization, "seed_keywords", []) or [])
+
+    update_fields = []
+    merged_values = {
+        "company_aliases": _uniq(
+            [
+                *(startup_profile.company_aliases or []),
+                company_name,
+                organization.name,
+                getattr(config, "brand_name", "") if config else "",
+            ]
+        ),
+        "domain_aliases": _uniq(
+            [
+                *(startup_profile.domain_aliases or []),
+                organization.domain,
+                normalize_domain(getattr(company, "domain", "") or ""),
+            ]
+        ),
+        "founder_names": _uniq([*(startup_profile.founder_names or []), founder_name]),
+        "team_names": _uniq([*(startup_profile.team_names or []), founder_name]),
+        "competitor_names": _uniq([*(startup_profile.competitor_names or []), *competitor_names]),
+        "competitor_domains": _uniq([*(startup_profile.competitor_domains or []), *competitor_domains]),
+        "positive_keywords": _uniq(
+            [
+                *(startup_profile.positive_keywords or []),
+                *seed_keywords,
+                company_name,
+                organization.name,
+                getattr(config, "brand_name", "") if config else "",
+                *(startup_profile.product_names or []),
+            ]
+        ),
+    }
+
+    for field_name, value in merged_values.items():
+        if getattr(startup_profile, field_name) != value:
+            setattr(startup_profile, field_name, value)
+            update_fields.append(field_name)
+
+    merged_notes = _append_note(
+        startup_profile.notes,
+        getattr(config, "company_context", "") if config else "",
+    )
+    if startup_profile.notes != merged_notes:
+        startup_profile.notes = merged_notes
+        update_fields.append("notes")
+
+    if update_fields:
+        update_fields.append("updated_at")
+        startup_profile.save(update_fields=update_fields)
+
+    return startup_profile
+
+
+def build_startup_context_snapshot(
+    *,
+    organization: Organization,
+    profile: StartupProfile,
+) -> dict:
+    return {
+        "organization_id": organization.id,
+        "domain": organization.domain,
+        "company_name": organization.name,
+        "company_aliases": list(profile.company_aliases or []),
+        "domain_aliases": list(profile.domain_aliases or []),
+        "product_names": list(profile.product_names or []),
+        "founder_names": list(profile.founder_names or []),
+        "team_names": list(profile.team_names or []),
+        "investor_names": list(profile.investor_names or []),
+        "investor_domains": list(profile.investor_domains or []),
+        "competitor_names": list(profile.competitor_names or []),
+        "competitor_domains": list(profile.competitor_domains or []),
+        "customer_names": list(profile.customer_names or []),
+        "customer_domains": list(profile.customer_domains or []),
+        "prospect_names": list(profile.prospect_names or []),
+        "prospect_domains": list(profile.prospect_domains or []),
+        "positive_keywords": list(profile.positive_keywords or []),
+        "negative_keywords": list(profile.negative_keywords or []),
+        "kpi_definitions": list(profile.kpi_definitions or []),
+        "default_currency": profile.default_currency,
+        "notes": profile.notes,
+        "stage": profile.stage,
+    }
+
+
 def resolve_or_create_profile(*, domain: str) -> tuple[Organization, StartupProfile]:
     normalized_domain = normalize_domain(domain)
     organization, _ = Organization.objects.get_or_create(
@@ -316,6 +436,11 @@ def create_startup_update_run(
     months = iter_recent_month_starts(3, reference=now)
     google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
     profile = getattr(organization, "startup_profile", None)
+    startup_context = (
+        build_startup_context_snapshot(organization=organization, profile=profile)
+        if profile is not None
+        else {}
+    )
     run = ContentFactoryRun.objects.create(
         run_id=f"startup-update-{uuid.uuid4()}",
         workflow=STARTUP_UPDATE_WORKFLOW,
@@ -337,6 +462,7 @@ def create_startup_update_run(
             "current_month": current_month.isoformat(),
             "backfill_window_start": backfill_start.isoformat(),
             "backfill_window_end": now.isoformat(),
+            "startup_context": startup_context,
         },
         result={},
         acceptance_summary={},
@@ -377,6 +503,17 @@ def maybe_start_startup_update_for_google_connection(
         organization=organization,
         binding=binding,
         window_months=window_months,
+    )
+    reused_existing_run = existing_run is not None
+    logger.info(
+        "google_oauth_startup_update_run_%s",
+        "reused" if reused_existing_run else "created",
+        extra={
+            "user_id": user.pk,
+            "organization_id": organization.id,
+            "run_id": run.run_id,
+            "reused": reused_existing_run,
+        },
     )
     if existing_run is None:
         transaction.on_commit(lambda: notify_valley_run_created(run.run_id))

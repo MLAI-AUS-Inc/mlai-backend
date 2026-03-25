@@ -32,6 +32,7 @@ class StartupProfileUpsertSerializer(serializers.Serializer):
     negative_keywords = serializers.ListField(child=serializers.CharField(), required=False)
     kpi_definitions = serializers.ListField(child=serializers.DictField(), required=False)
     default_currency = serializers.CharField(required=False, allow_blank=True)
+    stage = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
 
 
