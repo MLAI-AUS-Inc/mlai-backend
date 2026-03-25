@@ -2717,20 +2717,37 @@ class ContentFactoryCallbackView(APIView):
                     fallback_text = text_body
                     blocks = None
                 elif has_pillars:
-                    text_body = (
+                    fallback_text = (
                         f"✅ *Scan complete for {domain}!*\n\n"
                         f"I've analysed your codebase and generated "
                         f"*{components_count} article components* "
                         f"matched to your website's design:\n"
                         f"{component_list}{pillar_line}\n\n"
-                        f"The next step is to create an articles directory in your repo. "
-                        f"This will set up content pillar directories, article components, "
-                        f"an index page, and a demo article — submitted as a PR for your review."
+                        f"This scan did not include scaffold approval metadata. Please run a fresh scan before creating the articles directory."
+                    )
+                    blocks = None
+                else:
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{components_count} article components* "
+                        f"matched to your website's design:\n{component_list}\n\n"
+                        f"These components will be used to create articles that look native to your site.\n\n"
+                        f"Would you like me to write your first article? Just say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
+                    blocks = None
+            else:
+                if approval_required:
+                    fallback_text = (
+                        f"✅ *Scan complete for {domain}!*\n\n"
+                        f"I've analysed your repository and the next step is to create an articles directory in your repo.\n\n"
+                        f"This will set up the safe publish route as a PR for your review."
                     )
                     blocks = [
                         {
                             "type": "section",
-                            "text": {"type": "mrkdwn", "text": text_body}
+                            "text": {"type": "mrkdwn", "text": fallback_text}
                         },
                         {
                             "type": "actions",
@@ -2746,31 +2763,25 @@ class ContentFactoryCallbackView(APIView):
                                         "slack_user_id": slack_user_id,
                                         "channel_id": channel_id,
                                         "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
                                     })
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Skip for now"},
                                     "action_id": "scaffold_skip",
-                                    "value": _json.dumps({"domain": domain})
+                                    "value": _json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
+                                    })
                                 }
                             ]
                         }
                     ]
-                    fallback_text = f"✅ Scan complete for {domain}! Generated {components_count} components."
-                else:
-                    fallback_text = (
-                        f"✅ *Scan complete for {domain}!*\n\n"
-                        f"I've analysed your codebase and generated "
-                        f"*{components_count} article components* "
-                        f"matched to your website's design:\n{component_list}\n\n"
-                        f"These components will be used to create articles that look native to your site.\n\n"
-                        f"Would you like me to write your first article? Just say:\n"
-                        f"  `@Roo write me an article about [topic]`"
-                    )
-                    blocks = None
-            else:
-                if destination_summary:
+                elif destination_summary:
                     fallback_text = (
                         f"✅ *Scan complete for {domain}!*\n\n"
                         f"{destination_summary}\n\n"

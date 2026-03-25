@@ -94,6 +94,54 @@ class GithubServiceTest(TestCase):
         self.assertNotIn('slack_channel_id', payload)
         self.assertNotIn('slack_thread_ts', payload)
         self.assertEqual(payload['domain'], self.domain)
+        self.assertTrue(payload['scaffold_if_missing'])
+        self.assertTrue(payload['generate_components'])
+
+    @patch('integrations.services.github.time.sleep', return_value=None)
+    @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
+    @patch('integrations.services.github.http_requests.get')
+    @patch('integrations.services.github.http_requests.post')
+    def test_scan_github_project_treats_awaiting_confirmation_as_terminal(
+        self,
+        mock_post,
+        mock_get,
+        _mock_get_latest_sha,
+        _mock_sleep,
+    ):
+        queue_response = MagicMock()
+        queue_response.status_code = 202
+        queue_response.json.return_value = {"job_id": "scan-run-approval-1", "status": "queued"}
+        mock_post.return_value = queue_response
+
+        status_response = MagicMock()
+        status_response.status_code = 200
+        status_response.json.return_value = {
+            "status": "awaiting_confirmation",
+            "requested_action": "scaffold_publish_route",
+            "approve_url": "/api/runs/scan-run-approval-1/approve",
+            "deny_url": "/api/runs/scan-run-approval-1/deny",
+            "requires_user_action": True,
+            "next_action": "approve_scaffold",
+            "resume_hint": "approve_scaffold_then_merge_pr_then_rescan_before_publish",
+            "result": {
+                "generated_components": [{"name": "ArticleHeroHeader"}],
+                "scaffold_status": "approval_required",
+                "requested_action": "scaffold_publish_route",
+            },
+        }
+        mock_get.return_value = status_response
+
+        result = scan_github_project(
+            self.slack_user_id,
+            domain=self.domain,
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+        )
+
+        self.assertEqual(result["scan_run_id"], "scan-run-approval-1")
+        self.assertEqual(result["content_factory_response"]["requested_action"], "scaffold_publish_route")
+        self.assertEqual(result["content_factory_response"]["approve_url"], "/api/runs/scan-run-approval-1/approve")
+        self.assertTrue(result["content_factory_response"]["requires_user_action"])
 
     @patch('integrations.services.github.http_requests.post')
     def test_scaffold_articles_directory_uses_scaffold_endpoint(self, mock_post):
