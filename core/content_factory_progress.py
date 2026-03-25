@@ -14,6 +14,9 @@ SCHEDULED_DAILY_TRIGGER_SOURCE = "scheduled_daily"
 
 MILESTONE_SUMMARIES = {
     "queued": "Preparing the run and loading context.",
+    "repo_analysis": "Inspecting repository structure and dependencies.",
+    "template_generation": "Generating repo-specific templates and component guidance.",
+    "finalizing": "Enriching the scan with website context and finalizing results.",
     "research_started": "Researching candidate topics.",
     "candidate_pool_ready": "Shortlisting the strongest opportunities.",
     "awaiting_confirmation": "Research complete. Waiting for your topic choice.",
@@ -94,6 +97,11 @@ def is_discovery_workflow(job) -> bool:
     return not bool(request_meta.get("topic") or request_meta.get("source_run_id"))
 
 
+def is_scan_workflow(job) -> bool:
+    request_meta = job.request_meta or {}
+    return str(request_meta.get("type") or request_meta.get("workflow") or "").strip() in {"scan", "repo_scan"}
+
+
 def active_watchdog_status(job) -> bool:
     return str(job.status or "").strip() in {"queued", "researching", "confirmed", "generating"}
 
@@ -114,6 +122,15 @@ def live_card_summary_for_job(job) -> str:
 
 
 def _workflow_stages(job) -> list[tuple[str, str]]:
+    if is_scan_workflow(job):
+        return [
+            ("preparing", "Preparing scan"),
+            ("repo_analysis", "Inspecting repo"),
+            ("template_generation", "Generating guidance"),
+            ("finalizing", "Finalizing scan"),
+            ("complete", "Complete"),
+        ]
+
     stages = [
         ("preparing", "Preparing run"),
         ("researching", "Researching"),
@@ -133,6 +150,13 @@ def _workflow_stages(job) -> list[tuple[str, str]]:
 def _current_stage(job) -> str:
     status_value = str(job.status or "").strip()
     milestone_key = str(job.last_progress_milestone_key or "").strip()
+
+    if is_scan_workflow(job):
+        if status_value == "completed":
+            return "complete"
+        if milestone_key in {"repo_analysis", "template_generation", "finalizing"}:
+            return milestone_key
+        return "preparing"
 
     if status_value == "queued":
         return "preparing"

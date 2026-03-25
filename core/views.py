@@ -1803,6 +1803,7 @@ class ContentFactoryCallbackView(APIView):
     
     Event types:
     - topic_selection: Research complete, topic selected, awaiting confirmation
+    - scan_progress: Non-terminal repository scan milestone update
     - discovery_progress: Non-terminal discovery milestone update
     - article_progress: Non-terminal article milestone update
     - article_complete: Article generated and published successfully
@@ -1862,6 +1863,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_discovery_progress(data)
             elif event_type == 'article_progress':
                 return self._handle_article_progress(data)
+            elif event_type == 'scan_progress':
+                return self._handle_scan_progress(data)
             else:
                 logger.warning(f"Unknown event_type: {event_type}")
                 return Response(
@@ -2063,6 +2066,19 @@ class ContentFactoryCallbackView(APIView):
                 'candidate_pool_ready': 'Candidate pool ready',
             },
             response_message='Discovery progress callback processed',
+        )
+
+    def _handle_scan_progress(self, data):
+        return self._handle_progress_callback(
+            data,
+            event_name='scan_progress',
+            status_value='researching',
+            stage_titles={
+                'repo_analysis': 'Inspecting repository',
+                'template_generation': 'Generating guidance',
+                'finalizing': 'Finalizing scan',
+            },
+            response_message='Scan progress callback processed',
         )
 
     def _handle_delivery_mode_required(self, data):

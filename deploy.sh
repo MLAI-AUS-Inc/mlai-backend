@@ -18,6 +18,16 @@ echo "🔧 Configuring server..."
 ssh $USER@$DROPLET_IP << EOF
     set -euo pipefail
 
+    upsert_env_value() {
+        local key="\$1"
+        local value="\$2"
+        if grep -q "^\${key}=" .env; then
+            sed -i "s|^\${key}=.*|\${key}=\${value}|" .env
+        else
+            echo "\${key}=\${value}" >> .env
+        fi
+    }
+
     # Install Docker if not exists
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -38,6 +48,7 @@ ssh $USER@$DROPLET_IP << EOF
     sed -i 's/ALLOWED_HOSTS=.*/ALLOWED_HOSTS=api.mlai.au,209.38.85.60,localhost,127.0.0.1,esafety.localhost/' .env
     sed -i 's|CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://mlai.au,https://www.mlai.au|' .env
     sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://api.mlai.au|' .env
+    upsert_env_value VALLEY_HARNESS_URL http://valley-api:8080
 
     migration_applied() {
         local app_label="\$1"
@@ -69,6 +80,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
             exit 1
         fi
     }
+
+    docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
 
     echo "🐘 Starting database..."
     docker compose up -d db

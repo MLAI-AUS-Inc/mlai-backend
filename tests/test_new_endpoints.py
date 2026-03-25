@@ -1150,6 +1150,55 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_message.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
+    def test_scan_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
+        mock_send_message.return_value = (True, "live-scan-card")
+        ContentFactoryJob.objects.create(
+            job_id="job-scan-progress",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="queued",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"type": "scan", "github_repo": "acme/site"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_progress",
+                "job_id": "job-scan-progress",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-scan-progress:repo_analysis",
+                "milestone_key": "repo_analysis",
+                "milestone_index": 1,
+                "milestone_count": 3,
+                "message": "Scan started. Inspecting repository structure and dependencies.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-scan-progress")
+        self.assertEqual(job.status, "researching")
+        self.assertEqual(job.posted_progress_ids, ["job-scan-progress:repo_analysis"])
+        self.assertEqual(job.last_progress_milestone_index, 1)
+        self.assertEqual(job.last_progress_milestone_key, "repo_analysis")
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertIn(
+            "Scan started. Inspecting repository structure and dependencies.",
+            mock_send_message.call_args[0][1],
+        )
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Content Factory for mlai.au", blocks[0]["text"]["text"])
+        self.assertIn("Preparing scan", blocks[0]["text"]["text"])
+        self.assertIn("Inspecting repo", blocks[0]["text"]["text"])
+        self.assertNotIn("Writing draft", blocks[0]["text"]["text"])
+
+    @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_ignores_stale_milestone(self, mock_send_message):
         ContentFactoryJob.objects.create(
             job_id="job-discovery-stale",
