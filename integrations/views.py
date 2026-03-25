@@ -83,23 +83,6 @@ def _default_google_success_url() -> str:
     fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
     return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
 
-
-def _log_gmail_subject_preview_for_testing(user, *, limit: int = 5) -> None:
-    if not (getattr(settings, "IS_LOCAL_ENV", False) or getattr(settings, "DEBUG", False)):
-        return
-
-    try:
-        subjects = fetch_recent_subject_lines(user)[:limit]
-    except Exception:
-        logger.exception("Failed to fetch Gmail subject preview after Google OAuth for user %s", user.pk)
-        return
-
-    if not subjects:
-        logger.info("Gmail OAuth subject preview for user %s: no recent emails found", user.pk)
-        return
-
-    logger.info("Gmail OAuth subject preview for user %s: %s", user.pk, subjects)
-
 @login_required
 def google_connect(request):
     """
@@ -206,8 +189,6 @@ def google_callback(request):
         user=request.user,
         defaults=defaults,
     )
-
-    _log_gmail_subject_preview_for_testing(request.user)
 
     try:
         maybe_start_startup_update_for_google_connection(

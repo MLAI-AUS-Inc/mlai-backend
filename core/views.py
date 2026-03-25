@@ -2440,13 +2440,23 @@ class ContentFactoryCallbackView(APIView):
             }
 
         if slack_user_id:
+            channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+            publish_button_value = None
+            if job_id and channel_id and thread_ts:
+                publish_button_value = {
+                    "job_id": job_id,
+                    "domain": domain,
+                    "slack_user_id": slack_user_id,
+                    "channel_id": channel_id,
+                    "thread_ts": thread_ts,
+                }
             blocks = build_content_ready_blocks(
                 domain=domain,
                 content_package=content_package,
                 preview_url=preview_url,
+                publish_button_value=publish_button_value,
             )
             fallback_text = f"Article content ready for {domain}"
-            channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
             try:
                 if channel_id and thread_ts:
                     sent, _message_ts = SlackService.send_message(

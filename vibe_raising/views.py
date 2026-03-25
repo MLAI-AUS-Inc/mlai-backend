@@ -1,5 +1,6 @@
 import calendar
 import urllib.parse
+from typing import Optional
 
 from django.conf import settings
 from django.db import transaction
@@ -18,6 +19,7 @@ from integrations.services.startup_updates import (
     get_default_binding_for_domain,
     get_open_startup_update_run,
     resolve_or_create_profile,
+    sync_startup_profile_from_company,
 )
 from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
@@ -80,12 +82,27 @@ def _serialize_run_summary(run):
     if not run:
         return None
 
+    step_states = {}
+    for step in run.steps.order_by("display_order", "id"):
+        step_states[step.step_key] = {
+            "name": step.step_key,
+            "required": step.required,
+            "status": step.status,
+            "attempts": step.attempts,
+            "message": step.message or None,
+            "startedAt": step.started_at.isoformat() if step.started_at else None,
+            "completedAt": step.completed_at.isoformat() if step.completed_at else None,
+            "error": step.error or None,
+            "artifacts": step.artifacts or [],
+        }
+
     return {
         "runId": run.run_id,
         "workflow": run.workflow,
         "domain": run.domain,
         "status": run.status,
         "currentStep": run.current_step,
+        "stepStates": step_states,
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
     }
@@ -101,10 +118,7 @@ def _frontend_base_url():
 
 
 def _build_google_oauth_url(request):
-    next_url = (
-        f"{_frontend_base_url()}/vibe-raising/create-update"
-        "?gmail_connected=1&draft_from_email=1"
-    )
+    next_url = f"{_frontend_base_url()}/vibe-raising/create-update?email_draft=1"
     connect_url = request.build_absolute_uri(reverse("google_connect"))
     return f"{connect_url}?{urllib.parse.urlencode({'next': next_url})}"
 
@@ -180,7 +194,7 @@ def _extract_metrics(structured_memo):
         if not isinstance(item, dict):
             continue
 
-        metric_key = _metric_key_from_label(
+        metric_key = str(item.get("metric_key") or "").strip() or _metric_key_from_label(
             item.get("label") or item.get("name") or item.get("metric_name")
         )
         if not metric_key:
@@ -235,47 +249,40 @@ def _serialize_draft_bundle(drafts):
     }
 
 
+def _serialize_email_draft_month(draft):
+    structured_memo = draft.structured_memo or {}
+    month_value = draft.month
+    return {
+        "draftId": draft.id,
+        "isoMonth": month_value.isoformat(),
+        "month": calendar.month_name[month_value.month],
+        "year": month_value.year,
+        "metrics": _extract_metrics(structured_memo),
+        "highlights": _join_text_items(structured_memo.get("highlights")),
+        "challenges": _join_text_items(structured_memo.get("lowlights")),
+        "asks": _join_text_items(structured_memo.get("asks")),
+    }
+
+
+def _serialize_email_draft_bundle(drafts):
+    if not drafts:
+        return None
+
+    current = _serialize_email_draft_month(drafts[0])
+    past_months = [_serialize_email_draft_month(draft) for draft in reversed(drafts[1:])]
+    return {
+        "currentMonth": current,
+        "pastMonths": past_months,
+    }
+
+
 def _sync_startup_profile(*, startup_profile, organization, company, user):
-    org_name = str(company.name or "").strip()
-    if org_name and organization.name != org_name:
-        organization.name = org_name
-        organization.save(update_fields=["name"])
-
-    update_fields = []
-
-    def merge_strings(existing, *values):
-        merged = []
-        seen = set()
-        for raw in [*(existing or []), *values]:
-            value = str(raw or "").strip()
-            if not value:
-                continue
-            key = value.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(value)
-        return merged
-
-    company_aliases = merge_strings(startup_profile.company_aliases, company.name)
-    if company_aliases != list(startup_profile.company_aliases or []):
-        startup_profile.company_aliases = company_aliases
-        update_fields.append("company_aliases")
-
-    domain_aliases = merge_strings(startup_profile.domain_aliases, organization.domain)
-    if domain_aliases != list(startup_profile.domain_aliases or []):
-        startup_profile.domain_aliases = domain_aliases
-        update_fields.append("domain_aliases")
-
-    founder_name = str(getattr(user, "full_name", "") or "").strip()
-    founder_names = merge_strings(startup_profile.founder_names, founder_name)
-    if founder_names != list(startup_profile.founder_names or []):
-        startup_profile.founder_names = founder_names
-        update_fields.append("founder_names")
-
-    if update_fields:
-        update_fields.append("updated_at")
-        startup_profile.save(update_fields=update_fields)
+    sync_startup_profile_from_company(
+        startup_profile=startup_profile,
+        organization=organization,
+        company=company,
+        user=user,
+    )
 
 
 def _get_founder_company_context_or_response(user):
@@ -376,6 +383,92 @@ def _build_status_payload(*, user, company, domain):
         "company": company_payload,
         "run": _serialize_run_summary(open_run or latest_run),
         "draft": draft_payload,
+        "error": error,
+    }
+
+
+def _build_email_draft_payload(*, request, user, company, domain, run_id: Optional[str] = None):
+    google_connected = bool(getattr(user, "google_connection", None))
+    company_payload = _serialize_company_summary(company)
+    auth_url = _build_google_oauth_url(request)
+
+    if not domain:
+        return {
+            "state": "needs_domain",
+            "gmailConnected": google_connected,
+            "company": company_payload,
+            "authUrl": auth_url,
+            "run": None,
+            "draft": None,
+            "runId": None,
+            "status": None,
+            "currentStep": None,
+            "stepStates": {},
+            "currentMonth": None,
+            "pastMonths": [],
+            "error": "Add a company domain before connecting Gmail.",
+        }
+
+    binding = get_default_binding_for_domain(user=user, domain=domain)
+    organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+    latest_run = None
+    selected_run = None
+    drafts = []
+    if organization is not None:
+        run_queryset = ContentFactoryRun.objects.filter(
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            domain=organization.domain,
+        ).order_by("-updated_at")
+        selected_run = run_queryset.filter(run_id=run_id).first() if run_id else None
+        latest_run = selected_run or get_open_startup_update_run(organization=organization) or run_queryset.first()
+        drafts = list(organization.monthly_update_drafts.order_by("-month", "-updated_at")[:3])
+
+    draft_payload = _serialize_draft_bundle(drafts)
+    email_draft_payload = _serialize_email_draft_bundle(drafts)
+
+    error = None
+    if not google_connected:
+        state = "auth_required"
+    elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
+        state = "queued"
+    elif latest_run is not None and latest_run.status in {
+        ContentFactoryRunStatus.RUNNING,
+        ContentFactoryRunStatus.BLOCKED,
+        ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+        ContentFactoryRunStatus.AWAITING_APPROVAL,
+        ContentFactoryRunStatus.AWAITING_DELIVERY_MODE,
+        ContentFactoryRunStatus.APPROVAL_REQUIRED,
+    }:
+        state = "running"
+    elif email_draft_payload:
+        state = "completed"
+    elif latest_run and latest_run.status in {
+        ContentFactoryRunStatus.FAILED,
+        ContentFactoryRunStatus.DENIED,
+    }:
+        state = "failed"
+        error = "Gmail processing failed. Please try again."
+    elif latest_run and latest_run.status == ContentFactoryRunStatus.COMPLETED:
+        state = "failed"
+        error = "Draft generation completed without producing a draft."
+    else:
+        state = "failed"
+        error = "Draft generation has not started yet."
+
+    run_payload = _serialize_run_summary(latest_run)
+    return {
+        "state": state,
+        "gmailConnected": google_connected,
+        "company": company_payload,
+        "authUrl": auth_url,
+        "run": run_payload,
+        "draft": draft_payload,
+        "runId": run_payload["runId"] if run_payload else None,
+        "status": run_payload["status"] if run_payload else None,
+        "currentStep": run_payload["currentStep"] if run_payload else None,
+        "stepStates": (run_payload or {}).get("stepStates", {}),
+        "currentMonth": (email_draft_payload or {}).get("currentMonth"),
+        "pastMonths": (email_draft_payload or {}).get("pastMonths", []),
         "error": error,
     }
 
@@ -590,6 +683,127 @@ class VibeRaisingStartupUpdateStatusView(APIView):
 
         return Response(
             _build_status_payload(
+                user=request.user,
+                company=context["company"],
+                domain=context["domain"],
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingEmailDraftStartView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        company = context["company"]
+        domain = context["domain"]
+        if not domain:
+            return Response(
+                _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                ),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        organization, _startup_profile, binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+        google_connection = getattr(request.user, "google_connection", None)
+        if google_connection is None:
+            return Response(
+                _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                ),
+                status=status.HTTP_200_OK,
+            )
+
+        if binding.google_connection_id != google_connection.id:
+            binding.google_connection = google_connection
+            binding.save(update_fields=["google_connection", "updated_at"])
+
+        raw_force_regenerate = request.data.get("force_regenerate") or request.data.get("forceRegenerate")
+        force_regenerate = str(raw_force_regenerate or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        existing_run = get_open_startup_update_run(organization=organization)
+        reusable_drafts_exist = organization.monthly_update_drafts.exists()
+
+        created = False
+        if existing_run is None and reusable_drafts_exist and not force_regenerate:
+            payload = _build_email_draft_payload(
+                request=request,
+                user=request.user,
+                company=company,
+                domain=domain,
+            )
+            return Response(payload, status=status.HTTP_200_OK)
+
+        run = existing_run
+        if run is None:
+            run = create_startup_update_run(
+                organization=organization,
+                binding=binding,
+                window_months=DEFAULT_BACKFILL_MONTHS,
+            )
+            created = True
+            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+
+        payload = _build_email_draft_payload(
+            request=request,
+            user=request.user,
+            company=company,
+            domain=domain,
+            run_id=run.run_id,
+        )
+        return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class VibeRaisingEmailDraftStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        run_id = str(request.query_params.get("run_id") or "").strip() or None
+        return Response(
+            _build_email_draft_payload(
+                request=request,
+                user=request.user,
+                company=context["company"],
+                domain=context["domain"],
+                run_id=run_id,
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingEmailDraftLatestView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        return Response(
+            _build_email_draft_payload(
+                request=request,
                 user=request.user,
                 company=context["company"],
                 domain=context["domain"],
