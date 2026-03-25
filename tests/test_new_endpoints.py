@@ -21,6 +21,7 @@ from core.models import (
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
+    WrittenArticle,
 )
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
@@ -1703,6 +1704,65 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("inline-1.jpg", combined_text)
         self.assertIn("Quick Summary", combined_text)
 
+    @patch('integrations.services.slack.SlackService.update_message')
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_content_ready_callback_prefers_callback_content_package_when_run_result_is_not_yet_mirrored(
+        self,
+        mock_send_message,
+        mock_update_message,
+    ):
+        mock_send_message.return_value = (True, "live-content-card")
+        mock_update_message.return_value = True
+        ContentFactoryRun.objects.create(
+            run_id="job-content-callback-package",
+            workflow="direct_generate",
+            domain="mlai.au",
+            status="completed",
+            current_step="finalize",
+            artifact_root="/tmp/content-factory-runs/job-content-callback-package",
+            result={"status": "success"},
+            run_request={"domain": "mlai.au"},
+            acceptance_summary={"content_packaged": True},
+            verification_summary={"all_required_passed": True},
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-content-callback-package",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            progress_message_ts="progress-ts",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "content_ready",
+                "job_id": "job-content-callback-package",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "title": "How to Find a Technical Cofounder",
+                "content_package": self._sample_content_package(long_section=True),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(mock_update_message.called)
+        self.assertGreaterEqual(mock_send_message.call_count, 5)
+        first_blocks = mock_send_message.call_args_list[0][1]["blocks"]
+        publish_block = next(block for block in first_blocks if block.get("block_id") == "content_ready_publish_actions")
+        publish_button = publish_block["elements"][0]
+        self.assertEqual(publish_button["action_id"], "publish_content_pr")
+        combined_text = "\n".join(
+            json.dumps(call[1].get("blocks") or [])
+            for call in mock_send_message.call_args_list
+        )
+        self.assertIn("inline-1.jpg", combined_text)
+        self.assertIn("Quick Summary", combined_text)
+
     def test_resolve_thread_returns_ready_source_job(self):
         ContentFactoryJob.objects.create(
             job_id="job-content-ready",
@@ -1804,6 +1864,40 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("No promotable content-ready article", response.data["error"])
+
+    def test_seo_written_article_create_updates_existing_slug_instead_of_raising(self):
+        org = Organization.objects.create(name="MLAI", domain="mlai.au")
+        article = WrittenArticle.objects.create(
+            organization=org,
+            title="Original title",
+            slug="how-to-find-a-technical-cofounder",
+            category="featured",
+            primary_keyword="technical cofounder",
+        )
+
+        response = self.client.post(
+            reverse('seo_article_create'),
+            {
+                "domain": "mlai.au",
+                "title": "Updated title",
+                "slug": "how-to-find-a-technical-cofounder",
+                "category": "news",
+                "primary_keyword": "technical cofounder checklist",
+                "article_url": "https://mlai.au/articles/how-to-find-a-technical-cofounder",
+                "pr_url": "https://github.com/example/repo/pull/12",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "updated")
+        self.assertEqual(WrittenArticle.objects.filter(organization=org, slug=article.slug).count(), 1)
+        article.refresh_from_db()
+        self.assertEqual(article.title, "Updated title")
+        self.assertEqual(article.category, "news")
+        self.assertEqual(article.primary_keyword, "technical cofounder checklist")
+        self.assertEqual(article.article_url, "https://mlai.au/articles/how-to-find-a-technical-cofounder")
+        self.assertEqual(article.pr_url, "https://github.com/example/repo/pull/12")
 
     def test_content_preview_route_renders_signed_article_html(self):
         self._create_content_factory_run("run-preview-1")

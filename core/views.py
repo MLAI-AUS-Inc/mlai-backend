@@ -2415,9 +2415,15 @@ class ContentFactoryCallbackView(APIView):
             summary_text="Article content is ready.",
         )
 
-        run, content_package = _load_content_package_for_callback(job_id)
+        callback_content_package = data.get("content_package")
+        run = None
+        content_package = callback_content_package if isinstance(callback_content_package, dict) else None
+        if not content_package:
+            run, content_package = _load_content_package_for_callback(job_id)
         preview_url = ""
-        if content_package:
+        if content_package and not run:
+            run = ContentFactoryRun.objects.filter(run_id=job_id).first()
+        if content_package and run:
             try:
                 preview_url = build_content_factory_preview_url(
                     request=self.request,
@@ -2465,7 +2471,7 @@ class ContentFactoryCallbackView(APIView):
                         blocks=blocks,
                         thread_ts=thread_ts,
                     )
-                    if sent and _content_package_from_run(run):
+                    if sent and content_package:
                         for message in build_content_thread_messages(content_package):
                             SlackService.send_message(
                                 channel_id,
@@ -4392,17 +4398,19 @@ class SEOWrittenArticleCreateView(APIView):
             except ContentFactoryJob.DoesNotExist:
                 pass
 
-        # Create written article
-        article = WrittenArticle.objects.create(
+        defaults = {
+            'title': serializer.validated_data['title'],
+            'category': serializer.validated_data['category'],
+            'primary_keyword': primary_keyword,
+            'article_url': serializer.validated_data.get('article_url'),
+            'pr_url': serializer.validated_data.get('pr_url'),
+            'job': job,
+            'published_at': timezone.now(),
+        }
+        article, created = WrittenArticle.objects.update_or_create(
             organization=org,
-            title=serializer.validated_data['title'],
             slug=serializer.validated_data['slug'],
-            category=serializer.validated_data['category'],
-            primary_keyword=primary_keyword,
-            article_url=serializer.validated_data.get('article_url'),
-            pr_url=serializer.validated_data.get('pr_url'),
-            job=job,
-            published_at=timezone.now(),
+            defaults=defaults,
         )
 
         # Update keyword status to written if it exists
@@ -4422,8 +4430,8 @@ class SEOWrittenArticleCreateView(APIView):
         return Response({
             'id': str(article.id),
             'slug': article.slug,
-            'status': 'created'
-        }, status=status.HTTP_201_CREATED)
+            'status': 'created' if created else 'updated'
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class SEODashboardView(APIView):
