@@ -253,6 +253,94 @@ def render_content_preview_error_page(*, title: str, message: str) -> str:
 </html>"""
 
 
+def build_draft_pr_created_blocks(
+    *,
+    domain: str,
+    pr_url: str,
+    pr_number: Optional[int] = None,
+    route_path: str = "",
+    preview_url: str = "",
+) -> List[Dict[str, Any]]:
+    pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
+    section_text = f"📝 *Draft PR created* for {domain}\n\n*{pr_label}* is ready for review."
+    if route_path:
+        section_text += f"\nRoute: `{route_path}`"
+
+    actions = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open PR"},
+            "style": "primary",
+            "url": pr_url,
+        }
+    ]
+    if preview_url:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open Preview"},
+                "url": preview_url,
+            }
+        )
+
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": section_text,
+            },
+        },
+        {
+            "type": "actions",
+            "elements": actions,
+        },
+    ]
+
+
+def build_preview_ready_blocks(
+    *,
+    domain: str,
+    pr_url: str,
+    preview_url: str,
+    pr_number: Optional[int] = None,
+    route_path: str = "",
+) -> List[Dict[str, Any]]:
+    pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
+    section_text = (
+        f"✅ *Preview ready* for {domain}\n\n"
+        f"*{pr_label}* now has a live preview."
+    )
+    if route_path:
+        section_text += f"\nRoute: `{route_path}`"
+
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": section_text,
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Open Preview"},
+                    "style": "primary",
+                    "url": preview_url,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Open PR"},
+                    "url": pr_url,
+                },
+            ],
+        },
+    ]
+
+
 def build_content_ready_blocks(*, domain: str, content_package: Dict[str, Any], preview_url: str = "") -> List[Dict[str, Any]]:
     title = _string(content_package.get("title")) or "Untitled article"
     summary = _summary_text(content_package) or "The full article is ready below."

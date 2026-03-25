@@ -37,6 +37,8 @@ from .content_factory_progress import (
 from .content_factory_delivery import (
     build_content_factory_preview_url,
     build_content_ready_blocks,
+    build_draft_pr_created_blocks,
+    build_preview_ready_blocks,
     build_content_thread_messages,
     render_content_preview_error_page,
     render_content_preview_page,
@@ -1859,6 +1861,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_scaffold_complete(data)
             elif event_type == 'delivery_mode_required':
                 return self._handle_delivery_mode_required(data)
+            elif event_type == 'draft_pr_created':
+                return self._handle_draft_pr_created(data)
             elif event_type == 'preview_ready':
                 return self._handle_preview_ready(data)
             elif event_type == 'content_ready':
@@ -1926,6 +1930,59 @@ class ContentFactoryCallbackView(APIView):
             SlackService.send_dm(slack_user_id, text, blocks=blocks)
             return True
         return False
+
+    def _callback_dedupe_key(self, data, *, event_name):
+        raw_key = str(data.get('dedupe_key') or '').strip()
+        if raw_key:
+            return raw_key
+        pr_token = str(data.get('pr_number') or data.get('pr_url') or data.get('job_id') or 'unknown').strip()
+        preview_token = str(data.get('preview_url') or '').strip() or 'no-preview'
+        return f"{event_name}:{pr_token}:{preview_token}"
+
+    def _callback_marker_present(self, *, job, bucket, event_name, dedupe_key):
+        request_meta = dict(job.request_meta or {})
+        bucket_payload = request_meta.get(bucket) or {}
+        marker_list = bucket_payload.get(event_name) or []
+        return dedupe_key in marker_list
+
+    def _record_callback_marker(self, *, job, bucket, event_name, dedupe_key, extra_request_meta=None):
+        request_meta = dict(job.request_meta or {})
+        bucket_payload = dict(request_meta.get(bucket) or {})
+        marker_list = [str(item) for item in (bucket_payload.get(event_name) or []) if str(item).strip()]
+        if dedupe_key not in marker_list:
+            marker_list.append(dedupe_key)
+        bucket_payload[event_name] = marker_list[-25:]
+        request_meta[bucket] = bucket_payload
+        if extra_request_meta:
+            request_meta.update(extra_request_meta)
+        job.request_meta = request_meta
+        job.save(update_fields=['request_meta', 'updated_at'])
+
+    def _store_publish_callback_state(self, *, job, data, publish_stage, status_value):
+        request_meta = dict(job.request_meta or {})
+        request_meta['publish_stage'] = publish_stage
+        if data.get('route_path'):
+            request_meta['route_path'] = data.get('route_path')
+        if data.get('resolved_delivery_mode'):
+            request_meta['resolved_delivery_mode'] = data.get('resolved_delivery_mode')
+        if data.get('publish_resolution'):
+            request_meta['publish_resolution'] = data.get('publish_resolution')
+
+        update_fields = ['updated_at']
+        if job.status != status_value:
+            job.status = status_value
+            update_fields.append('status')
+        if data.get('pr_url') and job.pr_url != data.get('pr_url'):
+            job.pr_url = data.get('pr_url')
+            update_fields.append('pr_url')
+        if job.error_message:
+            job.error_message = ''
+            update_fields.append('error_message')
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            update_fields.append('request_meta')
+        if len(update_fields) > 1:
+            job.save(update_fields=update_fields)
 
     def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
         job_id = data.get('job_id')
@@ -2115,12 +2172,96 @@ class ContentFactoryCallbackView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    def _handle_draft_pr_created(self, data):
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        pr_url = str(data.get('pr_url') or '').strip()
+        pr_number = data.get('pr_number')
+        route_path = str(data.get('route_path') or '').strip()
+        preview_url = str(data.get('preview_url') or '').strip()
+        dedupe_key = self._callback_dedupe_key(data, event_name='draft_pr_created')
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='generating',
+        )
+        self._store_publish_callback_state(
+            job=job,
+            data=data,
+            publish_stage='awaiting_preview',
+            status_value='generating',
+        )
+
+        if self._callback_marker_present(
+            job=job,
+            bucket='callback_notifications',
+            event_name='draft_pr_created',
+            dedupe_key=dedupe_key,
+        ):
+            logger.info("Ignoring duplicate draft_pr_created callback for %s (%s)", job_id, dedupe_key)
+            return Response(
+                {
+                    'status': 'ignored',
+                    'reason': 'duplicate_notification',
+                    'job_id': job_id,
+                    'dedupe_key': dedupe_key,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        slack_sent = False
+        if pr_url:
+            blocks = build_draft_pr_created_blocks(
+                domain=domain,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                route_path=route_path,
+                preview_url=preview_url,
+            )
+            try:
+                slack_sent = self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=f"Draft PR ready for {domain}: {pr_url}",
+                    blocks=blocks,
+                    allow_dm_fallback=True,
+                )
+            except Exception as exc:
+                logger.warning("Failed to send draft_pr_created notification for %s: %s", job_id, exc)
+
+        if slack_sent:
+            self._record_callback_marker(
+                job=job,
+                bucket='callback_notifications',
+                event_name='draft_pr_created',
+                dedupe_key=dedupe_key,
+            )
+
+        return Response(
+            {
+                'status': 'processed',
+                'job_id': job_id,
+                'pr_url': pr_url or None,
+                'slack_sent': slack_sent,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def _handle_preview_ready(self, data):
         from integrations.services.article_generation import ArticleGenerationError, publish_article
 
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
+        pr_url = str(data.get('pr_url') or '').strip()
+        preview_url = str(data.get('preview_url') or '').strip()
+        pr_number = data.get('pr_number')
+        route_path = str(data.get('route_path') or '').strip()
+        dedupe_key = self._callback_dedupe_key(data, event_name='preview_ready')
 
         job = self._update_content_factory_job(
             job_id=job_id,
@@ -2128,18 +2269,87 @@ class ContentFactoryCallbackView(APIView):
             slack_user_id=slack_user_id,
             status_value='awaiting_approval',
         )
+        self._store_publish_callback_state(
+            job=job,
+            data=data,
+            publish_stage='preview_ready',
+            status_value='awaiting_approval',
+        )
+
+        notification_sent = False
+        if not self._callback_marker_present(
+            job=job,
+            bucket='callback_notifications',
+            event_name='preview_ready',
+            dedupe_key=dedupe_key,
+        ) and pr_url and preview_url:
+            blocks = build_preview_ready_blocks(
+                domain=domain,
+                pr_url=pr_url,
+                preview_url=preview_url,
+                pr_number=pr_number,
+                route_path=route_path,
+            )
+            try:
+                notification_sent = self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=f"Preview ready for {domain}: {preview_url}",
+                    blocks=blocks,
+                    allow_dm_fallback=True,
+                )
+            except Exception as exc:
+                logger.warning("Failed to send preview_ready notification for %s: %s", job_id, exc)
+            if notification_sent:
+                self._record_callback_marker(
+                    job=job,
+                    bucket='callback_notifications',
+                    event_name='preview_ready',
+                    dedupe_key=dedupe_key,
+                )
+
+        if self._callback_marker_present(
+            job=job,
+            bucket='callback_actions',
+            event_name='preview_ready_auto_approve',
+            dedupe_key=dedupe_key,
+        ):
+            logger.info("Ignoring duplicate preview_ready auto-approve for %s (%s)", job_id, dedupe_key)
+            return Response(
+                {
+                    'status': 'processed',
+                    'job_id': job_id,
+                    'auto_approved': True,
+                    'deduped_auto_approve': True,
+                    'slack_sent': notification_sent,
+                },
+                status=status.HTTP_200_OK,
+            )
 
         try:
             result = publish_article(job_id, slack_user_id=slack_user_id, domain=domain)
             job.status = 'generating'
             job.error_message = ''
-            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            update_fields = ['status', 'error_message', 'updated_at']
+            if pr_url and job.pr_url != pr_url:
+                job.pr_url = pr_url
+                update_fields.append('pr_url')
+            job.save(update_fields=update_fields)
+            self._record_callback_marker(
+                job=job,
+                bucket='callback_actions',
+                event_name='preview_ready_auto_approve',
+                dedupe_key=dedupe_key,
+                extra_request_meta={'publish_stage': 'auto_approved'},
+            )
             logger.info("Auto-approved preview for job %s", job_id)
             return Response(
                 {
                     'status': 'processed',
                     'job_id': job_id,
                     'auto_approved': True,
+                    'slack_sent': notification_sent,
                     'cf_response': result,
                 },
                 status=status.HTTP_200_OK,
