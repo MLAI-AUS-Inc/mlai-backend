@@ -258,7 +258,9 @@ def scan_github_project(
     progress_callback=None,
     slack_channel_id: str = None,
     slack_thread_ts: str = None,
-    domain: str = None
+    domain: str = None,
+    scaffold_if_missing: bool = True,
+    generate_components: bool = True,
 ) -> dict:
     """
     Trigger a repository scan via Content Factory.
@@ -377,12 +379,15 @@ def scan_github_project(
         raise ScanError("Domain is required for repository scan. Please provide the company's website domain when queueing the scan.")
 
     cf_data = None
+    scan_run_id = None
     try:
         payload = {
             "slack_user_id": slack_user_id,
             "github_repo": github_repo,
             "domain": resolved_domain,
             "existing_artifacts": existing_artifacts,
+            "scaffold_if_missing": scaffold_if_missing,
+            "generate_components": generate_components,
         }
 
         cf_response = http_requests.post(
@@ -426,6 +431,7 @@ def scan_github_project(
             job_id = data.get('job_id')
             if not job_id:
                 raise ScanError("Async response received but no job_id provided.")
+            scan_run_id = job_id
 
             # Create a ContentFactoryJob so callback handlers can look up thread context
             try:
@@ -436,7 +442,12 @@ def scan_github_project(
                     status='queued',
                     slack_channel_id=slack_channel_id or '',
                     slack_thread_ts=slack_thread_ts or '',
-                    request_meta={'type': 'scan', 'github_repo': github_repo},
+                    request_meta={
+                        'type': 'scan',
+                        'github_repo': github_repo,
+                        'scaffold_if_missing': scaffold_if_missing,
+                        'generate_components': generate_components,
+                    },
                 )
                 logger.info(f"Scan job created: {job_id} for {resolved_domain} (channel={slack_channel_id}, thread={slack_thread_ts})")
             except Exception as e:
@@ -463,8 +474,31 @@ def scan_github_project(
                             if progress_callback:
                                 progress_callback(f"⏳ {progress_msg}")
                         
-                        if state == 'completed':
-                            cf_data = status_data.get('result')
+                        if state in {'completed', 'awaiting_confirmation'}:
+                            result_payload = status_data.get('result')
+                            if isinstance(result_payload, dict):
+                                cf_data = dict(result_payload)
+                            else:
+                                cf_data = {}
+                            for field in (
+                                'status',
+                                'requested_action',
+                                'approve_url',
+                                'deny_url',
+                                'next_action',
+                                'requires_user_action',
+                                'resume_hint',
+                                'message',
+                                'scaffold_status',
+                                'scaffold_required',
+                                'scaffold_plan',
+                                'scaffold_queued',
+                                'scaffold_job_id',
+                            ):
+                                if status_data.get(field) is not None:
+                                    cf_data[field] = status_data.get(field)
+                            if scan_run_id:
+                                cf_data.setdefault('scan_run_id', scan_run_id)
                             break # Done!
                         elif state == 'failed':
                             error_detail = status_data.get('error', 'Unknown error')
@@ -653,6 +687,7 @@ def scan_github_project(
         "github_repo": github_repo,
         "domain": org_domain,
         "scanned_sha": current_sha,
+        "scan_run_id": scan_run_id,
         "content_factory_response": cf_data,
     }
 
@@ -914,17 +949,27 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                 progress_callback=_progress_listener,
                 domain=domain,
                 slack_channel_id=slack_channel_id,
-                slack_thread_ts=thread_ts
+                slack_thread_ts=thread_ts,
+                scaffold_if_missing=True,
+                generate_components=True,
             )
             
             import json as _json
 
             scan_domain = result.get('domain', domain)
+            scan_run_id = str(result.get('scan_run_id') or '').strip()
             logger.info(f"Background scan completed: {result}")
 
             # Build success message with component info + scaffold confirmation buttons
             cf_response = result.get('content_factory_response', {}) or {}
             generated_components = cf_response.get('generated_components', [])
+            requested_action = str(cf_response.get('requested_action') or '').strip()
+            scaffold_status = str(cf_response.get('scaffold_status') or '').strip()
+            approval_required = (
+                requested_action == 'scaffold_publish_route'
+                and scaffold_status == 'approval_required'
+                and bool(scan_run_id)
+            )
 
             # Check if scaffolding is available
             has_pillars = False
@@ -960,7 +1005,7 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                             pillar_display += f", +{len(p_names) - 6} more"
                         pillar_line = f"\n\n*{len(p_names)} content pillars:* {pillar_display}"
 
-                if has_pillars and not already_scaffolded:
+                if approval_required and not already_scaffolded:
                     text_body = (
                         f"✅ *Scan complete for {scan_domain}!*\n\n"
                         f"I've analysed your codebase and generated "
@@ -990,18 +1035,34 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                                         "slack_user_id": slack_user_id,
                                         "channel_id": slack_channel_id or "",
                                         "thread_ts": thread_ts or "",
+                                        "scan_run_id": scan_run_id,
                                     })
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Skip for now"},
                                     "action_id": "scaffold_skip",
-                                    "value": _json.dumps({"domain": scan_domain})
+                                    "value": _json.dumps({
+                                        "domain": scan_domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": slack_channel_id or "",
+                                        "thread_ts": thread_ts or "",
+                                        "scan_run_id": scan_run_id,
+                                    })
                                 }
                             ]
                         }
                     ]
                     fallback_text = f"✅ Scan complete for {scan_domain}! Generated {len(generated_components)} components."
+                elif has_pillars and not already_scaffolded:
+                    fallback_text = (
+                        f"✅ *Scan complete for {scan_domain}!*\n\n"
+                        f"I've analysed your codebase and generated "
+                        f"*{len(generated_components)} article components* "
+                        f"matched to your website's design:\n{comp_list}{pillar_line}\n\n"
+                        f"This scan did not include scaffold approval metadata. Please run a fresh scan before creating the articles directory."
+                    )
+                    blocks = None
                 else:
                     fallback_text = (
                         f"✅ *Scan complete for {scan_domain}!*\n\n"
@@ -1014,14 +1075,59 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                     )
                     blocks = None
             else:
-                fallback_text = (
-                    f"✅ *Scan complete for {scan_domain}!*\n\n"
-                    f"I've analysed your codebase and I'm ready to help. "
-                    f"You can now ask me to create blog pages or other content.\n\n"
-                    f"To get started, say:\n"
-                    f"  `@Roo write me an article about [topic]`"
-                )
-                blocks = None
+                if approval_required and not already_scaffolded:
+                    text_body = (
+                        f"✅ *Scan complete for {scan_domain}!*\n\n"
+                        f"I've analysed your repository and the next step is to create an articles directory in your repo.\n\n"
+                        f"This will set up the safe publish route as a PR for your review."
+                    )
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": text_body}
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"scaffold_confirm_{scan_domain}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Create Articles Directory"},
+                                    "style": "primary",
+                                    "action_id": "scaffold_confirm",
+                                    "value": _json.dumps({
+                                        "domain": scan_domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": slack_channel_id or "",
+                                        "thread_ts": thread_ts or "",
+                                        "scan_run_id": scan_run_id,
+                                    })
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Skip for now"},
+                                    "action_id": "scaffold_skip",
+                                    "value": _json.dumps({
+                                        "domain": scan_domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": slack_channel_id or "",
+                                        "thread_ts": thread_ts or "",
+                                        "scan_run_id": scan_run_id,
+                                    })
+                                }
+                            ]
+                        }
+                    ]
+                    fallback_text = f"✅ Scan complete for {scan_domain}!"
+                else:
+                    fallback_text = (
+                        f"✅ *Scan complete for {scan_domain}!*\n\n"
+                        f"I've analysed your codebase and I'm ready to help. "
+                        f"You can now ask me to create blog pages or other content.\n\n"
+                        f"To get started, say:\n"
+                        f"  `@Roo write me an article about [topic]`"
+                    )
+                    blocks = None
 
             if slack_channel_id:
                 SlackService.send_message(slack_channel_id, fallback_text, blocks=blocks, thread_ts=thread_ts)
