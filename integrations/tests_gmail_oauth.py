@@ -28,6 +28,7 @@ def _json_response(payload):
     DEFAULT_FRONTEND_URL="http://localhost:5173",
     MEDHACK_URL="http://localhost:3000",
     ESAFETY_URL="http://localhost:3001",
+    VIBE_RAISING_URL="http://localhost:5173",
 )
 class GoogleOAuthViewTests(TestCase):
     def setUp(self):
@@ -66,6 +67,20 @@ class GoogleOAuthViewTests(TestCase):
             "http://localhost:5173/settings?from=gmail",
         )
         self.assertEqual(params["state"], [session["google_oauth_state"]])
+
+    def test_google_connect_accepts_vibe_raising_next_url(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("google_connect"),
+            {"next": "http://localhost:5173/vibe-raising/create-update?gmail_connected=1&draft_from_email=1"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.client.session.get("google_oauth_next"),
+            "http://localhost:5173/vibe-raising/create-update?gmail_connected=1&draft_from_email=1",
+        )
 
     def test_google_connect_ignores_invalid_next(self):
         self.client.force_login(self.user)
@@ -136,6 +151,37 @@ class GoogleOAuthViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "http://localhost:3000/settings?gmail_connected=true")
+
+    @override_settings(
+        GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/google",
+        DEFAULT_FRONTEND_URL="",
+        MEDHACK_URL="",
+        ESAFETY_URL="",
+        VIBE_RAISING_URL="http://localhost:5173",
+    )
+    def test_google_callback_uses_vibe_raising_frontend_when_other_defaults_missing(self):
+        self._login_and_seed_oauth_state()
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "http://localhost:5173/settings?gmail_connected=true")
 
     @override_settings(
         GOOGLE_OAUTH_REDIRECT_URI="https://api.mlai.au/integrations/callback/google",

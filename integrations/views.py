@@ -44,6 +44,7 @@ def _known_frontend_origins() -> Set[str]:
             _origin_from_url(getattr(settings, "MEDHACK_URL", None)),
             _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
             _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
+            _origin_from_url(getattr(settings, "VIBE_RAISING_URL", None)),
         )
         if origin
     }
@@ -74,7 +75,7 @@ def _normalize_google_next(next_url: Optional[str]) -> Optional[str]:
 
 
 def _default_google_success_url() -> str:
-    for setting_name in ("MEDHACK_URL", "DEFAULT_FRONTEND_URL", "ESAFETY_URL"):
+    for setting_name in ("MEDHACK_URL", "DEFAULT_FRONTEND_URL", "ESAFETY_URL", "VIBE_RAISING_URL"):
         origin = _origin_from_url(getattr(settings, setting_name, None))
         if origin:
             return f"{origin}{GOOGLE_OAUTH_SUCCESS_PATH}"
