@@ -1263,6 +1263,75 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("How to Find a Technical Cofounder", blocks[0]["text"]["text"])
         self.assertNotIn("Artifact", blocks[0]["text"]["text"])
 
+    @patch('integrations.services.article_generation.publish_article_as_pr')
+    def test_run_control_promote_bundle_proxies_to_content_factory(self, mock_publish_article_as_pr):
+        mock_publish_article_as_pr.return_value = {
+            "status": "queued",
+            "job_id": "job-publish-child",
+            "source_run_id": "job-content-ready-promote",
+        }
+        self._create_content_factory_run("job-content-ready-promote")
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready-promote",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_run_control', args=["job-content-ready-promote", "promote-bundle"]),
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["job_id"], "job-publish-child")
+        mock_publish_article_as_pr.assert_called_once_with(
+            "job-content-ready-promote",
+            slack_user_id="U123",
+            domain="mlai.au",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
+    @patch('integrations.api_views_content.publish_article_as_pr')
+    def test_publish_pr_endpoint_proxies_to_child_publish_run(self, mock_publish_article_as_pr):
+        mock_publish_article_as_pr.return_value = {
+            "status": "queued",
+            "job_id": "job-publish-child",
+            "source_run_id": "job-content-ready-promote",
+        }
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready-promote",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_job_publish_pr', args=["job-content-ready-promote"]),
+            {"slack_user_id": "U123"},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["job_id"], "job-publish-child")
+        mock_publish_article_as_pr.assert_called_once_with(
+            "job-content-ready-promote",
+            slack_user_id="U123",
+            domain="mlai.au",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
         mock_send_message.return_value = (True, "live-progress-card")

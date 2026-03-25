@@ -9,6 +9,7 @@ urlpatterns = [
     path('jobs/<str:job_id>/progress-message', views.ContentJobProgressMessageView.as_view(), name='content_job_progress_message'),
     path('jobs/<str:job_id>/still-working', views.ContentJobStillWorkingView.as_view(), name='content_job_still_working'),
     path('publish/<str:job_id>', views.ContentPublishView.as_view(), name='content_publish'),
+    path('jobs/<str:job_id>/publish-pr', views.ContentPublishPrView.as_view(), name='content_job_publish_pr'),
     path('confirm', views.ContentConfirmView.as_view(), name='content_confirm'),
     path('jobs/<str:job_id>/confirm', views.ContentJobConfirmView.as_view(), name='content_job_confirm'),
     path('jobs/<str:job_id>/cancel', views.ContentJobCancelView.as_view(), name='content_job_cancel'),

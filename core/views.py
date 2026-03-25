@@ -2315,6 +2315,20 @@ class ContentFactoryCallbackView(APIView):
             event_name='preview_ready_auto_approve',
             dedupe_key=dedupe_key,
         ):
+            update_fields = ['updated_at']
+            if job.status != 'generating':
+                job.status = 'generating'
+                update_fields.append('status')
+            if job.error_message:
+                job.error_message = ''
+                update_fields.append('error_message')
+            request_meta = dict(job.request_meta or {})
+            if request_meta.get('publish_stage') != 'auto_approved':
+                request_meta['publish_stage'] = 'auto_approved'
+                job.request_meta = request_meta
+                update_fields.append('request_meta')
+            if len(update_fields) > 1:
+                job.save(update_fields=update_fields)
             logger.info("Ignoring duplicate preview_ready auto-approve for %s (%s)", job_id, dedupe_key)
             return Response(
                 {
@@ -2382,6 +2396,16 @@ class ContentFactoryCallbackView(APIView):
             status_value='completed',
             error_message='',
         )
+        request_meta = dict(job.request_meta or {})
+        request_meta['publish_stage'] = 'content_ready'
+        request_meta['publish_pr_url'] = reverse('content_job_publish_pr', args=[job_id])
+        if data.get('promote_bundle_url'):
+            request_meta['promote_bundle_url'] = data.get('promote_bundle_url')
+        if data.get('publish_pr_url'):
+            request_meta['source_publish_pr_url'] = data.get('publish_pr_url')
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
 
         logger.info("Content-only article complete for job %s (%s)", job_id, domain)
 
@@ -4773,11 +4797,33 @@ class ContentFactoryRunControlView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request, run_id: str, action: str):
+        from integrations.services.article_generation import ArticleGenerationError, publish_article_as_pr
+        from .models import ContentFactoryJob
+
         serializer = ContentFactoryRunControlSerializer(data=request.data or {})
         serializer.is_valid(raise_exception=True)
         actor = serializer.validated_data.get("actor") or "content-factory"
 
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        job = ContentFactoryJob.objects.filter(job_id=run_id).first()
+
+        if action in {"promote-bundle", "publish-pr"}:
+            if not run and not job:
+                return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            try:
+                result = publish_article_as_pr(
+                    run_id,
+                    slack_user_id=(job.slack_user_id if job else None),
+                    domain=((job.domain if job else None) or (run.domain if run else None)),
+                    slack_channel_id=(job.slack_channel_id if job else ""),
+                    slack_thread_ts=(job.slack_thread_ts if job else ""),
+                    slack_root_message_ts=(job.slack_root_message_ts if job else ""),
+                )
+                return Response(result, status=status.HTTP_200_OK)
+            except ArticleGenerationError as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
+
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
