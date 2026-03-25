@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/v1/hackathons/esafety/', include('esafety.urls')),
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
+    path('api/v1/vibe-raising/', include('vibe_raising.urls')),
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API

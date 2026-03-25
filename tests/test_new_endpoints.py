@@ -1136,13 +1136,72 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.status, "awaiting_delivery_mode")
         self.assertEqual(job.request_meta.get("recommended_delivery_mode"), "content_only")
 
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_draft_pr_created_callback_posts_thread_reply_once(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-draft-pr",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        url = reverse('content_factory_callback')
+        data = {
+            "event_type": "draft_pr_created",
+            "job_id": "job-draft-pr",
+            "domain": "mlai.au",
+            "slack_user_id": "U123",
+            "pr_url": "https://github.com/example/pr/1",
+            "pr_number": 1,
+            "route_path": "/articles/ifs",
+            "dedupe_key": "draft-pr-1",
+        }
+
+        first_response = self.client.post(url, data, format='json')
+        second_response = self.client.post(url, data, format='json')
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data["status"], "ignored")
+
+        job = ContentFactoryJob.objects.get(job_id="job-draft-pr")
+        self.assertEqual(job.status, "generating")
+        self.assertEqual(job.pr_url, "https://github.com/example/pr/1")
+        self.assertEqual(job.request_meta.get("publish_stage"), "awaiting_preview")
+        self.assertEqual(job.request_meta["callback_notifications"]["draft_pr_created"], ["draft-pr-1"])
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Draft PR created", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open PR")
+
+    @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')
-    def test_preview_ready_callback_auto_approves(self, mock_publish_article):
+    def test_preview_ready_callback_posts_preview_reply_and_auto_approves_once(
+        self,
+        mock_publish_article,
+        mock_send_message,
+    ):
         mock_publish_article.return_value = {
             "job_id": "job-preview-ready",
             "status": "queued",
             "approval_state": "approved",
         }
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-preview-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
 
         url = reverse('content_factory_callback')
         data = {
@@ -1152,18 +1211,34 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "slack_user_id": "U123",
             "preview_url": "https://preview.example.com",
             "pr_url": "https://github.com/example/pr/1",
+            "pr_number": 1,
+            "route_path": "/articles/ifs",
+            "dedupe_key": "preview-ready-1",
         }
 
         response = self.client.post(url, data, format='json')
+        duplicate_response = self.client.post(url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(duplicate_response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-preview-ready")
         self.assertEqual(job.status, "generating")
+        self.assertEqual(job.pr_url, "https://github.com/example/pr/1")
+        self.assertEqual(job.request_meta.get("publish_stage"), "auto_approved")
+        self.assertEqual(job.request_meta["callback_notifications"]["preview_ready"], ["preview-ready-1"])
+        self.assertEqual(job.request_meta["callback_actions"]["preview_ready_auto_approve"], ["preview-ready-1"])
         mock_publish_article.assert_called_once_with(
             "job-preview-ready",
             slack_user_id="U123",
             domain="mlai.au",
         )
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Preview ready", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_content_ready_callback_marks_job_completed(self, mock_send_dm):
