@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.urls import reverse
 from rest_framework.test import APIClient
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
@@ -220,12 +221,25 @@ class VibeRaisingApiTests(TestCase):
             "http%3A%2F%2Flocalhost%3A5173%2Fvibe-raising%2Fcreate-update%3Femail_draft%3D1",
             response.data["oauthUrl"],
         )
-
         organization = Organization.objects.get(domain="acme.com")
         self.assertEqual(organization.name, "Acme Inc.")
         binding = UserStartupBinding.objects.get(user=self.user, organization=organization)
         self.assertTrue(binding.is_default_for_gmail)
         self.assertEqual(binding.role, "founder")
+
+    def test_email_draft_routes_are_registered(self):
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-start"),
+            "/api/v1/vibe-raising/email-draft/start/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-status"),
+            "/api/v1/vibe-raising/email-draft/status/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-latest"),
+            "/api/v1/vibe-raising/email-draft/latest/",
+        )
 
     def test_startup_update_bootstrap_returns_needs_domain_for_missing_domain(self):
         self.client.force_authenticate(user=self.user)

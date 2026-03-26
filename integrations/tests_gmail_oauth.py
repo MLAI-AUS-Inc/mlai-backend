@@ -130,7 +130,7 @@ class GoogleOAuthViewTests(TestCase):
         self._login_and_seed_oauth_state()
 
         with patch(
-            "integrations.views.fetch_recent_subject_lines",
+            "integrations.services.gmail.fetch_recent_subject_lines",
         ) as mock_fetch, patch(
             "integrations.views.requests.post",
             return_value=_json_response(
@@ -241,7 +241,7 @@ class GoogleOAuthViewTests(TestCase):
             "https://api.mlai.au/integrations/callback/google",
         )
 
-    def test_google_callback_starts_startup_update_for_default_binding(self):
+    def test_google_callback_updates_default_binding_without_starting_run(self):
         organization = Organization.objects.create(name="Acme", domain="acme.com")
         binding = UserStartupBinding.objects.create(
             user=self.user,
@@ -263,18 +263,18 @@ class GoogleOAuthViewTests(TestCase):
             "integrations.views.requests.get",
             return_value=_json_response({"email": "founder@gmail.com"}),
         ):
-            response = self.client.get(
-                reverse("google_callback"),
-                {"state": "google-state", "code": "oauth-code"},
-            )
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                response = self.client.get(
+                    reverse("google_callback"),
+                    {"state": "google-state", "code": "oauth-code"},
+                )
 
         self.assertEqual(response.status_code, 302)
-        run = ContentFactoryRun.objects.get(workflow="startup_monthly_update", domain="acme.com")
-        self.assertEqual(run.run_request["organization_id"], organization.id)
-        binding.refresh_from_db()
-        self.assertEqual(binding.google_connection_id, self.user.google_connection.id)
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update", domain="acme.com").exists())
+        self.assertTrue(GoogleConnection.objects.filter(user=self.user, google_email="founder@gmail.com").exists())
+        self.assertEqual(callbacks, [])
 
-    def test_google_callback_run_is_reused_by_email_draft_start(self):
+    def test_email_draft_start_creates_run_after_google_callback(self):
         founder_profile = VibeRaisingProfile.objects.create(
             user=self.user,
             role=VibeRaisingProfile.ROLE_FOUNDER,
@@ -297,10 +297,8 @@ class GoogleOAuthViewTests(TestCase):
         self._login_and_seed_oauth_state()
 
         with patch(
-            "integrations.services.startup_updates.notify_valley_run_created",
-        ) as mock_oauth_notify, patch(
             "vibe_raising.views.notify_valley_run_created",
-        ) as mock_email_draft_notify, patch(
+        ) as mock_notify, patch(
             "integrations.views.requests.post",
             return_value=_json_response(
                 {
@@ -313,30 +311,29 @@ class GoogleOAuthViewTests(TestCase):
             "integrations.views.requests.get",
             return_value=_json_response({"email": "founder@gmail.com"}),
         ):
-            with self.captureOnCommitCallbacks(execute=True):
-                callback_response = self.client.get(
-                    reverse("google_callback"),
-                    {"state": "google-state", "code": "oauth-code"},
-                )
-
+            callback_response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+            self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 0)
             api_client = APIClient()
             api_client.force_authenticate(user=self.user)
-            start_response = api_client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {},
-                format="json",
-            )
+            with self.captureOnCommitCallbacks(execute=True):
+                start_response = api_client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {},
+                    format="json",
+                )
 
         self.assertEqual(callback_response.status_code, 302)
-        self.assertEqual(start_response.status_code, 200)
+        self.assertEqual(start_response.status_code, 201)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         run = ContentFactoryRun.objects.get(workflow="startup_monthly_update", domain="acme.com")
         self.assertEqual(start_response.data["runId"], run.run_id)
         self.assertEqual(start_response.data["state"], "queued")
-        mock_oauth_notify.assert_called_once_with(run.run_id)
-        mock_email_draft_notify.assert_not_called()
+        mock_notify.assert_called_once_with(run.run_id)
 
-    def test_google_callback_skips_startup_update_without_binding(self):
+    def test_google_callback_does_not_create_run_without_binding(self):
         self._login_and_seed_oauth_state()
 
         with patch(

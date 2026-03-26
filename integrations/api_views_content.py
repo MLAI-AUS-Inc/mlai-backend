@@ -17,6 +17,7 @@ from integrations.services.article_generation import (
     set_article_delivery_mode,
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
+    GitHubReconnectRequiredError,
     CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
     SCHEDULED_DAILY_TRIGGER_SOURCE,
 )
@@ -82,21 +83,49 @@ def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_reque
 
 
 def _store_pending_article_intent(slack_user_id: str, article_request: dict = None) -> bool:
+    return _store_pending_intent(
+        slack_user_id,
+        {
+            "type": "write_article",
+            "article_request": article_request,
+            "stored_at": timezone.now().isoformat(),
+        } if article_request else None,
+    )
+
+
+def _store_pending_intent(slack_user_id: str, pending_intent: dict = None) -> bool:
     pending_stored = False
-    if slack_user_id and article_request:
+    if slack_user_id and pending_intent:
         try:
             from integrations.models import UserIntegration
             integration, _ = UserIntegration.objects.get_or_create(slack_user_id=slack_user_id)
-            integration.pending_intent = {
-                "type": "write_article",
-                "article_request": article_request,
-                "stored_at": timezone.now().isoformat(),
-            }
+            integration.pending_intent = pending_intent
             integration.save()
             pending_stored = True
         except Exception as e:
             logger.warning(f"Failed to store pending intent for {slack_user_id}: {e}")
     return pending_stored
+
+
+def _handle_auth_required_error(
+    error: GitHubReconnectRequiredError,
+    slack_user_id: str,
+    *,
+    article_request: dict = None,
+    pending_intent: dict = None,
+) -> Response:
+    intent = pending_intent
+    if intent is None and article_request:
+        intent = {
+            "type": "write_article",
+            "article_request": article_request,
+            "stored_at": timezone.now().isoformat(),
+        }
+
+    pending_stored = _store_pending_intent(slack_user_id, intent)
+    payload = dict(error.payload)
+    payload["pending_intent_stored"] = pending_stored
+    return Response(payload, status=status.HTTP_412_PRECONDITION_FAILED)
 
 
 def _resume_pending_article_intent(slack_user_id: str, domain: str) -> Optional[dict]:
@@ -251,6 +280,9 @@ class ContentGenerateView(APIView):
         try:
             result = trigger_article_generation(slack_user_id, article_request)
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except GitHubReconnectRequiredError as e:
+            logger.warning(f"GitHub reconnect required: {e}")
+            return _handle_auth_required_error(e, slack_user_id, article_request=article_request)
         except ArticleSystemActionRequiredError as e:
             logger.warning(f"Article system action required: {e}")
             return _handle_article_system_action_required(e, slack_user_id, article_request)
@@ -262,13 +294,7 @@ class ContentGenerateView(APIView):
             if error_str.startswith("PREREQUISITE_MISSING:"):
                 return _handle_prerequisite_error(error_str, slack_user_id, article_request)
 
-            response_data = {"error": error_str}
-            # Include structured auth fields so the bot can prompt for GitHub connection
-            if "Please connect GitHub:" in error_str:
-                response_data["needs_github_auth"] = True
-                response_data["oauth_url"] = error_str.split("Please connect GitHub: ")[-1]
-                response_data["domain"] = article_request.get("domain")
-            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": error_str}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in generation view: {e}")
             return Response({"error": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -392,6 +418,17 @@ class ContentPublishPrView(APIView):
                 slack_root_message_ts=job.slack_root_message_ts or "",
             )
             return Response(result, status=status.HTTP_200_OK)
+        except GitHubReconnectRequiredError as e:
+            return _handle_auth_required_error(
+                e,
+                slack_user_id or job.slack_user_id,
+                pending_intent={
+                    "type": "publish_article_as_pr",
+                    "job_id": job_id,
+                    "domain": job.domain,
+                    "stored_at": timezone.now().isoformat(),
+                },
+            )
         except ArticleGenerationError as e:
             return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
         except Exception as e:
@@ -498,6 +535,12 @@ class ContentConfirmView(APIView):
 
                 mark_scheduled_dispatch_confirmed(job_id=source_run_id)
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except GitHubReconnectRequiredError as e:
+            return _handle_auth_required_error(
+                e,
+                slack_user_id,
+                article_request={"domain": domain, "topic": confirmed_keyword},
+            )
         except ArticleSystemActionRequiredError as e:
             return _handle_article_system_action_required(e, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
         except ArticleGenerationError as e:
@@ -680,6 +723,12 @@ class ContentJobConfirmView(APIView):
                 "skip_alternatives": skip_alternatives,
                 "cf_response": result
             }, status=status.HTTP_200_OK)
+        except GitHubReconnectRequiredError as e:
+            return _handle_auth_required_error(
+                e,
+                slack_user_id,
+                article_request={"domain": resolved_domain, "topic": confirmed_keyword},
+            )
         except ArticleSystemActionRequiredError as e:
             return _handle_article_system_action_required(e, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
         except ArticleGenerationError as e:

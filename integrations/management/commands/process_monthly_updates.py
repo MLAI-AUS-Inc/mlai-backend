@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 from integrations.models import GoogleConnection
-from integrations.services import fetch_recent_subject_lines
+from integrations.services.gmail import fetch_recent_subject_lines
 
 class Command(BaseCommand):
     help = 'Process monthly updates for users with connected Google accounts'
