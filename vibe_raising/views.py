@@ -1,11 +1,14 @@
 import calendar
+import logging
 import urllib.parse
+from datetime import timedelta
 from typing import Optional
 
 from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -31,6 +34,11 @@ from .serializers import (
     VibeRaisingProfileSerializer,
     VibeRaisingProfileUpsertSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
+
+QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 
 
 def _get_profile_or_404(user):
@@ -121,6 +129,15 @@ def _build_google_oauth_url(request):
     next_url = f"{_frontend_base_url()}/vibe-raising/create-update?email_draft=1"
     connect_url = request.build_absolute_uri(reverse("google_connect"))
     return f"{connect_url}?{urllib.parse.urlencode({'next': next_url})}"
+
+
+def _should_dispatch_existing_run(run) -> bool:
+    return (
+        bool(run)
+        and run.status == ContentFactoryRunStatus.QUEUED
+        and bool(run.updated_at)
+        and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
+    )
 
 
 def _normalize_text_list(value):
@@ -664,6 +681,12 @@ class VibeRaisingStartupUpdateRunView(APIView):
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
         else:
             run = existing_run
+            if _should_dispatch_existing_run(run):
+                logger.info(
+                    "Re-dispatching queued startup update run to Valley",
+                    extra={"run_id": run.run_id, "organization_id": organization.id},
+                )
+                transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
 
         payload = _build_status_payload(user=request.user, company=company, domain=domain)
         payload["run"] = _serialize_run_summary(run)
@@ -760,6 +783,12 @@ class VibeRaisingEmailDraftStartView(APIView):
                 window_months=DEFAULT_BACKFILL_MONTHS,
             )
             created = True
+            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+        elif _should_dispatch_existing_run(run):
+            logger.info(
+                "Re-dispatching queued email draft run to Valley",
+                extra={"run_id": run.run_id, "organization_id": organization.id},
+            )
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
 
         payload = _build_email_draft_payload(
