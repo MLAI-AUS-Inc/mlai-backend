@@ -12,6 +12,8 @@ urlpatterns = [
     # GitHub connection status endpoint
     path('org/github-status/', views.ContentFactoryGitHubStatusView.as_view(), name='content_factory_github_status'),
     path('org/github-status', views.ContentFactoryGitHubStatusView.as_view(), name='content_factory_github_status_no_slash'),
+    path('github/reconnect/', views.ContentFactoryGitHubReconnectView.as_view(), name='content_factory_github_reconnect'),
+    path('github/reconnect', views.ContentFactoryGitHubReconnectView.as_view(), name='content_factory_github_reconnect_no_slash'),
     # GitHub OAuth initiate endpoint (for domain-level OAuth)
     path('oauth/initiate/', views.ContentFactoryOAuthInitiateView.as_view(), name='content_factory_oauth_initiate'),
     path('oauth/initiate', views.ContentFactoryOAuthInitiateView.as_view(), name='content_factory_oauth_initiate_no_slash'),

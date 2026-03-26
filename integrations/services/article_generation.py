@@ -32,11 +32,23 @@ AUTO_REFUND_ERROR_CODES = {
     "NO_OPPORTUNITIES",
     "PUBLISH_TARGET_ACTION_REQUIRED",
 }
+AUTH_REQUIRED_ERROR_CODE = "AUTH_REQUIRED"
+AUTH_REQUIRED_MISSING_STEP = "github_auth"
+AUTH_REQUIRED_NEXT_ACTION = "reconnect_github"
+AUTH_REQUIRED_RESUME_HINT = "reconnect_github_then_retry"
 
 
 class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
+
+
+class GitHubReconnectRequiredError(ArticleGenerationError):
+    """Raised when GitHub must be reconnected before the workflow can continue."""
+
+    def __init__(self, payload: dict):
+        self.payload = dict(payload or {})
+        super().__init__(self.payload.get("message") or "GitHub authentication is required.")
 
 
 class ArticleSystemActionRequiredError(ArticleGenerationError):
@@ -88,6 +100,75 @@ def _raise_article_system_action_required(
         hint='Scaffold an article system first, or rescan if the repo already contains one.',
         message='This repository needs an article system before Roo can write a concrete article into it.',
         resolution_source=resolution_source,
+    )
+
+
+def _build_auth_required_payload(
+    payload: Optional[dict],
+    *,
+    resolved_domain: Optional[str],
+    slack_user_id: Optional[str],
+) -> dict:
+    source = dict(payload or {})
+    normalized_domain = normalize_domain(source.get("domain") or resolved_domain or "")
+    message = str(
+        source.get("message")
+        or source.get("error")
+        or "GitHub authentication is required before Roo can continue."
+    ).strip()
+
+    from integrations.services.github import build_github_auth_url
+
+    auth_url = source.get("auth_url") or build_github_auth_url(
+        slack_user_id or "",
+        domain=normalized_domain or None,
+    )
+
+    normalized = {
+        "status": source.get("status") or "precondition_failed",
+        "error_code": source.get("error_code") or AUTH_REQUIRED_ERROR_CODE,
+        "missing_step": source.get("missing_step") or AUTH_REQUIRED_MISSING_STEP,
+        "next_action": source.get("next_action") or AUTH_REQUIRED_NEXT_ACTION,
+        "requires_user_action": bool(source.get("requires_user_action", True)),
+        "resume_hint": source.get("resume_hint") or AUTH_REQUIRED_RESUME_HINT,
+        "domain": normalized_domain or source.get("domain") or resolved_domain,
+        "github_repo": source.get("github_repo"),
+        "reason_code": source.get("reason_code") or "missing_or_expired_credentials",
+        "message": message,
+        "error": message,
+        "auth_url": auth_url,
+    }
+    for key in ("workflow", "job_id", "run_id"):
+        value = source.get(key)
+        if value:
+            normalized[key] = value
+    return normalized
+
+
+def _raise_content_factory_precondition(
+    response,
+    *,
+    resolved_domain: Optional[str],
+    slack_user_id: Optional[str],
+) -> None:
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+
+    if str(data.get("error_code") or "").strip() == AUTH_REQUIRED_ERROR_CODE:
+        raise GitHubReconnectRequiredError(
+            _build_auth_required_payload(
+                data,
+                resolved_domain=resolved_domain,
+                slack_user_id=slack_user_id,
+            )
+        )
+
+    missing_step = str(data.get("missing_step") or "unknown").strip()
+    message = str(data.get("message") or data.get("error") or response.text or "Prerequisite step missing").strip()
+    raise ArticleGenerationError(
+        f"PREREQUISITE_MISSING:{missing_step}:{resolved_domain}:{message}"
     )
 
 
@@ -1286,23 +1367,17 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "job_status_url": status_url
             }
         elif response.status_code == 412:
-            # Content Factory prerequisite check failed (fallback — our proactive check should catch this first)
-            try:
-                data = response.json()
-                missing_step = data.get('missing_step', 'unknown')
-                cf_message = data.get('message', 'Prerequisite step missing')
-            except Exception:
-                missing_step = 'unknown'
-                cf_message = response.text
             _refund_content_factory_request(
                 user=charged_user,
                 slack_user_id=slack_user_id,
                 article_request=article_request,
                 resolved_domain=resolved_domain,
-                reason=f"article prerequisite response {missing_step}",
+                reason="article prerequisite response",
             )
-            raise ArticleGenerationError(
-                f"PREREQUISITE_MISSING:{missing_step}:{resolved_domain}:{cf_message}"
+            _raise_content_factory_precondition(
+                response,
+                resolved_domain=resolved_domain,
+                slack_user_id=slack_user_id,
             )
         else:
             logger.error(f"Content Factory generate failed: {response.text}")
@@ -1609,6 +1684,12 @@ def promote_article_bundle(
         )
 
         if response.status_code != 200:
+            if response.status_code == 412:
+                _raise_content_factory_precondition(
+                    response,
+                    resolved_domain=resolved_domain,
+                    slack_user_id=resolved_slack_user_id,
+                )
             logger.error(f"Content Factory promote-bundle failed: {response.text}")
             raise ArticleGenerationError(f"Promote bundle failed: {response.text}")
 
@@ -1831,6 +1912,19 @@ def confirm_topic(
                 )
             return data
         else:
+            if response.status_code == 412:
+                if deferred_charge_started:
+                    _refund_deferred_discovery_job_on_confirm_failure(
+                        source_job=source_job,
+                        slack_user_id=slack_user_id,
+                        domain=normalized_domain,
+                        reason="topic confirmation prerequisite response",
+                    )
+                _raise_content_factory_precondition(
+                    response,
+                    resolved_domain=normalized_domain,
+                    slack_user_id=slack_user_id,
+                )
             logger.error(f"Content Factory confirm topic failed: {response.text}")
             if deferred_charge_started:
                 _refund_deferred_discovery_job_on_confirm_failure(

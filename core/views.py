@@ -228,6 +228,43 @@ def _scan_destination_summary(article_system, publish_targets):
 
     return ""
 
+
+def _normalize_content_factory_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    domain = str(domain).lower().strip()
+    if domain.startswith('https://'):
+        domain = domain[8:]
+    elif domain.startswith('http://'):
+        domain = domain[7:]
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    if '/' in domain:
+        domain = domain.split('/')[0]
+    return domain
+
+
+def _content_factory_github_connection_state(config) -> str:
+    if not config or not str(getattr(config, "github_token_encrypted", "") or "").strip():
+        return "auth_required"
+
+    expires_at = getattr(config, "github_token_expires_at", None)
+    if expires_at:
+        buffer_time = timezone.timedelta(minutes=5)
+        if timezone.now() >= (expires_at - buffer_time):
+            return "auth_required"
+
+    if str(getattr(config, "github_repo", "") or "").strip():
+        return "connected"
+    return "repo_selection_required"
+
+
+def _content_factory_github_auth_url(*, slack_user_id: str, domain: Optional[str] = None) -> str:
+    from integrations.services.github import build_github_auth_url
+
+    normalized_domain = _normalize_content_factory_domain(domain or "")
+    return build_github_auth_url(slack_user_id or "", domain=normalized_domain or None)
+
 class SendMagicLinkView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
@@ -1488,20 +1525,6 @@ class ContentFactoryGitHubStatusView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
-    def _normalize_domain(self, domain: str) -> str:
-        if not domain:
-            return domain
-        domain = domain.lower().strip()
-        if domain.startswith('https://'):
-            domain = domain[8:]
-        elif domain.startswith('http://'):
-            domain = domain[7:]
-        if domain.startswith('www.'):
-            domain = domain[4:]
-        if '/' in domain:
-            domain = domain.split('/')[0]
-        return domain
-
     def get(self, request):
         domain = request.query_params.get('domain')
 
@@ -1511,7 +1534,7 @@ class ContentFactoryGitHubStatusView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        normalized_domain = self._normalize_domain(domain)
+        normalized_domain = _normalize_content_factory_domain(domain)
 
         try:
             org = Organization.objects.get(domain=normalized_domain)
@@ -1532,15 +1555,10 @@ class ContentFactoryGitHubStatusView(APIView):
                 'message': 'No GitHub token configured for this organization.'
             }, status=status.HTTP_200_OK)
 
-        # Check if token is expired
-        from django.utils import timezone
-        token_valid = True
-        if config.github_token_expires_at:
-            buffer_time = timezone.timedelta(minutes=5)
-            token_valid = timezone.now() < (config.github_token_expires_at - buffer_time)
+        token_valid = _content_factory_github_connection_state(config) != "auth_required"
 
         response_data = {
-            'connected': True,
+            'connected': token_valid,
             'domain': normalized_domain,
             'github_repo': config.github_repo,
             'github_user_name': config.github_user_name,
@@ -1551,6 +1569,76 @@ class ContentFactoryGitHubStatusView(APIView):
             response_data['expires_at'] = config.github_token_expires_at.isoformat()
 
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+class ContentFactoryGitHubReconnectView(APIView):
+    """
+    Start or confirm the Content Factory GitHub reconnect flow for a domain.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        domain = request.data.get('domain')
+        slack_user_id = str(request.data.get('slack_user_id') or '').strip()
+        github_repo = str(request.data.get('github_repo') or '').strip() or None
+        trigger = str(request.data.get('trigger') or 'manual').strip() or 'manual'
+        pending_action = request.data.get('pending_action')
+
+        normalized_domain = _normalize_content_factory_domain(domain)
+        if not normalized_domain and not slack_user_id:
+            return Response(
+                {'error': 'domain or slack_user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config = None
+        if normalized_domain:
+            org = Organization.objects.filter(domain=normalized_domain).first()
+            config = getattr(org, 'content_config', None) if org else None
+
+        resolved_repo = github_repo or (str(getattr(config, 'github_repo', '') or '').strip() or None)
+        connection_state = _content_factory_github_connection_state(config)
+        auth_url = _content_factory_github_auth_url(
+            slack_user_id=slack_user_id,
+            domain=normalized_domain or None,
+        )
+
+        response_payload = {
+            'domain': normalized_domain or None,
+            'github_repo': resolved_repo,
+            'connection_state': connection_state,
+            'trigger': trigger,
+            'pending_action': pending_action,
+        }
+
+        if connection_state == 'connected':
+            response_payload.update(
+                {
+                    'status': 'already_connected',
+                    'message': f"GitHub is already connected for {normalized_domain}.",
+                }
+            )
+            return Response(response_payload, status=status.HTTP_200_OK)
+
+        if connection_state == 'repo_selection_required':
+            message = (
+                f"GitHub is connected for {normalized_domain}, but Roo still needs a repository selected."
+            )
+        elif normalized_domain:
+            message = f"GitHub needs to be connected for {normalized_domain} before Roo can continue."
+        else:
+            message = "GitHub needs to be connected before Roo can continue."
+
+        response_payload.update(
+            {
+                'status': 'auth_started',
+                'auth_url': auth_url,
+                'message': message,
+            }
+        )
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 class ScheduledDiscoveryReplayView(APIView):
@@ -2585,9 +2673,19 @@ class ContentFactoryCallbackView(APIView):
         job_id = data.get('job_id')
         slack_user_id = data.get('slack_user_id')
         domain = data.get('domain')
-        error_message = data.get('error_message')
+        error_message = data.get('message') or data.get('error_message') or data.get('error')
+        github_repo = data.get('github_repo')
+        reason_code = data.get('reason_code')
+        workflow = data.get('workflow')
 
-        logger.info(f"Received auth_required callback for job {job_id} (user {slack_user_id})")
+        logger.info(
+            "Received auth_required callback for job %s (user %s, workflow=%s, repo=%s, reason=%s)",
+            job_id,
+            slack_user_id,
+            workflow,
+            github_repo,
+            reason_code,
+        )
 
         # Update job status
         job, created = ContentFactoryJob.objects.update_or_create(
@@ -2653,7 +2751,14 @@ class ContentFactoryCallbackView(APIView):
         
         # 3. Fallback: Notify user via Slack (Manual Re-auth)
         try:
-             self._send_auth_required_notification(slack_user_id, domain, error_message, job_id)
+             self._send_auth_required_notification(
+                 slack_user_id,
+                 domain,
+                 error_message,
+                 job_id,
+                 github_repo=github_repo,
+                 reason_code=reason_code,
+             )
         except Exception as e:
              logger.error(f"Failed to send auth_required notification: {e}")
              # Return success anyway to avoid crashing the caller (Content Factory)
@@ -2662,26 +2767,27 @@ class ContentFactoryCallbackView(APIView):
 
         return Response({'status': 'processed', 'job_id': job_id}, status=status.HTTP_200_OK)
 
-    def _send_auth_required_notification(self, slack_user_id, domain, error_message, job_id):
+    def _send_auth_required_notification(
+        self,
+        slack_user_id,
+        domain,
+        error_message,
+        job_id,
+        *,
+        github_repo=None,
+        reason_code=None,
+    ):
         from integrations.services.slack import SlackService
-        from django.urls import reverse
-        from django.conf import settings
 
         try:
-            # Construct Re-Auth URL with job_id in state
-            # We point to our backend's connect endpoint, passing job_id as a query param
-            # The backend view will embed it into the OAuth state
-            base_url = getattr(settings, 'MEDHACK_URL', 'https://mlai.au').rstrip('/')
-            
-            try:
-                connect_path = reverse('github_connect')
-            except Exception:
-                # Fallback path if reverse fails or namespace issue
-                connect_path = '/integrations/connect/github'
-                
-            auth_url = f"{base_url}{connect_path}?slack_user_id={slack_user_id}&job_id={job_id}"
+            auth_url = _content_factory_github_auth_url(
+                slack_user_id=slack_user_id,
+                domain=domain,
+            )
 
             text = f"⚠️ GitHub Authentication Failed for {domain}"
+            repo_line = f"\n*Repository:* `{github_repo}`" if github_repo else ""
+            reason_line = f"\n*Reason:* {reason_code}" if reason_code else ""
             blocks = [
                 {
                     "type": "header",
@@ -2695,7 +2801,10 @@ class ContentFactoryCallbackView(APIView):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"The content pipeline could not access your repository for *{domain}*.\n\n*Error:* {error_message}"
+                        "text": (
+                            f"The content pipeline could not access your repository for *{domain}*."
+                            f"{repo_line}{reason_line}\n\n*Error:* {error_message}"
+                        ),
                     }
                 },
                 {

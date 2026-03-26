@@ -2,7 +2,9 @@ import json
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
+from django.utils import timezone
 
+from core.models import Organization, OrganizationContentConfig
 from integrations.services.github import (
     AUTH_RECONNECT_TEXT,
     GitHubAuthScanError,
@@ -123,3 +125,89 @@ class GithubReconnectScanClassificationTests(TestCase):
 
         with self.assertRaises(GitHubAuthScanError):
             scan_github_project("U123", domain="mlai.au")
+
+
+class ContentFactoryGitHubReconnectEndpointTests(TestCase):
+    def test_reconnect_endpoint_returns_already_connected_for_healthy_domain(self):
+        org = Organization.objects.create(domain="mlai.au", name="MLAI")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_encrypted="gh-token",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                        "trigger": "manual",
+                        "pending_action": "publish_article",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "already_connected")
+        self.assertEqual(payload["connection_state"], "connected")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["github_repo"], "MLAI-AUS-Inc/mlai-au")
+        self.assertEqual(payload["trigger"], "manual")
+        self.assertEqual(payload["pending_action"], "publish_article")
+
+    def test_reconnect_endpoint_returns_auth_started_when_domain_auth_missing(self):
+        Organization.objects.create(domain="mlai.au", name="MLAI")
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "auth_started")
+        self.assertEqual(payload["connection_state"], "auth_required")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertIn("auth_url", payload)
+
+    def test_reconnect_endpoint_returns_auth_started_when_repo_selection_needed(self):
+        org = Organization.objects.create(domain="mlai.au", name="MLAI")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            github_token_encrypted="gh-token",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "auth_started")
+        self.assertEqual(payload["connection_state"], "repo_selection_required")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertIn("auth_url", payload)

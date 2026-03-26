@@ -10,6 +10,7 @@ from core.models import ContentFactoryJob, ContentFactoryRun, Organization, Orga
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleGenerationError,
+    GitHubReconnectRequiredError,
     check_generation_status,
     confirm_topic,
     publish_article,
@@ -244,6 +245,111 @@ class ArticleGenerationServiceTest(TestCase):
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
         )
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_raises_structured_auth_required_on_content_factory_412(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 412
+        mock_response.json.return_value = {
+            "status": "precondition_failed",
+            "error_code": "AUTH_REQUIRED",
+            "missing_step": "github_auth",
+            "next_action": "reconnect_github",
+            "requires_user_action": True,
+            "resume_hint": "reconnect_github_then_retry",
+            "domain": "mlai.au",
+            "github_repo": self.repo_name,
+            "reason_code": "missing_or_expired_credentials",
+            "message": "Reconnect GitHub before publishing.",
+        }
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            with self.assertRaises(GitHubReconnectRequiredError) as exc_info:
+                trigger_article_generation(self.slack_user_id, self._article_request())
+
+        payload = exc_info.exception.payload
+        self.assertEqual(payload["error_code"], "AUTH_REQUIRED")
+        self.assertEqual(payload["missing_step"], "github_auth")
+        self.assertEqual(payload["next_action"], "reconnect_github")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["github_repo"], self.repo_name)
+        self.assertTrue(payload["auth_url"])
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_promote_article_bundle_raises_structured_auth_required_on_content_factory_412(self, mock_post):
+        ContentFactoryJob.objects.create(
+            job_id="job_content_ready_auth",
+            domain="mlai.au",
+            slack_user_id=self.slack_user_id,
+            status="completed",
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 412
+        mock_response.json.return_value = {
+            "status": "precondition_failed",
+            "error_code": "AUTH_REQUIRED",
+            "missing_step": "github_auth",
+            "next_action": "reconnect_github",
+            "requires_user_action": True,
+            "resume_hint": "reconnect_github_then_retry",
+            "domain": "mlai.au",
+            "github_repo": self.repo_name,
+            "reason_code": "missing_or_expired_credentials",
+            "message": "Reconnect GitHub before promoting this bundle.",
+        }
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            with self.assertRaises(GitHubReconnectRequiredError) as exc_info:
+                promote_article_bundle("job_content_ready_auth", slack_user_id=self.slack_user_id, domain="mlai.au")
+
+        payload = exc_info.exception.payload
+        self.assertEqual(payload["error_code"], "AUTH_REQUIRED")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["github_repo"], self.repo_name)
+        self.assertTrue(payload["auth_url"])
+
+    @patch("integrations.api_views_content.trigger_article_generation")
+    def test_content_generate_view_returns_structured_auth_required(self, mock_trigger):
+        mock_trigger.side_effect = GitHubReconnectRequiredError(
+            {
+                "status": "precondition_failed",
+                "error_code": "AUTH_REQUIRED",
+                "missing_step": "github_auth",
+                "next_action": "reconnect_github",
+                "requires_user_action": True,
+                "resume_hint": "reconnect_github_then_retry",
+                "domain": "mlai.au",
+                "github_repo": self.repo_name,
+                "reason_code": "missing_or_expired_credentials",
+                "message": "Reconnect GitHub before continuing.",
+                "auth_url": "https://github.example/reconnect",
+            }
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/v1/content/generate",
+                data={
+                    "slack_user_id": self.slack_user_id,
+                    "domain": "mlai.au",
+                    "topic": "AI Agents",
+                    "target_keyword": "agentic ai",
+                    "request_source": "roo_slackbot",
+                    "client_request_id": "content-generate-auth-required",
+                },
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 412)
+        payload = response.json()
+        self.assertEqual(payload["error_code"], "AUTH_REQUIRED")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["github_repo"], self.repo_name)
+        self.assertEqual(payload["auth_url"], "https://github.example/reconnect")
+        self.assertTrue(payload["pending_intent_stored"])
 
         self.assertEqual(result["job_id"], "job_publish_child")
         mock_promote_article_bundle.assert_called_once_with(
