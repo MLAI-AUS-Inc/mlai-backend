@@ -2,10 +2,14 @@ import base64
 import datetime
 import hashlib
 import html
+import logging
 import re
+import ssl
+import time
 from email.utils import getaddresses
 from typing import Iterable, Optional
 
+import httplib2
 from django.conf import settings
 from django.utils import timezone
 from google.oauth2.credentials import Credentials
@@ -16,15 +20,17 @@ from integrations.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
     GmailMessageArtifact,
-    GmailRelevanceLabel,
     GmailThreadArtifact,
     GoogleConnection,
 )
 from integrations.services.startup_updates import (
     DEFAULT_ATTACHMENT_BYTES_LIMIT,
-    score_message_for_profile,
+    DEFAULT_BACKFILL_MONTHS,
+    apply_profile_scoring,
 )
 
+
+logger = logging.getLogger(__name__)
 
 METADATA_HEADERS = [
     "Subject",
@@ -37,6 +43,10 @@ METADATA_HEADERS = [
     "Message-ID",
     "In-Reply-To",
     "References",
+    "List-Id",
+    "List-Unsubscribe",
+    "Precedence",
+    "Auto-Submitted",
 ]
 REPLY_DELIMITER_PATTERNS = [
     re.compile(r"^on .+wrote:$", re.IGNORECASE),
@@ -66,6 +76,15 @@ class StaleHistoryCursorError(Exception):
     pass
 
 
+GMAIL_API_MAX_ATTEMPTS = 3
+GMAIL_API_RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+GMAIL_API_RETRYABLE_EXCEPTIONS = (
+    ssl.SSLError,
+    TimeoutError,
+    httplib2.HttpLib2Error,
+)
+
+
 def get_refreshed_credentials(connection: GoogleConnection):
     """
     Constructs a Credentials object from the stored refresh_token.
@@ -91,13 +110,52 @@ def build_gmail_service(connection: GoogleConnection, *, cache_discovery: bool =
 def build_backfill_query(*, after_dt, before_dt) -> str:
     after_ts = int(after_dt.timestamp())
     before_ts = int(before_dt.timestamp())
-    return f"after:{after_ts} before:{before_ts} -in:spam -in:trash"
+    return (
+        f"after:{after_ts} before:{before_ts} "
+        "-in:spam -in:trash -category:promotions -category:social -category:forums"
+    )
+
+
+def default_backfill_window(
+    *,
+    now=None,
+    window_months: int = DEFAULT_BACKFILL_MONTHS,
+) -> tuple[datetime.datetime, datetime.datetime]:
+    now = now or timezone.now()
+    start = now - datetime.timedelta(days=30 * int(window_months))
+    return start, now
 
 
 def six_month_backfill_window(*, now=None) -> tuple[datetime.datetime, datetime.datetime]:
-    now = now or timezone.now()
-    start = now - datetime.timedelta(days=30 * 6)
-    return start, now
+    return default_backfill_window(now=now, window_months=6)
+
+
+def _execute_gmail_request(request_factory, *, description: str):
+    for attempt in range(1, GMAIL_API_MAX_ATTEMPTS + 1):
+        try:
+            return request_factory().execute()
+        except HttpError as exc:
+            status_code = getattr(getattr(exc, "resp", None), "status", None)
+            if status_code not in GMAIL_API_RETRYABLE_HTTP_STATUSES or attempt >= GMAIL_API_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "Retrying Gmail API request %s after HTTP %s (%s/%s).",
+                description,
+                status_code,
+                attempt,
+                GMAIL_API_MAX_ATTEMPTS,
+            )
+        except GMAIL_API_RETRYABLE_EXCEPTIONS as exc:
+            if attempt >= GMAIL_API_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "Retrying Gmail API request %s after %s (%s/%s).",
+                description,
+                exc.__class__.__name__,
+                attempt,
+                GMAIL_API_MAX_ATTEMPTS,
+            )
+        time.sleep(min(2 ** (attempt - 1), 4))
 
 
 def list_message_page(
@@ -108,53 +166,67 @@ def list_message_page(
     max_results: int = 500,
 ) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
-    return (
-        service.users()
-        .messages()
-        .list(
-            userId="me",
-            q=query,
-            pageToken=page_token,
-            maxResults=max_results,
-            includeSpamTrash=False,
+    return _execute_gmail_request(
+        lambda: (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                q=query,
+                pageToken=page_token,
+                maxResults=max_results,
+                includeSpamTrash=False,
+            )
         )
-        .execute()
+        ,
+        description="messages.list",
     )
 
 
 def get_message_metadata(connection: GoogleConnection, message_id: str) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
-    return (
-        service.users()
-        .messages()
-        .get(
-            userId="me",
-            id=message_id,
-            format="metadata",
-            metadataHeaders=METADATA_HEADERS,
+    return _execute_gmail_request(
+        lambda: (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=METADATA_HEADERS,
+            )
         )
-        .execute()
+        ,
+        description=f"messages.get.metadata:{message_id}",
     )
 
 
 def get_message_full(connection: GoogleConnection, message_id: str) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
-    return service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    return _execute_gmail_request(
+        lambda: service.users().messages().get(userId="me", id=message_id, format="full"),
+        description=f"messages.get.full:{message_id}",
+    )
 
 
 def get_thread_full(connection: GoogleConnection, thread_id: str) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
-    return service.users().threads().get(userId="me", id=thread_id, format="full").execute()
+    return _execute_gmail_request(
+        lambda: service.users().threads().get(userId="me", id=thread_id, format="full"),
+        description=f"threads.get.full:{thread_id}",
+    )
 
 
 def get_attachment_payload(connection: GoogleConnection, message_id: str, attachment_id: str) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
-    return (
-        service.users()
-        .messages()
-        .attachments()
-        .get(userId="me", messageId=message_id, id=attachment_id)
-        .execute()
+    return _execute_gmail_request(
+        lambda: (
+            service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=message_id, id=attachment_id)
+        ),
+        description=f"messages.attachments.get:{message_id}:{attachment_id}",
     )
 
 
@@ -167,17 +239,20 @@ def list_history_page(
 ) -> dict:
     service = build_gmail_service(connection, cache_discovery=False)
     try:
-        return (
-            service.users()
-            .history()
-            .list(
-                userId="me",
-                startHistoryId=start_history_id,
-                pageToken=page_token,
-                maxResults=max_results,
-                historyTypes=["messageAdded"],
+        return _execute_gmail_request(
+            lambda: (
+                service.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    pageToken=page_token,
+                    maxResults=max_results,
+                    historyTypes=["messageAdded"],
+                )
             )
-            .execute()
+            ,
+            description=f"history.list:{start_history_id}",
         )
     except HttpError as exc:
         status_code = getattr(getattr(exc, "resp", None), "status", None)
@@ -352,26 +427,28 @@ def upsert_message_artifact_from_message_data(*, organization, connection: Googl
     )
 
     if profile is not None:
-        score, reasons, label = score_message_for_profile(profile, artifact)
-        artifact.heuristic_score = score
-        artifact.heuristic_reasons = reasons
-        if artifact.relevance_label == GmailRelevanceLabel.PENDING:
-            artifact.relevance_label = label
-        artifact.needs_thread_context = artifact.relevance_label in {
-            GmailRelevanceLabel.RELEVANT,
-            GmailRelevanceLabel.AMBIGUOUS,
-        }
-        artifact.save(
-            update_fields=[
-                "heuristic_score",
-                "heuristic_reasons",
-                "relevance_label",
-                "needs_thread_context",
-                "updated_at",
-            ]
-        )
+        apply_profile_scoring(profile, artifact)
 
     return artifact
+
+
+def _existing_metadata_artifact_map(
+    *,
+    organization,
+    connection: GoogleConnection,
+    message_ids: Iterable[str],
+) -> dict[str, GmailMessageArtifact]:
+    normalized_ids = [str(item or "").strip() for item in message_ids if str(item or "").strip()]
+    if not normalized_ids:
+        return {}
+
+    queryset = GmailMessageArtifact.objects.filter(
+        organization=organization,
+        google_connection=connection,
+        gmail_message_id__in=normalized_ids,
+        metadata_hydrated_at__isnull=False,
+    )
+    return {artifact.gmail_message_id: artifact for artifact in queryset}
 
 
 def sync_message_metadata_page(
@@ -386,9 +463,26 @@ def sync_message_metadata_page(
 ) -> dict:
     query = build_backfill_query(after_dt=after_dt, before_dt=before_dt)
     page = list_message_page(connection, query=query, page_token=page_token, max_results=max_results)
+    message_ids = [
+        str(item.get("id") or "").strip()
+        for item in (page.get("messages", []) or [])
+        if str(item.get("id") or "").strip()
+    ]
+    existing_artifacts = _existing_metadata_artifact_map(
+        organization=organization,
+        connection=connection,
+        message_ids=message_ids,
+    )
     artifacts = []
-    for item in page.get("messages", []) or []:
-        metadata = get_message_metadata(connection, item["id"])
+    reused_existing_count = 0
+    for message_id in message_ids:
+        existing_artifact = existing_artifacts.get(message_id)
+        if existing_artifact is not None:
+            artifacts.append(existing_artifact)
+            reused_existing_count += 1
+            continue
+
+        metadata = get_message_metadata(connection, message_id)
         artifacts.append(
             upsert_message_artifact_from_message_data(
                 organization=organization,
@@ -402,6 +496,7 @@ def sync_message_metadata_page(
         "mode": "backfill",
         "result_size_estimate": int(page.get("resultSizeEstimate") or 0),
         "next_page_token": page.get("nextPageToken"),
+        "reused_existing_count": reused_existing_count,
         "artifacts": artifacts,
     }
 
@@ -433,8 +528,20 @@ def sync_history_metadata_page(
             seen_ids.add(message_id)
             message_ids.append(message_id)
 
+    existing_artifacts = _existing_metadata_artifact_map(
+        organization=organization,
+        connection=connection,
+        message_ids=message_ids,
+    )
     artifacts = []
+    reused_existing_count = 0
     for message_id in message_ids:
+        existing_artifact = existing_artifacts.get(message_id)
+        if existing_artifact is not None:
+            artifacts.append(existing_artifact)
+            reused_existing_count += 1
+            continue
+
         metadata = get_message_metadata(connection, message_id)
         artifacts.append(
             upsert_message_artifact_from_message_data(
@@ -451,6 +558,7 @@ def sync_history_metadata_page(
         "history_id": str(page.get("historyId") or "").strip(),
         "result_size_estimate": len(message_ids),
         "next_page_token": page.get("nextPageToken"),
+        "reused_existing_count": reused_existing_count,
         "artifacts": artifacts,
     }
 

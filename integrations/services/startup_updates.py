@@ -28,7 +28,7 @@ from integrations.utils import normalize_domain
 logger = logging.getLogger(__name__)
 
 STARTUP_UPDATE_WORKFLOW = "startup_monthly_update"
-DEFAULT_BACKFILL_MONTHS = 6
+DEFAULT_BACKFILL_MONTHS = 1
 DEFAULT_CLASSIFICATION_BATCH_SIZE = 40
 DEFAULT_ATTACHMENT_BYTES_LIMIT = 10 * 1024 * 1024
 HIGH_SIGNAL_TERMS = [
@@ -67,6 +67,35 @@ LOW_SIGNAL_PATTERNS = [
     "promotion",
     "social",
 ]
+HARD_IRRELEVANT_TEXT_PATTERNS = [
+    "magic link",
+    "verification code",
+    "one-time password",
+    "password reset",
+    "weekly digest",
+    "newsletter",
+    "recommended for you",
+    "top posts",
+    "unsubscribe",
+    "invitation",
+    "calendar invitation",
+    "receipt",
+    "payment received",
+    "order confirmation",
+]
+HARD_IRRELEVANT_SENDER_LOCALPARTS = {
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "mailer-daemon",
+    "notifications",
+}
+HARD_IRRELEVANT_GMAIL_LABELS = {
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_FORUMS",
+}
+HARD_IRRELEVANT_PRECEDENCE_VALUES = {"bulk", "list", "junk"}
 OPEN_RUN_STATUSES = {
     ContentFactoryRunStatus.QUEUED,
     ContentFactoryRunStatus.RUNNING,
@@ -113,6 +142,10 @@ def _append_note(existing: str, addition: str) -> str:
     if addition_text.lower() in existing_text.lower():
         return existing_text
     return f"{existing_text}\n\n{addition_text}"
+
+
+def _match_any(values: Iterable[str], haystack: str) -> bool:
+    return any(value and value in haystack for value in values)
 
 
 def _competitor_name_domain_lists(raw_competitors) -> tuple[list[str], list[str]]:
@@ -205,6 +238,126 @@ def _serialize_metric(metric) -> dict:
         "evidence_attachment_ids": metric.evidence_attachment_ids or [],
         "summary": metric.summary or "",
     }
+
+
+def _message_haystack(artifact: GmailMessageArtifact) -> str:
+    return " ".join(
+        [
+            getattr(artifact, "subject", "") or "",
+            getattr(artifact, "snippet", "") or "",
+            getattr(artifact, "cleaned_text", "") or "",
+            getattr(artifact, "from_address", "") or "",
+            " ".join(getattr(artifact, "to_addresses", []) or []),
+            " ".join(getattr(artifact, "cc_addresses", []) or []),
+            " ".join(getattr(artifact, "bcc_addresses", []) or []),
+            " ".join(getattr(artifact, "reply_to_addresses", []) or []),
+        ]
+    ).lower()
+
+
+def _participant_domains(artifact: GmailMessageArtifact) -> list[str]:
+    participant_values = [getattr(artifact, "from_address", "") or ""]
+    participant_values.extend(getattr(artifact, "to_addresses", []) or [])
+    participant_values.extend(getattr(artifact, "cc_addresses", []) or [])
+    participant_values.extend(getattr(artifact, "bcc_addresses", []) or [])
+    participant_values.extend(getattr(artifact, "reply_to_addresses", []) or [])
+
+    participant_domains = []
+    for value in participant_values:
+        if "@" not in value:
+            continue
+        participant_domains.append(normalize_domain(value.split("@")[-1]))
+    return participant_domains
+
+
+def _normalize_sender_localpart(value: str) -> str:
+    localpart = str(value or "").split("@", 1)[0].lower()
+    return "".join(char for char in localpart if char.isalnum())
+
+
+def _header_values(artifact: GmailMessageArtifact) -> dict[str, str]:
+    raw = getattr(artifact, "header_values", {}) or {}
+    values = {}
+    for key, value in raw.items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key:
+            values[normalized_key] = str(value or "").strip()
+    return values
+
+
+def _profile_signal_lists(profile: StartupProfile) -> dict[str, list[str]]:
+    return {
+        "domain_aliases": [normalize_domain(item) for item in (profile.domain_aliases or [])],
+        "company_aliases": [item.lower() for item in (profile.company_aliases or [])],
+        "founder_names": [item.lower() for item in (profile.founder_names or [])],
+        "team_names": [item.lower() for item in (profile.team_names or [])],
+        "investor_domains": [normalize_domain(item) for item in (profile.investor_domains or [])],
+        "investor_names": [item.lower() for item in (profile.investor_names or [])],
+        "customer_domains": [normalize_domain(item) for item in (profile.customer_domains or [])],
+        "customer_names": [item.lower() for item in (profile.customer_names or [])],
+        "prospect_domains": [normalize_domain(item) for item in (profile.prospect_domains or [])],
+        "prospect_names": [item.lower() for item in (profile.prospect_names or [])],
+        "competitor_domains": [normalize_domain(item) for item in (profile.competitor_domains or [])],
+        "competitor_names": [item.lower() for item in (profile.competitor_names or [])],
+        "positive_keywords": [item.lower() for item in (profile.positive_keywords or [])],
+        "negative_keywords": [item.lower() for item in (profile.negative_keywords or [])],
+    }
+
+
+def _allowlist_override_reasons(
+    *,
+    haystack: str,
+    participant_domains: list[str],
+    profile_signals: dict[str, list[str]],
+) -> list[str]:
+    reasons = []
+    if _match_any(profile_signals["company_aliases"] + profile_signals["positive_keywords"], haystack):
+        reasons.append("allowlist_company_alias_or_positive_keyword")
+    if _match_any(profile_signals["founder_names"] + profile_signals["team_names"], haystack):
+        reasons.append("allowlist_founder_or_team_name")
+    if _match_any(profile_signals["investor_names"], haystack):
+        reasons.append("allowlist_investor_name")
+    if _match_any(profile_signals["customer_names"] + profile_signals["prospect_names"], haystack):
+        reasons.append("allowlist_customer_or_prospect_name")
+    if _match_any(HIGH_SIGNAL_TERMS, haystack):
+        reasons.append("allowlist_high_signal_term")
+    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
+        reasons.append("allowlist_company_domain")
+    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
+        reasons.append("allowlist_investor_domain")
+    if any(domain and domain in participant_domains for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]):
+        reasons.append("allowlist_customer_or_prospect_domain")
+    return _uniq(reasons)
+
+
+def _hard_irrelevant_reasons(artifact: GmailMessageArtifact, *, haystack: str) -> list[str]:
+    reasons = []
+    header_values = _header_values(artifact)
+    label_ids = {str(item or "").strip().upper() for item in (getattr(artifact, "label_ids", []) or [])}
+
+    if HARD_IRRELEVANT_GMAIL_LABELS.intersection(label_ids):
+        reasons.append("hard_filtered_gmail_category")
+
+    if header_values.get("list-id") or header_values.get("list-unsubscribe"):
+        reasons.append("hard_filtered_bulk_header")
+
+    precedence = header_values.get("precedence", "").lower()
+    if precedence in HARD_IRRELEVANT_PRECEDENCE_VALUES:
+        reasons.append("hard_filtered_bulk_header")
+
+    auto_submitted = header_values.get("auto-submitted", "").lower()
+    if auto_submitted and auto_submitted != "no":
+        reasons.append("hard_filtered_auto_submitted")
+
+    if _normalize_sender_localpart(getattr(artifact, "from_address", "") or "") in {
+        "".join(char for char in item if char.isalnum()) for item in HARD_IRRELEVANT_SENDER_LOCALPARTS
+    }:
+        reasons.append("hard_filtered_no_reply_sender")
+
+    if _match_any(HARD_IRRELEVANT_TEXT_PATTERNS, haystack):
+        reasons.append("hard_filtered_low_signal_pattern")
+
+    return _uniq(reasons)
 
 
 def seed_startup_profile(profile: StartupProfile) -> StartupProfile:
@@ -521,87 +674,73 @@ def maybe_start_startup_update_for_google_connection(
 
 
 def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArtifact) -> tuple[int, list[str], str]:
-    haystack = " ".join(
-        [
-            artifact.subject or "",
-            artifact.snippet or "",
-            artifact.cleaned_text or "",
-            artifact.from_address or "",
-            " ".join(artifact.to_addresses or []),
-            " ".join(artifact.cc_addresses or []),
-        ]
-    ).lower()
+    haystack = _message_haystack(artifact)
+    participant_domains = _participant_domains(artifact)
+    profile_signals = _profile_signal_lists(profile)
+    allowlist_reasons = _allowlist_override_reasons(
+        haystack=haystack,
+        participant_domains=participant_domains,
+        profile_signals=profile_signals,
+    )
+    hard_irrelevant_reasons = _hard_irrelevant_reasons(artifact, haystack=haystack)
+
+    if hard_irrelevant_reasons and not allowlist_reasons:
+        return 0, hard_irrelevant_reasons, GmailRelevanceLabel.IRRELEVANT
 
     score = 50
     reasons = []
+
+    if hard_irrelevant_reasons and allowlist_reasons:
+        reasons.append("allowlist_override_hard_filter")
 
     if any(pattern in haystack for pattern in LOW_SIGNAL_PATTERNS):
         score -= 40
         reasons.append("matched_low_signal_pattern")
 
-    domain_aliases = [normalize_domain(item) for item in (profile.domain_aliases or [])]
-    company_aliases = [item.lower() for item in (profile.company_aliases or [])]
-    founder_names = [item.lower() for item in (profile.founder_names or [])]
-    team_names = [item.lower() for item in (profile.team_names or [])]
-    investor_domains = [normalize_domain(item) for item in (profile.investor_domains or [])]
-    investor_names = [item.lower() for item in (profile.investor_names or [])]
-    customer_domains = [normalize_domain(item) for item in (profile.customer_domains or [])]
-    customer_names = [item.lower() for item in (profile.customer_names or [])]
-    prospect_domains = [normalize_domain(item) for item in (profile.prospect_domains or [])]
-    prospect_names = [item.lower() for item in (profile.prospect_names or [])]
-    competitor_domains = [normalize_domain(item) for item in (profile.competitor_domains or [])]
-    competitor_names = [item.lower() for item in (profile.competitor_names or [])]
-    positive_keywords = [item.lower() for item in (profile.positive_keywords or [])]
-    negative_keywords = [item.lower() for item in (profile.negative_keywords or [])]
-
-    if any(alias and alias in haystack for alias in company_aliases + positive_keywords):
+    if _match_any(profile_signals["company_aliases"] + profile_signals["positive_keywords"], haystack):
         score += 15
         reasons.append("matched_company_alias_or_positive_keyword")
 
-    if any(name and name in haystack for name in founder_names + team_names):
+    if _match_any(profile_signals["founder_names"] + profile_signals["team_names"], haystack):
         score += 15
         reasons.append("matched_founder_or_team_name")
 
-    if any(name and name in haystack for name in investor_names):
+    if _match_any(profile_signals["investor_names"], haystack):
         score += 20
         reasons.append("matched_investor_name")
 
-    if any(name and name in haystack for name in customer_names + prospect_names):
+    if _match_any(profile_signals["customer_names"] + profile_signals["prospect_names"], haystack):
         score += 15
         reasons.append("matched_customer_or_prospect_name")
 
-    if any(name and name in haystack for name in competitor_names):
+    if _match_any(profile_signals["competitor_names"], haystack):
         score += 10
         reasons.append("matched_competitor_name")
 
-    if any(term in haystack for term in HIGH_SIGNAL_TERMS):
+    if _match_any(HIGH_SIGNAL_TERMS, haystack):
         score += 15
         reasons.append("matched_high_signal_term")
 
-    participant_values = [artifact.from_address or ""] + list(artifact.to_addresses or []) + list(artifact.cc_addresses or [])
-    participant_domains = []
-    for value in participant_values:
-        if "@" not in value:
-            continue
-        participant_domains.append(normalize_domain(value.split("@")[-1]))
-
-    if any(domain and domain in participant_domains for domain in domain_aliases):
+    if any(domain and domain in participant_domains for domain in profile_signals["domain_aliases"]):
         score += 25
         reasons.append("matched_company_domain")
 
-    if any(domain and domain in participant_domains for domain in investor_domains):
+    if any(domain and domain in participant_domains for domain in profile_signals["investor_domains"]):
         score += 20
         reasons.append("matched_investor_domain")
 
-    if any(domain and domain in participant_domains for domain in customer_domains + prospect_domains):
+    if any(
+        domain and domain in participant_domains
+        for domain in profile_signals["customer_domains"] + profile_signals["prospect_domains"]
+    ):
         score += 15
         reasons.append("matched_customer_or_prospect_domain")
 
-    if any(domain and domain in participant_domains for domain in competitor_domains):
+    if any(domain and domain in participant_domains for domain in profile_signals["competitor_domains"]):
         score += 10
         reasons.append("matched_competitor_domain")
 
-    if any(keyword and keyword in haystack for keyword in negative_keywords):
+    if _match_any(profile_signals["negative_keywords"], haystack):
         score -= 20
         reasons.append("matched_negative_keyword")
 
@@ -615,6 +754,36 @@ def score_message_for_profile(profile: StartupProfile, artifact: GmailMessageArt
         label = GmailRelevanceLabel.AMBIGUOUS
 
     return score, _uniq(reasons), label
+
+
+def apply_profile_scoring(
+    profile: StartupProfile,
+    artifact: GmailMessageArtifact,
+    *,
+    persist: bool = True,
+) -> tuple[int, list[str], str]:
+    score, reasons, label = score_message_for_profile(profile, artifact)
+    artifact.heuristic_score = score
+    artifact.heuristic_reasons = reasons
+    if artifact.classified_at is None:
+        artifact.relevance_label = label
+    artifact.needs_thread_context = artifact.relevance_label in {
+        GmailRelevanceLabel.RELEVANT,
+        GmailRelevanceLabel.AMBIGUOUS,
+    }
+
+    if persist:
+        update_fields = [
+            "heuristic_score",
+            "heuristic_reasons",
+            "needs_thread_context",
+            "updated_at",
+        ]
+        if artifact.classified_at is None:
+            update_fields.insert(2, "relevance_label")
+        artifact.save(update_fields=update_fields)
+
+    return artifact.heuristic_score, artifact.heuristic_reasons, artifact.relevance_label
 
 
 def build_timeline_payload(*, organization: Organization) -> dict:

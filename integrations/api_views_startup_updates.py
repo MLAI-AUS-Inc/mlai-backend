@@ -33,6 +33,7 @@ from integrations.models import (
     StartupEvent,
 )
 from integrations.services.gmail import (
+    default_backfill_window,
     hydrate_thread_artifact,
     StaleHistoryCursorError,
     six_month_backfill_window,
@@ -390,7 +391,9 @@ class StartupUpdateIngestNextPageView(APIView):
             if timezone.is_naive(before_dt):
                 before_dt = timezone.make_aware(before_dt, timezone=dt_timezone.utc)
         else:
-            after_dt, before_dt = six_month_backfill_window()
+            after_dt, before_dt = default_backfill_window(
+                window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
+            )
 
         sync_result = None
         if mode == "incremental":
@@ -409,8 +412,9 @@ class StartupUpdateIngestNextPageView(APIView):
                     cursor.last_history_id = ""
                     cursor.backfill_completed_at = None
                     cursor.save(update_fields=["last_history_id", "backfill_completed_at", "updated_at"])
-                    after_dt = timezone.now() - timedelta(days=60)
-                    before_dt = timezone.now()
+                    after_dt, before_dt = default_backfill_window(
+                        window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
+                    )
                     sync_result = sync_message_metadata_page(
                         organization=organization,
                         connection=google_connection,
@@ -422,8 +426,9 @@ class StartupUpdateIngestNextPageView(APIView):
                     )
                     sync_result["cursor_reset"] = True
             else:
-                after_dt = timezone.now() - timedelta(days=60)
-                before_dt = timezone.now()
+                after_dt, before_dt = default_backfill_window(
+                    window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
+                )
                 sync_result = sync_message_metadata_page(
                     organization=organization,
                     connection=google_connection,
@@ -477,6 +482,7 @@ class StartupUpdateIngestNextPageView(APIView):
                 "next_page_token": sync_result["next_page_token"],
                 "history_id": sync_result.get("history_id", ""),
                 "cursor_reset": bool(sync_result.get("cursor_reset", False)),
+                "reused_existing_count": int(sync_result.get("reused_existing_count") or 0),
                 "relevance_counts": counts,
                 "message_ids": [artifact.gmail_message_id for artifact in sync_result["artifacts"]],
             },

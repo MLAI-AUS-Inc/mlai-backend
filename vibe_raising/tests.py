@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
 from integrations.models import GoogleConnection, MonthlyUpdateDraft, StartupProfile, UserStartupBinding
-from integrations.services.startup_updates import create_startup_update_run
+from integrations.services.startup_updates import DEFAULT_BACKFILL_MONTHS, create_startup_update_run
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
 
@@ -431,6 +431,9 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         self.assertEqual(first.data["runId"], second.data["runId"])
         mock_notify.assert_called_once()
+
+        run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
+        self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
