@@ -10,14 +10,12 @@ from django.http import HttpResponseBadRequest, HttpResponse
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from .models import GoogleConnection, UserIntegration
-from .services import fetch_recent_subject_lines
 from integrations.services.github_connections import (
     build_github_installation_url,
     build_github_oauth_state,
     store_github_oauth_state,
     validate_github_oauth_state,
 )
-from integrations.services.startup_updates import maybe_start_startup_update_for_google_connection
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -185,21 +183,10 @@ def google_callback(request):
         "refresh_token": refresh_token,
     }
 
-    google_connection, _ = GoogleConnection.objects.update_or_create(
+    GoogleConnection.objects.update_or_create(
         user=request.user,
         defaults=defaults,
     )
-
-    try:
-        maybe_start_startup_update_for_google_connection(
-            user=request.user,
-            google_connection=google_connection,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to auto-start startup update after Google OAuth for user %s",
-            request.user.pk,
-        )
 
     # Redirect to frontend
     return redirect(success_url or _default_google_success_url())
@@ -516,25 +503,3 @@ def github_select_repo(request):
         """)
     except UserIntegration.DoesNotExist:
         return HttpResponseBadRequest("Integration not found. Please try connecting again.")
-
-@login_required
-def get_gmail_emails(request):
-    """
-    API endpoint for frontend to get recent emails.
-    """
-    subjects = fetch_recent_subject_lines(request.user)
-    return JsonResponse({"subjects": subjects})
-
-from django.http import JsonResponse
-from django.contrib.auth import get_user_model
-
-User = get_user_model()
-
-@login_required
-def test_gmail_fetch(request):
-    """
-    Test endpoint to fetch recent Gmail subjects.
-    Only allows authenticated users.
-    """
-    subjects = fetch_recent_subject_lines(request.user)
-    return JsonResponse({"subjects": subjects})
