@@ -39,7 +39,7 @@ class StartupProfileUpsertSerializer(serializers.Serializer):
 class StartupUpdateRunCreateSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
     domain = serializers.CharField()
-    window_months = serializers.IntegerField(required=False, default=6, min_value=1, max_value=24)
+    window_months = serializers.IntegerField(required=False, default=1, min_value=1, max_value=24)
 
 
 class StartupUpdateIngestSerializer(serializers.Serializer):

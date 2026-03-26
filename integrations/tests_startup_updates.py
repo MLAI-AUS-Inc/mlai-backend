@@ -41,6 +41,7 @@ from integrations.services.gmail import (
     StaleHistoryCursorError,
     build_backfill_query,
     clean_email_text,
+    default_backfill_window,
 )
 from integrations.services.startup_updates import (
     STARTUP_UPDATE_WORKFLOW,
@@ -244,6 +245,94 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["mode"], "backfill")
         self.assertTrue(response.data["cursor_reset"])
 
+    @patch("integrations.services.gmail.get_message_metadata")
+    @patch("integrations.services.gmail.list_message_page")
+    def test_ingest_next_page_persists_hard_filtered_messages_as_irrelevant(
+        self,
+        mock_list_message_page,
+        mock_get_message_metadata,
+    ):
+        message_id = "msg-hard-filter"
+        internal_date = timezone.now()
+        mock_list_message_page.return_value = {
+            "messages": [{"id": message_id}],
+            "resultSizeEstimate": 1,
+            "nextPageToken": None,
+        }
+        mock_get_message_metadata.return_value = {
+            "id": message_id,
+            "threadId": "thread-hard-filter",
+            "historyId": "42",
+            "internalDate": str(int(internal_date.timestamp() * 1000)),
+            "labelIds": ["INBOX", "CATEGORY_PROMOTIONS"],
+            "snippet": "Use this magic link to sign in.",
+            "payload": {
+                "headers": [
+                    {"name": "Subject", "value": "Magic link to sign in"},
+                    {"name": "From", "value": "No Reply <noreply@example.com>"},
+                    {"name": "List-Unsubscribe", "value": "<mailto:unsubscribe@example.com>"},
+                    {"name": "Precedence", "value": "bulk"},
+                ]
+            },
+        }
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        artifact = GmailMessageArtifact.objects.get(
+            organization=self.organization,
+            gmail_message_id=message_id,
+        )
+        self.assertEqual(artifact.relevance_label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertFalse(artifact.needs_thread_context)
+        self.assertIn("hard_filtered_gmail_category", artifact.heuristic_reasons)
+        self.assertEqual(response.data["relevance_counts"]["irrelevant"], 1)
+
+    @patch("integrations.services.gmail.get_message_metadata")
+    @patch("integrations.services.gmail.list_message_page")
+    def test_ingest_next_page_reuses_existing_metadata_without_refetch(
+        self,
+        mock_list_message_page,
+        mock_get_message_metadata,
+    ):
+        artifact = GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-existing",
+            gmail_thread_id="thread-existing",
+            history_id="99",
+            internal_date=timezone.now(),
+            subject="Existing Acme update",
+            from_address="founder@acme.com",
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        mock_list_message_page.return_value = {
+            "messages": [{"id": artifact.gmail_message_id}],
+            "resultSizeEstimate": 1,
+            "nextPageToken": None,
+        }
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["reused_existing_count"], 1)
+        self.assertEqual(response.data["message_ids"], [artifact.gmail_message_id])
+        mock_get_message_metadata.assert_not_called()
+
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
     def setUp(self):
@@ -406,6 +495,92 @@ class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
         self.assertEqual(other_run.status, ContentFactoryRunStatus.RUNNING)
 
 
+class RelabelStartupUpdateMessagesCommandTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = StartupProfile.objects.create(
+            organization=self.organization,
+            company_aliases=["Acme", "Acme AI"],
+            domain_aliases=["acme.com"],
+            positive_keywords=["acme", "arr"],
+            investor_domains=["fund.example"],
+        )
+        self.unclassified = GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="bulk-1",
+            gmail_thread_id="thread-bulk-1",
+            internal_date=timezone.now(),
+            subject="Weekly digest and magic link",
+            from_address="noreply@news.example",
+            to_addresses=["samdonegan@gmail.com"],
+            header_values={
+                "list-unsubscribe": "<mailto:unsubscribe@example.com>",
+                "precedence": "bulk",
+            },
+            heuristic_score=61,
+            heuristic_reasons=["matched_company_alias_or_positive_keyword"],
+            relevance_label=GmailRelevanceLabel.AMBIGUOUS,
+            needs_thread_context=True,
+        )
+        self.classified = GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="classified-1",
+            gmail_thread_id="thread-classified-1",
+            internal_date=timezone.now(),
+            subject="Weekly digest and magic link",
+            from_address="noreply@news.example",
+            to_addresses=["samdonegan@gmail.com"],
+            header_values={
+                "list-unsubscribe": "<mailto:unsubscribe@example.com>",
+                "precedence": "bulk",
+            },
+            heuristic_score=88,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            classified_at=timezone.now(),
+        )
+
+    def test_relabel_command_dry_run_reports_changes_without_mutating(self):
+        out = StringIO()
+
+        call_command(
+            "relabel_startup_update_messages",
+            domain=self.organization.domain,
+            stdout=out,
+        )
+
+        self.unclassified.refresh_from_db()
+        self.classified.refresh_from_db()
+        self.assertEqual(self.unclassified.relevance_label, GmailRelevanceLabel.AMBIGUOUS)
+        self.assertTrue(self.unclassified.needs_thread_context)
+        self.assertEqual(self.classified.relevance_label, GmailRelevanceLabel.RELEVANT)
+        self.assertIn("Before:", out.getvalue())
+        self.assertIn("After:", out.getvalue())
+        self.assertIn("Would relabel 1 message(s).", out.getvalue())
+
+    def test_relabel_command_apply_updates_unclassified_messages_only(self):
+        out = StringIO()
+
+        call_command(
+            "relabel_startup_update_messages",
+            domain=self.organization.domain,
+            apply=True,
+            stdout=out,
+        )
+
+        self.unclassified.refresh_from_db()
+        self.classified.refresh_from_db()
+        self.assertEqual(self.unclassified.relevance_label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertFalse(self.unclassified.needs_thread_context)
+        self.assertIn("hard_filtered_bulk_header", self.unclassified.heuristic_reasons)
+        self.assertEqual(self.classified.relevance_label, GmailRelevanceLabel.RELEVANT)
+        self.assertEqual(self.classified.heuristic_reasons, ["matched_company_domain"])
+        self.assertIn("Relabeled 1 message(s).", out.getvalue())
+
+
 class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
     def setUp(self):
         super().setUp()
@@ -485,6 +660,36 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["threads"][0]["gmail_thread_id"], self.thread.gmail_thread_id)
+
+    def test_classification_batch_excludes_irrelevant_messages(self):
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-irrelevant",
+            gmail_thread_id="thread-irrelevant",
+            internal_date=timezone.now(),
+            subject="Weekly digest",
+            from_address="noreply@news.example",
+            heuristic_score=0,
+            heuristic_reasons=["hard_filtered_bulk_header"],
+            relevance_label=GmailRelevanceLabel.IRRELEVANT,
+            needs_thread_context=False,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            batch_response = self.client.get(
+                reverse("startup_updates_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        self.assertEqual(
+            [item["gmail_message_id"] for item in batch_response.data["messages"]],
+            [self.message.gmail_message_id],
+        )
 
     def test_classification_extraction_timeline_and_drafts(self):
         with self._with_key():
@@ -685,6 +890,12 @@ class StartupUpdateOpenRunsViewTest(StartupUpdateApiTestCase):
 
 
 class StartupUpdateServiceHelpersTest(TestCase):
+    def test_default_backfill_window_defaults_to_30_days(self):
+        now = datetime(2026, 3, 26, tzinfo=dt_timezone.utc)
+        after_dt, before_dt = default_backfill_window(now=now)
+        self.assertEqual(before_dt, now)
+        self.assertEqual(after_dt, now - timedelta(days=30))
+
     def test_build_backfill_query_uses_unix_timestamps(self):
         after_dt = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
         before_dt = datetime(2026, 2, 1, tzinfo=dt_timezone.utc)
@@ -692,6 +903,9 @@ class StartupUpdateServiceHelpersTest(TestCase):
         self.assertIn("after:1767225600", query)
         self.assertIn("before:1769904000", query)
         self.assertIn("-in:spam -in:trash", query)
+        self.assertIn("-category:promotions", query)
+        self.assertIn("-category:social", query)
+        self.assertIn("-category:forums", query)
 
     def test_clean_email_text_strips_reply_chain(self):
         raw = "Latest update line\n\nOn Tue, someone wrote:\n> older quote\n> more"
@@ -742,6 +956,127 @@ class StartupUpdateServiceHelpersTest(TestCase):
         self.assertGreaterEqual(score, 80)
         self.assertEqual(label, GmailRelevanceLabel.RELEVANT)
         self.assertIn("matched_company_domain", reasons)
+
+    def test_score_message_for_profile_hard_filters_bulk_no_reply_mail(self):
+        profile = SimpleNamespace(
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+            founder_names=[],
+            team_names=[],
+            investor_domains=[],
+            investor_names=[],
+            competitor_names=[],
+            competitor_domains=[],
+            customer_names=[],
+            customer_domains=[],
+            prospect_names=[],
+            prospect_domains=[],
+            positive_keywords=["acme"],
+            negative_keywords=[],
+        )
+        artifact = SimpleNamespace(
+            subject="Weekly digest and magic link",
+            snippet="Use this magic link to sign in",
+            cleaned_text="",
+            from_address="noreply@news.example",
+            to_addresses=["samdonegan@gmail.com"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={
+                "list-unsubscribe": "<mailto:unsubscribe@example.com>",
+                "precedence": "bulk",
+            },
+            label_ids=["CATEGORY_PROMOTIONS"],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertEqual(score, 0)
+        self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertIn("hard_filtered_bulk_header", reasons)
+        self.assertIn("hard_filtered_no_reply_sender", reasons)
+        self.assertIn("hard_filtered_gmail_category", reasons)
+
+    def test_score_message_for_profile_allowlist_overrides_hard_filter(self):
+        profile = SimpleNamespace(
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+            founder_names=[],
+            team_names=["Sam Donegan"],
+            investor_domains=["fund.example"],
+            investor_names=[],
+            competitor_names=[],
+            competitor_domains=[],
+            customer_names=[],
+            customer_domains=[],
+            prospect_names=[],
+            prospect_domains=[],
+            positive_keywords=["acme", "arr"],
+            negative_keywords=[],
+        )
+        artifact = SimpleNamespace(
+            subject="Acme investor newsletter with ARR update",
+            snippet="ARR is now 24000",
+            cleaned_text="Investor update for Acme ARR",
+            from_address="noreply@acme.com",
+            to_addresses=["partner@fund.example"],
+            cc_addresses=[],
+            bcc_addresses=[],
+            reply_to_addresses=[],
+            header_values={"list-unsubscribe": "<mailto:unsubscribe@acme.com>"},
+            label_ids=["CATEGORY_PROMOTIONS"],
+        )
+
+        score, reasons, label = score_message_for_profile(profile, artifact)
+
+        self.assertGreater(score, 20)
+        self.assertNotEqual(label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertIn("allowlist_override_hard_filter", reasons)
+        self.assertIn("matched_company_domain", reasons)
+
+    def test_score_message_for_profile_hard_filters_invites_receipts_and_auth_subjects(self):
+        profile = SimpleNamespace(
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+            founder_names=[],
+            team_names=[],
+            investor_domains=[],
+            investor_names=[],
+            competitor_names=[],
+            competitor_domains=[],
+            customer_names=[],
+            customer_domains=[],
+            prospect_names=[],
+            prospect_domains=[],
+            positive_keywords=[],
+            negative_keywords=[],
+        )
+
+        for subject in [
+            "Calendar invitation",
+            "Payment received",
+            "Order confirmation",
+            "Verification code",
+        ]:
+            artifact = SimpleNamespace(
+                subject=subject,
+                snippet="",
+                cleaned_text="",
+                from_address="notifications@example.com",
+                to_addresses=["samdonegan@gmail.com"],
+                cc_addresses=[],
+                bcc_addresses=[],
+                reply_to_addresses=[],
+                header_values={},
+                label_ids=[],
+            )
+
+            score, reasons, label = score_message_for_profile(profile, artifact)
+
+            self.assertEqual(score, 0, msg=subject)
+            self.assertEqual(label, GmailRelevanceLabel.IRRELEVANT, msg=subject)
+            self.assertIn("hard_filtered_low_signal_pattern", reasons, msg=subject)
 
     def test_sync_startup_profile_from_company_merges_existing_org_context(self):
         user = User.objects.create_user(
