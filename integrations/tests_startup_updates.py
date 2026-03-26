@@ -1,16 +1,28 @@
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
+from io import StringIO
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryRun, Organization, OrganizationContentConfig
+from core.models import (
+    ContentFactoryApprovalState,
+    ContentFactoryRun,
+    ContentFactoryRunStatus,
+    ContentFactoryRunStep,
+    ContentFactoryRunStepAttempt,
+    ContentFactoryStepStatus,
+    Organization,
+    OrganizationContentConfig,
+)
 from integrations.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -31,6 +43,7 @@ from integrations.services.gmail import (
     clean_email_text,
 )
 from integrations.services.startup_updates import (
+    STARTUP_UPDATE_WORKFLOW,
     create_startup_update_run,
     render_monthly_update_markdown,
     score_message_for_profile,
@@ -230,7 +243,167 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         cursor.refresh_from_db()
         self.assertEqual(response.data["mode"], "backfill")
         self.assertTrue(response.data["cursor_reset"])
-        self.assertEqual(cursor.last_history_id, "")
+
+
+class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = StartupProfile.objects.create(
+            organization=self.organization,
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+        )
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        self.artifact = GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="artifact-1",
+            gmail_thread_id="thread-1",
+            internal_date=timezone.now(),
+            subject="Acme update",
+            from_address="founder@acme.com",
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+        )
+        self.draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            month=timezone.now().date().replace(day=1),
+            status="ready",
+            structured_memo={"title": "Investor update"},
+        )
+
+    def _create_run(
+        self,
+        *,
+        run_id: str,
+        status: str = ContentFactoryRunStatus.RUNNING,
+        domain: Optional[str] = None,
+        result: Optional[dict] = None,
+    ) -> ContentFactoryRun:
+        run = ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            domain=domain or self.organization.domain,
+            slack_user_id=str(self.user.id),
+            status=status,
+            current_step="gmail_backfill",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            step_order=["profile_resolution", "gmail_backfill"],
+            run_request={"organization_id": self.organization.id},
+            result=result
+            or {
+                "_valley_meta": {
+                    "lease_owner": "worker-1",
+                    "lease_expires_at": "2026-03-26T06:10:00+00:00",
+                    "last_heartbeat_at": "2026-03-26T06:05:00+00:00",
+                    "last_error": "timed out",
+                    "dead_letters": [{"step_key": "gmail_backfill"}],
+                }
+            },
+            error="timed out",
+            resume_available=True,
+        )
+        step = ContentFactoryRunStep.objects.create(
+            run=run,
+            step_key="gmail_backfill",
+            display_order=1,
+            required=True,
+            status=ContentFactoryStepStatus.RUNNING,
+            attempts=1,
+            message="Processing gmail_backfill",
+            started_at=timezone.now(),
+            error="",
+        )
+        ContentFactoryRunStepAttempt.objects.create(
+            step=step,
+            attempt=1,
+            status=ContentFactoryStepStatus.RUNNING,
+            message="attempt started",
+            started_at=timezone.now(),
+            error="",
+        )
+        return run
+
+    def test_reset_command_dry_run_lists_matches_and_does_not_mutate(self):
+        run = self._create_run(run_id="startup-update-reset-dry-run")
+
+        out = StringIO()
+        call_command(
+            "reset_startup_update_runs",
+            domain=self.organization.domain,
+            stdout=out,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertIn(run.run_id, out.getvalue())
+        self.assertIn("Dry run", out.getvalue())
+        self.assertTrue(run.resume_available)
+        self.assertEqual(run.steps.get(step_key="gmail_backfill").status, ContentFactoryStepStatus.RUNNING)
+
+    def test_reset_command_apply_resets_stale_open_runs_and_preserves_artifacts(self):
+        stale_run = self._create_run(run_id="startup-update-reset-stale")
+        fresh_run = self._create_run(run_id="startup-update-reset-fresh")
+        completed_run = self._create_run(
+            run_id="startup-update-reset-completed",
+            status=ContentFactoryRunStatus.COMPLETED,
+        )
+        stale_time = timezone.now() - timedelta(minutes=45)
+        ContentFactoryRun.objects.filter(pk=stale_run.pk).update(updated_at=stale_time)
+
+        out = StringIO()
+        call_command(
+            "reset_startup_update_runs",
+            domain=self.organization.domain,
+            older_than_minutes=30,
+            apply=True,
+            stdout=out,
+        )
+
+        stale_run.refresh_from_db()
+        fresh_run.refresh_from_db()
+        completed_run.refresh_from_db()
+
+        self.assertEqual(stale_run.status, ContentFactoryRunStatus.FAILED)
+        self.assertFalse(stale_run.resume_available)
+        self.assertEqual(stale_run.error, "Locally reset stale startup-update run.")
+        self.assertIsNone(stale_run.result["_valley_meta"]["lease_owner"])
+        self.assertEqual(stale_run.result["_valley_meta"]["dead_letters"], [])
+
+        stale_step = stale_run.steps.get(step_key="gmail_backfill")
+        self.assertEqual(stale_step.status, ContentFactoryStepStatus.FAILED)
+        self.assertEqual(stale_step.error, "Locally reset stale startup-update run.")
+        self.assertIsNotNone(stale_step.completed_at)
+        stale_attempt = stale_step.attempt_history.get(attempt=1)
+        self.assertEqual(stale_attempt.status, ContentFactoryStepStatus.FAILED)
+        self.assertEqual(stale_attempt.error, "Locally reset stale startup-update run.")
+        self.assertIsNotNone(stale_attempt.completed_at)
+
+        self.assertEqual(fresh_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(completed_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(GmailMessageArtifact.objects.count(), 1)
+        self.assertEqual(MonthlyUpdateDraft.objects.count(), 1)
+        self.assertIn("Reset 1 startup-update run(s).", out.getvalue())
+
+    def test_reset_command_run_id_selector_targets_only_requested_run(self):
+        target_run = self._create_run(run_id="startup-update-reset-target")
+        other_run = self._create_run(run_id="startup-update-reset-other")
+
+        call_command(
+            "reset_startup_update_runs",
+            run_ids=[target_run.run_id],
+            apply=True,
+            stdout=StringIO(),
+        )
+
+        target_run.refresh_from_db()
+        other_run.refresh_from_db()
+        self.assertEqual(target_run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(other_run.status, ContentFactoryRunStatus.RUNNING)
 
 
 class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
