@@ -175,8 +175,20 @@ Recommended local flow:
 2. authenticate through `GET /api/v1/auth/verify-magic-link/` in the browser
 3. visit `http://localhost:8000/integrations/connect/google`
 4. confirm a [`GoogleConnection`](/Users/samdonegan/Documents/Code/mlai-backend/integrations/models.py) exists for your user
-5. if a default [`UserStartupBinding`](/Users/samdonegan/Documents/Code/mlai-backend/integrations/models.py) already exists for the user, the callback will auto-create the startup update run and notify Valley
-6. otherwise create or retry the startup update run manually and verify it advances past `gmail_backfill`
+5. after the callback redirects back to Vibe Raising, trigger `email-draft/start` from the frontend and confirm Valley begins processing the run
+6. if a prior local run is stuck, stop the Valley worker, dry-run the reset command, apply it, restart the worker, and then trigger a fresh draft run:
+
+```bash
+cd /Users/samdonegan/Documents/Code/valley-backend
+docker compose -f docker-compose.local.yml -f docker-compose.mlai-local.yml stop worker
+
+cd /Users/samdonegan/Documents/Code/mlai-backend
+scripts/local-live-db/django.sh reset_startup_update_runs --domain mlai.au --older-than-minutes 5
+scripts/local-live-db/django.sh reset_startup_update_runs --domain mlai.au --older-than-minutes 5 --apply
+
+cd /Users/samdonegan/Documents/Code/valley-backend
+docker compose -f docker-compose.local.yml -f docker-compose.mlai-local.yml start worker
+```
 
 Example check:
 
