@@ -117,6 +117,7 @@ mlai_env_lines = [
     f"CONTENT_FACTORY_URL=http://host.docker.internal:{content_factory_port}",
     f"CONTENT_FACTORY_API_KEY={local_content_factory_api_key}",
     "VALLEY_HARNESS_URL=http://valley-api:8080",
+    f"VALLEY_HARNESS_API_KEY={local_mlai_api_key}",
     f"ROO_API_KEY={local_mlai_api_key}",
     f"INTERNAL_API_KEY={local_mlai_api_key}",
     "ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,host.docker.internal",

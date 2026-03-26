@@ -97,6 +97,7 @@ The generated overrides do three important things:
 - point local `content-factory` at local `mlai-backend` on `http://host.docker.internal:8000` and local Redis on `redis://redis:6379/0`
 - set `DEFAULT_FRONTEND_URL` and `MEDHACK_URL` to `http://localhost:3000` so local auth and Gmail OAuth redirect back to the real local frontend
 - set `VALLEY_HARNESS_URL=http://valley-api:8080` so Gmail OAuth can auto-start the local Valley harness when the Valley stack is running on the shared Docker network
+- set `VALLEY_HARNESS_API_KEY` to the same local internal service key as `ROO_API_KEY` and `INTERNAL_API_KEY` so local Valley auth matches `mlai-backend`
 
 ## 3. Start Or Stop The DB Tunnel
 
@@ -153,6 +154,18 @@ Before testing Gmail locally:
 - keep `GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/integrations/callback/google` in `mlai-backend/.env.local-docker`
 - keep `DEFAULT_FRONTEND_URL=http://localhost:3000` and `MEDHACK_URL=http://localhost:3000` in `mlai-backend/.env.local-docker`
 - add `http://localhost:8000/integrations/callback/google` to the Google Cloud console's authorized redirect URIs for the current OAuth client
+- restart the local `web` container after changing `.env.local-docker` so the running callback code and service keys match the repo
+- if you want OAuth to auto-start Valley, start Valley on the shared Docker network instead of the standalone compose mode:
+
+```bash
+cd /Users/samdonegan/Documents/Code/valley-backend
+docker network create mlai-local-shared >/dev/null 2>&1 || true
+MLAI_LOCAL_API_KEY="$(grep '^INTERNAL_API_KEY=' /Users/samdonegan/Documents/Code/mlai-backend/.env.local-docker | cut -d= -f2-)" \
+VALLEY_INTERNAL_API_KEY="$(grep '^VALLEY_HARNESS_API_KEY=' /Users/samdonegan/Documents/Code/mlai-backend/.env.local-docker | cut -d= -f2-)" \
+docker compose -f docker-compose.local.yml -f docker-compose.mlai-local.yml up --build
+```
+
+Plain `docker-compose.local.yml` is standalone-only. It does not expose the `valley-api` hostname on `mlai-local-shared`, so `mlai-backend` cannot reach it at `http://valley-api:8080`.
 
 Use the same browser session for both auth steps so the Django `sessionid` cookie issued by magic-link verification is present when you hit the Gmail connect route.
 
