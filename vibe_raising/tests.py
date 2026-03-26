@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
@@ -430,6 +431,45 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         self.assertEqual(first.data["runId"], second.data["runId"])
         mock_notify.assert_called_once()
+
+    def test_email_draft_start_redispatches_stale_queued_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        ContentFactoryRun.objects.filter(pk=run.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=5),
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "queued")
+        self.assertEqual(response.data["runId"], run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        mock_notify.assert_called_once_with(run.run_id)
 
     def test_email_draft_status_reports_queued_then_running_for_open_run(self):
         self.client.force_authenticate(user=self.user)
