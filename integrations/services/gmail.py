@@ -652,7 +652,6 @@ def hydrate_thread_artifact(
     messages = thread_data.get("messages", []) or []
     payloads = []
     source_message_ids = []
-    attachment_ids = []
     latest_internal_date = None
 
     thread_artifact, _ = GmailThreadArtifact.objects.get_or_create(
@@ -660,6 +659,7 @@ def hydrate_thread_artifact(
         google_connection=connection,
         gmail_thread_id=thread_id,
     )
+    attachment_ids = [] if fetch_attachments else list(thread_artifact.attachment_ids or [])
 
     for message_data in messages:
         artifact = upsert_message_artifact_from_message_data(
@@ -731,6 +731,93 @@ def hydrate_thread_artifact(
         ]
     )
     return thread_artifact
+
+
+def ensure_thread_attachments_hydrated(
+    *,
+    organization,
+    connection: GoogleConnection,
+    thread_artifact: GmailThreadArtifact,
+    size_limit_bytes: int = DEFAULT_ATTACHMENT_BYTES_LIMIT,
+) -> list[GmailAttachmentArtifact]:
+    source_message_ids = [
+        str(message_id or "").strip()
+        for message_id in (
+            thread_artifact.source_message_ids
+            or [item.get("message_id") for item in (thread_artifact.message_payloads or [])]
+        )
+        if str(message_id or "").strip()
+    ]
+    if not source_message_ids:
+        return list(
+            GmailAttachmentArtifact.objects.filter(thread_artifact=thread_artifact).order_by("id")
+        )
+
+    message_artifacts = list(
+        GmailMessageArtifact.objects.filter(
+            organization=organization,
+            google_connection=connection,
+            gmail_message_id__in=source_message_ids,
+        ).order_by("internal_date", "id")
+    )
+    existing_attachments = {
+        (
+            attachment.message_artifact_id,
+            attachment.part_id,
+            attachment.gmail_attachment_id,
+        ): attachment
+        for attachment in GmailAttachmentArtifact.objects.filter(message_artifact__in=message_artifacts)
+    }
+    existing_attachments_by_message: dict[int, list[GmailAttachmentArtifact]] = {}
+    for attachment in existing_attachments.values():
+        existing_attachments_by_message.setdefault(attachment.message_artifact_id, []).append(attachment)
+
+    hydrated_attachments: list[GmailAttachmentArtifact] = []
+    attachment_ids: list[int] = []
+    seen_attachment_ids: set[int] = set()
+    for message_artifact in message_artifacts:
+        manifest_items = message_artifact.attachment_manifest or []
+        for manifest_item in manifest_items:
+            part_id = str(manifest_item.get("part_id") or "").strip()
+            attachment_id = str(manifest_item.get("attachment_id") or "").strip()
+            key = (message_artifact.id, part_id, attachment_id)
+            attachment = existing_attachments.get(key)
+            if attachment is None:
+                attachment = _hydrate_attachment(
+                    organization=organization,
+                    connection=connection,
+                    thread_artifact=thread_artifact,
+                    message_artifact=message_artifact,
+                    manifest_item=manifest_item,
+                    size_limit_bytes=size_limit_bytes,
+                )
+                existing_attachments[key] = attachment
+            elif attachment.thread_artifact_id != thread_artifact.id:
+                attachment.thread_artifact = thread_artifact
+                attachment.save(update_fields=["thread_artifact", "updated_at"])
+
+            if attachment.id not in seen_attachment_ids:
+                hydrated_attachments.append(attachment)
+                attachment_ids.append(attachment.id)
+                seen_attachment_ids.add(attachment.id)
+
+        if manifest_items:
+            continue
+
+        for attachment in existing_attachments_by_message.get(message_artifact.id, []):
+            if attachment.thread_artifact_id != thread_artifact.id:
+                attachment.thread_artifact = thread_artifact
+                attachment.save(update_fields=["thread_artifact", "updated_at"])
+            if attachment.id not in seen_attachment_ids:
+                hydrated_attachments.append(attachment)
+                attachment_ids.append(attachment.id)
+                seen_attachment_ids.add(attachment.id)
+
+    if thread_artifact.attachment_ids != attachment_ids:
+        thread_artifact.attachment_ids = attachment_ids
+        thread_artifact.save(update_fields=["attachment_ids", "updated_at"])
+
+    return hydrated_attachments
 
 
 def fetch_last_month_emails(connection: GoogleConnection):

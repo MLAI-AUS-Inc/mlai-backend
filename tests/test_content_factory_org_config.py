@@ -110,3 +110,41 @@ class ContentFactoryOrgConfigTests(TestCase):
 
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
         self.assertEqual(get_response.data["build_healing_hints"], hints)
+
+    def test_org_config_round_trips_repo_execution_contract(self):
+        execution_contract = {
+            "runtime_family": "python",
+            "workspace_subdir": "apps/content",
+            "install_command": ["pip", "install", "-r", "requirements.txt"],
+            "typecheck_command": ["python", "-m", "py_compile", "main.py"],
+            "test_command": ["pytest", "-q"],
+            "build_command": ["python", "build.py"],
+            "preview_command": ["python", "-m", "http.server", "8000"],
+            "browser_entry_url": "http://127.0.0.1:8000",
+            "required_env_keys": ["OPENAI_API_KEY"],
+            "system_packages": ["libpq-dev"],
+            "registry_auth_refs": ["pypi-internal"],
+            "supports_direct_publish": False,
+            "fallback_mode": "draft_pr",
+        }
+
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "repo_execution_contract": execution_contract,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.repo_execution_contract, execution_contract)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["repo_execution_contract"], execution_contract)

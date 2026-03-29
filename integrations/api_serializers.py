@@ -52,6 +52,7 @@ class StartupUpdateIngestSerializer(serializers.Serializer):
 class StartupUpdateThreadHydrationSerializer(serializers.Serializer):
     thread_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     message_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    fetch_attachments = serializers.BooleanField(required=False, default=False)
 
 
 class StartupUpdateBatchQuerySerializer(serializers.Serializer):

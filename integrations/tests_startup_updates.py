@@ -805,6 +805,49 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["hydrated_thread_ids"], [self.thread.gmail_thread_id])
         self.assertEqual(mock_hydrate_thread_artifact.call_args.kwargs["thread_id"], self.thread.gmail_thread_id)
+        self.assertFalse(mock_hydrate_thread_artifact.call_args.kwargs["fetch_attachments"])
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_lazily_hydrates_missing_attachments(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-lazy",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.return_value = {"data": "TVJSIHJlYWNoZWQgMTIwMDAgVVNE"}
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["threads"][0]["attachments"]), 1)
+        hydrated_attachment = GmailAttachmentArtifact.objects.get(
+            organization=self.organization,
+            message_artifact=self.message,
+            gmail_attachment_id="att-lazy",
+        )
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.attachment_ids, [hydrated_attachment.id])
+        self.assertEqual(response.data["threads"][0]["attachments"][0]["id"], hydrated_attachment.id)
+        mock_get_attachment_payload.assert_called_once_with(
+            self.google_connection,
+            self.message.gmail_message_id,
+            "att-lazy",
+        )
 
     def test_hydration_candidates_ignore_threads_from_other_connections(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)

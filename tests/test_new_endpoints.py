@@ -1033,6 +1033,50 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_message.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_blocked_marks_job_blocked_without_terminal_notification(self, mock_send_dm, mock_send_message):
+        user = User.objects.create_user(email="blocked@example.com", password="password", slack_id="U123")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="blocked-run-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            billing_status="charged",
+            billing_amount=6,
+            request_meta={"domain": "mlai.au"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_blocked",
+                "job_id": "blocked-run-1",
+                "run_id": "blocked-run-1",
+                "workflow": "direct_generate",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "blocked_step": "verify_build",
+                "error_code": "verifier_capacity_unavailable",
+                "error": "Dedicated verifier worker `build-verifier` is unavailable; verify_build is blocked until capacity returns.",
+                "preferred_queue": "build-verifier",
+                "fallback_policy": "auto_fallback",
+                "retry_after_seconds": 60,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="blocked-run-1")
+        self.assertEqual(job.status, "blocked")
+        self.assertIn("verifier_capacity_unavailable", job.error_message)
+        self.assertEqual(job.billing_status, "charged")
+        self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
+        self.assertEqual(job.request_meta.get("blocked_preferred_queue"), "build-verifier")
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_message')
     def test_scaffold_complete_uses_parent_run_thread_context(self, mock_send_message):
         ContentFactoryJob.objects.create(
             job_id="scan-parent-1",
@@ -1180,6 +1224,57 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         blocks = mock_send_message.call_args[1]["blocks"]
         self.assertIn("Draft PR created", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open PR")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_generation_pr_opened_callback_marks_job_needs_review(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-pr-opened",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_pr_opened",
+                "job_id": "job-pr-opened",
+                "run_id": "job-pr-opened",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "pr_url": "https://github.com/example/pr/44",
+                "pr_number": 44,
+                "route_path": "/articles/how-to-build-an-ai-harness",
+                "review_required": True,
+                "verification_state": "build_failed_after_repair_budget",
+                "reason_code": "repair_budget_exhausted",
+                "artifact_links": {
+                    "verification_report": "/api/runs/job-pr-opened/artifacts/verification_report.json",
+                },
+                "dedupe_key": "generation-pr-opened-44",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-pr-opened")
+        self.assertEqual(job.status, "needs_review")
+        self.assertEqual(job.pr_url, "https://github.com/example/pr/44")
+        self.assertEqual(job.request_meta.get("publish_stage"), "needs_review")
+        self.assertTrue(job.request_meta.get("review_required"))
+        self.assertEqual(job.request_meta.get("verification_state"), "build_failed_after_repair_budget")
+        self.assertEqual(job.request_meta.get("reason_code"), "repair_budget_exhausted")
+        self.assertEqual(
+            job.request_meta.get("artifact_links", {}).get("verification_report"),
+            "/api/runs/job-pr-opened/artifacts/verification_report.json",
+        )
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')
@@ -1989,6 +2084,82 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         )
         self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
         self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
+
+
+class ArticleGenerationStatusTests(TestCase):
+    @patch('integrations.services.article_generation._handle_status_failure')
+    def test_check_generation_status_marks_blocked_run_without_terminal_failure(self, mock_handle_status_failure):
+        from integrations.services import article_generation
+
+        ContentFactoryJob.objects.create(
+            job_id="blocked-poll-run-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+        )
+
+        class _FakeResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {
+                    "job_id": "blocked-poll-run-1",
+                    "run_id": "blocked-poll-run-1",
+                    "status": "blocked",
+                    "current_step": "verify_build",
+                    "error_code": "verifier_capacity_unavailable",
+                    "error": "Dedicated verifier worker `build-verifier` is unavailable; verify_build is blocked until capacity returns.",
+                    "preferred_queue": "build-verifier",
+                    "fallback_policy": "auto_fallback",
+                    "retry_after_seconds": 60,
+                }
+
+        with patch('integrations.services.article_generation.http_requests.get', return_value=_FakeResponse()):
+            result = article_generation.check_generation_status("blocked-poll-run-1")
+
+        self.assertEqual(result["status"], "blocked")
+        mock_handle_status_failure.assert_not_called()
+        job = ContentFactoryJob.objects.get(job_id="blocked-poll-run-1")
+        self.assertEqual(job.status, "blocked")
+        self.assertIn("verifier_capacity_unavailable", job.error_message)
+        self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
+
+    @patch('integrations.services.article_generation._handle_status_failure')
+    def test_check_generation_status_marks_needs_review_run_without_terminal_failure(self, mock_handle_status_failure):
+        from integrations.services import article_generation
+
+        ContentFactoryJob.objects.create(
+            job_id="needs-review-run-1",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+        )
+
+        class _FakeResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {
+                    "job_id": "needs-review-run-1",
+                    "run_id": "needs-review-run-1",
+                    "status": "needs_review",
+                    "pr_url": "https://github.com/example/pr/55",
+                    "verification_state": "unsupported_runtime",
+                    "reason_code": "unsupported_runtime",
+                }
+
+        with patch('integrations.services.article_generation.http_requests.get', return_value=_FakeResponse()):
+            result = article_generation.check_generation_status("needs-review-run-1")
+
+        self.assertEqual(result["status"], "needs_review")
+        mock_handle_status_failure.assert_not_called()
+        job = ContentFactoryJob.objects.get(job_id="needs-review-run-1")
+        self.assertEqual(job.status, "needs_review")
+        self.assertEqual(job.pr_url, "https://github.com/example/pr/55")
+        self.assertEqual(job.request_meta.get("publish_stage"), "needs_review")
+        self.assertEqual(job.request_meta.get("reason_code"), "unsupported_runtime")
 
 
 class TopicConfirmTests(TestCase):

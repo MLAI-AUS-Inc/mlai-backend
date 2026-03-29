@@ -949,6 +949,7 @@ class ContentFactoryOrgConfigView(APIView):
             'installed_packages': config.installed_packages if config else {},
             'pillar_strategy': config.pillar_strategy if config else {},
             'build_healing_hints': config.build_healing_hints if config else [],
+            'repo_execution_contract': config.repo_execution_contract if config else {},
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
             'publish_targets': config.publish_targets if config else [],
@@ -1022,6 +1023,7 @@ class ContentFactoryOrgConfigView(APIView):
             'installed_packages',
             'pillar_strategy',
             'build_healing_hints',
+            'repo_execution_contract',
             'article_path_pattern',
             'registry_path',
             'publish_targets',
@@ -2005,6 +2007,8 @@ class ContentFactoryCallbackView(APIView):
     - scan_progress: Non-terminal repository scan milestone update
     - discovery_progress: Non-terminal discovery milestone update
     - article_progress: Non-terminal article milestone update
+    - generation_blocked: Non-terminal capacity or verifier block update
+    - generation_pr_opened: Draft PR opened as the terminal reviewable outcome
     - article_complete: Article generated and published successfully
     - publish_bundle_ready: Delivery bundle packaged and ready
     - error: Pipeline failed with error
@@ -2048,6 +2052,10 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_scan_complete(data)
             elif event_type == 'generation_failed':
                 return self._handle_generation_failed(data)
+            elif event_type == 'generation_blocked':
+                return self._handle_generation_blocked(data)
+            elif event_type == 'generation_pr_opened':
+                return self._handle_generation_pr_opened(data)
             elif event_type == 'scaffold_complete':
                 return self._handle_scaffold_complete(data)
             elif event_type == 'delivery_mode_required':
@@ -2437,6 +2445,122 @@ class ContentFactoryCallbackView(APIView):
                 'status': 'processed',
                 'job_id': job_id,
                 'pr_url': pr_url or None,
+                'slack_sent': slack_sent,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def _handle_generation_pr_opened(self, data):
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        pr_url = str(data.get('pr_url') or '').strip()
+        pr_number = data.get('pr_number')
+        route_path = str(data.get('route_path') or '').strip()
+        preview_url = str(data.get('preview_url') or '').strip()
+        verification_state = str(data.get('verification_state') or '').strip()
+        reason_code = str(data.get('reason_code') or '').strip()
+        review_required = bool(data.get('review_required', True))
+        dedupe_key = self._callback_dedupe_key(data, event_name='generation_pr_opened')
+        status_value = 'needs_review' if review_required else 'pr_opened'
+        publish_stage = 'needs_review' if review_required else 'pr_opened'
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value=status_value,
+            error_message='',
+        )
+        self._store_publish_callback_state(
+            job=job,
+            data=data,
+            publish_stage=publish_stage,
+            status_value=status_value,
+        )
+
+        request_meta = dict(job.request_meta or {})
+        request_meta.update(
+            {
+                'review_required': review_required,
+                'verification_state': verification_state,
+                'reason_code': reason_code,
+            }
+        )
+        if data.get('artifact_links') is not None:
+            request_meta['artifact_links'] = data.get('artifact_links')
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
+
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text=(
+                "Draft PR opened and ready for human review."
+                if review_required
+                else "Draft PR opened."
+            ),
+            failed=False,
+        )
+
+        if self._callback_marker_present(
+            job=job,
+            bucket='callback_notifications',
+            event_name='generation_pr_opened',
+            dedupe_key=dedupe_key,
+        ):
+            logger.info("Ignoring duplicate generation_pr_opened callback for %s (%s)", job_id, dedupe_key)
+            return Response(
+                {
+                    'status': 'ignored',
+                    'reason': 'duplicate_notification',
+                    'job_id': job_id,
+                    'dedupe_key': dedupe_key,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        slack_sent = False
+        if pr_url:
+            blocks = build_draft_pr_created_blocks(
+                domain=domain,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                route_path=route_path,
+                preview_url=preview_url,
+            )
+            try:
+                slack_sent = self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text=(
+                        f"Draft PR ready for review for {domain}: {pr_url}"
+                        if review_required
+                        else f"Draft PR opened for {domain}: {pr_url}"
+                    ),
+                    blocks=blocks,
+                    allow_dm_fallback=True,
+                )
+            except Exception as exc:
+                logger.warning("Failed to send generation_pr_opened notification for %s: %s", job_id, exc)
+
+        if slack_sent:
+            self._record_callback_marker(
+                job=job,
+                bucket='callback_notifications',
+                event_name='generation_pr_opened',
+                dedupe_key=dedupe_key,
+            )
+
+        return Response(
+            {
+                'status': 'processed',
+                'job_id': job_id,
+                'pr_url': pr_url or None,
+                'review_required': review_required,
+                'job_status': status_value,
                 'slack_sent': slack_sent,
             },
             status=status.HTTP_200_OK,
@@ -3477,6 +3601,80 @@ class ContentFactoryCallbackView(APIView):
         return Response({
             'status': 'received',
             'message': 'Generation failed callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_generation_blocked(self, data):
+        """Handle generation_blocked event from content-factory."""
+        from .models import ContentFactoryJob
+
+        job_id = data.get('job_id')
+        run_id = data.get('run_id') or job_id
+        workflow = data.get('workflow') or 'unknown'
+        error_message = data.get('error', data.get('error_message', 'Generation is blocked waiting for capacity.'))
+        error_code = data.get('error_code', 'verifier_capacity_unavailable')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        blocked_step = data.get('blocked_step') or 'verify_build'
+        preferred_queue = data.get('preferred_queue') or ''
+        fallback_policy = data.get('fallback_policy') or ''
+        retry_after_seconds = data.get('retry_after_seconds')
+
+        job, _created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': 'blocked',
+                'error_message': f"[{error_code}] {error_message}",
+            }
+        )
+
+        if any(
+            value for value in (
+                blocked_step,
+                preferred_queue,
+                fallback_policy,
+                retry_after_seconds,
+            )
+        ):
+            request_meta = dict(job.request_meta or {})
+            request_meta.update(
+                {
+                    "blocked_step": blocked_step,
+                    "blocked_error_code": error_code,
+                    "blocked_preferred_queue": preferred_queue,
+                    "blocked_fallback_policy": fallback_policy,
+                    "blocked_retry_after_seconds": retry_after_seconds,
+                }
+            )
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
+
+        logger.warning(
+            "Generation blocked for job %s run %s workflow=%s (%s): [%s] %s",
+            job_id,
+            run_id,
+            workflow,
+            domain,
+            error_code,
+            error_message,
+        )
+
+        retry_suffix = ""
+        if retry_after_seconds is not None:
+            retry_suffix = f" Retrying when capacity returns (next check in ~{retry_after_seconds}s)."
+
+        upsert_live_progress_card(
+            job,
+            data=data,
+            summary_text=f"Run blocked at {blocked_step}: {error_message}{retry_suffix}",
+            failed=False,
+        )
+
+        return Response({
+            'status': 'received',
+            'message': 'Generation blocked callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
 

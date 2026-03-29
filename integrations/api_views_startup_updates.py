@@ -35,6 +35,7 @@ from integrations.models import (
 )
 from integrations.services.gmail import (
     default_backfill_window,
+    ensure_thread_attachments_hydrated,
     hydrate_thread_artifact,
     StaleHistoryCursorError,
     six_month_backfill_window,
@@ -521,13 +522,14 @@ class StartupUpdateHydrateThreadsView(APIView):
 
         hydrated = []
         attachment_count = 0
+        fetch_attachments = bool(data.get("fetch_attachments", False))
         for thread_id in sorted(thread_ids):
             thread_artifact = hydrate_thread_artifact(
                 organization=organization,
                 connection=google_connection,
                 thread_id=thread_id,
                 profile=profile,
-                fetch_attachments=True,
+                fetch_attachments=fetch_attachments,
             )
             attachment_count += len(thread_artifact.attachment_ids or [])
             hydrated.append(thread_artifact.gmail_thread_id)
@@ -716,8 +718,10 @@ class StartupUpdateExtractionBatchView(APIView):
 
         bundles = []
         for thread_artifact in queryset:
-            attachments = list(
-                GmailAttachmentArtifact.objects.filter(thread_artifact=thread_artifact).order_by("id")
+            attachments = ensure_thread_attachments_hydrated(
+                organization=organization,
+                connection=google_connection,
+                thread_artifact=thread_artifact,
             )
             bundles.append(
                 {

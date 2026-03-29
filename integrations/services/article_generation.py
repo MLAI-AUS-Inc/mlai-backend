@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ARTICLE_DELIVERY_MODE = "publish_code"
 VALID_ARTICLE_DELIVERY_MODES = {"publish_code", "content_only"}
-FAILURE_RUN_STATUSES = {"failed", "error", "blocked", "blocked_verification", "denied"}
+FAILURE_RUN_STATUSES = {"failed", "error", "denied"}
+BLOCKED_RUN_STATUSES = {"blocked", "blocked_verification"}
+REVIEWABLE_RUN_STATUSES = {"pr_opened", "needs_review"}
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
@@ -775,6 +777,12 @@ def augment_status_with_job_tracking(job_id: str, result: Optional[dict]) -> dic
 
 
 def _serialize_local_run_snapshot(run) -> dict:
+    result_payload = run.result or {}
+    status_value = run.status
+    reviewable_status = str(result_payload.get("status") or "").strip()
+    if status_value == "completed" and reviewable_status in REVIEWABLE_RUN_STATUSES:
+        status_value = reviewable_status
+
     steps = {}
     for step in run.steps.order_by("display_order", "id"):
         steps[step.step_key] = {
@@ -797,7 +805,7 @@ def _serialize_local_run_snapshot(run) -> dict:
         "domain": run.domain,
         "github_repo": run.github_repo,
         "slack_user_id": run.slack_user_id,
-        "status": run.status,
+        "status": status_value,
         "current_step": run.current_step,
         "approval_state": run.approval_state,
         "artifact_root": run.artifact_root,
@@ -806,7 +814,7 @@ def _serialize_local_run_snapshot(run) -> dict:
         "verification_summary": run.verification_summary or {},
         "resume_available": run.resume_available,
         "error": run.error or None,
-        "result": run.result or {},
+        "result": result_payload,
         "run_request": run.run_request or {},
         "step_states": steps,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
@@ -1459,6 +1467,108 @@ def _handle_status_failure(job_id: str, result: dict):
             logger.warning(f"Failed to send failure notification for job {job_id}: {e}")
 
 
+def _handle_status_blocked(job_id: str, result: dict):
+    """
+    Handle a blocked job detected during status polling.
+    Updates the local ContentFactoryJob without treating the run as terminal.
+    """
+    from core.models import ContentFactoryJob
+
+    try:
+        job = ContentFactoryJob.objects.get(job_id=job_id)
+    except ContentFactoryJob.DoesNotExist:
+        logger.warning(f"Blocked status for unknown job {job_id}")
+        return
+
+    error_message = result.get('error') or result.get('error_message') or 'Generation is blocked waiting for capacity'
+    error_code = str(result.get("error_code") or "blocked")
+    blocked_step = str(result.get("blocked_step") or result.get("current_step") or "").strip()
+
+    update_fields = ['updated_at']
+    if job.status != 'blocked':
+        job.status = 'blocked'
+        update_fields.append('status')
+
+    formatted_error = f"[{error_code}] {error_message}"
+    if job.error_message != formatted_error:
+        job.error_message = formatted_error
+        update_fields.append('error_message')
+
+    request_meta = dict(job.request_meta or {})
+    blocked_changed = False
+    for key, value in (
+        ("blocked_step", blocked_step),
+        ("blocked_error_code", error_code),
+        ("blocked_retry_after_seconds", result.get("retry_after_seconds")),
+        ("blocked_preferred_queue", result.get("preferred_queue")),
+        ("blocked_fallback_policy", result.get("fallback_policy")),
+    ):
+        if request_meta.get(key) != value:
+            request_meta[key] = value
+            blocked_changed = True
+    if blocked_changed:
+        job.request_meta = request_meta
+        update_fields.append('request_meta')
+
+    if len(update_fields) > 1:
+        job.save(update_fields=update_fields)
+
+    logger.info(
+        "Updated job %s to blocked: %s: %s",
+        job_id,
+        error_code,
+        error_message,
+    )
+
+
+def _handle_status_reviewable(job_id: str, result: dict):
+    """
+    Handle a reviewable terminal outcome detected during status polling.
+    """
+    from core.models import ContentFactoryJob
+
+    try:
+        job = ContentFactoryJob.objects.get(job_id=job_id)
+    except ContentFactoryJob.DoesNotExist:
+        logger.warning(f"Reviewable status for unknown job {job_id}")
+        return
+
+    status_value = str(result.get("status") or "needs_review").strip() or "needs_review"
+    update_fields = ["updated_at"]
+    if job.status != status_value:
+        job.status = status_value
+        update_fields.append("status")
+
+    pr_url = result.get("pr_url") or ((result.get("result") or {}).get("pr_url"))
+    if pr_url and job.pr_url != pr_url:
+        job.pr_url = pr_url
+        update_fields.append("pr_url")
+
+    request_meta = dict(job.request_meta or {})
+    changed = False
+    for key, value in (
+        ("publish_stage", status_value),
+        ("review_required", status_value == "needs_review"),
+        ("verification_state", result.get("verification_state")),
+        ("reason_code", result.get("reason_code")),
+    ):
+        if request_meta.get(key) != value:
+            request_meta[key] = value
+            changed = True
+    if changed:
+        job.request_meta = request_meta
+        update_fields.append("request_meta")
+
+    if job.error_message:
+        job.error_message = ""
+        update_fields.append("error_message")
+
+    if len(update_fields) > 1:
+        job.save(update_fields=update_fields)
+
+    logger.info("Updated job %s to reviewable status %s", job_id, status_value)
+
+
 def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) -> dict:
     """
     Select a delivery mode for an article run paused before queueing.
@@ -1556,7 +1666,11 @@ def check_generation_status(job_id: str) -> dict:
         if response.status_code == 200:
             result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
             # Detect failure and update local state + notify user
-            if result.get('status') in FAILURE_RUN_STATUSES:
+            if result.get('status') in BLOCKED_RUN_STATUSES:
+                _handle_status_blocked(job_id, result)
+            elif result.get('status') in REVIEWABLE_RUN_STATUSES:
+                _handle_status_reviewable(job_id, result)
+            elif result.get('status') in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, result)
             return result
         for fallback_endpoint in (status_endpoint_legacy, status_endpoint_old_backend):
@@ -1567,14 +1681,22 @@ def check_generation_status(job_id: str) -> dict:
             )
             if response.status_code == 200:
                 result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
-                if result.get('status') in FAILURE_RUN_STATUSES:
+                if result.get('status') in BLOCKED_RUN_STATUSES:
+                    _handle_status_blocked(job_id, result)
+                elif result.get('status') in REVIEWABLE_RUN_STATUSES:
+                    _handle_status_reviewable(job_id, result)
+                elif result.get('status') in FAILURE_RUN_STATUSES:
                     _handle_status_failure(job_id, result)
                 return result
 
         local_result = _load_local_run_snapshot(job_id)
         if local_result:
             local_result = augment_status_with_job_tracking(job_id, local_result)
-            if local_result.get("status") in FAILURE_RUN_STATUSES:
+            if local_result.get("status") in BLOCKED_RUN_STATUSES:
+                _handle_status_blocked(job_id, local_result)
+            elif local_result.get("status") in REVIEWABLE_RUN_STATUSES:
+                _handle_status_reviewable(job_id, local_result)
+            elif local_result.get("status") in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, local_result)
             return local_result
 
@@ -1590,7 +1712,11 @@ def check_generation_status(job_id: str) -> dict:
                 "Content Factory unreachable during status check for %s; returning mirrored local run",
                 job_id,
             )
-            if local_result.get("status") in FAILURE_RUN_STATUSES:
+            if local_result.get("status") in BLOCKED_RUN_STATUSES:
+                _handle_status_blocked(job_id, local_result)
+            elif local_result.get("status") in REVIEWABLE_RUN_STATUSES:
+                _handle_status_reviewable(job_id, local_result)
+            elif local_result.get("status") in FAILURE_RUN_STATUSES:
                 _handle_status_failure(job_id, local_result)
             return local_result
 

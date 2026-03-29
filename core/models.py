@@ -174,6 +174,11 @@ class OrganizationContentConfig(models.Model):
         blank=True,
         help_text="Reusable build/browser healing rules promoted from publish-time verification.",
     )
+    repo_execution_contract = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Runtime family and command contract used to verify and publish this repository.",
+    )
     brand_name = models.CharField(max_length=100, blank=True, null=True)
     articles_scaffolded = models.BooleanField(
         default=False,
@@ -324,6 +329,9 @@ class ContentFactoryJob(models.Model):
         ('awaiting_delivery_mode', 'Awaiting Delivery Mode'),
         ('awaiting_approval', 'Awaiting Approval'),
         ('generating', 'Generating'),
+        ('blocked', 'Blocked'),
+        ('pr_opened', 'PR Opened'),
+        ('needs_review', 'Needs Review'),
         ('confirmed', 'Confirmed'),
         ('cancelled', 'Cancelled'),
         ('completed', 'Completed'),
