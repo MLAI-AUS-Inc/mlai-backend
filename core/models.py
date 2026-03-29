@@ -169,6 +169,11 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="SEO content pillars with slugs and topics derived from company context"
     )
+    build_healing_hints = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Reusable build/browser healing rules promoted from publish-time verification.",
+    )
     brand_name = models.CharField(max_length=100, blank=True, null=True)
     articles_scaffolded = models.BooleanField(
         default=False,
@@ -456,6 +461,59 @@ class ContentFactoryApprovalState(models.TextChoices):
     APPROVAL_REQUIRED = "approval_required", "Approval Required"
     APPROVED = "approved", "Approved"
     DENIED = "denied", "Denied"
+
+
+class ContentFactoryHealingPromotionState(models.TextChoices):
+    CANDIDATE = "candidate", "Candidate"
+    PROMOTED = "promoted", "Promoted"
+
+
+class ContentFactoryHealingRecord(models.Model):
+    """Reusable publish-time healing memory for a specific repo/domain failure family."""
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="content_factory_healing_records",
+    )
+    domain = models.CharField(max_length=255, db_index=True)
+    github_repo = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    failure_kind = models.CharField(max_length=100, db_index=True)
+    failure_family_key = models.CharField(max_length=64, db_index=True)
+    exact_signature = models.CharField(max_length=64, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    normalized_failure = models.JSONField(default=dict, blank=True)
+    changed_files = models.JSONField(default=list, blank=True)
+    patch_manifest = models.JSONField(default=dict, blank=True)
+    validation_results = models.JSONField(default=dict, blank=True)
+    evidence_artifacts = models.JSONField(default=dict, blank=True)
+    snippet_or_rule = models.TextField(blank=True, default="")
+    applies_to = models.JSONField(default=list, blank=True)
+    promoted_payload = models.JSONField(default=dict, blank=True)
+    promotion_state = models.CharField(
+        max_length=32,
+        choices=ContentFactoryHealingPromotionState.choices,
+        default=ContentFactoryHealingPromotionState.CANDIDATE,
+        db_index=True,
+    )
+    latest_run_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_healing_record"
+        ordering = ["-updated_at"]
+        unique_together = (
+            "domain",
+            "github_repo",
+            "failure_kind",
+            "failure_family_key",
+        )
+
+    def __str__(self):
+        return f"{self.domain}:{self.github_repo}:{self.failure_kind}:{self.failure_family_key}"
 
 
 class ContentFactoryRun(models.Model):

@@ -24,6 +24,7 @@ from integrations.api_serializers import (
 from integrations.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
+    GoogleConnection,
     GmailMessageArtifact,
     GmailRelevanceLabel,
     GmailSyncCursor,
@@ -48,6 +49,9 @@ from integrations.services.startup_updates import (
     build_timeline_payload,
     create_startup_update_run,
     get_default_binding_for_domain,
+    get_open_startup_update_run,
+    get_startup_update_run_google_connection_id,
+    pin_startup_update_run_connection,
     resolve_or_create_profile,
     seed_startup_profile,
     upsert_monthly_update_draft,
@@ -220,7 +224,13 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
         organization.user_startup_bindings.select_related("user", "google_connection"),
         id=binding_id,
     )
-    google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
+    google_connection_id = get_startup_update_run_google_connection_id(run)
+    if google_connection_id is None:
+        google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
+        if google_connection is not None:
+            pin_startup_update_run_connection(run, google_connection.id)
+    else:
+        google_connection = get_object_or_404(GoogleConnection, id=google_connection_id)
     if google_connection is None:
         raise ValueError("No Google connection bound to this startup update run.")
     profile = getattr(organization, "startup_profile", None)
@@ -327,19 +337,10 @@ class StartupUpdateRunView(APIView):
 
         organization = binding.organization
         _, profile = resolve_or_create_profile(domain=organization.domain)
-        existing_run = ContentFactoryRun.objects.filter(
-            workflow=STARTUP_UPDATE_WORKFLOW,
-            domain=organization.domain,
-            status__in=[
-                ContentFactoryRunStatus.QUEUED,
-                ContentFactoryRunStatus.RUNNING,
-                ContentFactoryRunStatus.BLOCKED,
-                ContentFactoryRunStatus.AWAITING_CONFIRMATION,
-                ContentFactoryRunStatus.AWAITING_APPROVAL,
-                ContentFactoryRunStatus.AWAITING_DELIVERY_MODE,
-                ContentFactoryRunStatus.APPROVAL_REQUIRED,
-            ],
-        ).first()
+        existing_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id,
+        )
         run = create_startup_update_run(
             organization=organization,
             binding=binding,
@@ -507,6 +508,7 @@ class StartupUpdateHydrateThreadsView(APIView):
         if data.get("message_ids"):
             for artifact in GmailMessageArtifact.objects.filter(
                 organization=organization,
+                google_connection=google_connection,
                 gmail_message_id__in=data["message_ids"],
             ):
                 thread_ids.add(artifact.gmail_thread_id)
@@ -556,13 +558,17 @@ class StartupUpdateHydrationCandidatesView(APIView):
 
         hydrated_by_thread = {
             item["gmail_thread_id"]: item["hydration_status"]
-            for item in GmailThreadArtifact.objects.filter(organization=organization).values("gmail_thread_id", "hydration_status")
+            for item in GmailThreadArtifact.objects.filter(
+                organization=organization,
+                google_connection=google_connection,
+            ).values("gmail_thread_id", "hydration_status")
         }
 
         seen_thread_ids = set()
         candidates = []
         queryset = GmailMessageArtifact.objects.filter(
             organization=organization,
+            google_connection=google_connection,
             relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
             needs_thread_context=True,
         ).order_by("-internal_date")
@@ -609,6 +615,7 @@ class StartupUpdateClassificationBatchView(APIView):
 
         queryset = GmailMessageArtifact.objects.filter(
             organization=organization,
+            google_connection=google_connection,
             relevance_label__in=[GmailRelevanceLabel.AMBIGUOUS, GmailRelevanceLabel.PENDING],
         ).order_by("-heuristic_score", "-internal_date")[:limit]
 
@@ -658,6 +665,7 @@ class StartupUpdateClassificationResultsView(APIView):
             artifact = get_object_or_404(
                 GmailMessageArtifact,
                 organization=organization,
+                google_connection=google_connection,
                 gmail_message_id=item["gmail_message_id"],
             )
             artifact.relevance_label = item["relevance_label"]
@@ -701,6 +709,7 @@ class StartupUpdateExtractionBatchView(APIView):
 
         queryset = GmailThreadArtifact.objects.filter(
             organization=organization,
+            google_connection=google_connection,
             hydration_status=ArtifactProcessingStatus.HYDRATED,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
         ).order_by("-latest_message_internal_date", "-updated_at")[:limit]
@@ -751,6 +760,7 @@ class StartupUpdateExtractionResultsView(APIView):
             thread_artifact = get_object_or_404(
                 GmailThreadArtifact,
                 organization=organization,
+                google_connection=google_connection,
                 gmail_thread_id=item["gmail_thread_id"],
             )
             thread_artifact.extraction_status = item.get(

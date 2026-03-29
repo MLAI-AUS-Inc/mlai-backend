@@ -53,6 +53,7 @@ from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
 from .models import (
     ComponentMapping,
     ContentFactoryApprovalState,
+    ContentFactoryHealingRecord,
     ContentFactoryRun,
     ContentFactoryRunStatus,
     ContentFactoryRunStep,
@@ -64,6 +65,7 @@ from .models import (
 )
 from integrations.services.github_connections import get_owned_org_configs
 from .serializers import (
+    ContentFactoryHealingRecordSerializer,
     ContentFactoryRunControlSerializer,
     ContentFactoryRunSyncSerializer,
     GeneratedComponentListSerializer,
@@ -946,6 +948,7 @@ class ContentFactoryOrgConfigView(APIView):
             'tech_stack': config.tech_stack if config else {},
             'installed_packages': config.installed_packages if config else {},
             'pillar_strategy': config.pillar_strategy if config else {},
+            'build_healing_hints': config.build_healing_hints if config else [],
             'article_path_pattern': config.article_path_pattern if config else None,
             'registry_path': config.registry_path if config else None,
             'publish_targets': config.publish_targets if config else [],
@@ -1018,6 +1021,7 @@ class ContentFactoryOrgConfigView(APIView):
             'tech_stack',
             'installed_packages',
             'pillar_strategy',
+            'build_healing_hints',
             'article_path_pattern',
             'registry_path',
             'publish_targets',
@@ -1120,6 +1124,105 @@ class ContentFactoryOrgConfigView(APIView):
             }
         
         return Response(response_data, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)
+
+
+class ContentFactoryHealingRecordView(APIView):
+    """
+    GET/POST reusable healing records for Content Factory publish-time verification.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    @staticmethod
+    def _normalize_domain(domain: str) -> str:
+        if not domain:
+            return domain
+        domain = domain.lower().strip()
+        if domain.startswith('https://'):
+            domain = domain[8:]
+        elif domain.startswith('http://'):
+            domain = domain[7:]
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        if '/' in domain:
+            domain = domain.split('/')[0]
+        return domain
+
+    def get(self, request):
+        records = ContentFactoryHealingRecord.objects.all()
+        domain = self._normalize_domain(request.query_params.get("domain") or "")
+        github_repo = str(request.query_params.get("github_repo") or "").strip()
+        failure_kind = str(request.query_params.get("failure_kind") or "").strip()
+        failure_family_key = str(request.query_params.get("failure_family_key") or "").strip()
+        promotion_state = str(request.query_params.get("promotion_state") or "").strip()
+        limit_raw = str(request.query_params.get("limit") or "").strip()
+
+        if domain:
+            records = records.filter(domain=domain)
+        if github_repo:
+            records = records.filter(github_repo=github_repo)
+        if failure_kind:
+            records = records.filter(failure_kind=failure_kind)
+        if failure_family_key:
+            records = records.filter(failure_family_key=failure_family_key)
+        if promotion_state:
+            records = records.filter(promotion_state=promotion_state)
+
+        limit = 50
+        if limit_raw:
+            try:
+                limit = max(1, min(int(limit_raw), 200))
+            except ValueError:
+                limit = 50
+
+        serializer = ContentFactoryHealingRecordSerializer(records.order_by("-updated_at")[:limit], many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        payload = dict(request.data or {})
+        if "domain" in payload:
+            payload["domain"] = self._normalize_domain(payload.get("domain"))
+
+        serializer = ContentFactoryHealingRecordSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        domain = data["domain"]
+        github_repo = data.get("github_repo") or ""
+        failure_kind = data["failure_kind"]
+        failure_family_key = data["failure_family_key"]
+        organization = Organization.objects.filter(domain=domain).first()
+
+        defaults = {
+            "organization": organization,
+            "exact_signature": data.get("exact_signature") or "",
+            "summary": data.get("summary") or "",
+            "normalized_failure": data.get("normalized_failure") or {},
+            "changed_files": data.get("changed_files") or [],
+            "patch_manifest": data.get("patch_manifest") or {},
+            "validation_results": data.get("validation_results") or {},
+            "evidence_artifacts": data.get("evidence_artifacts") or {},
+            "snippet_or_rule": data.get("snippet_or_rule") or "",
+            "applies_to": data.get("applies_to") or [],
+            "promoted_payload": data.get("promoted_payload") or {},
+            "promotion_state": data.get("promotion_state") or "candidate",
+            "latest_run_id": data.get("latest_run_id") or "",
+        }
+
+        record, created = ContentFactoryHealingRecord.objects.update_or_create(
+            domain=domain,
+            github_repo=github_repo,
+            failure_kind=failure_kind,
+            failure_family_key=failure_family_key,
+            defaults=defaults,
+        )
+        response_payload = ContentFactoryHealingRecordSerializer(record).data
+        response_payload["sync_status"] = "created" if created else "updated"
+        return Response(
+            response_payload,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class ContentFactoryComponentsView(APIView):

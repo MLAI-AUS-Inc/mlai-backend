@@ -79,3 +79,34 @@ class ContentFactoryOrgConfigTests(TestCase):
             get_response.data["default_publish_target_id"],
             publish_targets[0]["target_id"],
         )
+
+    def test_org_config_round_trips_build_healing_hints(self):
+        hints = [
+            {
+                "failure_family_key": "vite-transform-tsx",
+                "applies_to": ["article_module"],
+                "summary": "Prefer build-safe JSON-LD rendering in article modules.",
+                "snippet_or_rule": "Use dangerouslySetInnerHTML for JSON-LD script tags and keep FAQ answers serializable.",
+            }
+        ]
+
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "build_healing_hints": hints,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.build_healing_hints, hints)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["build_healing_hints"], hints)

@@ -20,6 +20,7 @@ from integrations.services.startup_updates import (
     bind_user_to_startup,
     create_startup_update_run,
     get_default_binding_for_domain,
+    get_latest_startup_update_run,
     get_open_startup_update_run,
     resolve_or_create_profile,
     sync_startup_profile_from_company,
@@ -341,7 +342,9 @@ def _ensure_binding_for_company(*, user, company):
 
 
 def _build_status_payload(*, user, company, domain):
-    google_connected = bool(getattr(user, "google_connection", None))
+    google_connection = getattr(user, "google_connection", None)
+    google_connected = bool(google_connection)
+    google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
 
     if not domain:
@@ -356,14 +359,19 @@ def _build_status_payload(*, user, company, domain):
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
     organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
-    open_run = get_open_startup_update_run(organization=organization) if organization else None
-    latest_run = (
-        ContentFactoryRun.objects.filter(
-            workflow=STARTUP_UPDATE_WORKFLOW,
-            domain=organization.domain,
+    open_run = (
+        get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection_id,
         )
-        .order_by("-updated_at")
-        .first()
+        if organization
+        else None
+    )
+    latest_run = (
+        get_latest_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection_id,
+        )
         if organization
         else None
     )
@@ -405,7 +413,9 @@ def _build_status_payload(*, user, company, domain):
 
 
 def _build_email_draft_payload(*, request, user, company, domain, run_id: Optional[str] = None):
-    google_connected = bool(getattr(user, "google_connection", None))
+    google_connection = getattr(user, "google_connection", None)
+    google_connected = bool(google_connection)
+    google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
     auth_url = _build_google_oauth_url(request)
 
@@ -437,7 +447,13 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             domain=organization.domain,
         ).order_by("-updated_at")
         selected_run = run_queryset.filter(run_id=run_id).first() if run_id else None
-        latest_run = selected_run or get_open_startup_update_run(organization=organization) or run_queryset.first()
+        latest_run = selected_run or get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection_id,
+        ) or get_latest_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection_id,
+        )
         drafts = list(organization.monthly_update_drafts.order_by("-month", "-updated_at")[:3])
 
     draft_payload = _serialize_draft_bundle(drafts)
@@ -671,7 +687,10 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        existing_run = get_open_startup_update_run(organization=organization)
+        existing_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id,
+        )
         if existing_run is None:
             run = create_startup_update_run(
                 organization=organization,
@@ -762,7 +781,10 @@ class VibeRaisingEmailDraftStartView(APIView):
             "yes",
             "on",
         }
-        existing_run = get_open_startup_update_run(organization=organization)
+        existing_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id,
+        )
         reusable_drafts_exist = organization.monthly_update_drafts.exists()
 
         created = False

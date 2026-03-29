@@ -4,6 +4,8 @@ from . import views
 urlpatterns = [
     path('org/config/', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config'),
     path('org/config', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config_no_slash'),
+    path('healing-records/', views.ContentFactoryHealingRecordView.as_view(), name='content_factory_healing_records'),
+    path('healing-records', views.ContentFactoryHealingRecordView.as_view(), name='content_factory_healing_records_no_slash'),
     # Component library endpoints
     path('org/components/', views.ContentFactoryComponentsView.as_view(), name='content_factory_components'),
     path('org/components', views.ContentFactoryComponentsView.as_view(), name='content_factory_components_no_slash'),

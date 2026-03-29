@@ -647,6 +647,19 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.thread.attachment_ids = [self.attachment.id]
         self.thread.save(update_fields=["attachment_ids", "updated_at"])
 
+    def _create_secondary_connection(self):
+        other_user = User.objects.create_user(
+            email=f"other-{User.objects.count()}@example.com",
+            password="test1234",
+        )
+        other_connection = GoogleConnection.objects.create(
+            user=other_user,
+            google_email=f"other-{GoogleConnection.objects.count()}@gmail.com",
+            refresh_token="refresh-token-2",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        return other_user, other_connection
+
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
 
@@ -690,6 +703,233 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             [item["gmail_message_id"] for item in batch_response.data["messages"]],
             [self.message.gmail_message_id],
         )
+
+    def test_classification_batch_scopes_messages_to_run_connection(self):
+        _other_user, other_connection = self._create_secondary_connection()
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_message_id=self.message.gmail_message_id,
+            gmail_thread_id="thread-other-123",
+            internal_date=timezone.now() + timedelta(minutes=1),
+            subject="Cross-connection duplicate",
+            from_address="ceo@other.example",
+            snippet="Should not be included for this run",
+            cleaned_text="Should not be included for this run",
+            heuristic_score=99,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.AMBIGUOUS,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            batch_response = self.client.get(
+                reverse("startup_updates_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        self.assertEqual(batch_response.data["messages"][0]["gmail_thread_id"], self.message.gmail_thread_id)
+
+    def test_classification_results_updates_only_pinned_connection_artifact(self):
+        _other_user, other_connection = self._create_secondary_connection()
+        other_message = GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_message_id=self.message.gmail_message_id,
+            gmail_thread_id="thread-other-123",
+            internal_date=timezone.now() + timedelta(minutes=1),
+            subject="Cross-connection duplicate",
+            from_address="ceo@other.example",
+            snippet="Should not be updated for this run",
+            cleaned_text="Should not be updated for this run",
+            heuristic_score=99,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.AMBIGUOUS,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            classify_response = self.client.post(
+                reverse("startup_updates_classification_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_message_id": self.message.gmail_message_id,
+                            "relevance_label": GmailRelevanceLabel.RELEVANT,
+                            "relevance_score": 0.93,
+                            "relevance_reason": "Investor-facing revenue update",
+                            "needs_thread_context": True,
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(classify_response.status_code, status.HTTP_200_OK)
+        self.message.refresh_from_db()
+        other_message.refresh_from_db()
+        self.assertEqual(self.message.relevance_label, GmailRelevanceLabel.RELEVANT)
+        self.assertEqual(other_message.relevance_label, GmailRelevanceLabel.AMBIGUOUS)
+
+    @patch("integrations.api_views_startup_updates.hydrate_thread_artifact")
+    def test_hydrate_threads_message_id_lookup_uses_run_connection(self, mock_hydrate_thread_artifact):
+        _other_user, other_connection = self._create_secondary_connection()
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_message_id=self.message.gmail_message_id,
+            gmail_thread_id="thread-other-123",
+            internal_date=timezone.now() + timedelta(minutes=1),
+            subject="Cross-connection duplicate",
+            from_address="ceo@other.example",
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        mock_hydrate_thread_artifact.return_value = self.thread
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_hydrate_threads", args=[self.run.run_id]),
+                {"message_ids": [self.message.gmail_message_id]},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["hydrated_thread_ids"], [self.thread.gmail_thread_id])
+        self.assertEqual(mock_hydrate_thread_artifact.call_args.kwargs["thread_id"], self.thread.gmail_thread_id)
+
+    def test_hydration_candidates_ignore_threads_from_other_connections(self):
+        GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
+        _other_user, other_connection = self._create_secondary_connection()
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_message_id="msg-other",
+            gmail_thread_id="thread-other",
+            internal_date=timezone.now() + timedelta(minutes=2),
+            subject="Other connection relevant message",
+            from_address="ceo@other.example",
+            cleaned_text="Should not be considered for this run",
+            heuristic_score=90,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_thread_id="thread-other",
+            source_message_ids=["msg-other"],
+            message_payloads=[{"message_id": "msg-other"}],
+            cleaned_text="Should not be considered for this run",
+            hydration_status=ArtifactProcessingStatus.PENDING,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+            source_message_count=1,
+            latest_message_internal_date=timezone.now() + timedelta(minutes=2),
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_hydration_candidates", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["gmail_thread_id"], self.thread.gmail_thread_id)
+
+    def test_extraction_batch_and_results_scope_threads_to_run_connection(self):
+        _other_user, other_connection = self._create_secondary_connection()
+        other_thread = GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_thread_id=self.thread.gmail_thread_id,
+            source_message_ids=["msg-other"],
+            message_payloads=[{"message_id": "msg-other"}],
+            cleaned_text="Cross-connection thread",
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+            source_message_count=1,
+            latest_message_internal_date=timezone.now() + timedelta(minutes=2),
+            hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            extraction_batch = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(extraction_batch.status_code, status.HTTP_200_OK)
+        self.assertEqual(extraction_batch.data["count"], 1)
+        self.assertEqual(extraction_batch.data["threads"][0]["gmail_thread_id"], self.thread.gmail_thread_id)
+        self.assertEqual(extraction_batch.data["threads"][0]["source_message_ids"], self.thread.source_message_ids)
+
+        with self._with_key():
+            extraction_result = self.client.post(
+                reverse("startup_updates_extraction_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_thread_id": self.thread.gmail_thread_id,
+                            "extraction_status": ArtifactProcessingStatus.PROCESSED,
+                            "attachment_updates": [],
+                            "events": [],
+                            "metrics": [],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(extraction_result.status_code, status.HTTP_200_OK)
+        self.thread.refresh_from_db()
+        other_thread.refresh_from_db()
+        self.assertEqual(self.thread.extraction_status, ArtifactProcessingStatus.PROCESSED)
+        self.assertEqual(other_thread.extraction_status, ArtifactProcessingStatus.PENDING)
+
+    def test_run_context_prefers_pinned_google_connection_over_binding_connection(self):
+        _other_user, other_connection = self._create_secondary_connection()
+        self.binding.google_connection = other_connection
+        self.binding.save(update_fields=["google_connection", "updated_at"])
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=other_connection,
+            gmail_message_id="msg-other-connection",
+            gmail_thread_id="thread-other-connection",
+            internal_date=timezone.now() + timedelta(minutes=2),
+            subject="Other connection message",
+            from_address="ceo@other.example",
+            cleaned_text="Should not be considered for this pinned run",
+            heuristic_score=99,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.AMBIGUOUS,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            batch_response = self.client.get(
+                reverse("startup_updates_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        self.assertEqual(batch_response.data["messages"][0]["gmail_message_id"], self.message.gmail_message_id)
 
     def test_classification_extraction_timeline_and_drafts(self):
         with self._with_key():

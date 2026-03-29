@@ -31,6 +31,7 @@ STARTUP_UPDATE_WORKFLOW = "startup_monthly_update"
 DEFAULT_BACKFILL_MONTHS = 1
 DEFAULT_CLASSIFICATION_BATCH_SIZE = 40
 DEFAULT_ATTACHMENT_BYTES_LIMIT = 10 * 1024 * 1024
+SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
 HIGH_SIGNAL_TERMS = [
     "arr",
     "mrr",
@@ -561,16 +562,107 @@ def get_default_gmail_binding(*, user) -> Optional[UserStartupBinding]:
     return None
 
 
-def get_open_startup_update_run(*, organization: Organization) -> Optional[ContentFactoryRun]:
-    return (
-        ContentFactoryRun.objects.filter(
-            workflow=STARTUP_UPDATE_WORKFLOW,
-            domain=organization.domain,
-            status__in=list(OPEN_RUN_STATUSES),
-        )
-        .order_by("-updated_at")
-        .first()
+def get_startup_update_run_google_connection_id(run: ContentFactoryRun) -> Optional[int]:
+    value = (run.run_request or {}).get("google_connection_id")
+    if value in ("", None):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def pin_startup_update_run_connection(run: ContentFactoryRun, google_connection_id: Optional[int]) -> Optional[int]:
+    if google_connection_id is None:
+        return None
+    current_id = get_startup_update_run_google_connection_id(run)
+    if current_id == int(google_connection_id):
+        return current_id
+
+    run_request = dict(run.run_request or {})
+    run_request["google_connection_id"] = int(google_connection_id)
+    run.run_request = run_request
+    run.save(update_fields=["run_request", "updated_at"])
+    return int(google_connection_id)
+
+
+def _iter_startup_update_runs(*, organization: Organization, statuses: Optional[Iterable[str]] = None) -> list[ContentFactoryRun]:
+    queryset = ContentFactoryRun.objects.filter(
+        workflow=STARTUP_UPDATE_WORKFLOW,
+        domain=organization.domain,
     )
+    if statuses is not None:
+        queryset = queryset.filter(status__in=list(statuses))
+    return list(queryset.order_by("-updated_at"))
+
+
+def get_open_startup_update_run(
+    *,
+    organization: Organization,
+    google_connection_id: Optional[int] = None,
+) -> Optional[ContentFactoryRun]:
+    runs = _iter_startup_update_runs(
+        organization=organization,
+        statuses=OPEN_RUN_STATUSES,
+    )
+    if google_connection_id is None:
+        return runs[0] if runs else None
+
+    legacy_candidate = None
+    for run in runs:
+        run_google_connection_id = get_startup_update_run_google_connection_id(run)
+        if run_google_connection_id == google_connection_id:
+            return run
+        if run_google_connection_id is None and legacy_candidate is None:
+            legacy_candidate = run
+    return legacy_candidate
+
+
+def get_latest_startup_update_run(
+    *,
+    organization: Organization,
+    google_connection_id: Optional[int] = None,
+) -> Optional[ContentFactoryRun]:
+    runs = _iter_startup_update_runs(organization=organization)
+    if google_connection_id is None:
+        return runs[0] if runs else None
+
+    legacy_candidate = None
+    for run in runs:
+        run_google_connection_id = get_startup_update_run_google_connection_id(run)
+        if run_google_connection_id == google_connection_id:
+            return run
+        if run_google_connection_id is None and legacy_candidate is None:
+            legacy_candidate = run
+    return legacy_candidate
+
+
+def supersede_conflicting_startup_update_runs(
+    *,
+    organization: Organization,
+    google_connection_id: Optional[int],
+    keep_run_id: Optional[str] = None,
+    error_message: str = SUPERSEDED_GMAIL_CONNECTION_ERROR,
+) -> int:
+    if google_connection_id is None:
+        return 0
+
+    updated = 0
+    for run in _iter_startup_update_runs(organization=organization, statuses=OPEN_RUN_STATUSES):
+        if keep_run_id and run.run_id == keep_run_id:
+            continue
+
+        run_google_connection_id = get_startup_update_run_google_connection_id(run)
+        if run_google_connection_id in (None, google_connection_id):
+            continue
+
+        run.status = ContentFactoryRunStatus.FAILED
+        run.error = error_message
+        run.resume_available = False
+        run.save(update_fields=["status", "error", "resume_available", "updated_at"])
+        updated += 1
+
+    return updated
 
 
 def create_startup_update_run(
@@ -579,20 +671,35 @@ def create_startup_update_run(
     binding: UserStartupBinding,
     window_months: int = DEFAULT_BACKFILL_MONTHS,
 ) -> ContentFactoryRun:
-    existing = get_open_startup_update_run(organization=organization)
+    google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
+    google_connection_id = google_connection.id if google_connection else None
+
+    existing = get_open_startup_update_run(
+        organization=organization,
+        google_connection_id=google_connection_id,
+    )
     if existing:
+        pin_startup_update_run_connection(existing, google_connection_id)
+        supersede_conflicting_startup_update_runs(
+            organization=organization,
+            google_connection_id=google_connection_id,
+            keep_run_id=existing.run_id,
+        )
         return existing
 
     now = timezone.now()
     backfill_start = now - timedelta(days=30 * int(window_months))
     current_month = _month_start(now)
     months = iter_recent_month_starts(3, reference=now)
-    google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
     profile = getattr(organization, "startup_profile", None)
     startup_context = (
         build_startup_context_snapshot(organization=organization, profile=profile)
         if profile is not None
         else {}
+    )
+    supersede_conflicting_startup_update_runs(
+        organization=organization,
+        google_connection_id=google_connection_id,
     )
     run = ContentFactoryRun.objects.create(
         run_id=f"startup-update-{uuid.uuid4()}",
@@ -651,7 +758,10 @@ def maybe_start_startup_update_for_google_connection(
 
     organization = binding.organization
     resolve_or_create_profile(domain=organization.domain)
-    existing_run = get_open_startup_update_run(organization=organization)
+    existing_run = get_open_startup_update_run(
+        organization=organization,
+        google_connection_id=google_connection.id,
+    )
     run = create_startup_update_run(
         organization=organization,
         binding=binding,

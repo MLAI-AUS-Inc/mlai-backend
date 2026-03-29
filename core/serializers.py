@@ -391,3 +391,32 @@ class ContentFactoryRunSyncSerializer(serializers.Serializer):
 
 class ContentFactoryRunControlSerializer(serializers.Serializer):
     actor = serializers.CharField(required=False, allow_blank=True, default="content-factory")
+
+
+from .models import ContentFactoryHealingRecord
+
+
+class ContentFactoryHealingRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContentFactoryHealingRecord
+        fields = [
+            "domain",
+            "github_repo",
+            "failure_kind",
+            "failure_family_key",
+            "exact_signature",
+            "summary",
+            "normalized_failure",
+            "changed_files",
+            "patch_manifest",
+            "validation_results",
+            "evidence_artifacts",
+            "snippet_or_rule",
+            "applies_to",
+            "promoted_payload",
+            "promotion_state",
+            "latest_run_id",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]

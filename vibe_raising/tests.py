@@ -9,7 +9,11 @@ from rest_framework.test import APIClient
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
 from integrations.models import GoogleConnection, MonthlyUpdateDraft, StartupProfile, UserStartupBinding
-from integrations.services.startup_updates import DEFAULT_BACKFILL_MONTHS, create_startup_update_run
+from integrations.services.startup_updates import (
+    DEFAULT_BACKFILL_MONTHS,
+    SUPERSEDED_GMAIL_CONNECTION_ERROR,
+    create_startup_update_run,
+)
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
 
@@ -38,6 +42,14 @@ class VibeRaisingApiTests(TestCase):
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])
         return profile, company
+
+    def _create_google_connection(self, *, user=None, email="founder@gmail.com", refresh_token="refresh-token"):
+        return GoogleConnection.objects.create(
+            user=user or self.user,
+            google_email=email,
+            refresh_token=refresh_token,
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
 
     def test_profile_requires_authentication(self):
         response = self.client.get("/api/v1/vibe-raising/profile/")
@@ -405,12 +417,7 @@ class VibeRaisingApiTests(TestCase):
     def test_email_draft_start_creates_or_reuses_open_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-        GoogleConnection.objects.create(
-            user=self.user,
-            google_email="founder@gmail.com",
-            refresh_token="refresh-token",
-            scope="https://www.googleapis.com/auth/gmail.readonly",
-        )
+        google_connection = self._create_google_connection()
 
         with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
             with self.captureOnCommitCallbacks(execute=True):
@@ -434,6 +441,7 @@ class VibeRaisingApiTests(TestCase):
 
         run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
+        self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
@@ -473,6 +481,60 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["runId"], run.run_id)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         mock_notify.assert_called_once_with(run.run_id)
+
+    def test_email_draft_start_supersedes_other_connection_open_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+
+        other_user = User.objects.create_user(
+            email="other-founder@example.com",
+            password="password",
+            first_name="Other",
+            last_name="Founder",
+            role="participant",
+        )
+        other_connection = self._create_google_connection(
+            user=other_user,
+            email="other-founder@gmail.com",
+            refresh_token="other-refresh-token",
+        )
+        other_binding = UserStartupBinding.objects.create(
+            user=other_user,
+            organization=organization,
+            google_connection=other_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        other_run = create_startup_update_run(
+            organization=organization,
+            binding=other_binding,
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        new_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        other_run.refresh_from_db()
+        self.assertNotEqual(new_run.run_id, other_run.run_id)
+        self.assertEqual(new_run.run_request["google_connection_id"], google_connection.id)
+        self.assertEqual(other_run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(other_run.error, SUPERSEDED_GMAIL_CONNECTION_ERROR)
+        mock_notify.assert_called_once_with(new_run.run_id)
 
     def test_email_draft_status_reports_queued_then_running_for_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -515,6 +577,50 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(running_response.data["runId"], run.run_id)
         self.assertEqual(running_response.data["status"], ContentFactoryRunStatus.RUNNING)
         self.assertEqual(running_response.data["currentStep"], "event_extraction")
+
+    def test_email_draft_status_ignores_open_run_for_other_connection(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+
+        other_user = User.objects.create_user(
+            email="other-founder-status@example.com",
+            password="password",
+            first_name="Other",
+            last_name="Founder",
+            role="participant",
+        )
+        other_connection = self._create_google_connection(
+            user=other_user,
+            email="other-founder-status@gmail.com",
+            refresh_token="other-refresh-token-status",
+        )
+        other_binding = UserStartupBinding.objects.create(
+            user=other_user,
+            organization=organization,
+            google_connection=other_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        other_run = create_startup_update_run(
+            organization=organization,
+            binding=other_binding,
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/email-draft/status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "failed")
+        self.assertIsNone(response.data["runId"])
+        self.assertNotEqual(response.data["runId"], other_run.run_id)
 
     def test_email_draft_status_returns_completed_payload_with_editor_shape(self):
         self.client.force_authenticate(user=self.user)
