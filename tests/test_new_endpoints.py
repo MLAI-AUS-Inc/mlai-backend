@@ -1473,8 +1473,69 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("Review PR created", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_generation_pr_opened_callback_downgrades_raw_repo_preview_url_for_review_bundle(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-pr-opened-raw-preview",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+        self._create_content_factory_run("job-pr-opened-raw-preview")
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_pr_opened",
+                "job_id": "job-pr-opened-raw-preview",
+                "run_id": "job-pr-opened-raw-preview",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "pr_url": "https://github.com/example/pr/78",
+                "pr_number": 78,
+                "preview_url": "https://content-how-to-raise-your-first-million.example.dev/articles/featured/how-to-raise-your-first-million",
+                "review_surface_kind": "fallback_bundle",
+                "primary_review_url": "https://github.com/example/pr/78",
+                "primary_review_label": "Open review PR",
+                "route_is_live": False,
+                "intended_route_path": "/articles/featured/how-to-raise-your-first-million",
+                "bundle_primary_path": ".content-factory/drafts/how-to-raise-your-first-million/README.md",
+                "review_required": True,
+                "verification_state": "build_failed_review_pr",
+                "reason_code": "environment_bundler_unstable",
+                "dedupe_key": "generation-pr-opened-raw-preview-78",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-pr-opened-raw-preview")
+        self.assertEqual(job.status, "needs_review")
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertTrue(job.request_meta.get("preview_content_verified"))
+        self.assertEqual(
+            job.request_meta.get("repo_preview_candidate_url"),
+            "https://content-how-to-raise-your-first-million.example.dev/articles/featured/how-to-raise-your-first-million",
+        )
         self.assertIn(
-            "/api/content-factory/runs/job-pr-opened-preview/preview/",
+            "/api/content-factory/runs/job-pr-opened-raw-preview/preview/",
+            job.request_meta.get("preview_url", ""),
+        )
+        self.assertEqual(mock_send_message.call_count, 2)
+        pr_notification_call = mock_send_message.call_args_list[1]
+        self.assertIn("Review bundle preview ready for mlai.au:", pr_notification_call[0][1])
+        blocks = pr_notification_call[1]["blocks"]
+        self.assertIn("Review PR created", blocks[0]["text"]["text"])
+        self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertIn(
+            "/api/content-factory/runs/job-pr-opened-raw-preview/preview/",
             blocks[1]["elements"][0]["url"],
         )
         self.assertIn("sig=", blocks[1]["elements"][0]["url"])
@@ -1509,6 +1570,8 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "domain": "mlai.au",
             "slack_user_id": "U123",
             "preview_url": "https://preview.example.com",
+            "preview_surface_kind": "repo_preview",
+            "preview_content_verified": True,
             "pr_url": "https://github.com/example/pr/1",
             "pr_number": 1,
             "review_surface_kind": "preview_route",

@@ -2219,21 +2219,37 @@ class ContentFactoryCallbackView(APIView):
         preview_url = str(payload.get('preview_url') or '').strip()
         route_is_live = bool(payload.get('route_is_live')) if payload.get('route_is_live') is not None else bool(preview_url)
         preview_surface_kind = str(payload.get('preview_surface_kind') or '').strip()
+        review_surface_kind = str(payload.get('review_surface_kind') or '').strip()
+        review_bundle_surface_kinds = {'fallback_bundle', 'patch_bundle', 'content_bundle'}
+        is_review_bundle = review_surface_kind in review_bundle_surface_kinds
+        is_content_factory_artifact_preview = (
+            '/api/content-factory/runs/' in preview_url and '/preview' in preview_url
+        )
+        if not preview_surface_kind and preview_url and is_content_factory_artifact_preview:
+            preview_surface_kind = 'artifact_preview'
+            payload['preview_surface_kind'] = preview_surface_kind
+        elif not preview_surface_kind and preview_url:
+            preview_surface_kind = 'repo_preview'
+            payload['preview_surface_kind'] = preview_surface_kind
         preview_content_verified_raw = payload.get('preview_content_verified')
         preview_content_verified = (
             bool(preview_content_verified_raw)
             if preview_content_verified_raw is not None
-            else bool(preview_url) and preview_surface_kind != 'repo_preview'
+            else bool(preview_url) and preview_surface_kind == 'artifact_preview'
         )
 
-        if preview_url and (preview_surface_kind != 'repo_preview' or preview_content_verified):
-            if not preview_surface_kind:
-                payload['preview_surface_kind'] = 'repo_preview' if route_is_live else 'artifact_preview'
+        if preview_url and preview_surface_kind == 'artifact_preview':
+            payload['preview_content_verified'] = True
+            payload['route_is_live'] = False
             return payload
 
-        if preview_surface_kind == 'repo_preview' and preview_url and not preview_content_verified:
+        if preview_url and preview_surface_kind == 'repo_preview' and preview_content_verified and not is_review_bundle:
+            return payload
+
+        if preview_url and (is_review_bundle or (preview_surface_kind == 'repo_preview' and not preview_content_verified)):
             payload['repo_preview_candidate_url'] = str(payload.get('repo_preview_candidate_url') or preview_url).strip()
             payload['preview_url'] = ''
+            payload['preview_content_verified'] = False
             payload['route_is_live'] = False
 
         if not run_id:
