@@ -1272,9 +1272,26 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             job.request_meta.get("artifact_links", {}).get("verification_report"),
             "/api/runs/job-pr-opened/artifacts/verification_report.json",
         )
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertEqual(job.progress_message_ts, "message-ts")
+        self.assertEqual(mock_send_message.call_count, 2)
+
+        live_card_call = mock_send_message.call_args_list[0]
+        self.assertEqual(live_card_call[0][0], "C123")
+        self.assertEqual(live_card_call[0][1], "Draft PR opened and ready for human review.")
+        self.assertEqual(live_card_call[1]["thread_ts"], "123.456")
+        self.assertIn(
+            "Draft PR opened and ready for human review.",
+            live_card_call[1]["blocks"][0]["text"]["text"],
+        )
+
+        pr_notification_call = mock_send_message.call_args_list[1]
+        self.assertEqual(pr_notification_call[0][0], "C123")
+        self.assertEqual(
+            pr_notification_call[0][1],
+            "Draft PR ready for review for mlai.au: https://github.com/example/pr/44",
+        )
+        self.assertEqual(pr_notification_call[1]["thread_ts"], "123.456")
+        self.assertIn("Draft PR created", pr_notification_call[1]["blocks"][0]["text"]["text"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')
