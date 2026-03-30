@@ -20,6 +20,7 @@ from integrations.services.startup_updates import (
     RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
+    cancel_startup_update_run,
     create_startup_update_run,
     get_default_binding_for_domain,
     get_latest_startup_update_run,
@@ -27,7 +28,7 @@ from integrations.services.startup_updates import (
     resolve_or_create_profile,
     sync_startup_profile_from_company,
 )
-from integrations.services.valley_harness import notify_valley_run_created
+from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .serializers import (
@@ -449,6 +450,7 @@ def _serialize_run_progress(run):
                 ContentFactoryRunStatus.COMPLETED,
                 ContentFactoryRunStatus.FAILED,
                 ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.CANCELLED,
             }
             else None
         ),
@@ -514,6 +516,8 @@ def _build_status_payload(*, user, company, domain):
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
+    elif latest_run and latest_run.status == ContentFactoryRunStatus.CANCELLED:
+        state = "cancelled"
     elif latest_run and latest_run.status in {
         ContentFactoryRunStatus.FAILED,
         ContentFactoryRunStatus.DENIED,
@@ -604,6 +608,8 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
         ContentFactoryRunStatus.APPROVAL_REQUIRED,
     }:
         state = "running"
+    elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.CANCELLED:
+        state = "cancelled"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.COMPLETED and email_draft_payload:
         state = "completed"
     elif latest_run and latest_run.status == ContentFactoryRunStatus.COMPLETED:
@@ -1085,6 +1091,72 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
                 domain=domain,
                 run_id=open_run.run_id,
             ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingEmailDraftCancelView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, run_id: str):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        company = context["company"]
+        domain = context["domain"]
+        if not domain:
+            return Response(
+                {"error": "Add a company domain before cancelling Gmail draft generation."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        organization, _startup_profile, binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+        google_connection = getattr(request.user, "google_connection", None)
+        google_connection_id = getattr(google_connection, "id", None) or binding.google_connection_id
+
+        try:
+            cancel_result = cancel_startup_update_run(
+                run_id=run_id,
+                organization=organization,
+                binding_id=binding.id,
+                google_connection_id=google_connection_id,
+                cancelled_by_user_id=request.user.id,
+            )
+        except ContentFactoryRun.DoesNotExist:
+            return Response({"error": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionError:
+            return Response({"error": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        run = cancel_result["run"]
+        cleanup = cancel_result["cleanup"]
+        revoke_payload = {
+            "revoke_requested": False,
+            "revoke_succeeded": False,
+            "revoked_job_ids": [],
+            "missing_job_ids": [],
+        }
+        if cancel_result["cancel_applied"]:
+            revoke_payload = cancel_valley_run(run.run_id)
+
+        return Response(
+            {
+                "run_id": run.run_id,
+                "status": run.status,
+                "terminal_state": run.status if run.status in {
+                    ContentFactoryRunStatus.COMPLETED,
+                    ContentFactoryRunStatus.CANCELLED,
+                } else None,
+                "cancel_applied": bool(cancel_result["cancel_applied"]),
+                "cleanup": cleanup,
+                "revoke_requested": bool(revoke_payload.get("revoke_requested")),
+                "revoke_succeeded": bool(revoke_payload.get("revoke_succeeded")),
+                "revoked_job_ids": list(revoke_payload.get("revoked_job_ids") or []),
+                "missing_job_ids": list(revoke_payload.get("missing_job_ids") or []),
+            },
             status=status.HTTP_200_OK,
         )
 

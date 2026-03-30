@@ -69,12 +69,14 @@ from .serializers import (
     ContentFactoryHealingRecordSerializer,
     ContentFactoryRunControlSerializer,
     ContentFactoryRunSyncSerializer,
+    ContentFactoryRunValleyJobSerializer,
     GeneratedComponentListSerializer,
     GeneratedComponentSerializer,
 )
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+VALLEY_META_KEY = "_valley_meta"
 
 ROLE_ALIASES = {
     'mentor': 'professional',
@@ -5065,6 +5067,22 @@ def _parse_optional_datetime(value):
     return parse_datetime(value)
 
 
+def _content_factory_run_result_payload(run: ContentFactoryRun) -> dict:
+    payload = run.result or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _content_factory_run_meta(run: ContentFactoryRun) -> dict:
+    meta = _content_factory_run_result_payload(run).get(VALLEY_META_KEY) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _set_content_factory_run_meta(run: ContentFactoryRun, meta: dict) -> None:
+    payload = dict(_content_factory_run_result_payload(run))
+    payload[VALLEY_META_KEY] = dict(meta or {})
+    run.result = payload
+
+
 def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
     steps = {}
     for step in run.steps.order_by("display_order", "id"):
@@ -5212,12 +5230,28 @@ class ContentFactoryRunView(APIView):
         return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
 
     def put(self, request, run_id: str):
+        existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         payload = dict(request.data)
         payload["run_id"] = run_id
         serializer = ContentFactoryRunSyncSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         step_states = request.data.get("step_states", {}) or {}
+
+        if (
+            existing_run is not None
+            and existing_run.status == ContentFactoryRunStatus.CANCELLED
+            and data.get("status") != ContentFactoryRunStatus.CANCELLED
+        ):
+            return Response(
+                {
+                    "error": "run_cancelled",
+                    "detail": "This run was cancelled and cannot accept more workflow updates.",
+                    "run_id": run_id,
+                    "status": existing_run.status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         max_attempts = 3 if connection.vendor == "sqlite" else 1
         for attempt_number in range(1, max_attempts + 1):
@@ -5244,6 +5278,60 @@ class ContentFactoryRunView(APIView):
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryRunValleyJobView(APIView):
+    """
+    Track active Valley Celery jobs for a durable run.
+
+    POST /api/content-factory/runs/<run_id>/valley-jobs
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if not run:
+            return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ContentFactoryRunValleyJobSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        job_id = serializer.validated_data["job_id"]
+        transition = serializer.validated_data["transition"]
+        reason = serializer.validated_data.get("reason") or ""
+
+        meta = _content_factory_run_meta(run)
+        tracked_job_ids = [
+            str(item).strip()
+            for item in list(meta.get("tracked_job_ids") or [])
+            if str(item).strip()
+        ]
+        if transition in {"queued", "started"}:
+            if job_id not in tracked_job_ids:
+                tracked_job_ids.append(job_id)
+        elif transition == "finished":
+            tracked_job_ids = [item for item in tracked_job_ids if item != job_id]
+
+        meta["tracked_job_ids"] = tracked_job_ids
+        meta["last_tracked_job_transition"] = {
+            "job_id": job_id,
+            "transition": transition,
+            "reason": reason,
+            "recorded_at": timezone.now().isoformat(),
+        }
+        _set_content_factory_run_meta(run, meta)
+        run.save(update_fields=["result", "updated_at"])
+
+        return Response(
+            {
+                "run_id": run_id,
+                "job_id": job_id,
+                "transition": transition,
+                "tracked_job_ids": tracked_job_ids,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

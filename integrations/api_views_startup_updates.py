@@ -49,15 +49,21 @@ from integrations.services.startup_updates import (
     OPEN_RUN_STATUSES,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
+    build_cancel_backup_for_draft,
+    build_cancel_backup_for_event,
+    build_cancel_backup_for_metric,
     build_timeline_payload,
+    cancel_startup_update_run,
     create_startup_update_run,
     DEFAULT_MAX_SOURCE_THREADS,
     get_default_binding_for_domain,
     get_open_startup_update_run,
+    get_startup_update_run_cancel_backups,
     get_startup_update_run_google_connection_id,
     pin_startup_update_run_connection,
     resolve_or_create_profile,
     seed_startup_profile,
+    set_startup_update_run_cancel_backups,
     upsert_monthly_update_draft,
 )
 from integrations.services.valley_harness import notify_valley_run_created
@@ -244,6 +250,73 @@ def _get_run_meta(run: ContentFactoryRun) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def _cancelled_run_response(run: ContentFactoryRun) -> Response:
+    return Response(
+        {
+            "error": "run_cancelled",
+            "detail": "This startup update run was cancelled and cannot accept more workflow writes.",
+            "run_id": run.run_id,
+            "status": run.status,
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _reject_if_run_cancelled(run: ContentFactoryRun) -> Optional[Response]:
+    if run.status == ContentFactoryRunStatus.CANCELLED:
+        return _cancelled_run_response(run)
+    return None
+
+
+def _backup_draft_if_needed(run: ContentFactoryRun, draft: MonthlyUpdateDraft, backups: dict) -> bool:
+    if draft.run_id == run.run_id:
+        return False
+
+    draft_backups = dict((backups or {}).get("drafts") or {})
+    draft_key = draft.month.isoformat()
+    if draft_key in draft_backups:
+        return False
+
+    draft_backups[draft_key] = build_cancel_backup_for_draft(draft)
+    backups["drafts"] = draft_backups
+    return True
+
+
+def _backup_event_if_needed(run: ContentFactoryRun, event: StartupEvent, backups: dict) -> bool:
+    if event.run_id == run.run_id:
+        return False
+
+    event_backups = dict((backups or {}).get("events") or {})
+    event_key = event.canonical_key
+    if event_key in event_backups:
+        return False
+
+    event_backups[event_key] = build_cancel_backup_for_event(event)
+    backups["events"] = event_backups
+    return True
+
+
+def _backup_metric_if_needed(run: ContentFactoryRun, metric: StartupMetricObservation, backups: dict) -> bool:
+    if metric.run_id == run.run_id:
+        return False
+
+    metric_backups = dict((backups or {}).get("metrics") or {})
+    metric_key = "|".join(
+        [
+            str(metric.source_thread_id or ""),
+            metric.metric_key,
+            metric.period_month.isoformat(),
+            metric.value_text,
+        ]
+    )
+    if metric_key in metric_backups:
+        return False
+
+    metric_backups[metric_key] = build_cancel_backup_for_metric(metric)
+    backups["metrics"] = metric_backups
+    return True
+
+
 def _get_run_generated_draft_months(run: ContentFactoryRun) -> list[str]:
     raw_months = (
         _get_run_result_payload(run).get("generated_draft_months")
@@ -309,6 +382,7 @@ def _serialize_run_progress(run: ContentFactoryRun) -> dict:
                 ContentFactoryRunStatus.COMPLETED,
                 ContentFactoryRunStatus.FAILED,
                 ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.CANCELLED,
             }
             else None
         ),
@@ -555,6 +629,8 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
 
 
 def _update_run_step(run: ContentFactoryRun, *, step_key: str):
+    if run.status == ContentFactoryRunStatus.CANCELLED:
+        return
     if run.status == ContentFactoryRunStatus.QUEUED:
         run.status = ContentFactoryRunStatus.RUNNING
     run.current_step = step_key
@@ -733,6 +809,9 @@ class StartupUpdateIngestNextPageView(APIView):
         data = serializer.validated_data
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="gmail_backfill")
         cursor, _ = GmailSyncCursor.objects.get_or_create(
@@ -862,6 +941,9 @@ class StartupUpdateHydrateThreadsView(APIView):
         data = serializer.validated_data
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="thread_hydration")
 
@@ -915,6 +997,9 @@ class StartupUpdateHydrationCandidatesView(APIView):
         limit = serializer.validated_data["limit"]
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="thread_hydration")
         eligible_thread_ids = set(
@@ -993,6 +1078,9 @@ class StartupUpdateClassificationBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="relevance_classification")
 
@@ -1044,6 +1132,9 @@ class StartupUpdateClassificationResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="relevance_classification")
 
@@ -1091,6 +1182,9 @@ class StartupUpdateExtractionBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="event_extraction")
         eligible_thread_ids = _get_prioritized_run_thread_ids(
@@ -1159,9 +1253,14 @@ class StartupUpdateExtractionResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="event_extraction")
 
+        backups = get_startup_update_run_cancel_backups(run)
+        backups_changed = False
         event_count = 0
         metric_count = 0
         attachment_count = 0
@@ -1204,6 +1303,12 @@ class StartupUpdateExtractionResultsView(APIView):
                 attachment_count += 1
 
             for event_data in item.get("events", []):
+                existing_event = StartupEvent.objects.filter(
+                    organization=organization,
+                    canonical_key=event_data["canonical_key"],
+                ).first()
+                if existing_event is not None:
+                    backups_changed = _backup_event_if_needed(run, existing_event, backups) or backups_changed
                 StartupEvent.objects.update_or_create(
                     organization=organization,
                     canonical_key=event_data["canonical_key"],
@@ -1230,6 +1335,15 @@ class StartupUpdateExtractionResultsView(APIView):
                 event_count += 1
 
             for metric_data in item.get("metrics", []):
+                existing_metric = StartupMetricObservation.objects.filter(
+                    organization=organization,
+                    source_thread=thread_artifact,
+                    metric_key=metric_data["metric_key"],
+                    period_month=metric_data["period_month"],
+                    value_text=metric_data["value_text"],
+                ).first()
+                if existing_metric is not None:
+                    backups_changed = _backup_metric_if_needed(run, existing_metric, backups) or backups_changed
                 StartupMetricObservation.objects.update_or_create(
                     organization=organization,
                     source_thread=thread_artifact,
@@ -1250,6 +1364,10 @@ class StartupUpdateExtractionResultsView(APIView):
                 )
                 metric_count += 1
 
+        if backups_changed:
+            set_startup_update_run_cancel_backups(run, backups)
+            run.save(update_fields=["result", "updated_at"])
+
         return Response(
             {
                 "run": _serialize_run(run, request),
@@ -1267,6 +1385,9 @@ class StartupUpdateTimelineView(APIView):
 
     def get(self, request, run_id: str):
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="timeline_merge")
         return Response(
@@ -1305,11 +1426,22 @@ class StartupUpdateDraftResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="draft_generation")
 
+        backups = get_startup_update_run_cancel_backups(run)
+        backups_changed = False
         saved = []
         for item in serializer.validated_data["drafts"]:
+            existing_draft = MonthlyUpdateDraft.objects.filter(
+                organization=organization,
+                month=item["month"],
+            ).first()
+            if existing_draft is not None:
+                backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
             draft = upsert_monthly_update_draft(
                 organization=organization,
                 month=item["month"],
@@ -1324,6 +1456,10 @@ class StartupUpdateDraftResultsView(APIView):
                 groundedness_notes=item.get("groundedness_notes", ""),
             )
             saved.append(_serialize_draft(draft))
+
+        if backups_changed:
+            set_startup_update_run_cancel_backups(run, backups)
+            run.save(update_fields=["result", "updated_at"])
 
         return Response(
             {

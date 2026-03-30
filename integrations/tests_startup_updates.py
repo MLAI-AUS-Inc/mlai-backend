@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
 from types import SimpleNamespace
@@ -45,9 +45,14 @@ from integrations.services.gmail import (
 )
 from integrations.services.startup_updates import (
     STARTUP_UPDATE_WORKFLOW,
+    build_cancel_backup_for_draft,
+    build_cancel_backup_for_event,
+    build_cancel_backup_for_metric,
+    cancel_startup_update_run,
     create_startup_update_run,
     render_monthly_update_markdown,
     score_message_for_profile,
+    set_startup_update_run_cancel_backups,
     sync_startup_profile_from_company,
 )
 
@@ -269,6 +274,176 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(results_response.data["past_months"][0]["month"], "February")
         self.assertEqual(results_response.data["draft"]["month"], "March")
         self.assertEqual(results_response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+
+
+class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+
+    def test_cancel_service_restores_previous_outputs_and_deletes_current_only_rows(self):
+        older_run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            window_months=6,
+        )
+        older_run.status = ContentFactoryRunStatus.COMPLETED
+        older_run.save(update_fields=["status", "updated_at"])
+
+        restored_draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=older_run,
+            month=datetime(2026, 3, 1, tzinfo=dt_timezone.utc).date(),
+            status="ready",
+            structured_memo={"highlights": ["Older March highlight"]},
+            rendered_markdown="# Older March",
+        )
+        restored_event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=older_run,
+            canonical_key="march_customer_win",
+            event_type="customer_win",
+            title="Original customer win",
+            summary="Original summary",
+            month_bucket=datetime(2026, 3, 1, tzinfo=dt_timezone.utc).date(),
+        )
+        restored_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=older_run,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="$45,000",
+            value_number=Decimal("45000"),
+            period_month=datetime(2026, 3, 1, tzinfo=dt_timezone.utc).date(),
+            summary="Original revenue snapshot",
+        )
+
+        backups = {
+            "drafts": {restored_draft.month.isoformat(): build_cancel_backup_for_draft(restored_draft)},
+            "events": {restored_event.canonical_key: build_cancel_backup_for_event(restored_event)},
+            "metrics": {
+                f"{restored_metric.metric_key}:{restored_metric.period_month.isoformat()}:{restored_metric.value_text}":
+                    build_cancel_backup_for_metric(restored_metric)
+            },
+        }
+
+        current_run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            window_months=6,
+        )
+        current_run.status = ContentFactoryRunStatus.RUNNING
+        current_run.current_step = "draft_generation"
+        set_startup_update_run_cancel_backups(current_run, backups)
+        current_run.save(update_fields=["status", "current_step", "result", "updated_at"])
+
+        restored_draft.run = current_run
+        restored_draft.structured_memo = {"highlights": ["Cancelled March highlight"]}
+        restored_draft.rendered_markdown = "# Cancelled March"
+        restored_draft.save(update_fields=["run", "structured_memo", "rendered_markdown", "updated_at"])
+
+        restored_event.run = current_run
+        restored_event.title = "Cancelled customer win"
+        restored_event.summary = "Cancelled summary"
+        restored_event.save(update_fields=["run", "title", "summary", "updated_at"])
+
+        restored_metric.run = current_run
+        restored_metric.summary = "Cancelled revenue snapshot"
+        restored_metric.save(update_fields=["run", "summary", "updated_at"])
+
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=current_run,
+            month=datetime(2026, 2, 1, tzinfo=dt_timezone.utc).date(),
+            status="draft",
+            structured_memo={"highlights": ["Current-only February draft"]},
+            rendered_markdown="",
+        )
+        StartupEvent.objects.create(
+            organization=self.organization,
+            run=current_run,
+            canonical_key="february_launch",
+            event_type="product_milestone",
+            title="Current-only launch",
+            month_bucket=datetime(2026, 2, 1, tzinfo=dt_timezone.utc).date(),
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=current_run,
+            metric_key="mrr",
+            metric_name="MRR",
+            value_text="$12,000",
+            period_month=datetime(2026, 2, 1, tzinfo=dt_timezone.utc).date(),
+            summary="Current-only MRR",
+        )
+
+        result = cancel_startup_update_run(
+            run_id=current_run.run_id,
+            organization=self.organization,
+            binding_id=self.binding.id,
+            google_connection_id=self.google_connection.id,
+            cancelled_by_user_id=self.user.id,
+        )
+
+        current_run.refresh_from_db()
+        restored_draft.refresh_from_db()
+        restored_event.refresh_from_db()
+        restored_metric.refresh_from_db()
+
+        self.assertTrue(result["cancel_applied"])
+        self.assertEqual(result["cleanup"]["drafts_deleted"], 1)
+        self.assertEqual(result["cleanup"]["events_deleted"], 1)
+        self.assertEqual(result["cleanup"]["metrics_deleted"], 1)
+        self.assertEqual(current_run.status, ContentFactoryRunStatus.CANCELLED)
+
+        self.assertEqual(restored_draft.run_id, older_run.id)
+        self.assertEqual(restored_draft.structured_memo["highlights"], ["Older March highlight"])
+        self.assertEqual(restored_event.run_id, older_run.id)
+        self.assertEqual(restored_event.title, "Original customer win")
+        self.assertEqual(restored_metric.run_id, older_run.id)
+        self.assertEqual(restored_metric.summary, "Original revenue snapshot")
+
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(run=current_run, month=date(2026, 2, 1)).exists())
+        self.assertFalse(StartupEvent.objects.filter(run=current_run, canonical_key="february_launch").exists())
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(
+                run=current_run,
+                metric_key="mrr",
+                period_month=date(2026, 2, 1),
+            ).exists()
+        )
+
+    def test_cancelled_run_rejects_late_draft_result_writes(self):
+        run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            window_months=6,
+        )
+        run.status = ContentFactoryRunStatus.CANCELLED
+        run.save(update_fields=["status", "updated_at"])
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_draft_results", args=[run.run_id]),
+                {
+                    "drafts": [
+                        {
+                            "month": "2026-03-01",
+                            "structured_memo": {"highlights": ["Should be rejected"]},
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["error"], "run_cancelled")
 
 
 class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
