@@ -1370,9 +1370,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "job_id": job_id,
                 "run_id": job_id,
                 "workflow": data.get("workflow") or "direct_generate",
-                "status": "queued",
-                "message": "Generation started",
-                "job_status_url": status_url
+                "status": data.get("status") or "queued",
+                "message": data.get("message") or "Generation started",
+                "job_status_url": status_url,
+                "deduped": bool(data.get("deduped")),
+                "recovered": bool(data.get("recovered")),
+                "resume_from": data.get("resume_from"),
             }
         elif response.status_code == 412:
             _refund_content_factory_request(
