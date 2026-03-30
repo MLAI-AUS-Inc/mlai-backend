@@ -965,6 +965,20 @@ class VibeRaisingEmailDraftStartView(APIView):
 
         created = False
         if existing_run is None and reusable_drafts_exist and not force_regenerate:
+            latest_draft = organization.monthly_update_drafts.order_by("-month", "-updated_at").first()
+            logger.info(
+                "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
+                extra={
+                    "user_id": request.user.id,
+                    "organization_id": organization.id,
+                    "organization_domain": organization.domain,
+                    "google_connection_id": google_connection.id,
+                    "force_regenerate": force_regenerate,
+                    "draft_count": organization.monthly_update_drafts.count(),
+                    "latest_draft_month": latest_draft.month.isoformat() if latest_draft else None,
+                    "skip_reason": "reusable_drafts_available",
+                },
+            )
             payload = _build_email_draft_payload(
                 request=request,
                 user=request.user,
@@ -989,6 +1003,20 @@ class VibeRaisingEmailDraftStartView(APIView):
                 extra={"run_id": run.run_id, "organization_id": organization.id},
             )
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+        else:
+            logger.info(
+                "Skipping Valley dispatch for Vibe Raising email draft start because an open run is already active",
+                extra={
+                    "user_id": request.user.id,
+                    "organization_id": organization.id,
+                    "organization_domain": organization.domain,
+                    "google_connection_id": google_connection.id,
+                    "run_id": run.run_id,
+                    "run_status": run.status,
+                    "run_updated_at": run.updated_at.isoformat() if run.updated_at else None,
+                    "skip_reason": "active_run_reused",
+                },
+            )
 
         payload = _build_email_draft_payload(
             request=request,
