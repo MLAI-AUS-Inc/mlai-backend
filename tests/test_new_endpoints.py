@@ -1289,6 +1289,60 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("sig=", blocks[1]["elements"][0]["url"])
 
     @patch('integrations.services.slack.SlackService.send_message')
+    def test_draft_pr_created_callback_downgrades_unverified_repo_preview_to_artifact_preview(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-draft-pr-unverified-preview",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+        self._create_content_factory_run("job-draft-pr-unverified-preview")
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "draft_pr_created",
+                "job_id": "job-draft-pr-unverified-preview",
+                "run_id": "job-draft-pr-unverified-preview",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "pr_url": "https://github.com/example/pr/13",
+                "pr_number": 13,
+                "preview_url": "https://preview.example.com/articles/featured/test-article",
+                "preview_surface_kind": "repo_preview",
+                "preview_content_verified": False,
+                "repo_preview_candidate_url": "https://preview.example.com/articles/featured/test-article",
+                "review_surface_kind": "preview_route",
+                "primary_review_url": "https://preview.example.com/articles/featured/test-article",
+                "primary_review_label": "Open Preview",
+                "route_is_live": True,
+                "route_path": "/articles/featured/test-article",
+                "dedupe_key": "draft-pr-unverified-preview-13",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-draft-pr-unverified-preview")
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertTrue(job.request_meta.get("preview_content_verified"))
+        self.assertEqual(
+            job.request_meta.get("repo_preview_candidate_url"),
+            "https://preview.example.com/articles/featured/test-article",
+        )
+        self.assertIn(
+            "/api/content-factory/runs/job-draft-pr-unverified-preview/preview/",
+            job.request_meta.get("preview_url", ""),
+        )
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+
+    @patch('integrations.services.slack.SlackService.send_message')
     def test_generation_pr_opened_callback_marks_job_needs_review(self, mock_send_message):
         mock_send_message.return_value = (True, "message-ts")
         ContentFactoryJob.objects.create(
