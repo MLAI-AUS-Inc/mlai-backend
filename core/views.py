@@ -2172,6 +2172,9 @@ class ContentFactoryCallbackView(APIView):
             'intended_route_path',
             'preview_url',
             'preview_surface_kind',
+            'preview_content_verified',
+            'repo_preview_candidate_url',
+            'preview_failure_reason',
             'primary_review_url',
             'primary_review_label',
             'review_surface_kind',
@@ -2179,7 +2182,9 @@ class ContentFactoryCallbackView(APIView):
         ):
             if field in data:
                 value = data.get(field)
-                if value:
+                if field == 'preview_content_verified':
+                    request_meta[field] = bool(value)
+                elif value:
                     request_meta[field] = value
                 else:
                     request_meta.pop(field, None)
@@ -2212,11 +2217,22 @@ class ContentFactoryCallbackView(APIView):
         preview_url = str(payload.get('preview_url') or '').strip()
         route_is_live = bool(payload.get('route_is_live')) if payload.get('route_is_live') is not None else bool(preview_url)
         preview_surface_kind = str(payload.get('preview_surface_kind') or '').strip()
+        preview_content_verified_raw = payload.get('preview_content_verified')
+        preview_content_verified = (
+            bool(preview_content_verified_raw)
+            if preview_content_verified_raw is not None
+            else bool(preview_url) and preview_surface_kind != 'repo_preview'
+        )
 
-        if preview_url:
+        if preview_url and (preview_surface_kind != 'repo_preview' or preview_content_verified):
             if not preview_surface_kind:
                 payload['preview_surface_kind'] = 'repo_preview' if route_is_live else 'artifact_preview'
             return payload
+
+        if preview_surface_kind == 'repo_preview' and preview_url and not preview_content_verified:
+            payload['repo_preview_candidate_url'] = str(payload.get('repo_preview_candidate_url') or preview_url).strip()
+            payload['preview_url'] = ''
+            payload['route_is_live'] = False
 
         if not run_id:
             return payload
@@ -2236,6 +2252,7 @@ class ContentFactoryCallbackView(APIView):
 
         payload['preview_url'] = artifact_preview_url
         payload['preview_surface_kind'] = 'artifact_preview'
+        payload['preview_content_verified'] = True
         payload['primary_review_url'] = artifact_preview_url
         payload['primary_review_label'] = 'Open Preview'
         payload['route_is_live'] = False
