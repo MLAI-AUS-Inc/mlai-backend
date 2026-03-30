@@ -144,6 +144,132 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         )
         mock_notify.assert_called_once_with(run.run_id)
 
+    @patch("integrations.api_views_startup_updates.notify_valley_run_created")
+    def test_run_creation_reports_reused_existing_run_and_active_run(self, mock_notify):
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            with self._with_key():
+                first = self.client.post(
+                    reverse("startup_updates_run"),
+                    {
+                        "user_id": self.user.id,
+                        "domain": self.organization.domain,
+                        "window_months": 6,
+                    },
+                    format="json",
+                    **self.headers,
+                )
+
+        with self._with_key():
+            second = self.client.post(
+                reverse("startup_updates_run"),
+                {
+                    "user_id": self.user.id,
+                    "domain": self.organization.domain,
+                    "window_months": 6,
+                },
+                format="json",
+                **self.headers,
+            )
+            active = self.client.get(
+                reverse("startup_updates_active_run"),
+                {
+                    "domain": self.organization.domain,
+                    "binding_id": binding.id,
+                    "google_connection_id": self.google_connection.id,
+                },
+                **self.headers,
+            )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(first.data["reused_existing_run"])
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertTrue(second.data["reused_existing_run"])
+        self.assertEqual(first.data["run_id"], second.data["run_id"])
+        self.assertEqual(active.status_code, status.HTTP_200_OK)
+        self.assertEqual(active.data["run_id"], first.data["run_id"])
+        self.assertEqual(active.data["status"], ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(active.data["display_stage"], "Preparing company context")
+        mock_notify.assert_called_once()
+
+    def test_run_status_and_draft_results_getters(self):
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=self.organization,
+            binding=binding,
+            window_months=6,
+        )
+        run.status = ContentFactoryRunStatus.COMPLETED
+        run.current_step = "groundedness_review"
+        run.result = {
+            "generated_draft_months": ["2026-03-01", "2026-02-01"],
+            "_valley_meta": {"last_heartbeat_at": "2026-03-30T04:10:11+00:00"},
+        }
+        run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=run,
+            month=datetime(2026, 3, 1, tzinfo=dt_timezone.utc).date(),
+            status="ready",
+            structured_memo={
+                "highlights": ["Closed March pilot"],
+                "lowlights": ["March hiring slowed"],
+                "asks": ["March intro"],
+                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
+            },
+            rendered_markdown="# March Update",
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=run,
+            month=datetime(2026, 2, 1, tzinfo=dt_timezone.utc).date(),
+            status="ready",
+            structured_memo={
+                "highlights": ["Launched February feature"],
+                "lowlights": ["February challenge"],
+                "asks": ["February intro"],
+                "kpi_snapshot": [{"metric_key": "mrr", "label": "MRR", "value": "$12,000"}],
+            },
+            rendered_markdown="# February Update",
+        )
+
+        with self._with_key():
+            status_response = self.client.get(
+                reverse("startup_updates_run_status", args=[run.run_id]),
+                **self.headers,
+            )
+            results_response = self.client.get(
+                reverse("startup_updates_draft_results", args=[run.run_id]),
+                **self.headers,
+            )
+
+        self.assertEqual(status_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(status_response.data["run_id"], run.run_id)
+        self.assertEqual(status_response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(status_response.data["display_stage"], "Final review")
+        self.assertEqual(status_response.data["last_heartbeat_at"], "2026-03-30T04:10:11+00:00")
+        self.assertEqual(status_response.data["generated_draft_months"], ["2026-03-01", "2026-02-01"])
+        self.assertEqual(status_response.data["terminal_state"], ContentFactoryRunStatus.COMPLETED)
+
+        self.assertEqual(results_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(results_response.data["run_id"], run.run_id)
+        self.assertEqual(results_response.data["current_month"]["month"], "March")
+        self.assertEqual(results_response.data["current_month"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(results_response.data["past_months"][0]["month"], "February")
+        self.assertEqual(results_response.data["draft"]["month"], "March")
+        self.assertEqual(results_response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+
 
 class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
     def setUp(self):
@@ -601,12 +727,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             binding=self.binding,
             window_months=6,
         )
+        message_timestamp = timezone.now() - timedelta(minutes=5)
         self.message = GmailMessageArtifact.objects.create(
             organization=self.organization,
             google_connection=self.google_connection,
             gmail_message_id="msg-123",
             gmail_thread_id="thread-123",
-            internal_date=timezone.now(),
+            internal_date=message_timestamp,
             subject="ACME pilot converted to ARR contract",
             from_address="ceo@acme.com",
             to_addresses=["investor@fund.example"],
@@ -628,7 +755,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             hydration_status=ArtifactProcessingStatus.HYDRATED,
             extraction_status=ArtifactProcessingStatus.PENDING,
             source_message_count=1,
-            latest_message_internal_date=timezone.now(),
+            latest_message_internal_date=message_timestamp,
             hydrated_at=timezone.now(),
         )
         self.attachment = GmailAttachmentArtifact.objects.create(
@@ -734,6 +861,43 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(batch_response.data["count"], 1)
         self.assertEqual(batch_response.data["messages"][0]["gmail_thread_id"], self.message.gmail_thread_id)
 
+    def test_classification_batch_scopes_messages_to_run_window(self):
+        now = timezone.now()
+        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
+        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self.run.save(update_fields=["run_request", "updated_at"])
+
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-old-window",
+            gmail_thread_id="thread-old-window",
+            internal_date=now - timedelta(days=7),
+            subject="Out-of-window message",
+            from_address="ceo@acme.com",
+            snippet="Should not be classified for this run",
+            cleaned_text="Should not be classified for this run",
+            heuristic_score=95,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.AMBIGUOUS,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            batch_response = self.client.get(
+                reverse("startup_updates_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        self.assertEqual(
+            [item["gmail_message_id"] for item in batch_response.data["messages"]],
+            [self.message.gmail_message_id],
+        )
+
     def test_classification_results_updates_only_pinned_connection_artifact(self):
         _other_user, other_connection = self._create_secondary_connection()
         other_message = GmailMessageArtifact.objects.create(
@@ -807,6 +971,73 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(mock_hydrate_thread_artifact.call_args.kwargs["thread_id"], self.thread.gmail_thread_id)
         self.assertFalse(mock_hydrate_thread_artifact.call_args.kwargs["fetch_attachments"])
 
+    def test_hydration_candidates_scope_to_run_window_and_top_threads(self):
+        now = timezone.now()
+        self.message.internal_date = now - timedelta(minutes=20)
+        self.message.save(update_fields=["internal_date", "updated_at"])
+        self.thread.hydration_status = ArtifactProcessingStatus.PENDING
+        self.thread.latest_message_internal_date = now - timedelta(minutes=20)
+        self.thread.save(update_fields=["hydration_status", "latest_message_internal_date", "updated_at"])
+        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
+        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self.run.run_request["max_source_threads"] = 1
+        self.run.save(update_fields=["run_request", "updated_at"])
+
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-top-thread",
+            gmail_thread_id="thread-top-thread",
+            internal_date=now,
+            subject="Newest in-window thread",
+            from_address="founder@acme.com",
+            snippet="Most recent relevant thread",
+            cleaned_text="Most recent relevant thread",
+            heuristic_score=88,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_thread_id="thread-top-thread",
+            source_message_ids=["msg-top-thread"],
+            message_payloads=[{"message_id": "msg-top-thread"}],
+            cleaned_text="Most recent relevant thread",
+            hydration_status=ArtifactProcessingStatus.PENDING,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+            source_message_count=1,
+            latest_message_internal_date=now,
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-outside-window",
+            gmail_thread_id="thread-outside-window",
+            internal_date=now - timedelta(days=14),
+            subject="Outside-window thread",
+            from_address="founder@acme.com",
+            cleaned_text="Should not be hydrated in this run",
+            heuristic_score=90,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_hydration_candidates", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["gmail_thread_id"], "thread-top-thread")
+
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_lazily_hydrates_missing_attachments(self, mock_get_attachment_payload):
         self.message.attachment_manifest = [
@@ -848,6 +1079,85 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             self.message.gmail_message_id,
             "att-lazy",
         )
+
+    def test_extraction_batch_scopes_to_run_window_and_top_threads(self):
+        now = timezone.now()
+        self.message.internal_date = now - timedelta(minutes=20)
+        self.message.save(update_fields=["internal_date", "updated_at"])
+        self.thread.latest_message_internal_date = now - timedelta(minutes=20)
+        self.thread.save(update_fields=["latest_message_internal_date", "updated_at"])
+        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
+        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self.run.run_request["max_source_threads"] = 1
+        self.run.save(update_fields=["run_request", "updated_at"])
+
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-newest-thread",
+            gmail_thread_id="thread-newest-thread",
+            internal_date=now,
+            subject="Newest thread in run window",
+            from_address="founder@acme.com",
+            cleaned_text="Newest thread in run window",
+            heuristic_score=91,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_thread_id="thread-newest-thread",
+            source_message_ids=["msg-newest-thread"],
+            message_payloads=[{"message_id": "msg-newest-thread"}],
+            cleaned_text="Newest thread in run window",
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+            source_message_count=1,
+            latest_message_internal_date=now,
+            hydrated_at=timezone.now(),
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_message_id="msg-stale-thread",
+            gmail_thread_id="thread-stale-thread",
+            internal_date=now - timedelta(days=10),
+            subject="Stale thread outside run window",
+            from_address="founder@acme.com",
+            cleaned_text="Stale thread outside run window",
+            heuristic_score=80,
+            heuristic_reasons=["matched_company_domain"],
+            relevance_label=GmailRelevanceLabel.RELEVANT,
+            needs_thread_context=True,
+            metadata_hydrated_at=timezone.now(),
+        )
+        GmailThreadArtifact.objects.create(
+            organization=self.organization,
+            google_connection=self.google_connection,
+            gmail_thread_id="thread-stale-thread",
+            source_message_ids=["msg-stale-thread"],
+            message_payloads=[{"message_id": "msg-stale-thread"}],
+            cleaned_text="Stale thread outside run window",
+            hydration_status=ArtifactProcessingStatus.HYDRATED,
+            extraction_status=ArtifactProcessingStatus.PENDING,
+            source_message_count=1,
+            latest_message_internal_date=now - timedelta(days=10),
+            hydrated_at=timezone.now(),
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["gmail_thread_id"], "thread-newest-thread")
 
     def test_hydration_candidates_ignore_threads_from_other_connections(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)

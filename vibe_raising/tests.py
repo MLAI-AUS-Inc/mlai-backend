@@ -253,6 +253,22 @@ class VibeRaisingApiTests(TestCase):
             reverse("vibe-raising-email-draft-latest"),
             "/api/v1/vibe-raising/email-draft/latest/",
         )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-active-run"),
+            "/api/v1/vibe-raising/email-draft/active-run/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-run-status", args=["run-123"]),
+            "/api/v1/vibe-raising/email-draft/runs/run-123/status/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-draft-results-latest"),
+            "/api/v1/vibe-raising/email-draft/draft-results/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-email-draft-draft-results", args=["run-123"]),
+            "/api/v1/vibe-raising/email-draft/runs/run-123/draft-results/",
+        )
 
     def test_startup_update_bootstrap_returns_needs_domain_for_missing_domain(self):
         self.client.force_authenticate(user=self.user)
@@ -434,7 +450,9 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(first.data["state"], "queued")
+        self.assertFalse(first.data["reusedExistingRun"])
         self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data["reusedExistingRun"])
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         self.assertEqual(first.data["runId"], second.data["runId"])
         mock_notify.assert_called_once()
@@ -692,6 +710,131 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual([item["month"] for item in response.data["pastMonths"]], ["January", "February"])
         self.assertEqual(response.data["draft"]["month"], "March")
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+
+    def test_email_draft_active_run_returns_null_without_open_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        response = self.client.get("/api/v1/vibe-raising/email-draft/active-run/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data)
+
+    def test_email_draft_active_run_returns_progress_payload(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        run.status = ContentFactoryRunStatus.RUNNING
+        run.current_step = "gmail_backfill"
+        run.result = {
+            "_valley_meta": {"last_heartbeat_at": "2026-03-30T04:05:06+00:00"},
+        }
+        run.save(update_fields=["status", "current_step", "result", "updated_at"])
+
+        response = self.client.get("/api/v1/vibe-raising/email-draft/active-run/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "running")
+        self.assertEqual(response.data["runId"], run.run_id)
+        self.assertEqual(response.data["displayStage"], "Scanning recent Gmail messages")
+        self.assertEqual(response.data["lastHeartbeatAt"], "2026-03-30T04:05:06+00:00")
+        self.assertEqual(response.data["binding"]["id"], binding.id)
+        self.assertEqual(response.data["binding"]["googleConnectionId"], google_connection.id)
+
+    def test_email_draft_run_status_and_results_are_scoped_to_requested_run(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        older_run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        older_run.status = ContentFactoryRunStatus.COMPLETED
+        older_run.current_step = "groundedness_review"
+        older_run.result = {
+            "generated_draft_months": ["2026-03-01"],
+            "_valley_meta": {"last_heartbeat_at": "2026-03-30T02:00:00+00:00"},
+        }
+        older_run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=older_run,
+            month=date(2026, 3, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["March highlight"],
+                "lowlights": ["March challenge"],
+                "asks": ["March ask"],
+                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
+            },
+            rendered_markdown="# March Update",
+        )
+
+        newer_run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        newer_run.status = ContentFactoryRunStatus.COMPLETED
+        newer_run.current_step = "groundedness_review"
+        newer_run.result = {
+            "generated_draft_months": ["2026-04-01"],
+        }
+        newer_run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=newer_run,
+            month=date(2026, 4, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["April highlight"],
+                "lowlights": ["April challenge"],
+                "asks": ["April ask"],
+                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$52,000"}],
+            },
+            rendered_markdown="# April Update",
+        )
+
+        status_response = self.client.get(
+            f"/api/v1/vibe-raising/email-draft/runs/{older_run.run_id}/status/",
+        )
+        results_response = self.client.get(
+            f"/api/v1/vibe-raising/email-draft/runs/{older_run.run_id}/draft-results/",
+        )
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["state"], "completed")
+        self.assertEqual(status_response.data["runId"], older_run.run_id)
+        self.assertEqual(status_response.data["generatedDraftMonths"], ["2026-03-01"])
+        self.assertEqual(status_response.data["currentMonth"]["month"], "March")
+        self.assertEqual(status_response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+
+        self.assertEqual(results_response.status_code, 200)
+        self.assertEqual(results_response.data["runId"], older_run.run_id)
+        self.assertEqual(results_response.data["currentMonth"]["month"], "March")
+        self.assertEqual(results_response.data["draft"]["month"], "March")
+        self.assertEqual(results_response.data["draft"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(results_response.data["months"][0]["month"], "March")
 
     def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
         self.client.force_authenticate(user=self.user)

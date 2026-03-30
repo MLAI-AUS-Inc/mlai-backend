@@ -1,15 +1,17 @@
 from datetime import datetime, timedelta, timezone as dt_timezone
+from typing import Optional, Tuple
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization
+from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
 from core.permissions import HasRooApiKey
 from integrations.api_serializers import (
     ClassificationResultsSerializer,
@@ -49,6 +51,7 @@ from integrations.services.startup_updates import (
     bind_user_to_startup,
     build_timeline_payload,
     create_startup_update_run,
+    DEFAULT_MAX_SOURCE_THREADS,
     get_default_binding_for_domain,
     get_open_startup_update_run,
     get_startup_update_run_google_connection_id,
@@ -61,6 +64,18 @@ from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
 
 User = get_user_model()
+
+EMAIL_DRAFT_DISPLAY_STAGES = {
+    "profile_resolution": "Preparing company context",
+    "gmail_backfill": "Scanning recent Gmail messages",
+    "relevance_classification": "Finding investor-relevant updates",
+    "thread_hydration": "Pulling full thread context",
+    "event_extraction": "Extracting metrics and highlights",
+    "timeline_merge": "Building timeline",
+    "draft_generation": "Drafting monthly updates",
+    "groundedness_review": "Final review",
+}
+VALLEY_META_KEY = "_valley_meta"
 
 
 def _serialize_profile(profile) -> dict:
@@ -210,12 +225,311 @@ def _serialize_metric(metric) -> dict:
     }
 
 
+def _parse_optional_int(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_run_result_payload(run: ContentFactoryRun) -> dict:
+    payload = run.result or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _get_run_meta(run: ContentFactoryRun) -> dict:
+    meta = _get_run_result_payload(run).get(VALLEY_META_KEY) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _get_run_generated_draft_months(run: ContentFactoryRun) -> list[str]:
+    raw_months = (
+        _get_run_result_payload(run).get("generated_draft_months")
+        or (run.run_request or {}).get("draft_months")
+        or []
+    )
+    if not isinstance(raw_months, (list, tuple)):
+        return []
+
+    months: list[str] = []
+    for item in raw_months:
+        text = str(item or "").strip()
+        if text:
+            months.append(text)
+    return months
+
+
+def _get_email_draft_display_stage(current_step: Optional[str]) -> str:
+    step_key = str(current_step or "").strip() or RUN_STEP_ORDER[0]
+    return EMAIL_DRAFT_DISPLAY_STAGES.get(step_key, "Preparing company context")
+
+
+def _count_completed_run_steps(run: ContentFactoryRun) -> Tuple[int, int]:
+    ordered_steps = list(run.step_order or RUN_STEP_ORDER)
+    if not ordered_steps:
+        return 0, 0
+
+    step_statuses = {
+        step.step_key: step.status
+        for step in run.steps.all()
+    }
+    completed_count = 0
+    for step_key in ordered_steps:
+        if step_statuses.get(step_key) in {
+            ContentFactoryStepStatus.COMPLETED,
+            ContentFactoryStepStatus.SKIPPED,
+        }:
+            completed_count += 1
+
+    if run.status == ContentFactoryRunStatus.COMPLETED:
+        completed_count = len(ordered_steps)
+
+    return completed_count, len(ordered_steps)
+
+
+def _serialize_run_progress(run: ContentFactoryRun) -> dict:
+    completed_steps, total_steps = _count_completed_run_steps(run)
+    return {
+        "run_id": run.run_id,
+        "status": run.status,
+        "current_step": run.current_step,
+        "completed_steps": completed_steps,
+        "total_steps": total_steps,
+        "display_stage": _get_email_draft_display_stage(run.current_step),
+        "last_heartbeat_at": _get_run_meta(run).get("last_heartbeat_at"),
+        "can_retry": run.status in {
+            ContentFactoryRunStatus.FAILED,
+            ContentFactoryRunStatus.DENIED,
+        },
+        "terminal_state": (
+            run.status
+            if run.status in {
+                ContentFactoryRunStatus.COMPLETED,
+                ContentFactoryRunStatus.FAILED,
+                ContentFactoryRunStatus.DENIED,
+            }
+            else None
+        ),
+        "generated_draft_months": _get_run_generated_draft_months(run),
+    }
+
+
+def _normalize_text_list(value) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+
+    if isinstance(value, dict):
+        candidate = (
+            value.get("text")
+            or value.get("value")
+            or value.get("title")
+            or value.get("label")
+            or ""
+        )
+        text = str(candidate).strip()
+        return [text] if text else []
+
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_normalize_text_list(item))
+        return items
+
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _join_text_items(value) -> str:
+    items = _normalize_text_list(value)
+    if not items:
+        return ""
+
+    text = ". ".join(item.rstrip(". ") for item in items if item.strip())
+    text = text.strip()
+    if text and text[-1].isalnum():
+        text += "."
+    return text
+
+
+def _metric_key_from_label(label) -> Optional[str]:
+    normalized = str(label or "").strip().lower()
+    if normalized in {"revenue", "monthly revenue"}:
+        return "revenue"
+    if normalized in {"active users", "users", "monthly active users"}:
+        return "activeUsers"
+    if normalized in {"mrr", "monthly recurring revenue"}:
+        return "mrr"
+    if normalized in {"burn rate", "burn"}:
+        return "burnRate"
+    if normalized == "runway":
+        return "runway"
+    return None
+
+
+def _normalize_metric_value(value) -> Optional[str]:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_form_metrics(structured_memo) -> dict:
+    metrics = {}
+    snapshot = (structured_memo or {}).get("kpi_snapshot") or []
+    for item in snapshot:
+        if not isinstance(item, dict):
+            continue
+
+        metric_key = str(item.get("metric_key") or "").strip() or _metric_key_from_label(
+            item.get("label") or item.get("name") or item.get("metric_name")
+        )
+        if not metric_key:
+            continue
+
+        metric_value = _normalize_metric_value(
+            item.get("value")
+            or item.get("value_text")
+            or item.get("value_number")
+        )
+        if metric_value:
+            metrics[metric_key] = metric_value
+
+    return metrics
+
+
+def _serialize_draft_for_editor(draft) -> dict:
+    structured_memo = draft.structured_memo or {}
+    month_value = draft.month
+    return {
+        "month": month_value.strftime("%B"),
+        "year": month_value.year,
+        "highlights": _join_text_items(structured_memo.get("highlights")),
+        "challenges": _join_text_items(structured_memo.get("lowlights")),
+        "asks": _join_text_items(structured_memo.get("asks")),
+        "metrics": _extract_form_metrics(structured_memo),
+    }
+
+
+def _serialize_email_draft_month(draft) -> dict:
+    structured_memo = draft.structured_memo or {}
+    month_value = draft.month
+    return {
+        "draft_id": draft.id,
+        "iso_month": month_value.isoformat(),
+        "month": month_value.strftime("%B"),
+        "year": month_value.year,
+        "metrics": _extract_form_metrics(structured_memo),
+        "highlights": _join_text_items(structured_memo.get("highlights")),
+        "challenges": _join_text_items(structured_memo.get("lowlights")),
+        "asks": _join_text_items(structured_memo.get("asks")),
+    }
+
+
+def _serialize_draft_results_bundle(drafts) -> Optional[dict]:
+    if not drafts:
+        return None
+
+    current_month = _serialize_email_draft_month(drafts[0])
+    past_months = [_serialize_email_draft_month(draft) for draft in reversed(drafts[1:])]
+
+    editor_past_months = []
+    for draft in drafts[1:3]:
+        payload = _serialize_draft_for_editor(draft)
+        editor_past_months.append(
+            {
+                "month": f"{payload['month']} {payload['year']}",
+                "highlights": payload["highlights"],
+                "challenges": payload["challenges"],
+                "asks": payload["asks"],
+                "metrics": payload["metrics"],
+            }
+        )
+
+    return {
+        "draft": {
+            **_serialize_draft_for_editor(drafts[0]),
+            "pastMonths": editor_past_months,
+        },
+        "current_month": current_month,
+        "past_months": past_months,
+        "months": [*past_months, current_month],
+    }
+
+
 def _get_run_or_404(run_id: str) -> ContentFactoryRun:
     return get_object_or_404(
         ContentFactoryRun,
         run_id=run_id,
         workflow=STARTUP_UPDATE_WORKFLOW,
     )
+
+
+def _get_run_window_bounds(run: ContentFactoryRun) -> Tuple[Optional[datetime], Optional[datetime]]:
+    request_payload = run.run_request or {}
+    start = parse_datetime(str(request_payload.get("backfill_window_start") or "").strip() or "")
+    end = parse_datetime(str(request_payload.get("backfill_window_end") or "").strip() or "")
+    return start, end
+
+
+def _apply_run_window(queryset, run: ContentFactoryRun, field_name: str):
+    start, end = _get_run_window_bounds(run)
+    filters = {}
+    if start is not None:
+        filters[f"{field_name}__gte"] = start
+    if end is not None:
+        filters[f"{field_name}__lte"] = end
+    if filters:
+        queryset = queryset.filter(**filters)
+    return queryset
+
+
+def _get_run_max_source_threads(run: ContentFactoryRun) -> int:
+    raw_value = (run.run_request or {}).get("max_source_threads", DEFAULT_MAX_SOURCE_THREADS)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_SOURCE_THREADS
+    return max(value, 1)
+
+
+def _get_prioritized_run_thread_ids(
+    *,
+    run: ContentFactoryRun,
+    organization: Organization,
+    google_connection: GoogleConnection,
+) -> list[str]:
+    thread_limit = _get_run_max_source_threads(run)
+    queryset = _apply_run_window(
+        GmailMessageArtifact.objects.filter(
+            organization=organization,
+            google_connection=google_connection,
+            relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
+            needs_thread_context=True,
+        )
+        .exclude(gmail_thread_id="")
+        .order_by("-internal_date", "-updated_at")
+        .only("gmail_thread_id"),
+        run,
+        "internal_date",
+    )
+
+    thread_ids: list[str] = []
+    seen_thread_ids: set[str] = set()
+    for artifact in queryset:
+        if artifact.gmail_thread_id in seen_thread_ids:
+            continue
+        seen_thread_ids.add(artifact.gmail_thread_id)
+        thread_ids.append(artifact.gmail_thread_id)
+        if len(thread_ids) >= thread_limit:
+            break
+    return thread_ids
 
 
 def _get_org_and_binding_for_run(run: ContentFactoryRun):
@@ -356,11 +670,57 @@ class StartupUpdateRunView(APIView):
         return Response(
             {
                 "run": _serialize_run(run, request),
+                "run_id": run.run_id,
+                "status": run.status,
+                "current_step": run.current_step,
+                "reused_existing_run": existing_run is not None,
                 "profile": _serialize_profile(profile),
                 "binding": _serialize_binding(binding),
             },
             status=status.HTTP_200_OK if existing_run else status.HTTP_201_CREATED,
         )
+
+
+class StartupUpdateActiveRunView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = normalize_domain(request.query_params.get("domain") or "")
+        binding_id = _parse_optional_int(request.query_params.get("binding_id"))
+        google_connection_id = _parse_optional_int(request.query_params.get("google_connection_id"))
+
+        if not domain or binding_id is None:
+            return Response(
+                {"error": "domain and binding_id query parameters are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        organization = get_object_or_404(Organization, domain=domain)
+        binding = get_object_or_404(
+            organization.user_startup_bindings.select_related("user", "google_connection"),
+            id=binding_id,
+        )
+        if google_connection_id is None:
+            google_connection_id = binding.google_connection_id or getattr(binding.user, "google_connection_id", None)
+
+        run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection_id,
+        )
+        if run is None:
+            return Response(None, status=status.HTTP_200_OK)
+
+        return Response(_serialize_run_progress(run), status=status.HTTP_200_OK)
+
+
+class StartupUpdateRunStatusView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        run = _get_run_or_404(run_id)
+        return Response(_serialize_run_progress(run), status=status.HTTP_200_OK)
 
 
 class StartupUpdateIngestNextPageView(APIView):
@@ -557,6 +917,22 @@ class StartupUpdateHydrationCandidatesView(APIView):
         run = _get_run_or_404(run_id)
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="thread_hydration")
+        eligible_thread_ids = set(
+            _get_prioritized_run_thread_ids(
+                run=run,
+                organization=organization,
+                google_connection=google_connection,
+            )
+        )
+        if not eligible_thread_ids:
+            return Response(
+                {
+                    "run": _serialize_run(run, request),
+                    "count": 0,
+                    "threads": [],
+                },
+                status=status.HTTP_200_OK,
+            )
 
         hydrated_by_thread = {
             item["gmail_thread_id"]: item["hydration_status"]
@@ -568,12 +944,17 @@ class StartupUpdateHydrationCandidatesView(APIView):
 
         seen_thread_ids = set()
         candidates = []
-        queryset = GmailMessageArtifact.objects.filter(
-            organization=organization,
-            google_connection=google_connection,
-            relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
-            needs_thread_context=True,
-        ).order_by("-internal_date")
+        queryset = _apply_run_window(
+            GmailMessageArtifact.objects.filter(
+                organization=organization,
+                google_connection=google_connection,
+                relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
+                needs_thread_context=True,
+                gmail_thread_id__in=eligible_thread_ids,
+            ).order_by("-internal_date"),
+            run,
+            "internal_date",
+        )
 
         for artifact in queryset:
             if artifact.gmail_thread_id in seen_thread_ids:
@@ -615,11 +996,15 @@ class StartupUpdateClassificationBatchView(APIView):
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="relevance_classification")
 
-        queryset = GmailMessageArtifact.objects.filter(
-            organization=organization,
-            google_connection=google_connection,
-            relevance_label__in=[GmailRelevanceLabel.AMBIGUOUS, GmailRelevanceLabel.PENDING],
-        ).order_by("-heuristic_score", "-internal_date")[:limit]
+        queryset = _apply_run_window(
+            GmailMessageArtifact.objects.filter(
+                organization=organization,
+                google_connection=google_connection,
+                relevance_label__in=[GmailRelevanceLabel.AMBIGUOUS, GmailRelevanceLabel.PENDING],
+            ).order_by("-heuristic_score", "-internal_date"),
+            run,
+            "internal_date",
+        )[:limit]
 
         payload = []
         for artifact in queryset:
@@ -708,13 +1093,33 @@ class StartupUpdateExtractionBatchView(APIView):
         run = _get_run_or_404(run_id)
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="event_extraction")
-
-        queryset = GmailThreadArtifact.objects.filter(
+        eligible_thread_ids = _get_prioritized_run_thread_ids(
+            run=run,
             organization=organization,
             google_connection=google_connection,
-            hydration_status=ArtifactProcessingStatus.HYDRATED,
-            extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
-        ).order_by("-latest_message_internal_date", "-updated_at")[:limit]
+        )
+
+        if not eligible_thread_ids:
+            return Response(
+                {
+                    "run": _serialize_run(run, request),
+                    "count": 0,
+                    "threads": [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        queryset = _apply_run_window(
+            GmailThreadArtifact.objects.filter(
+                organization=organization,
+                google_connection=google_connection,
+                gmail_thread_id__in=eligible_thread_ids,
+                hydration_status=ArtifactProcessingStatus.HYDRATED,
+                extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
+            ).order_by("-latest_message_internal_date", "-updated_at"),
+            run,
+            "latest_message_internal_date",
+        )[:limit]
 
         bundles = []
         for thread_artifact in queryset:
@@ -876,6 +1281,24 @@ class StartupUpdateTimelineView(APIView):
 class StartupUpdateDraftResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        run = _get_run_or_404(run_id)
+        drafts = list(run.monthly_update_drafts.order_by("-month", "-updated_at"))
+        payload = _serialize_draft_results_bundle(drafts)
+        if payload is None:
+            return Response(
+                {"error": "Draft results are not available yet."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "run_id": run.run_id,
+                **payload,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def post(self, request, run_id: str):
         serializer = DraftResultsSerializer(data=request.data)

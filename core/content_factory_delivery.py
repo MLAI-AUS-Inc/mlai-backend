@@ -390,6 +390,29 @@ def build_preview_ready_blocks(
     ]
 
 
+def build_progress_update_blocks(
+    *,
+    domain: str,
+    stage_title: str,
+    message: str,
+    milestone_index: Optional[int] = None,
+    milestone_count: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    section_text = f"⏳ *{stage_title}* for {domain}\n\n{_string(message)}"
+    if milestone_index and milestone_count:
+        section_text += f"\n\nStep {milestone_index} of {milestone_count}"
+
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": section_text,
+            },
+        }
+    ]
+
+
 def build_content_ready_blocks(
     *,
     domain: str,

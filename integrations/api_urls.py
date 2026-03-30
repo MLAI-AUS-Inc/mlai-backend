@@ -25,7 +25,9 @@ urlpatterns = [
     # Startup updates / investor memo workflow
     path('startup-updates/profile', api_views_startup_updates.StartupProfileView.as_view(), name='startup_updates_profile'),
     path('startup-updates/run', api_views_startup_updates.StartupUpdateRunView.as_view(), name='startup_updates_run'),
+    path('startup-updates/active-run', api_views_startup_updates.StartupUpdateActiveRunView.as_view(), name='startup_updates_active_run'),
     path('startup-updates/open-runs', api_views_startup_updates.StartupUpdateOpenRunsView.as_view(), name='startup_updates_open_runs'),
+    path('startup-updates/runs/<str:run_id>/status', api_views_startup_updates.StartupUpdateRunStatusView.as_view(), name='startup_updates_run_status'),
     path('startup-updates/runs/<str:run_id>/ingest-next-page', api_views_startup_updates.StartupUpdateIngestNextPageView.as_view(), name='startup_updates_ingest_next_page'),
     path('startup-updates/runs/<str:run_id>/hydration-candidates', api_views_startup_updates.StartupUpdateHydrationCandidatesView.as_view(), name='startup_updates_hydration_candidates'),
     path('startup-updates/runs/<str:run_id>/hydrate-threads', api_views_startup_updates.StartupUpdateHydrateThreadsView.as_view(), name='startup_updates_hydrate_threads'),

@@ -1232,6 +1232,63 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open PR")
 
     @patch('integrations.services.slack.SlackService.send_message')
+    def test_draft_pr_created_callback_uses_artifact_preview_when_repo_preview_missing(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-draft-pr-preview",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+        self._create_content_factory_run("job-draft-pr-preview")
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "draft_pr_created",
+                "job_id": "job-draft-pr-preview",
+                "run_id": "job-draft-pr-preview",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "pr_url": "https://github.com/example/pr/12",
+                "pr_number": 12,
+                "review_surface_kind": "preview_route",
+                "primary_review_url": "https://github.com/example/pr/12",
+                "primary_review_label": "Open PR",
+                "route_is_live": False,
+                "route_path": "",
+                "intended_route_path": "/articles/featured/how-to-build-an-ai-harness",
+                "dedupe_key": "draft-pr-preview-12",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-draft-pr-preview")
+        self.assertEqual(job.request_meta.get("publish_stage"), "awaiting_preview")
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertIn(
+            "/api/content-factory/runs/job-draft-pr-preview/preview/",
+            job.request_meta.get("preview_url", ""),
+        )
+        self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        mock_send_message.assert_called_once()
+        self.assertIn("Preview ready for mlai.au:", mock_send_message.call_args[0][1])
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("Draft PR created", blocks[0]["text"]["text"])
+        self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertIn(
+            "/api/content-factory/runs/job-draft-pr-preview/preview/",
+            blocks[1]["elements"][0]["url"],
+        )
+        self.assertIn("sig=", blocks[1]["elements"][0]["url"])
+
+    @patch('integrations.services.slack.SlackService.send_message')
     def test_generation_pr_opened_callback_marks_job_needs_review(self, mock_send_message):
         mock_send_message.return_value = (True, "message-ts")
         ContentFactoryJob.objects.create(
@@ -1309,6 +1366,66 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pr_notification_call[1]["blocks"][1]["elements"][0]["text"]["text"], "Open review PR")
 
     @patch('integrations.services.slack.SlackService.send_message')
+    def test_generation_pr_opened_callback_uses_artifact_preview_for_review_bundle(self, mock_send_message):
+        mock_send_message.return_value = (True, "message-ts")
+        ContentFactoryJob.objects.create(
+            job_id="job-pr-opened-preview",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+        self._create_content_factory_run("job-pr-opened-preview")
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_pr_opened",
+                "job_id": "job-pr-opened-preview",
+                "run_id": "job-pr-opened-preview",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "pr_url": "https://github.com/example/pr/77",
+                "pr_number": 77,
+                "review_surface_kind": "fallback_bundle",
+                "primary_review_url": "https://github.com/example/pr/77",
+                "primary_review_label": "Open review PR",
+                "route_is_live": False,
+                "intended_route_path": "/articles/featured/how-to-build-an-ai-harness",
+                "bundle_primary_path": ".content-factory/drafts/how-to-build-an-ai-harness/README.md",
+                "review_required": True,
+                "verification_state": "build_failed_review_pr",
+                "reason_code": "environment_bundler_unstable",
+                "dedupe_key": "generation-pr-opened-preview-77",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-pr-opened-preview")
+        self.assertEqual(job.status, "needs_review")
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertIn(
+            "/api/content-factory/runs/job-pr-opened-preview/preview/",
+            job.request_meta.get("preview_url", ""),
+        )
+        self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        self.assertEqual(mock_send_message.call_count, 2)
+        pr_notification_call = mock_send_message.call_args_list[1]
+        self.assertIn("Review bundle preview ready for mlai.au:", pr_notification_call[0][1])
+        blocks = pr_notification_call[1]["blocks"]
+        self.assertIn("Review PR created", blocks[0]["text"]["text"])
+        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
+        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertIn(
+            "/api/content-factory/runs/job-pr-opened-preview/preview/",
+            blocks[1]["elements"][0]["url"],
+        )
+        self.assertIn("sig=", blocks[1]["elements"][0]["url"])
+
+    @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')
     def test_preview_ready_callback_posts_preview_reply_and_auto_approves_once(
         self,
@@ -1357,6 +1474,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.status, "generating")
         self.assertEqual(job.pr_url, "https://github.com/example/pr/1")
         self.assertEqual(job.request_meta.get("publish_stage"), "auto_approved")
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "repo_preview")
         self.assertEqual(job.request_meta["callback_notifications"]["preview_ready"], ["preview-ready-1"])
         self.assertEqual(job.request_meta["callback_actions"]["preview_ready_auto_approve"], ["preview-ready-1"])
         mock_publish_article.assert_called_once_with(
@@ -1497,19 +1615,21 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         job = ContentFactoryJob.objects.get(job_id="job-progress")
         self.assertEqual(job.posted_progress_ids, ["job-progress:research_locked"])
         self.assertEqual(job.last_progress_milestone_index, 1)
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
         self.assertIn(
             "Research complete. Sources are gathered and the outline is locked.",
-            mock_send_message.call_args[0][1],
+            mock_send_message.call_args_list[0][0][1],
         )
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
-        blocks = mock_send_message.call_args[1]["blocks"]
-        self.assertIn("Content Factory for mlai.au", blocks[0]["text"]["text"])
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args_list[0][1]["blocks"]
+        self.assertIn("Research locked", blocks[0]["text"]["text"])
         self.assertIn(
             "Research complete. Sources are gathered and the outline is locked.",
             blocks[0]["text"]["text"],
         )
+        live_card_blocks = mock_send_message.call_args_list[1][1]["blocks"]
+        self.assertIn("Content Factory for mlai.au", live_card_blocks[0]["text"]["text"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):
@@ -1545,16 +1665,20 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.status, "researching")
         self.assertEqual(job.posted_progress_ids, ["job-discovery-progress:research_started"])
         self.assertEqual(job.last_progress_milestone_index, 1)
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
         self.assertIn(
             "Research started. Context, competitors, and prior topic history are loaded.",
-            mock_send_message.call_args[0][1],
+            mock_send_message.call_args_list[0][0][1],
         )
-        self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
         self.assertIn(
             "Research started. Context, competitors, and prior topic history are loaded.",
-            mock_send_message.call_args[1]["blocks"][0]["text"]["text"],
+            mock_send_message.call_args_list[0][1]["blocks"][0]["text"]["text"],
+        )
+        self.assertIn(
+            "Content Factory for mlai.au",
+            mock_send_message.call_args_list[1][1]["blocks"][0]["text"]["text"],
         )
 
     @patch('integrations.services.slack.SlackService.send_message')
@@ -1626,18 +1750,75 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.posted_progress_ids, ["job-scan-progress:repo_analysis"])
         self.assertEqual(job.last_progress_milestone_index, 1)
         self.assertEqual(job.last_progress_milestone_key, "repo_analysis")
-        mock_send_message.assert_called_once()
-        self.assertEqual(mock_send_message.call_args[0][0], "C123")
+        self.assertEqual(mock_send_message.call_count, 2)
+        self.assertEqual(mock_send_message.call_args_list[0][0][0], "C123")
         self.assertIn(
             "Scan started. Inspecting repository structure and dependencies.",
-            mock_send_message.call_args[0][1],
+            mock_send_message.call_args_list[0][0][1],
         )
+        self.assertEqual(mock_send_message.call_args_list[0][1]["thread_ts"], "123.456")
+        blocks = mock_send_message.call_args_list[0][1]["blocks"]
+        self.assertIn("Inspecting repository", blocks[0]["text"]["text"])
+        self.assertIn("Scan started. Inspecting repository structure and dependencies.", blocks[0]["text"]["text"])
+        live_card_blocks = mock_send_message.call_args_list[1][1]["blocks"]
+        self.assertIn("Content Factory for mlai.au", live_card_blocks[0]["text"]["text"])
+        self.assertIn("Preparing scan", live_card_blocks[0]["text"]["text"])
+        self.assertIn("Inspecting repo", live_card_blocks[0]["text"]["text"])
+        self.assertNotIn("Writing draft", live_card_blocks[0]["text"]["text"])
+
+    @patch('integrations.services.slack.SlackService.update_message')
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_article_progress_callback_posts_thread_reply_and_updates_existing_live_card(
+        self,
+        mock_send_message,
+        mock_update_message,
+    ):
+        mock_send_message.return_value = (True, "thread-reply-ts")
+        mock_update_message.return_value = True
+        ContentFactoryJob.objects.create(
+            job_id="job-progress-followup",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            progress_message_ts="live-progress-card",
+            posted_progress_ids=["job-progress-followup:research_locked"],
+            last_progress_milestone_index=1,
+            last_progress_milestone_key="research_locked",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_progress",
+                "job_id": "job-progress-followup",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "progress_id": "job-progress-followup:draft_grounded",
+                "milestone_key": "draft_grounded",
+                "milestone_index": 2,
+                "milestone_count": 3,
+                "message": "Draft written and grounded to sources.",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-progress-followup")
+        self.assertEqual(
+            job.posted_progress_ids,
+            ["job-progress-followup:research_locked", "job-progress-followup:draft_grounded"],
+        )
+        self.assertEqual(job.last_progress_milestone_index, 2)
+        mock_send_message.assert_called_once()
+        self.assertIn("Draft written and grounded to sources.", mock_send_message.call_args[0][1])
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
-        blocks = mock_send_message.call_args[1]["blocks"]
-        self.assertIn("Content Factory for mlai.au", blocks[0]["text"]["text"])
-        self.assertIn("Preparing scan", blocks[0]["text"]["text"])
-        self.assertIn("Inspecting repo", blocks[0]["text"]["text"])
-        self.assertNotIn("Writing draft", blocks[0]["text"]["text"])
+        self.assertEqual(mock_update_message.call_count, 1)
+        self.assertEqual(mock_update_message.call_args[0][0], "C123")
+        self.assertEqual(mock_update_message.call_args[0][1], "live-progress-card")
+        self.assertIn("Draft written and grounded to sources.", mock_update_message.call_args[0][2])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_discovery_progress_callback_ignores_stale_milestone(self, mock_send_message):
@@ -2076,6 +2257,25 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         response = self.client.get(
             reverse("content_factory_run_preview", args=["run-preview-no-images"]),
+            {"sig": signature},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "How to Choose Cattle Scales for Accurate Livestock Weighing")
+
+    def test_content_preview_route_supports_nested_result_content_package(self):
+        run = self._create_content_factory_run("run-preview-nested")
+        run.result = {
+            "status": "needs_review",
+            "result": {
+                "content_package": self._sample_content_package(),
+            },
+        }
+        run.save(update_fields=["result", "updated_at"])
+        signature = build_content_factory_preview_signature("run-preview-nested")
+
+        response = self.client.get(
+            reverse("content_factory_run_preview", args=["run-preview-nested"]),
             {"sig": signature},
         )
 
