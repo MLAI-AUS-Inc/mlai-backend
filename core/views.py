@@ -2160,8 +2160,23 @@ class ContentFactoryCallbackView(APIView):
     def _store_publish_callback_state(self, *, job, data, publish_stage, status_value):
         request_meta = dict(job.request_meta or {})
         request_meta['publish_stage'] = publish_stage
-        if data.get('route_path'):
-            request_meta['route_path'] = data.get('route_path')
+        for field in (
+            'route_path',
+            'intended_route_path',
+            'preview_url',
+            'primary_review_url',
+            'primary_review_label',
+            'review_surface_kind',
+            'bundle_primary_path',
+        ):
+            if field in data:
+                value = data.get(field)
+                if value:
+                    request_meta[field] = value
+                else:
+                    request_meta.pop(field, None)
+        if 'route_is_live' in data:
+            request_meta['route_is_live'] = bool(data.get('route_is_live'))
         if data.get('resolved_delivery_mode'):
             request_meta['resolved_delivery_mode'] = data.get('resolved_delivery_mode')
         if data.get('publish_resolution'):
@@ -2379,6 +2394,12 @@ class ContentFactoryCallbackView(APIView):
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
         preview_url = str(data.get('preview_url') or '').strip()
+        review_surface_kind = str(data.get('review_surface_kind') or '').strip()
+        primary_review_url = str(data.get('primary_review_url') or '').strip()
+        primary_review_label = str(data.get('primary_review_label') or '').strip()
+        intended_route_path = str(data.get('intended_route_path') or '').strip()
+        bundle_primary_path = str(data.get('bundle_primary_path') or '').strip()
+        route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
         dedupe_key = self._callback_dedupe_key(data, event_name='draft_pr_created')
 
         job = self._update_content_factory_job(
@@ -2419,13 +2440,23 @@ class ContentFactoryCallbackView(APIView):
                 pr_number=pr_number,
                 route_path=route_path,
                 preview_url=preview_url,
+                review_surface_kind=review_surface_kind,
+                primary_review_url=primary_review_url,
+                primary_review_label=primary_review_label,
+                route_is_live=route_is_live,
+                intended_route_path=intended_route_path,
+                bundle_primary_path=bundle_primary_path,
             )
             try:
                 slack_sent = self._send_job_message(
                     job=job,
                     data=data,
                     slack_user_id=slack_user_id,
-                    text=f"Draft PR ready for {domain}: {pr_url}",
+                    text=(
+                        f"Preview ready for {domain}: {primary_review_url}"
+                        if review_surface_kind == 'preview_route' and preview_url and primary_review_url
+                        else f"Draft PR ready for {domain}: {pr_url}"
+                    ),
                     blocks=blocks,
                     allow_dm_fallback=True,
                 )
@@ -2458,12 +2489,25 @@ class ContentFactoryCallbackView(APIView):
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
         preview_url = str(data.get('preview_url') or '').strip()
+        review_surface_kind = str(data.get('review_surface_kind') or '').strip()
+        primary_review_url = str(data.get('primary_review_url') or '').strip()
+        primary_review_label = str(data.get('primary_review_label') or '').strip()
+        intended_route_path = str(data.get('intended_route_path') or '').strip()
+        bundle_primary_path = str(data.get('bundle_primary_path') or '').strip()
+        route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
         verification_state = str(data.get('verification_state') or '').strip()
         reason_code = str(data.get('reason_code') or '').strip()
         review_required = bool(data.get('review_required', True))
         dedupe_key = self._callback_dedupe_key(data, event_name='generation_pr_opened')
         status_value = 'needs_review' if review_required else 'pr_opened'
         publish_stage = 'needs_review' if review_required else 'pr_opened'
+        review_summary = (
+            "Review bundle PR opened and ready for human review."
+            if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'}
+            else "Draft PR opened and ready for human review."
+            if review_required
+            else "Draft PR opened."
+        )
 
         job = self._update_content_factory_job(
             job_id=job_id,
@@ -2496,11 +2540,7 @@ class ContentFactoryCallbackView(APIView):
         upsert_live_progress_card(
             job,
             data=data,
-            summary_text=(
-                "Draft PR opened and ready for human review."
-                if review_required
-                else "Draft PR opened."
-            ),
+            summary_text=review_summary,
             failed=False,
         )
 
@@ -2529,6 +2569,12 @@ class ContentFactoryCallbackView(APIView):
                 pr_number=pr_number,
                 route_path=route_path,
                 preview_url=preview_url,
+                review_surface_kind=review_surface_kind,
+                primary_review_url=primary_review_url,
+                primary_review_label=primary_review_label,
+                route_is_live=route_is_live,
+                intended_route_path=intended_route_path,
+                bundle_primary_path=bundle_primary_path,
             )
             try:
                 slack_sent = self._send_job_message(
@@ -2536,7 +2582,11 @@ class ContentFactoryCallbackView(APIView):
                     data=data,
                     slack_user_id=slack_user_id,
                     text=(
-                        f"Draft PR ready for review for {domain}: {pr_url}"
+                        f"Review bundle ready for {domain}: {pr_url}"
+                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'}
+                        else f"Preview ready for review for {domain}: {primary_review_url}"
+                        if review_surface_kind == 'preview_route' and preview_url and primary_review_url
+                        else f"Draft PR ready for review for {domain}: {pr_url}"
                         if review_required
                         else f"Draft PR opened for {domain}: {pr_url}"
                     ),
@@ -2576,6 +2626,9 @@ class ContentFactoryCallbackView(APIView):
         preview_url = str(data.get('preview_url') or '').strip()
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
+        primary_review_url = str(data.get('primary_review_url') or '').strip()
+        primary_review_label = str(data.get('primary_review_label') or '').strip()
+        route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
         dedupe_key = self._callback_dedupe_key(data, event_name='preview_ready')
 
         job = self._update_content_factory_job(
@@ -2604,13 +2657,16 @@ class ContentFactoryCallbackView(APIView):
                 preview_url=preview_url,
                 pr_number=pr_number,
                 route_path=route_path,
+                primary_review_url=primary_review_url,
+                primary_review_label=primary_review_label,
+                route_is_live=route_is_live,
             )
             try:
                 notification_sent = self._send_job_message(
                     job=job,
                     data=data,
                     slack_user_id=slack_user_id,
-                    text=f"Preview ready for {domain}: {preview_url}",
+                    text=f"Preview ready for {domain}: {primary_review_url or preview_url}",
                     blocks=blocks,
                     allow_dm_fallback=True,
                 )

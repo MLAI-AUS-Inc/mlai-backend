@@ -261,21 +261,62 @@ def build_draft_pr_created_blocks(
     pr_number: Optional[int] = None,
     route_path: str = "",
     preview_url: str = "",
+    review_surface_kind: str = "",
+    primary_review_url: str = "",
+    primary_review_label: str = "",
+    route_is_live: Optional[bool] = None,
+    intended_route_path: str = "",
+    bundle_primary_path: str = "",
 ) -> List[Dict[str, Any]]:
     pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
-    section_text = f"📝 *Draft PR created* for {domain}\n\n*{pr_label}* is ready for review."
-    if route_path:
-        section_text += f"\nRoute: `{route_path}`"
+    normalized_kind = _string(review_surface_kind) or ("preview_route" if preview_url or route_path else "fallback_bundle")
+    normalized_route_is_live = bool(route_is_live) if route_is_live is not None else bool(preview_url)
+    normalized_route_path = _string(route_path) if normalized_route_is_live else ""
+    normalized_bundle_primary_path = _string(bundle_primary_path)
+    normalized_primary_review_url = _string(primary_review_url) or (_string(preview_url) or _string(pr_url))
+    normalized_primary_review_label = _string(primary_review_label)
+    if not normalized_primary_review_label:
+        if normalized_kind == "preview_route" and preview_url:
+            normalized_primary_review_label = "Open Preview"
+        elif normalized_kind == "preview_route":
+            normalized_primary_review_label = "Open PR"
+        else:
+            normalized_primary_review_label = "Open review PR"
 
-    actions = [
-        {
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open PR"},
-            "style": "primary",
-            "url": pr_url,
-        }
-    ]
-    if preview_url:
+    if normalized_kind == "preview_route":
+        if preview_url:
+            section_text = f"📝 *Draft PR created* for {domain}\n\n*{pr_label}* is ready for review."
+        else:
+            section_text = f"📝 *Draft PR created* for {domain}\n\n*{pr_label}* is open and preview is still preparing."
+    else:
+        section_text = (
+            f"📝 *Review PR created* for {domain}\n\n"
+            f"*{pr_label}* contains a review bundle for manual review."
+        )
+    if normalized_route_path:
+        section_text += f"\nPreview route: `{normalized_route_path}`"
+    if normalized_bundle_primary_path:
+        section_text += f"\nBundle: `{normalized_bundle_primary_path}`"
+
+    actions: List[Dict[str, Any]] = []
+    if normalized_primary_review_url:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": normalized_primary_review_label},
+                "style": "primary",
+                "url": normalized_primary_review_url,
+            }
+        )
+    if pr_url and pr_url != normalized_primary_review_url:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Open PR"},
+                "url": pr_url,
+            }
+        )
+    if preview_url and preview_url != normalized_primary_review_url:
         actions.append(
             {
                 "type": "button",
@@ -306,14 +347,21 @@ def build_preview_ready_blocks(
     preview_url: str,
     pr_number: Optional[int] = None,
     route_path: str = "",
+    primary_review_url: str = "",
+    primary_review_label: str = "",
+    route_is_live: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
+    normalized_route_is_live = bool(route_is_live) if route_is_live is not None else bool(preview_url)
+    normalized_route_path = _string(route_path) if normalized_route_is_live else ""
+    normalized_primary_review_url = _string(primary_review_url) or _string(preview_url)
+    normalized_primary_review_label = _string(primary_review_label) or "Open Preview"
     section_text = (
         f"✅ *Preview ready* for {domain}\n\n"
         f"*{pr_label}* now has a live preview."
     )
-    if route_path:
-        section_text += f"\nRoute: `{route_path}`"
+    if normalized_route_path:
+        section_text += f"\nPreview route: `{normalized_route_path}`"
 
     return [
         {
@@ -328,9 +376,9 @@ def build_preview_ready_blocks(
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Open Preview"},
+                    "text": {"type": "plain_text", "text": normalized_primary_review_label},
                     "style": "primary",
-                    "url": preview_url,
+                    "url": normalized_primary_review_url,
                 },
                 {
                     "type": "button",

@@ -1202,7 +1202,12 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "slack_user_id": "U123",
             "pr_url": "https://github.com/example/pr/1",
             "pr_number": 1,
-            "route_path": "/articles/ifs",
+            "review_surface_kind": "preview_route",
+            "primary_review_url": "https://github.com/example/pr/1",
+            "primary_review_label": "Open PR",
+            "route_is_live": False,
+            "route_path": "",
+            "intended_route_path": "/articles/ifs",
             "dedupe_key": "draft-pr-1",
         }
 
@@ -1223,6 +1228,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
         blocks = mock_send_message.call_args[1]["blocks"]
         self.assertIn("Draft PR created", blocks[0]["text"]["text"])
+        self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open PR")
 
     @patch('integrations.services.slack.SlackService.send_message')
@@ -1248,7 +1254,13 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "slack_user_id": "U123",
                 "pr_url": "https://github.com/example/pr/44",
                 "pr_number": 44,
-                "route_path": "/articles/how-to-build-an-ai-harness",
+                "review_surface_kind": "fallback_bundle",
+                "primary_review_url": "https://github.com/example/pr/44",
+                "primary_review_label": "Open review PR",
+                "route_is_live": False,
+                "route_path": "",
+                "intended_route_path": "/articles/how-to-build-an-ai-harness",
+                "bundle_primary_path": ".content-factory/drafts/how-to-build-an-ai-harness/README.md",
                 "review_required": True,
                 "verification_state": "build_failed_after_repair_budget",
                 "reason_code": "repair_budget_exhausted",
@@ -1277,10 +1289,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         live_card_call = mock_send_message.call_args_list[0]
         self.assertEqual(live_card_call[0][0], "C123")
-        self.assertEqual(live_card_call[0][1], "Draft PR opened and ready for human review.")
+        self.assertEqual(live_card_call[0][1], "Review bundle PR opened and ready for human review.")
         self.assertEqual(live_card_call[1]["thread_ts"], "123.456")
         self.assertIn(
-            "Draft PR opened and ready for human review.",
+            "Review bundle PR opened and ready for human review.",
             live_card_call[1]["blocks"][0]["text"]["text"],
         )
 
@@ -1288,10 +1300,13 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pr_notification_call[0][0], "C123")
         self.assertEqual(
             pr_notification_call[0][1],
-            "Draft PR ready for review for mlai.au: https://github.com/example/pr/44",
+            "Review bundle ready for mlai.au: https://github.com/example/pr/44",
         )
         self.assertEqual(pr_notification_call[1]["thread_ts"], "123.456")
-        self.assertIn("Draft PR created", pr_notification_call[1]["blocks"][0]["text"]["text"])
+        self.assertIn("Review PR created", pr_notification_call[1]["blocks"][0]["text"]["text"])
+        self.assertIn(".content-factory/drafts/how-to-build-an-ai-harness/README.md", pr_notification_call[1]["blocks"][0]["text"]["text"])
+        self.assertNotIn("Preview route:", pr_notification_call[1]["blocks"][0]["text"]["text"])
+        self.assertEqual(pr_notification_call[1]["blocks"][1]["elements"][0]["text"]["text"], "Open review PR")
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')
@@ -1325,6 +1340,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "preview_url": "https://preview.example.com",
             "pr_url": "https://github.com/example/pr/1",
             "pr_number": 1,
+            "review_surface_kind": "preview_route",
+            "primary_review_url": "https://preview.example.com",
+            "primary_review_label": "Open Preview",
+            "route_is_live": True,
             "route_path": "/articles/ifs",
             "dedupe_key": "preview-ready-1",
         }
@@ -1350,6 +1369,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(mock_send_message.call_args[1]["thread_ts"], "123.456")
         blocks = mock_send_message.call_args[1]["blocks"]
         self.assertIn("Preview ready", blocks[0]["text"]["text"])
+        self.assertIn("Preview route: `/articles/ifs`", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
 
