@@ -304,11 +304,11 @@ class GmailAttachmentArtifact(models.Model):
         on_delete=models.CASCADE,
         related_name="attachments",
     )
-    gmail_attachment_id = models.CharField(max_length=255, blank=True, default="")
+    gmail_attachment_id = models.CharField(max_length=1024, blank=True, default="")
     mime_type = models.CharField(max_length=255, blank=True, default="")
     filename = models.CharField(max_length=500, blank=True, default="")
-    part_id = models.CharField(max_length=255, blank=True, default="")
-    content_disposition = models.CharField(max_length=100, blank=True, default="")
+    part_id = models.CharField(max_length=1024, blank=True, default="")
+    content_disposition = models.CharField(max_length=500, blank=True, default="")
     size_bytes = models.PositiveIntegerField(default=0)
     is_inline = models.BooleanField(default=False)
     raw_content_base64 = models.TextField(blank=True, default="")

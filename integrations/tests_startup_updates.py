@@ -1315,6 +1315,45 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             "att-lazy",
         )
 
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):
+        long_attachment_id = "att-" + ("x" * 400)
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": long_attachment_id,
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.return_value = {"data": "TVJSIHJlYWNoZWQgMTIwMDAgVVNE"}
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        hydrated_attachment = GmailAttachmentArtifact.objects.get(
+            organization=self.organization,
+            message_artifact=self.message,
+            gmail_attachment_id=long_attachment_id,
+        )
+        self.assertEqual(hydrated_attachment.gmail_attachment_id, long_attachment_id)
+        mock_get_attachment_payload.assert_called_once_with(
+            self.google_connection,
+            self.message.gmail_message_id,
+            long_attachment_id,
+        )
+
     def test_extraction_batch_scopes_to_run_window_and_top_threads(self):
         now = timezone.now()
         self.message.internal_date = now - timedelta(minutes=20)
