@@ -31,6 +31,7 @@ STARTUP_UPDATE_WORKFLOW = "startup_monthly_update"
 DEFAULT_BACKFILL_MONTHS = 1
 DEFAULT_CLASSIFICATION_BATCH_SIZE = 40
 DEFAULT_ATTACHMENT_BYTES_LIMIT = 10 * 1024 * 1024
+DEFAULT_MAX_SOURCE_THREADS = 40
 SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
 HIGH_SIGNAL_TERMS = [
     "arr",
@@ -718,6 +719,7 @@ def create_startup_update_run(
             "window_months": int(window_months),
             "classification_batch_size": DEFAULT_CLASSIFICATION_BATCH_SIZE,
             "attachment_bytes_limit": DEFAULT_ATTACHMENT_BYTES_LIMIT,
+            "max_source_threads": DEFAULT_MAX_SOURCE_THREADS,
             "draft_months": [item.isoformat() for item in months],
             "current_month": current_month.isoformat(),
             "backfill_window_start": backfill_start.isoformat(),

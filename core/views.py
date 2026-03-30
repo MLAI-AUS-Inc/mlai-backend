@@ -38,6 +38,7 @@ from .content_factory_delivery import (
     build_content_factory_preview_url,
     build_content_ready_blocks,
     build_draft_pr_created_blocks,
+    build_progress_update_blocks,
     build_preview_ready_blocks,
     build_content_thread_messages,
     render_content_preview_error_page,
@@ -1979,8 +1980,14 @@ def _content_package_from_run(run: Optional[ContentFactoryRun]) -> dict:
     if not run:
         return {}
     result = run.result or {}
-    package = result.get("content_package") or {}
-    return package if isinstance(package, dict) else {}
+    candidates = [
+        result.get("content_package"),
+        (result.get("result") or {}).get("content_package") if isinstance(result.get("result"), dict) else None,
+    ]
+    for package in candidates:
+        if isinstance(package, dict) and package:
+            return package
+    return {}
 
 
 def _load_content_package_for_callback(run_id: str, *, attempts: int = 3, delay_seconds: float = 0.35):
@@ -2164,6 +2171,7 @@ class ContentFactoryCallbackView(APIView):
             'route_path',
             'intended_route_path',
             'preview_url',
+            'preview_surface_kind',
             'primary_review_url',
             'primary_review_label',
             'review_surface_kind',
@@ -2198,6 +2206,41 @@ class ContentFactoryCallbackView(APIView):
         if len(update_fields) > 1:
             job.save(update_fields=update_fields)
 
+    def _enrich_review_preview_payload(self, data):
+        payload = dict(data or {})
+        run_id = str(payload.get('run_id') or payload.get('job_id') or '').strip()
+        preview_url = str(payload.get('preview_url') or '').strip()
+        route_is_live = bool(payload.get('route_is_live')) if payload.get('route_is_live') is not None else bool(preview_url)
+        preview_surface_kind = str(payload.get('preview_surface_kind') or '').strip()
+
+        if preview_url:
+            if not preview_surface_kind:
+                payload['preview_surface_kind'] = 'repo_preview' if route_is_live else 'artifact_preview'
+            return payload
+
+        if not run_id:
+            return payload
+
+        run, content_package = _load_content_package_for_callback(run_id)
+        if not run or not content_package:
+            return payload
+
+        try:
+            artifact_preview_url = build_content_factory_preview_url(
+                request=self.request,
+                run_id=run.run_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to build artifact preview URL for %s: %s", run_id, exc)
+            return payload
+
+        payload['preview_url'] = artifact_preview_url
+        payload['preview_surface_kind'] = 'artifact_preview'
+        payload['primary_review_url'] = artifact_preview_url
+        payload['primary_review_label'] = 'Open Preview'
+        payload['route_is_live'] = False
+        return payload
+
     def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -2210,6 +2253,10 @@ class ContentFactoryCallbackView(APIView):
             milestone_index = int(data.get('milestone_index') or 0)
         except (TypeError, ValueError):
             milestone_index = 0
+        try:
+            milestone_count = int(data.get('milestone_count') or 0)
+        except (TypeError, ValueError):
+            milestone_count = 0
 
         job = self._update_content_factory_job(
             job_id=job_id,
@@ -2265,25 +2312,31 @@ class ContentFactoryCallbackView(APIView):
         stage_title = stage_titles.get(milestone_key, 'Progress update')
         fallback_text = f"{stage_title}: {message}"
         summary_text = message
+        progress_blocks = build_progress_update_blocks(
+            domain=domain,
+            stage_title=stage_title,
+            message=message,
+            milestone_index=milestone_index or None,
+            milestone_count=milestone_count or None,
+        )
 
         try:
             job.last_progress_milestone_key = milestone_key
             job.last_progress_updated_at = timezone.now()
             job.still_working_pinged_at = None
-            sent, _message_ts = upsert_live_progress_card(
+            self._send_job_message(
+                job=job,
+                data=data,
+                slack_user_id=slack_user_id,
+                text=fallback_text,
+                blocks=progress_blocks,
+                allow_dm_fallback=False,
+            )
+            upsert_live_progress_card(
                 job,
                 data=data,
                 summary_text=summary_text,
             )
-            if not sent:
-                self._send_job_message(
-                    job=job,
-                    data=data,
-                    slack_user_id=slack_user_id,
-                    text=fallback_text,
-                    blocks=None,
-                    allow_dm_fallback=True,
-                )
         except Exception as exc:
             logger.warning("Failed to send %s notification for %s: %s", event_name, job_id, exc)
             return Response(
@@ -2387,6 +2440,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_draft_pr_created(self, data):
+        data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -2453,8 +2507,10 @@ class ContentFactoryCallbackView(APIView):
                     data=data,
                     slack_user_id=slack_user_id,
                     text=(
-                        f"Preview ready for {domain}: {primary_review_url}"
-                        if review_surface_kind == 'preview_route' and preview_url and primary_review_url
+                        f"Review bundle preview ready for {domain}: {primary_review_url}"
+                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and primary_review_url
+                        else f"Preview ready for {domain}: {primary_review_url}"
+                        if preview_url and primary_review_url
                         else f"Draft PR ready for {domain}: {pr_url}"
                     ),
                     blocks=blocks,
@@ -2482,6 +2538,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_generation_pr_opened(self, data):
+        data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -2582,10 +2639,12 @@ class ContentFactoryCallbackView(APIView):
                     data=data,
                     slack_user_id=slack_user_id,
                     text=(
-                        f"Review bundle ready for {domain}: {pr_url}"
+                        f"Review bundle preview ready for {domain}: {primary_review_url}"
+                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and primary_review_url
+                        else f"Review bundle ready for {domain}: {pr_url}"
                         if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'}
                         else f"Preview ready for review for {domain}: {primary_review_url}"
-                        if review_surface_kind == 'preview_route' and preview_url and primary_review_url
+                        if preview_url and primary_review_url
                         else f"Draft PR ready for review for {domain}: {pr_url}"
                         if review_required
                         else f"Draft PR opened for {domain}: {pr_url}"
@@ -2619,6 +2678,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_preview_ready(self, data):
         from integrations.services.article_generation import ArticleGenerationError, publish_article
 
+        data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -5172,7 +5232,7 @@ class ContentFactoryRunView(APIView):
 
 class ContentFactoryRunPreviewView(View):
     """
-    Public signed preview for content-only article runs.
+    Public signed preview for any run with a stored content package.
 
     GET /api/content-factory/runs/<run_id>/preview?sig=...
     """

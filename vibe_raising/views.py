@@ -13,9 +13,11 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization
+from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
 from integrations.services.startup_updates import (
     DEFAULT_BACKFILL_MONTHS,
+    OPEN_RUN_STATUSES,
+    RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
     create_startup_update_run,
@@ -40,6 +42,17 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
+VALLEY_META_KEY = "_valley_meta"
+EMAIL_DRAFT_DISPLAY_STAGES = {
+    "profile_resolution": "Preparing company context",
+    "gmail_backfill": "Scanning recent Gmail messages",
+    "relevance_classification": "Finding investor-relevant updates",
+    "thread_hydration": "Pulling full thread context",
+    "event_extraction": "Extracting metrics and highlights",
+    "timeline_merge": "Building timeline",
+    "draft_generation": "Drafting monthly updates",
+    "groundedness_review": "Final review",
+}
 
 
 def _get_profile_or_404(user):
@@ -81,8 +94,10 @@ def _serialize_binding_summary(binding):
         return None
 
     return {
+        "id": binding.id,
         "organizationId": binding.organization_id,
         "organizationDomain": binding.organization.domain,
+        "googleConnectionId": binding.google_connection_id,
         "isDefaultForGmail": binding.is_default_for_gmail,
     }
 
@@ -111,6 +126,7 @@ def _serialize_run_summary(run):
         "domain": run.domain,
         "status": run.status,
         "currentStep": run.current_step,
+        "stepOrder": run.step_order or [],
         "stepStates": step_states,
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
@@ -294,6 +310,21 @@ def _serialize_email_draft_bundle(drafts):
     }
 
 
+def _serialize_email_draft_results_bundle(drafts):
+    if not drafts:
+        return None
+
+    draft_payload = _serialize_draft_bundle(drafts)
+    email_payload = _serialize_email_draft_bundle(drafts) or {}
+    months = [*email_payload.get("pastMonths", []), email_payload.get("currentMonth")]
+    return {
+        "draft": draft_payload,
+        "currentMonth": email_payload.get("currentMonth"),
+        "pastMonths": email_payload.get("pastMonths", []),
+        "months": [item for item in months if item],
+    }
+
+
 def _sync_startup_profile(*, startup_profile, organization, company, user):
     sync_startup_profile_from_company(
         startup_profile=startup_profile,
@@ -339,6 +370,102 @@ def _ensure_binding_for_company(*, user, company):
         is_default_for_gmail=True,
     )
     return organization, startup_profile, binding
+
+
+def _get_run_result_payload(run) -> dict:
+    payload = run.result or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _get_run_meta(run) -> dict:
+    payload = _get_run_result_payload(run)
+    meta = payload.get(VALLEY_META_KEY) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _get_run_generated_draft_months(run) -> list[str]:
+    payload = _get_run_result_payload(run)
+    raw_months = payload.get("generated_draft_months") or (run.run_request or {}).get("draft_months") or []
+    if not isinstance(raw_months, (list, tuple)):
+        return []
+
+    months = []
+    for item in raw_months:
+        text = str(item or "").strip()
+        if text:
+            months.append(text)
+    return months
+
+
+def _get_email_draft_display_stage(current_step: Optional[str]) -> str:
+    step_key = str(current_step or "").strip() or RUN_STEP_ORDER[0]
+    return EMAIL_DRAFT_DISPLAY_STAGES.get(step_key, "Preparing company context")
+
+
+def _count_completed_run_steps(run) -> tuple[int, int]:
+    ordered_steps = list(run.step_order or RUN_STEP_ORDER)
+    if not ordered_steps:
+        return 0, 0
+
+    step_statuses = {
+        step.step_key: step.status
+        for step in run.steps.all()
+    }
+    completed_count = 0
+    for step_key in ordered_steps:
+        if step_statuses.get(step_key) in {
+            ContentFactoryStepStatus.COMPLETED,
+            ContentFactoryStepStatus.SKIPPED,
+        }:
+            completed_count += 1
+
+    if run.status == ContentFactoryRunStatus.COMPLETED:
+        completed_count = len(ordered_steps)
+
+    return completed_count, len(ordered_steps)
+
+
+def _serialize_run_progress(run):
+    if not run:
+        return None
+
+    completed_steps, total_steps = _count_completed_run_steps(run)
+    meta = _get_run_meta(run)
+    return {
+        "runId": run.run_id,
+        "status": run.status,
+        "currentStep": run.current_step,
+        "completedSteps": completed_steps,
+        "totalSteps": total_steps,
+        "displayStage": _get_email_draft_display_stage(run.current_step),
+        "lastHeartbeatAt": meta.get("last_heartbeat_at"),
+        "canRetry": run.status in {
+            ContentFactoryRunStatus.FAILED,
+            ContentFactoryRunStatus.DENIED,
+        },
+        "terminalState": (
+            run.status
+            if run.status in {
+                ContentFactoryRunStatus.COMPLETED,
+                ContentFactoryRunStatus.FAILED,
+                ContentFactoryRunStatus.DENIED,
+            }
+            else None
+        ),
+        "generatedDraftMonths": _get_run_generated_draft_months(run),
+    }
+
+
+def _get_recent_drafts_for_organization(organization):
+    if organization is None:
+        return []
+    return list(organization.monthly_update_drafts.order_by("-month", "-updated_at")[:3])
+
+
+def _get_drafts_for_run(run):
+    if run is None:
+        return []
+    return list(run.monthly_update_drafts.order_by("-month", "-updated_at"))
 
 
 def _build_status_payload(*, user, company, domain):
@@ -454,10 +581,14 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             organization=organization,
             google_connection_id=google_connection_id,
         )
-        drafts = list(organization.monthly_update_drafts.order_by("-month", "-updated_at")[:3])
+        drafts = _get_drafts_for_run(latest_run)
+        if not drafts and latest_run is None and selected_run is None:
+            drafts = _get_recent_drafts_for_organization(organization)
 
     draft_payload = _serialize_draft_bundle(drafts)
     email_draft_payload = _serialize_email_draft_bundle(drafts)
+    run_payload = _serialize_run_summary(latest_run)
+    progress_payload = _serialize_run_progress(latest_run)
 
     error = None
     if not google_connected:
@@ -473,36 +604,81 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
         ContentFactoryRunStatus.APPROVAL_REQUIRED,
     }:
         state = "running"
-    elif email_draft_payload:
+    elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.COMPLETED and email_draft_payload:
         state = "completed"
+    elif latest_run and latest_run.status == ContentFactoryRunStatus.COMPLETED:
+        state = "failed"
+        error = "Draft generation completed without producing a draft."
     elif latest_run and latest_run.status in {
         ContentFactoryRunStatus.FAILED,
         ContentFactoryRunStatus.DENIED,
     }:
         state = "failed"
         error = "Gmail processing failed. Please try again."
-    elif latest_run and latest_run.status == ContentFactoryRunStatus.COMPLETED:
-        state = "failed"
-        error = "Draft generation completed without producing a draft."
+    elif email_draft_payload:
+        state = "completed"
     else:
         state = "failed"
         error = "Draft generation has not started yet."
 
-    run_payload = _serialize_run_summary(latest_run)
     return {
         "state": state,
         "gmailConnected": google_connected,
         "company": company_payload,
+        "binding": _serialize_binding_summary(binding),
         "authUrl": auth_url,
         "run": run_payload,
+        "progress": progress_payload,
         "draft": draft_payload,
         "runId": run_payload["runId"] if run_payload else None,
         "status": run_payload["status"] if run_payload else None,
         "currentStep": run_payload["currentStep"] if run_payload else None,
         "stepStates": (run_payload or {}).get("stepStates", {}),
+        "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
+        "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
+        "displayStage": progress_payload["displayStage"] if progress_payload else _get_email_draft_display_stage(None),
+        "lastHeartbeatAt": progress_payload["lastHeartbeatAt"] if progress_payload else None,
+        "canRetry": progress_payload["canRetry"] if progress_payload else False,
+        "terminalState": progress_payload["terminalState"] if progress_payload else None,
+        "generatedDraftMonths": progress_payload["generatedDraftMonths"] if progress_payload else [],
         "currentMonth": (email_draft_payload or {}).get("currentMonth"),
         "pastMonths": (email_draft_payload or {}).get("pastMonths", []),
         "error": error,
+    }
+
+
+def _build_email_draft_results_payload(*, request, user, company, domain, run_id: Optional[str] = None):
+    payload = _build_email_draft_payload(
+        request=request,
+        user=user,
+        company=company,
+        domain=domain,
+        run_id=run_id,
+    )
+
+    draft_results = _serialize_email_draft_results_bundle(
+        _get_drafts_for_run(
+            ContentFactoryRun.objects.filter(
+                workflow=STARTUP_UPDATE_WORKFLOW,
+                run_id=run_id,
+            ).first()
+        )
+    ) if run_id else None
+
+    if draft_results is None and payload.get("draft") is not None:
+        draft_results = {
+            "draft": payload.get("draft"),
+            "currentMonth": payload.get("currentMonth"),
+            "pastMonths": payload.get("pastMonths", []),
+            "months": [*payload.get("pastMonths", []), payload.get("currentMonth")],
+        }
+
+    return {
+        **payload,
+        "currentMonth": (draft_results or {}).get("currentMonth"),
+        "pastMonths": (draft_results or {}).get("pastMonths", []),
+        "months": [item for item in (draft_results or {}).get("months", []) if item],
+        "draft": (draft_results or {}).get("draft"),
     }
 
 
@@ -795,6 +971,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 company=company,
                 domain=domain,
             )
+            payload["reusedExistingRun"] = False
             return Response(payload, status=status.HTTP_200_OK)
 
         run = existing_run
@@ -820,10 +997,32 @@ class VibeRaisingEmailDraftStartView(APIView):
             domain=domain,
             run_id=run.run_id,
         )
+        payload["reusedExistingRun"] = not created
         return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class VibeRaisingEmailDraftStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, run_id: Optional[str] = None):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        requested_run_id = run_id or str(request.query_params.get("run_id") or "").strip() or None
+        return Response(
+            _build_email_draft_payload(
+                request=request,
+                user=request.user,
+                company=context["company"],
+                domain=context["domain"],
+                run_id=requested_run_id,
+            ),
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingEmailDraftActiveRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
@@ -831,17 +1030,59 @@ class VibeRaisingEmailDraftStatusView(APIView):
         if error_response:
             return error_response
 
-        run_id = str(request.query_params.get("run_id") or "").strip() or None
+        google_connection = getattr(request.user, "google_connection", None)
+        google_connection_id = getattr(google_connection, "id", None)
+        domain = context["domain"]
+        if not domain:
+            return Response(None, status=status.HTTP_200_OK)
+
+        binding = get_default_binding_for_domain(user=request.user, domain=domain)
+        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        open_run = (
+            get_open_startup_update_run(
+                organization=organization,
+                google_connection_id=google_connection_id,
+            )
+            if organization is not None
+            else None
+        )
+        if open_run is None or open_run.status not in OPEN_RUN_STATUSES:
+            return Response(None, status=status.HTTP_200_OK)
+
         return Response(
             _build_email_draft_payload(
                 request=request,
                 user=request.user,
                 company=context["company"],
-                domain=context["domain"],
-                run_id=run_id,
+                domain=domain,
+                run_id=open_run.run_id,
             ),
             status=status.HTTP_200_OK,
         )
+
+
+class VibeRaisingEmailDraftResultsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, run_id: Optional[str] = None):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        requested_run_id = run_id or str(request.query_params.get("run_id") or "").strip() or None
+        payload = _build_email_draft_results_payload(
+            request=request,
+            user=request.user,
+            company=context["company"],
+            domain=context["domain"],
+            run_id=requested_run_id,
+        )
+        if not payload.get("draft"):
+            return Response(
+                {"error": "Draft results are not available yet."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class VibeRaisingEmailDraftLatestView(APIView):
