@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import uuid
+from decimal import Decimal
 from datetime import date, datetime, timedelta
 from typing import Iterable, Optional, Union
 
@@ -10,11 +13,15 @@ from core.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
     ContentFactoryRunStatus,
+    ContentFactoryRunStepAttempt,
+    ContentFactoryStepStatus,
     Organization,
 )
 from integrations.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
+    StartupEvent,
+    StartupMetricObservation,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
     GmailSyncCursor,
@@ -107,6 +114,12 @@ OPEN_RUN_STATUSES = {
     ContentFactoryRunStatus.AWAITING_DELIVERY_MODE,
     ContentFactoryRunStatus.APPROVAL_REQUIRED,
 }
+STARTUP_UPDATE_CANCELLABLE_STATUSES = OPEN_RUN_STATUSES | {
+    ContentFactoryRunStatus.FAILED,
+    ContentFactoryRunStatus.DENIED,
+}
+RUN_CANCEL_BACKUPS_KEY = "_cancel_backups"
+VALLEY_META_KEY = "_valley_meta"
 RUN_STEP_ORDER = [
     "profile_resolution",
     "gmail_backfill",
@@ -200,6 +213,47 @@ def _serialize_datetime(value):
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _get_run_result_payload(run: ContentFactoryRun) -> dict:
+    payload = run.result or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _set_run_result_payload(run: ContentFactoryRun, payload: dict) -> None:
+    run.result = dict(payload or {})
+
+
+def _get_run_meta(run: ContentFactoryRun) -> dict:
+    meta = _get_run_result_payload(run).get(VALLEY_META_KEY) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _set_run_meta(run: ContentFactoryRun, meta: dict) -> None:
+    payload = dict(_get_run_result_payload(run))
+    payload[VALLEY_META_KEY] = dict(meta or {})
+    _set_run_result_payload(run, payload)
+
+
+def get_startup_update_run_cancel_backups(run: ContentFactoryRun) -> dict:
+    backups = _get_run_result_payload(run).get(RUN_CANCEL_BACKUPS_KEY) or {}
+    if not isinstance(backups, dict):
+        backups = {}
+    return {
+        "drafts": dict(backups.get("drafts") or {}),
+        "events": dict(backups.get("events") or {}),
+        "metrics": dict(backups.get("metrics") or {}),
+    }
+
+
+def set_startup_update_run_cancel_backups(run: ContentFactoryRun, backups: dict) -> None:
+    payload = dict(_get_run_result_payload(run))
+    payload[RUN_CANCEL_BACKUPS_KEY] = {
+        "drafts": dict((backups or {}).get("drafts") or {}),
+        "events": dict((backups or {}).get("events") or {}),
+        "metrics": dict((backups or {}).get("metrics") or {}),
+    }
+    _set_run_result_payload(run, payload)
 
 
 def _serialize_event(event) -> dict:
@@ -739,6 +793,271 @@ def create_startup_update_run(
         },
     )
     return run
+
+
+def _iso_date(value) -> str | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _iso_datetime(value) -> str | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def build_cancel_backup_for_draft(draft: MonthlyUpdateDraft) -> dict:
+    return {
+        "run_id": getattr(draft.run, "run_id", None),
+        "month": draft.month.isoformat(),
+        "status": draft.status,
+        "title": draft.title,
+        "model_name": draft.model_name,
+        "groundedness_status": draft.groundedness_status,
+        "structured_memo": draft.structured_memo or {},
+        "rendered_markdown": draft.rendered_markdown or "",
+        "evidence_event_ids": list(draft.evidence_event_ids or []),
+        "evidence_metric_ids": list(draft.evidence_metric_ids or []),
+        "carry_forward_event_ids": list(draft.carry_forward_event_ids or []),
+        "groundedness_notes": draft.groundedness_notes or "",
+    }
+
+
+def build_cancel_backup_for_event(event: StartupEvent) -> dict:
+    return {
+        "run_id": getattr(event.run, "run_id", None),
+        "canonical_key": event.canonical_key,
+        "event_type": event.event_type,
+        "title": event.title,
+        "summary": event.summary or "",
+        "event_date": _iso_date(event.event_date),
+        "month_bucket": event.month_bucket.isoformat(),
+        "date_precision": event.date_precision,
+        "sentiment": event.sentiment or "",
+        "investor_importance": event.investor_importance,
+        "quantitative_facts": list(event.quantitative_facts or []),
+        "evidence_message_ids": list(event.evidence_message_ids or []),
+        "evidence_attachment_ids": list(event.evidence_attachment_ids or []),
+        "source_thread_ids": list(event.source_thread_ids or []),
+        "confidence": event.confidence,
+        "status": event.status,
+        "needs_review": bool(event.needs_review),
+        "merge_notes": event.merge_notes or "",
+    }
+
+
+def build_cancel_backup_for_metric(metric: StartupMetricObservation) -> dict:
+    return {
+        "run_id": getattr(metric.run, "run_id", None),
+        "source_thread_id": metric.source_thread_id,
+        "metric_key": metric.metric_key,
+        "metric_name": metric.metric_name,
+        "value_text": metric.value_text,
+        "value_number": str(metric.value_number) if metric.value_number is not None else None,
+        "unit": metric.unit or "",
+        "observed_at": _iso_datetime(metric.observed_at),
+        "period_month": metric.period_month.isoformat(),
+        "confidence": metric.confidence,
+        "evidence_message_ids": list(metric.evidence_message_ids or []),
+        "evidence_attachment_ids": list(metric.evidence_attachment_ids or []),
+        "summary": metric.summary or "",
+    }
+
+
+def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) -> int:
+    restored = 0
+    for snapshot in (backups or {}).values():
+        month_value = date.fromisoformat(str(snapshot["month"]))
+        previous_run = ContentFactoryRun.objects.filter(run_id=snapshot.get("run_id") or "").first()
+        MonthlyUpdateDraft.objects.update_or_create(
+            organization=organization,
+            month=month_value,
+            defaults={
+                "run": previous_run,
+                "status": snapshot.get("status", MonthlyUpdateDraftStatus.DRAFT),
+                "title": snapshot.get("title", ""),
+                "model_name": snapshot.get("model_name", ""),
+                "groundedness_status": snapshot.get("groundedness_status", "pending"),
+                "structured_memo": snapshot.get("structured_memo") or {},
+                "rendered_markdown": snapshot.get("rendered_markdown", ""),
+                "evidence_event_ids": snapshot.get("evidence_event_ids") or [],
+                "evidence_metric_ids": snapshot.get("evidence_metric_ids") or [],
+                "carry_forward_event_ids": snapshot.get("carry_forward_event_ids") or [],
+                "groundedness_notes": snapshot.get("groundedness_notes", ""),
+            },
+        )
+        restored += 1
+    return restored
+
+
+def _restore_cancelled_run_events(*, organization: Organization, backups: dict) -> int:
+    restored = 0
+    for snapshot in (backups or {}).values():
+        previous_run = ContentFactoryRun.objects.filter(run_id=snapshot.get("run_id") or "").first()
+        StartupEvent.objects.update_or_create(
+            organization=organization,
+            canonical_key=snapshot["canonical_key"],
+            defaults={
+                "run": previous_run,
+                "event_type": snapshot["event_type"],
+                "title": snapshot["title"],
+                "summary": snapshot.get("summary", ""),
+                "event_date": snapshot.get("event_date"),
+                "month_bucket": date.fromisoformat(str(snapshot["month_bucket"])),
+                "date_precision": snapshot.get("date_precision", "day"),
+                "sentiment": snapshot.get("sentiment", ""),
+                "investor_importance": snapshot.get("investor_importance", 3),
+                "quantitative_facts": snapshot.get("quantitative_facts") or [],
+                "evidence_message_ids": snapshot.get("evidence_message_ids") or [],
+                "evidence_attachment_ids": snapshot.get("evidence_attachment_ids") or [],
+                "source_thread_ids": snapshot.get("source_thread_ids") or [],
+                "confidence": snapshot.get("confidence", 0.0),
+                "status": snapshot.get("status", "open"),
+                "needs_review": bool(snapshot.get("needs_review", False)),
+                "merge_notes": snapshot.get("merge_notes", ""),
+            },
+        )
+        restored += 1
+    return restored
+
+
+def _restore_cancelled_run_metrics(*, organization: Organization, backups: dict) -> int:
+    restored = 0
+    for snapshot in (backups or {}).values():
+        previous_run = ContentFactoryRun.objects.filter(run_id=snapshot.get("run_id") or "").first()
+        StartupMetricObservation.objects.update_or_create(
+            organization=organization,
+            source_thread_id=snapshot.get("source_thread_id"),
+            metric_key=snapshot["metric_key"],
+            period_month=date.fromisoformat(str(snapshot["period_month"])),
+            value_text=snapshot["value_text"],
+            defaults={
+                "run": previous_run,
+                "metric_name": snapshot["metric_name"],
+                "value_number": Decimal(snapshot["value_number"]) if snapshot.get("value_number") not in (None, "") else None,
+                "unit": snapshot.get("unit", ""),
+                "observed_at": snapshot.get("observed_at"),
+                "confidence": snapshot.get("confidence", 0.0),
+                "evidence_message_ids": snapshot.get("evidence_message_ids") or [],
+                "evidence_attachment_ids": snapshot.get("evidence_attachment_ids") or [],
+                "summary": snapshot.get("summary", ""),
+            },
+        )
+        restored += 1
+    return restored
+
+
+def cancel_startup_update_run(
+    *,
+    run_id: str,
+    organization: Organization,
+    binding_id: int,
+    google_connection_id: Optional[int],
+    cancelled_by_user_id: int,
+) -> dict:
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.select_for_update().filter(
+            run_id=run_id,
+            workflow=STARTUP_UPDATE_WORKFLOW,
+            domain=organization.domain,
+        ).first()
+        if run is None:
+            raise ContentFactoryRun.DoesNotExist(run_id)
+
+        run_binding_id = (run.run_request or {}).get("binding_id")
+        if run_binding_id and int(run_binding_id) != int(binding_id):
+            raise PermissionError("Run does not belong to the active binding.")
+
+        run_google_connection_id = get_startup_update_run_google_connection_id(run)
+        if (
+            google_connection_id is not None
+            and run_google_connection_id is not None
+            and int(run_google_connection_id) != int(google_connection_id)
+        ):
+            raise PermissionError("Run does not belong to the active Gmail connection.")
+
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            return {
+                "run": run,
+                "cancel_applied": False,
+                "cleanup": {"drafts_deleted": 0, "events_deleted": 0, "metrics_deleted": 0},
+            }
+
+        if run.status == ContentFactoryRunStatus.CANCELLED:
+            return {
+                "run": run,
+                "cancel_applied": False,
+                "cleanup": {"drafts_deleted": 0, "events_deleted": 0, "metrics_deleted": 0},
+            }
+
+        if run.status not in STARTUP_UPDATE_CANCELLABLE_STATUSES:
+            return {
+                "run": run,
+                "cancel_applied": False,
+                "cleanup": {"drafts_deleted": 0, "events_deleted": 0, "metrics_deleted": 0},
+            }
+
+        backups = get_startup_update_run_cancel_backups(run)
+        _restore_cancelled_run_drafts(organization=organization, backups=backups.get("drafts") or {})
+        _restore_cancelled_run_events(organization=organization, backups=backups.get("events") or {})
+        _restore_cancelled_run_metrics(organization=organization, backups=backups.get("metrics") or {})
+
+        drafts_deleted, _ = MonthlyUpdateDraft.objects.filter(run=run).delete()
+        events_deleted, _ = StartupEvent.objects.filter(run=run).delete()
+        metrics_deleted, _ = StartupMetricObservation.objects.filter(run=run).delete()
+
+        meta = _get_run_meta(run)
+        meta["retry_count"] = 0
+        meta["last_error"] = ""
+        meta["lease_owner"] = None
+        meta["lease_expires_at"] = None
+        meta["last_heartbeat_at"] = None
+        meta["dead_letters"] = []
+        cancelled_at = timezone.now()
+        meta["cancellation"] = {
+            "cancelled_at": cancelled_at.isoformat(),
+            "cancelled_by_user_id": int(cancelled_by_user_id),
+            "cancel_reason": "user_requested",
+        }
+        _set_run_meta(run, meta)
+
+        run.status = ContentFactoryRunStatus.CANCELLED
+        run.error = "Cancelled by user."
+        run.resume_available = False
+        run.save(update_fields=["status", "result", "error", "resume_available", "updated_at"])
+
+        run.steps.filter(status=ContentFactoryStepStatus.RUNNING).update(
+            status=ContentFactoryStepStatus.CANCELLED,
+            message="Cancelled by user.",
+            completed_at=cancelled_at,
+            error="Cancelled by user.",
+        )
+        ContentFactoryRunStepAttempt.objects.filter(
+            step__run=run,
+            status=ContentFactoryStepStatus.RUNNING,
+        ).update(
+            status=ContentFactoryStepStatus.CANCELLED,
+            message="Cancelled by user.",
+            completed_at=cancelled_at,
+            error="Cancelled by user.",
+        )
+
+        return {
+            "run": run,
+            "cancel_applied": True,
+            "cleanup": {
+                "drafts_deleted": int(drafts_deleted),
+                "events_deleted": int(events_deleted),
+                "metrics_deleted": int(metrics_deleted),
+            },
+        }
 
 
 def maybe_start_startup_update_for_google_connection(

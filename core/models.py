@@ -447,6 +447,7 @@ class ContentFactoryRunStatus(models.TextChoices):
     RUNNING = "running", "Running"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
     BLOCKED = "blocked", "Blocked"
     AWAITING_DELIVERY_MODE = "awaiting_delivery_mode", "Awaiting Delivery Mode"
     AWAITING_CONFIRMATION = "awaiting_confirmation", "Awaiting Confirmation"
@@ -460,6 +461,7 @@ class ContentFactoryStepStatus(models.TextChoices):
     RUNNING = "running", "Running"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
     BLOCKED = "blocked", "Blocked"
     SKIPPED = "skipped", "Skipped"
 

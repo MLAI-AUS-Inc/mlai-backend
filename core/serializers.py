@@ -389,6 +389,16 @@ class ContentFactoryRunSyncSerializer(serializers.Serializer):
     step_states = serializers.DictField(required=False, default=dict)
 
 
+class ContentFactoryRunValleyJobSerializer(serializers.Serializer):
+    job_id = serializers.CharField()
+    transition = serializers.ChoiceField(choices=[
+        ("queued", "Queued"),
+        ("started", "Started"),
+        ("finished", "Finished"),
+    ])
+    reason = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class ContentFactoryRunControlSerializer(serializers.Serializer):
     actor = serializers.CharField(required=False, allow_blank=True, default="content-factory")
 

@@ -4,6 +4,7 @@ from .views import (
     VibeRaisingActiveCompanyView,
     VibeRaisingCompanyView,
     VibeRaisingEmailDraftActiveRunView,
+    VibeRaisingEmailDraftCancelView,
     VibeRaisingEmailDraftLatestView,
     VibeRaisingEmailDraftResultsView,
     VibeRaisingEmailDraftStartView,
@@ -53,6 +54,11 @@ urlpatterns = [
         "email-draft/runs/<str:run_id>/status/",
         VibeRaisingEmailDraftStatusView.as_view(),
         name="vibe-raising-email-draft-run-status",
+    ),
+    path(
+        "email-draft/runs/<str:run_id>/cancel/",
+        VibeRaisingEmailDraftCancelView.as_view(),
+        name="vibe-raising-email-draft-run-cancel",
     ),
     path(
         "email-draft/draft-results/",

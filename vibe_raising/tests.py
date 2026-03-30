@@ -8,7 +8,14 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
-from integrations.models import GoogleConnection, MonthlyUpdateDraft, StartupProfile, UserStartupBinding
+from integrations.models import (
+    GoogleConnection,
+    MonthlyUpdateDraft,
+    StartupEvent,
+    StartupMetricObservation,
+    StartupProfile,
+    UserStartupBinding,
+)
 from integrations.services.startup_updates import (
     DEFAULT_BACKFILL_MONTHS,
     SUPERSEDED_GMAIL_CONNECTION_ERROR,
@@ -753,6 +760,88 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["lastHeartbeatAt"], "2026-03-30T04:05:06+00:00")
         self.assertEqual(response.data["binding"]["id"], binding.id)
         self.assertEqual(response.data["binding"]["googleConnectionId"], google_connection.id)
+
+    @patch("vibe_raising.views.cancel_valley_run")
+    def test_email_draft_cancel_marks_run_cancelled_and_clears_active_run(self, mock_cancel_valley_run):
+        mock_cancel_valley_run.return_value = {
+            "run_id": "ignored",
+            "revoke_requested": True,
+            "revoke_succeeded": True,
+            "revoked_job_ids": ["job-1"],
+            "missing_job_ids": [],
+        }
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        run.status = ContentFactoryRunStatus.RUNNING
+        run.current_step = "event_extraction"
+        run.save(update_fields=["status", "current_step", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 3, 1),
+            status="draft",
+            structured_memo={"highlights": ["Pending March update"]},
+            rendered_markdown="",
+        )
+        StartupEvent.objects.create(
+            organization=organization,
+            run=run,
+            canonical_key="march_customer_win",
+            event_type="customer_win",
+            title="Won a March customer",
+            month_bucket=date(2026, 3, 1),
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            run=run,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="$45,000",
+            period_month=date(2026, 3, 1),
+        )
+
+        response = self.client.post(
+            f"/api/v1/vibe-raising/email-draft/runs/{run.run_id}/cancel/",
+            {},
+            format="json",
+        )
+        active_run_response = self.client.get("/api/v1/vibe-raising/email-draft/active-run/")
+        status_response = self.client.get(
+            f"/api/v1/vibe-raising/email-draft/runs/{run.run_id}/status/",
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.CANCELLED)
+        self.assertTrue(response.data["cancel_applied"])
+        self.assertEqual(response.data["cleanup"]["drafts_deleted"], 1)
+        self.assertEqual(response.data["cleanup"]["events_deleted"], 1)
+        self.assertEqual(response.data["cleanup"]["metrics_deleted"], 1)
+        self.assertTrue(response.data["revoke_requested"])
+        self.assertTrue(response.data["revoke_succeeded"])
+        self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(run=run).exists())
+        self.assertFalse(StartupEvent.objects.filter(run=run).exists())
+        self.assertFalse(StartupMetricObservation.objects.filter(run=run).exists())
+
+        self.assertEqual(active_run_response.status_code, 200)
+        self.assertIsNone(active_run_response.data)
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["state"], "cancelled")
+        mock_cancel_valley_run.assert_called_once_with(run.run_id)
 
     def test_email_draft_run_status_and_results_are_scoped_to_requested_run(self):
         self.client.force_authenticate(user=self.user)
