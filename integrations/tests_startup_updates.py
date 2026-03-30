@@ -683,7 +683,11 @@ class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
             current_step="gmail_backfill",
             approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
             step_order=["profile_resolution", "gmail_backfill"],
-            run_request={"organization_id": self.organization.id},
+            run_request={
+                "organization_id": self.organization.id,
+                "binding_id": self.binding.id,
+                "google_connection_id": self.google_connection.id,
+            },
             result=result
             or {
                 "_valley_meta": {
@@ -794,6 +798,62 @@ class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
         other_run.refresh_from_db()
         self.assertEqual(target_run.status, ContentFactoryRunStatus.FAILED)
         self.assertEqual(other_run.status, ContentFactoryRunStatus.RUNNING)
+
+    @patch("integrations.management.commands.reset_startup_update_runs.cancel_valley_run")
+    def test_reset_command_cancel_mode_marks_run_cancelled_and_cleans_outputs(self, mock_cancel_valley_run):
+        mock_cancel_valley_run.return_value = {
+            "revoke_requested": True,
+            "revoke_succeeded": True,
+            "revoked_job_ids": ["job-1"],
+            "missing_job_ids": [],
+        }
+        run = self._create_run(run_id="startup-update-reset-cancel")
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=run,
+            month=date(2026, 2, 1),
+            status="draft",
+            structured_memo={"title": "Cancelled draft"},
+        )
+        event = StartupEvent.objects.create(
+            organization=self.organization,
+            run=run,
+            canonical_key="cancel-event",
+            event_type="customer_win",
+            title="Cancelled event",
+            month_bucket=date(2026, 3, 1),
+        )
+        metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=run,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="$45,000",
+            period_month=date(2026, 3, 1),
+        )
+
+        out = StringIO()
+        call_command(
+            "reset_startup_update_runs",
+            run_ids=[run.run_id],
+            apply=True,
+            cancel=True,
+            stdout=out,
+        )
+
+        run.refresh_from_db()
+        step = run.steps.get(step_key="gmail_backfill")
+        attempt = step.attempt_history.get(attempt=1)
+
+        self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertFalse(run.resume_available)
+        self.assertEqual(step.status, ContentFactoryStepStatus.CANCELLED)
+        self.assertEqual(attempt.status, ContentFactoryStepStatus.CANCELLED)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(pk=draft.pk).exists())
+        self.assertFalse(StartupEvent.objects.filter(pk=event.pk).exists())
+        self.assertFalse(StartupMetricObservation.objects.filter(pk=metric.pk).exists())
+        self.assertIn("Cancelled 1 startup-update run(s).", out.getvalue())
+        mock_cancel_valley_run.assert_called_once_with(run.run_id)
 
 
 class RelabelStartupUpdateMessagesCommandTest(StartupUpdateApiTestCase):

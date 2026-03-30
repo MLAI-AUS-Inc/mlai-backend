@@ -12,7 +12,14 @@ from core.models import (
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
 )
-from integrations.services.startup_updates import OPEN_RUN_STATUSES, STARTUP_UPDATE_WORKFLOW
+from integrations.models import UserStartupBinding
+from integrations.services.startup_updates import (
+    OPEN_RUN_STATUSES,
+    STARTUP_UPDATE_CANCELLABLE_STATUSES,
+    STARTUP_UPDATE_WORKFLOW,
+    cancel_startup_update_run,
+)
+from integrations.services.valley_harness import cancel_valley_run
 
 
 LOCAL_RESET_ERROR = "Locally reset stale startup-update run."
@@ -96,15 +103,53 @@ class Command(BaseCommand):
             action="store_true",
             help="Apply the reset. Without this flag the command only prints matching runs.",
         )
+        parser.add_argument(
+            "--cancel",
+            action="store_true",
+            help="Cancel matching runs instead of marking them failed. This also deletes run-scoped outputs and asks Valley to revoke tracked jobs.",
+        )
+
+    def _cancel_run(self, run: ContentFactoryRun) -> tuple[dict, dict]:
+        binding_id = (run.run_request or {}).get("binding_id")
+        if not binding_id:
+            raise CommandError(f"Run {run.run_id} is missing binding_id in run_request.")
+
+        binding = (
+            UserStartupBinding.objects.select_related("organization", "google_connection")
+            .filter(id=binding_id)
+            .first()
+        )
+        if binding is None:
+            raise CommandError(f"Run {run.run_id} refers to missing binding_id={binding_id}.")
+
+        google_connection_id = (run.run_request or {}).get("google_connection_id") or binding.google_connection_id
+        cancel_result = cancel_startup_update_run(
+            run_id=run.run_id,
+            organization=binding.organization,
+            binding_id=binding.id,
+            google_connection_id=google_connection_id,
+            cancelled_by_user_id=binding.user_id,
+        )
+        revoke_payload = {
+            "revoke_requested": False,
+            "revoke_succeeded": False,
+            "revoked_job_ids": [],
+            "missing_job_ids": [],
+        }
+        if cancel_result["cancel_applied"]:
+            revoke_payload = cancel_valley_run(run.run_id)
+        return cancel_result, revoke_payload
 
     def handle(self, *args, **options):
         older_than_minutes = options["older_than_minutes"]
         if older_than_minutes is not None and older_than_minutes < 0:
             raise CommandError("--older-than-minutes must be >= 0.")
 
+        cancel_mode = bool(options.get("cancel"))
+
         queryset = ContentFactoryRun.objects.filter(
             workflow=STARTUP_UPDATE_WORKFLOW,
-            status__in=list(OPEN_RUN_STATUSES),
+            status__in=list(STARTUP_UPDATE_CANCELLABLE_STATUSES if cancel_mode else OPEN_RUN_STATUSES),
         ).order_by("-updated_at")
         domain = str(options.get("domain") or "").strip()
         run_ids = [str(item).strip() for item in options.get("run_ids") or [] if str(item).strip()]
@@ -118,10 +163,10 @@ class Command(BaseCommand):
 
         runs = list(queryset)
         if not runs:
-            self.stdout.write("No matching open startup-update runs found.")
+            self.stdout.write("No matching startup-update runs found.")
             return
 
-        action = "Applying reset" if options["apply"] else "Dry run"
+        action = "Applying cancellation" if options["apply"] and cancel_mode else "Applying reset" if options["apply"] else "Dry run"
         self.stdout.write(f"{action} for {len(runs)} startup-update run(s):")
         for run in runs:
             self.stdout.write(
@@ -130,7 +175,27 @@ class Command(BaseCommand):
             )
 
         if not options["apply"]:
-            self.stdout.write("Re-run with --apply to mark these runs failed for local recovery.")
+            if cancel_mode:
+                self.stdout.write("Re-run with --apply --cancel to cancel these runs and clean up their outputs.")
+            else:
+                self.stdout.write("Re-run with --apply to mark these runs failed for local recovery.")
+            return
+
+        if cancel_mode:
+            cancelled = 0
+            for run in runs:
+                cancel_result, revoke_payload = self._cancel_run(run)
+                cleanup = cancel_result["cleanup"]
+                self.stdout.write(
+                    f"Cancelled {run.run_id}: cancel_applied={bool(cancel_result['cancel_applied'])} "
+                    f"drafts_deleted={cleanup['drafts_deleted']} "
+                    f"events_deleted={cleanup['events_deleted']} "
+                    f"metrics_deleted={cleanup['metrics_deleted']} "
+                    f"revoke_requested={bool(revoke_payload.get('revoke_requested'))} "
+                    f"revoke_succeeded={bool(revoke_payload.get('revoke_succeeded'))}"
+                )
+                cancelled += 1
+            self.stdout.write(self.style.SUCCESS(f"Cancelled {cancelled} startup-update run(s)."))
             return
 
         now = timezone.now()
