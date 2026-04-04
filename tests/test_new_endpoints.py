@@ -1261,6 +1261,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "route_is_live": False,
                 "route_path": "",
                 "intended_route_path": "/articles/featured/how-to-build-an-ai-harness",
+                "preview_screenshot_urls": [
+                    "https://storage.example.com/previews/job-draft-pr-preview.png",
+                ],
                 "dedupe_key": "draft-pr-preview-12",
             },
             format='json',
@@ -1275,6 +1278,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             job.request_meta.get("preview_url", ""),
         )
         self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        self.assertEqual(
+            job.request_meta.get("preview_screenshot_urls"),
+            ["https://storage.example.com/previews/job-draft-pr-preview.png"],
+        )
         mock_send_message.assert_called_once()
         self.assertIn("Preview ready for mlai.au:", mock_send_message.call_args[0][1])
         blocks = mock_send_message.call_args[1]["blocks"]
@@ -1282,6 +1289,11 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertEqual(blocks[2]["type"], "image")
+        self.assertEqual(
+            blocks[2]["image_url"],
+            "https://storage.example.com/previews/job-draft-pr-preview.png",
+        )
         self.assertIn(
             "/api/content-factory/runs/job-draft-pr-preview/preview/",
             blocks[1]["elements"][0]["url"],
@@ -1452,6 +1464,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "review_required": True,
                 "verification_state": "build_failed_review_pr",
                 "reason_code": "environment_bundler_unstable",
+                "preview_screenshot_urls": [
+                    "https://storage.example.com/previews/job-pr-opened-preview.png",
+                ],
                 "dedupe_key": "generation-pr-opened-preview-77",
             },
             format='json',
@@ -1466,6 +1481,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             job.request_meta.get("preview_url", ""),
         )
         self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        self.assertEqual(
+            job.request_meta.get("preview_screenshot_urls"),
+            ["https://storage.example.com/previews/job-pr-opened-preview.png"],
+        )
         self.assertEqual(mock_send_message.call_count, 2)
         pr_notification_call = mock_send_message.call_args_list[1]
         self.assertIn("Review bundle preview ready for mlai.au:", pr_notification_call[0][1])
@@ -1473,6 +1492,11 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("Review PR created", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertEqual(blocks[2]["type"], "image")
+        self.assertEqual(
+            blocks[2]["image_url"],
+            "https://storage.example.com/previews/job-pr-opened-preview.png",
+        )
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_generation_pr_opened_callback_downgrades_raw_repo_preview_url_for_review_bundle(self, mock_send_message):
@@ -1579,6 +1603,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             "primary_review_label": "Open Preview",
             "route_is_live": True,
             "route_path": "/articles/ifs",
+            "preview_screenshot_urls": [
+                "https://storage.example.com/previews/job-preview-ready.png",
+            ],
             "dedupe_key": "preview-ready-1",
         }
 
@@ -1592,6 +1619,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.pr_url, "https://github.com/example/pr/1")
         self.assertEqual(job.request_meta.get("publish_stage"), "auto_approved")
         self.assertEqual(job.request_meta.get("preview_surface_kind"), "repo_preview")
+        self.assertEqual(
+            job.request_meta.get("preview_screenshot_urls"),
+            ["https://storage.example.com/previews/job-preview-ready.png"],
+        )
         self.assertEqual(job.request_meta["callback_notifications"]["preview_ready"], ["preview-ready-1"])
         self.assertEqual(job.request_meta["callback_actions"]["preview_ready_auto_approve"], ["preview-ready-1"])
         mock_publish_article.assert_called_once_with(
@@ -1607,6 +1638,11 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("Preview route: `/articles/ifs`", blocks[0]["text"]["text"])
         self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
         self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        self.assertEqual(blocks[2]["type"], "image")
+        self.assertEqual(
+            blocks[2]["image_url"],
+            "https://storage.example.com/previews/job-preview-ready.png",
+        )
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_content_ready_callback_marks_job_completed(self, mock_send_dm):
@@ -2265,6 +2301,106 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.data["job_id"], "job-content-ready")
         self.assertEqual(response.data["promoted_publish_job_id"], "job-publish-child")
         self.assertEqual(response.data["publish_stage"], "awaiting_preview")
+
+    def test_resolve_thread_returns_existing_publish_child_when_review_is_required(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "publish_stage": "needs_review",
+                "promoted_publish_job_id": "job-publish-child",
+            },
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-publish-child",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "source_run_id": "job-content-ready",
+                "publish_stage": "needs_review",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "publish_pr",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["resolution"], "in_progress")
+        self.assertEqual(response.data["job_id"], "job-content-ready")
+        self.assertEqual(response.data["promoted_publish_job_id"], "job-publish-child")
+        self.assertEqual(response.data["publish_stage"], "needs_review")
+
+    def test_resolve_thread_prefers_existing_publish_child_over_older_content_ready_job(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready-older",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"publish_stage": "content_ready"},
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-content-ready-current",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "publish_stage": "pr_opened",
+                "promoted_publish_job_id": "job-publish-child-current",
+            },
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-publish-child-current",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="completed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={
+                "source_run_id": "job-content-ready-current",
+                "publish_stage": "pr_opened",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "publish_pr",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["resolution"], "in_progress")
+        self.assertEqual(response.data["job_id"], "job-content-ready-current")
+        self.assertEqual(response.data["promoted_publish_job_id"], "job-publish-child-current")
+        self.assertEqual(response.data["publish_stage"], "pr_opened")
 
     def test_resolve_thread_returns_404_when_no_promotable_source_job_exists(self):
         ContentFactoryJob.objects.create(

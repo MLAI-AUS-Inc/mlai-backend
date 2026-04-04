@@ -25,6 +25,16 @@ from core.content_factory_progress import maybe_send_still_working_ping, upsert_
 
 logger = logging.getLogger(__name__)
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+PUBLISH_READY_STAGE = "content_ready"
+PUBLISH_IN_PROGRESS_SOURCE_STAGES = {
+    "promotion_requested",
+    "awaiting_preview",
+    "preview_ready",
+    "needs_review",
+    "pr_opened",
+    "auto_approved",
+}
+PUBLISH_IN_PROGRESS_CHILD_STAGES = PUBLISH_IN_PROGRESS_SOURCE_STAGES - {"promotion_requested"}
 
 
 def _validate_roo_content_request(request, *, require_client_request_id: bool = False) -> Optional[Response]:
@@ -204,8 +214,8 @@ def _resolve_publishable_job_for_thread(
         publish_stage = str(request_meta.get("publish_stage") or "").strip()
         promoted_publish_job_id = str(request_meta.get("promoted_publish_job_id") or "").strip()
         return (
-            0 if publish_stage == "content_ready" else 1,
-            0 if publish_stage == "promotion_requested" else 1,
+            0 if publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES else 1,
+            0 if publish_stage == PUBLISH_READY_STAGE else 1,
             0 if promoted_publish_job_id else 1,
             -int(job.created_at.timestamp()),
         )
@@ -215,7 +225,7 @@ def _resolve_publishable_job_for_thread(
     source_publish_stage = str(source_meta.get("publish_stage") or "").strip() or "unknown"
     promoted_publish_job_id = str(source_meta.get("promoted_publish_job_id") or "").strip()
 
-    if source_publish_stage == "content_ready":
+    if source_publish_stage == PUBLISH_READY_STAGE:
         return {
             "resolution": "ready",
             "job_id": source_job.job_id,
@@ -223,12 +233,15 @@ def _resolve_publishable_job_for_thread(
             "publish_stage": source_publish_stage,
         }
 
-    if source_publish_stage in {"promotion_requested", "awaiting_preview", "preview_ready", "auto_approved"} and promoted_publish_job_id:
+    if source_publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES and promoted_publish_job_id:
         child_job = ContentFactoryJob.objects.filter(job_id=promoted_publish_job_id).first()
         child_meta = dict(getattr(child_job, "request_meta", {}) or {})
         child_publish_stage = str(child_meta.get("publish_stage") or "").strip()
         effective_publish_stage = child_publish_stage or source_publish_stage
-        if child_publish_stage in {"awaiting_preview", "preview_ready", "auto_approved"} or source_publish_stage in {"promotion_requested", "awaiting_preview", "preview_ready", "auto_approved"}:
+        if (
+            child_publish_stage in PUBLISH_IN_PROGRESS_CHILD_STAGES
+            or source_publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES
+        ):
             return {
                 "resolution": "in_progress",
                 "job_id": source_job.job_id,

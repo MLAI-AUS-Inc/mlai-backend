@@ -267,6 +267,7 @@ def build_draft_pr_created_blocks(
     route_is_live: Optional[bool] = None,
     intended_route_path: str = "",
     bundle_primary_path: str = "",
+    preview_screenshot_urls: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
     pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
     normalized_kind = _string(review_surface_kind) or ("preview_route" if preview_url or route_path else "fallback_bundle")
@@ -325,7 +326,7 @@ def build_draft_pr_created_blocks(
             }
         )
 
-    return [
+    blocks = [
         {
             "type": "section",
             "text": {
@@ -338,6 +339,13 @@ def build_draft_pr_created_blocks(
             "elements": actions,
         },
     ]
+    image_block = _preview_screenshot_block(
+        preview_screenshot_urls=preview_screenshot_urls,
+        alt_text=f"Preview screenshot for {domain}",
+    )
+    if image_block:
+        blocks.append(image_block)
+    return blocks
 
 
 def build_preview_ready_blocks(
@@ -350,6 +358,7 @@ def build_preview_ready_blocks(
     primary_review_url: str = "",
     primary_review_label: str = "",
     route_is_live: Optional[bool] = None,
+    preview_screenshot_urls: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
     pr_label = f"PR #{pr_number}" if pr_number else "Draft PR"
     normalized_route_is_live = bool(route_is_live) if route_is_live is not None else bool(preview_url)
@@ -363,7 +372,7 @@ def build_preview_ready_blocks(
     if normalized_route_path:
         section_text += f"\nPreview route: `{normalized_route_path}`"
 
-    return [
+    blocks = [
         {
             "type": "section",
             "text": {
@@ -388,6 +397,13 @@ def build_preview_ready_blocks(
             ],
         },
     ]
+    image_block = _preview_screenshot_block(
+        preview_screenshot_urls=preview_screenshot_urls,
+        alt_text=f"Preview screenshot for {domain}",
+    )
+    if image_block:
+        blocks.append(image_block)
+    return blocks
 
 
 def build_progress_update_blocks(
@@ -725,6 +741,24 @@ def _summary_text(content_package: Dict[str, Any]) -> str:
 
 def _slack_link(url: str, label: str) -> str:
     return f"<{url}|{label}>"
+
+
+def _preview_screenshot_block(
+    *,
+    preview_screenshot_urls: Optional[Iterable[str]],
+    alt_text: str,
+) -> Optional[Dict[str, Any]]:
+    if not preview_screenshot_urls:
+        return None
+    for value in preview_screenshot_urls:
+        image_url = _string(value)
+        if image_url:
+            return {
+                "type": "image",
+                "image_url": image_url,
+                "alt_text": _string(alt_text) or "Preview screenshot",
+            }
+    return None
 
 
 def _string(value: Any) -> str:

@@ -1,7 +1,7 @@
 import calendar
 import logging
 import urllib.parse
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Optional
 
 from django.conf import settings
@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
+from integrations.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
 from integrations.services.startup_updates import (
     DEFAULT_BACKFILL_MONTHS,
     OPEN_RUN_STATUSES,
@@ -35,6 +36,7 @@ from .serializers import (
     VibeRaisingActiveCompanySerializer,
     VibeRaisingCompanySerializer,
     VibeRaisingCompanyUpsertSerializer,
+    VibeRaisingMonthlyUpdateUpsertSerializer,
     VibeRaisingProfileSerializer,
     VibeRaisingProfileUpsertSerializer,
 )
@@ -199,6 +201,11 @@ def _join_text_items(value):
     return text
 
 
+def _join_text_items_with_newlines(value):
+    items = _normalize_text_list(value)
+    return "\n".join(item.strip() for item in items if item.strip())
+
+
 def _normalize_metric_value(value):
     if value is None:
         return None
@@ -220,6 +227,15 @@ def _metric_key_from_label(label):
     if normalized == "runway":
         return "runway"
     return None
+
+
+MANUAL_METRIC_LABELS = {
+    "revenue": "Revenue",
+    "activeUsers": "Active Users",
+    "mrr": "MRR",
+    "burnRate": "Burn Rate",
+    "runway": "Runway",
+}
 
 
 def _extract_metrics(structured_memo):
@@ -256,6 +272,57 @@ def _serialize_draft_for_form(draft):
         "challenges": _join_text_items(structured_memo.get("lowlights")),
         "asks": _join_text_items(structured_memo.get("asks")),
         "metrics": _extract_metrics(structured_memo),
+    }
+
+
+def _split_editor_text(value):
+    return [
+        item.strip()
+        for item in str(value or "").replace("\r\n", "\n").split("\n")
+        if item.strip()
+    ]
+
+
+def _build_manual_kpi_snapshot(metrics):
+    snapshot = []
+    for metric_key, label in MANUAL_METRIC_LABELS.items():
+        value = str((metrics or {}).get(metric_key) or "").strip()
+        if not value:
+            continue
+        snapshot.append(
+            {
+                "metric_key": metric_key,
+                "label": label,
+                "value": value,
+                "value_text": value,
+            }
+        )
+    return snapshot
+
+
+def _build_manual_structured_memo(payload):
+    return {
+        "highlights": _split_editor_text(payload.get("highlights")),
+        "lowlights": _split_editor_text(payload.get("challenges")),
+        "asks": _split_editor_text(payload.get("asks")),
+        "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
+    }
+
+
+def _serialize_monthly_update(draft):
+    structured_memo = draft.structured_memo or {}
+    return {
+        "id": draft.id,
+        "isoMonth": draft.month.isoformat(),
+        "month": f"{calendar.month_name[draft.month.month]} {draft.month.year}",
+        "monthName": calendar.month_name[draft.month.month],
+        "year": draft.month.year,
+        "date": draft.updated_at.isoformat(),
+        "status": draft.status,
+        "metrics": _extract_metrics(structured_memo),
+        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
     }
 
 
@@ -804,6 +871,70 @@ class VibeRaisingActiveCompanyView(APIView):
             profile.save(update_fields=["active_company", "updated_at"])
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VibeRaisingMonthlyUpdateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        domain = context["domain"]
+        if not domain:
+            return Response({"updates": []}, status=status.HTTP_200_OK)
+
+        binding = get_default_binding_for_domain(user=request.user, domain=domain)
+        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        if organization is None:
+            return Response({"updates": []}, status=status.HTTP_200_OK)
+
+        updates = [
+            _serialize_monthly_update(draft)
+            for draft in organization.monthly_update_drafts.order_by("-month", "-updated_at")
+        ]
+        return Response({"updates": updates}, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        if not context["domain"]:
+            return Response(
+                {"detail": "Add a company domain before publishing updates."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = VibeRaisingMonthlyUpdateUpsertSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        company = context["company"]
+        organization, _startup_profile, _binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+        month_bucket = date(
+            serializer.validated_data["year"],
+            serializer.validated_data["month_number"],
+            1,
+        )
+        draft, created = MonthlyUpdateDraft.objects.update_or_create(
+            organization=organization,
+            month=month_bucket,
+            defaults={
+                "status": MonthlyUpdateDraftStatus.READY,
+                "title": f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update",
+                "model_name": "vibe-raising-manual",
+                "structured_memo": _build_manual_structured_memo(serializer.validated_data),
+            },
+        )
+
+        return Response(
+            {"update": _serialize_monthly_update(draft)},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class VibeRaisingStartupUpdateBootstrapView(APIView):

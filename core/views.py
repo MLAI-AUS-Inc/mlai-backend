@@ -2173,6 +2173,7 @@ class ContentFactoryCallbackView(APIView):
             'route_path',
             'intended_route_path',
             'preview_url',
+            'preview_screenshot_urls',
             'preview_surface_kind',
             'preview_content_verified',
             'repo_preview_candidate_url',
@@ -2186,6 +2187,16 @@ class ContentFactoryCallbackView(APIView):
                 value = data.get(field)
                 if field == 'preview_content_verified':
                     request_meta[field] = bool(value)
+                elif field == 'preview_screenshot_urls':
+                    normalized_urls = [
+                        str(item).strip()
+                        for item in (value or [])
+                        if str(item).strip()
+                    ]
+                    if normalized_urls:
+                        request_meta[field] = normalized_urls
+                    else:
+                        request_meta.pop(field, None)
                 elif value:
                     request_meta[field] = value
                 else:
@@ -2483,6 +2494,11 @@ class ContentFactoryCallbackView(APIView):
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
         preview_url = str(data.get('preview_url') or '').strip()
+        preview_screenshot_urls = [
+            str(item).strip()
+            for item in (data.get('preview_screenshot_urls') or [])
+            if str(item).strip()
+        ]
         review_surface_kind = str(data.get('review_surface_kind') or '').strip()
         primary_review_url = str(data.get('primary_review_url') or '').strip()
         primary_review_label = str(data.get('primary_review_label') or '').strip()
@@ -2535,6 +2551,7 @@ class ContentFactoryCallbackView(APIView):
                 route_is_live=route_is_live,
                 intended_route_path=intended_route_path,
                 bundle_primary_path=bundle_primary_path,
+                preview_screenshot_urls=preview_screenshot_urls,
             )
             try:
                 slack_sent = self._send_job_message(
@@ -2581,6 +2598,11 @@ class ContentFactoryCallbackView(APIView):
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
         preview_url = str(data.get('preview_url') or '').strip()
+        preview_screenshot_urls = [
+            str(item).strip()
+            for item in (data.get('preview_screenshot_urls') or [])
+            if str(item).strip()
+        ]
         review_surface_kind = str(data.get('review_surface_kind') or '').strip()
         primary_review_url = str(data.get('primary_review_url') or '').strip()
         primary_review_label = str(data.get('primary_review_label') or '').strip()
@@ -2667,6 +2689,7 @@ class ContentFactoryCallbackView(APIView):
                 route_is_live=route_is_live,
                 intended_route_path=intended_route_path,
                 bundle_primary_path=bundle_primary_path,
+                preview_screenshot_urls=preview_screenshot_urls,
             )
             try:
                 slack_sent = self._send_job_message(
@@ -2719,6 +2742,11 @@ class ContentFactoryCallbackView(APIView):
         slack_user_id = data.get('slack_user_id', '')
         pr_url = str(data.get('pr_url') or '').strip()
         preview_url = str(data.get('preview_url') or '').strip()
+        preview_screenshot_urls = [
+            str(item).strip()
+            for item in (data.get('preview_screenshot_urls') or [])
+            if str(item).strip()
+        ]
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
         primary_review_url = str(data.get('primary_review_url') or '').strip()
@@ -2755,6 +2783,7 @@ class ContentFactoryCallbackView(APIView):
                 primary_review_url=primary_review_url,
                 primary_review_label=primary_review_label,
                 route_is_live=route_is_live,
+                preview_screenshot_urls=preview_screenshot_urls,
             )
             try:
                 notification_sent = self._send_job_message(

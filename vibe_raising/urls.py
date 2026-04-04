@@ -9,6 +9,7 @@ from .views import (
     VibeRaisingEmailDraftResultsView,
     VibeRaisingEmailDraftStartView,
     VibeRaisingEmailDraftStatusView,
+    VibeRaisingMonthlyUpdateView,
     VibeRaisingProfileView,
     VibeRaisingStartupUpdateBootstrapView,
     VibeRaisingStartupUpdateRunView,
@@ -20,6 +21,7 @@ urlpatterns = [
     path("profile/", VibeRaisingProfileView.as_view(), name="vibe-raising-profile"),
     path("companies/", VibeRaisingCompanyView.as_view(), name="vibe-raising-companies"),
     path("active-company/", VibeRaisingActiveCompanyView.as_view(), name="vibe-raising-active-company"),
+    path("updates/", VibeRaisingMonthlyUpdateView.as_view(), name="vibe-raising-updates"),
     path(
         "startup-update/bootstrap/",
         VibeRaisingStartupUpdateBootstrapView.as_view(),

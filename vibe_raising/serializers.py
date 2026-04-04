@@ -1,6 +1,17 @@
+import calendar
+
 from rest_framework import serializers
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
+
+
+VIBE_RAISING_UPDATE_METRIC_KEYS = {
+    "revenue",
+    "activeUsers",
+    "mrr",
+    "burnRate",
+    "runway",
+}
 
 
 def _blank_to_none(value):
@@ -120,3 +131,44 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
     }
 
     companyId = serializers.UUIDField()
+
+
+class VibeRaisingMonthlyUpdateUpsertSerializer(serializers.Serializer):
+    month = serializers.CharField()
+    year = serializers.IntegerField(min_value=2000, max_value=2100)
+    highlights = serializers.CharField(allow_blank=True, required=False, default="")
+    challenges = serializers.CharField(allow_blank=True, required=False, default="")
+    asks = serializers.CharField(allow_blank=True, required=False, default="")
+    metrics = serializers.DictField(
+        child=serializers.CharField(allow_blank=True),
+        required=False,
+        default=dict,
+    )
+
+    def validate(self, attrs):
+        month_lookup = {
+            name.lower(): index
+            for index, name in enumerate(calendar.month_name)
+            if index
+        }
+        raw_month = str(attrs.get("month") or "").strip()
+        month_number = month_lookup.get(raw_month.lower())
+        if month_number is None:
+            raise serializers.ValidationError({"month": "Use a full month name."})
+
+        attrs["month"] = calendar.month_name[month_number]
+        attrs["month_number"] = month_number
+
+        for field in ("highlights", "challenges", "asks"):
+            attrs[field] = str(attrs.get(field) or "").strip()
+
+        normalized_metrics = {}
+        for key, value in (attrs.get("metrics") or {}).items():
+            if key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
+                continue
+            normalized_value = _blank_to_none(value)
+            if normalized_value is not None:
+                normalized_metrics[key] = normalized_value
+
+        attrs["metrics"] = normalized_metrics
+        return attrs

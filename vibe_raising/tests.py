@@ -11,6 +11,7 @@ from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization
 from integrations.models import (
     GoogleConnection,
     MonthlyUpdateDraft,
+    MonthlyUpdateDraftStatus,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -184,6 +185,66 @@ class VibeRaisingApiTests(TestCase):
         company = VibeRaisingCompany.objects.get()
         self.assertEqual(company.domain, "second.example")
 
+    def test_founder_can_save_monthly_update_for_active_company(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "March",
+                "year": 2026,
+                "highlights": "Closed two pilots\nHired first AE",
+                "challenges": "Longer sales cycle",
+                "asks": "Intros to health system buyers",
+                "metrics": {
+                    "revenue": "50000",
+                    "activeUsers": "3420",
+                    "ignored": "noop",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(draft.structured_memo["highlights"], ["Closed two pilots", "Hired first AE"])
+        self.assertEqual(draft.structured_memo["lowlights"], ["Longer sales cycle"])
+        self.assertEqual(draft.structured_memo["asks"], ["Intros to health system buyers"])
+        self.assertEqual(response.data["update"]["month"], "March 2026")
+        self.assertEqual(response.data["update"]["metrics"]["revenue"], "50000")
+        self.assertNotIn("ignored", response.data["update"]["metrics"])
+
+    def test_founder_can_list_monthly_updates_for_active_company(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "highlights": ["Closed a channel partnership", "Shipped onboarding refresh"],
+                "lowlights": ["Sales cycle slipped"],
+                "asks": ["Intros to Series A fintech funds"],
+                "kpi_snapshot": [
+                    {"metric_key": "revenue", "label": "Revenue", "value": "42000"},
+                ],
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/updates/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["updates"]), 1)
+        self.assertEqual(response.data["updates"][0]["month"], "February 2026")
+        self.assertEqual(
+            response.data["updates"][0]["highlights"],
+            "Closed a channel partnership\nShipped onboarding refresh",
+        )
+        self.assertEqual(response.data["updates"][0]["metrics"]["revenue"], "42000")
+
     def test_investor_gets_403_on_company_endpoints(self):
         self.client.force_authenticate(user=self.user)
         VibeRaisingProfile.objects.create(
@@ -202,9 +263,11 @@ class VibeRaisingApiTests(TestCase):
             {"companyId": "33f3e9c7-85b0-458b-a3ee-7bb8b9f0d4f8"},
             format="json",
         )
+        updates_response = self.client.get("/api/v1/vibe-raising/updates/")
 
         self.assertEqual(company_response.status_code, 403)
         self.assertEqual(active_response.status_code, 403)
+        self.assertEqual(updates_response.status_code, 403)
 
     def test_switching_to_unowned_company_returns_404(self):
         self.client.force_authenticate(user=self.user)
