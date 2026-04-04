@@ -186,6 +186,19 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(UserIntegration.objects.get(slack_user_id="U456").pending_intent)
 
+    def test_pending_intent_endpoint_accepts_legacy_intent_data_payload(self):
+        url = reverse('pending_intent_list')
+        data = {
+            "slack_user_id": "U789",
+            "intent_data": json.dumps({"type": "write_article", "article_request": {"domain": "mlai.au"}}),
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            UserIntegration.objects.get(slack_user_id="U789").pending_intent,
+            {"type": "write_article", "article_request": {"domain": "mlai.au"}},
+        )
+
     @patch('integrations.services.github.http_requests.post')
     def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
         ContentFactoryJob.objects.create(

@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import timedelta
 
@@ -385,6 +386,15 @@ class IntentView(APIView):
         """
         slack_user_id = request.data.get('slack_user_id')
         intent = request.data.get('intent')
+        if intent is None and 'intent_data' in request.data:
+            legacy_intent = request.data.get('intent_data')
+            if isinstance(legacy_intent, str):
+                try:
+                    intent = json.loads(legacy_intent)
+                except ValueError:
+                    intent = legacy_intent
+            else:
+                intent = legacy_intent
 
         if not slack_user_id:
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
