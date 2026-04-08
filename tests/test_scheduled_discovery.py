@@ -4,7 +4,7 @@ from datetime import date as calendar_date
 from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from requests import Response
@@ -19,159 +19,199 @@ from core.models import (
     ScheduledDiscoveryDispatchState,
     User,
 )
-from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, confirm_topic
 from integrations.services.daily_discovery import (
     DEFAULT_SCHEDULE_TIMEZONE,
-    due_daily_discovery_targets,
     enqueue_scheduled_discovery,
-    expire_stale_queued_dispatches,
     resolve_daily_discovery_timezone,
     run_daily_discovery_scheduler,
 )
 from roo.models import PointsAccount
 
 
+@override_settings(
+    SCHEDULED_DISCOVERY_TIMEZONE="Australia/Melbourne",
+    SCHEDULED_DISCOVERY_CHANNEL_NAME="vibe-marketing",
+    SCHEDULED_DISCOVERY_SLOT_MINUTES=15,
+    SCHEDULED_DISCOVERY_MAX_TARGETS=20,
+)
 class ScheduledDiscoveryServiceTests(TestCase):
     def setUp(self):
-        self.integration = UserIntegration.objects.create(
-            slack_user_id="U-SCHED",
-            github_repo="owner/repo",
-        )
         self.org = Organization.objects.create(
-            name="Example",
-            domain="example.com",
+            name="Alpha",
+            domain="alpha.example.com",
             competitors=["competitor-a.com"],
+            seed_keywords=["alpha keyword"],
         )
         self.config = OrganizationContentConfig.objects.create(
             organization=self.org,
-            github_repo="owner/repo",
+            connected_slack_user_id="U-ALPHA",
+            daily_discovery_enabled=True,
+            daily_discovery_priority=0,
+            github_repo="owner/alpha",
             scan_summary="scan ready",
         )
 
     @staticmethod
-    def _melbourne_due_now():
-        return datetime(2026, 3, 23, 21, 2, tzinfo=dt_timezone.utc)
+    def _utc(year, month, day, hour, minute):
+        return datetime(year, month, day, hour, minute, tzinfo=dt_timezone.utc)
 
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
-    def test_due_targets_fire_at_local_8am(self, mock_get_user_profile):
-        mock_get_user_profile.return_value = {"tz": "Australia/Melbourne"}
+    @classmethod
+    def _melbourne_8am(cls):
+        return cls._utc(2026, 3, 23, 21, 0)
 
-        targets = due_daily_discovery_targets(now=self._melbourne_due_now())
+    @classmethod
+    def _melbourne_807am(cls):
+        return cls._utc(2026, 3, 23, 21, 7)
 
-        self.assertEqual(len(targets), 1)
-        self.assertEqual(targets[0].slack_user_id, "U-SCHED")
-        self.assertEqual(targets[0].domain, "example.com")
-        self.assertEqual(targets[0].timezone_name, "Australia/Melbourne")
+    @classmethod
+    def _melbourne_816am(cls):
+        return cls._utc(2026, 3, 23, 21, 16)
 
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
+    @classmethod
+    def _schedule_local_date(cls):
+        return calendar_date(2026, 3, 24)
+
     @patch("integrations.services.daily_discovery.trigger_article_generation")
-    def test_run_scheduler_queues_multiple_domains_for_same_user(self, mock_trigger, mock_get_user_profile):
-        mock_get_user_profile.return_value = {"tz": "Australia/Melbourne"}
-        mock_trigger.side_effect = [
-            {"job_id": "job-domain-1"},
-            {"job_id": "job-domain-2"},
-        ]
-        other_org = Organization.objects.create(
-            name="Other",
-            domain="other-example.com",
+    def test_scheduler_builds_schedule_and_dispatches_first_slot_only(self, mock_trigger):
+        mock_trigger.return_value = {"job_id": "job-alpha"}
+        beta_org = Organization.objects.create(
+            name="Beta",
+            domain="beta.example.com",
             competitors=["competitor-b.com"],
+            seed_keywords=["beta keyword"],
         )
         OrganizationContentConfig.objects.create(
-            organization=other_org,
-            github_repo="owner/repo",
+            organization=beta_org,
+            connected_slack_user_id="U-BETA",
+            daily_discovery_enabled=True,
+            daily_discovery_priority=10,
+            github_repo="owner/beta",
             scan_summary="scan ready",
         )
 
-        result = run_daily_discovery_scheduler(now=self._melbourne_due_now())
+        result = run_daily_discovery_scheduler(now=self._melbourne_807am())
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["queued"], 2)
+        self.assertEqual(result["schedule_result"]["status"], "scheduled")
+        self.assertEqual(result["schedule_result"]["created"], 2)
+        self.assertEqual(result["queued"], 1)
         self.assertEqual(result["failed"], 0)
+
+        alpha_dispatch = ScheduledDiscoveryDispatch.objects.get(domain="alpha.example.com")
+        beta_dispatch = ScheduledDiscoveryDispatch.objects.get(domain="beta.example.com")
+
+        self.assertEqual(alpha_dispatch.state, ScheduledDiscoveryDispatchState.QUEUED)
+        self.assertEqual(alpha_dispatch.slot_index, 0)
+        self.assertEqual(alpha_dispatch.content_factory_job_id, "job-alpha")
+        self.assertEqual(beta_dispatch.state, ScheduledDiscoveryDispatchState.SCHEDULED)
+        self.assertEqual(beta_dispatch.slot_index, 1)
         self.assertEqual(
-            ScheduledDiscoveryDispatch.objects.filter(state=ScheduledDiscoveryDispatchState.QUEUED).count(),
-            2,
+            beta_dispatch.scheduled_for_at,
+            self._utc(2026, 3, 23, 21, 15),
         )
 
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
+        mock_trigger.assert_called_once()
+        self.assertEqual(mock_trigger.call_args[0][0], "U-ALPHA")
+        payload = mock_trigger.call_args[0][1]
+        self.assertEqual(payload["domain"], "alpha.example.com")
+        self.assertEqual(payload["trigger_source"], "scheduled_daily")
+        self.assertEqual(payload["scheduled_slot_index"], 0)
+        self.assertEqual(payload["scheduled_channel_name"], "vibe-marketing")
+
     @patch("integrations.services.daily_discovery.trigger_article_generation")
-    def test_enqueue_is_idempotent_for_same_day(self, mock_trigger, mock_get_user_profile):
-        mock_get_user_profile.return_value = {"tz": "Australia/Melbourne"}
+    def test_failed_slot_does_not_block_next_due_slot(self, mock_trigger):
+        first_dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U-ALPHA",
+            domain="alpha.example.com",
+            timezone="Australia/Melbourne",
+            local_date=self._schedule_local_date(),
+            scheduled_for_at=self._melbourne_8am(),
+            slot_index=0,
+            trigger_source="daily_scheduler",
+            state=ScheduledDiscoveryDispatchState.SCHEDULED,
+        )
+        second_dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U-BETA",
+            domain="beta.example.com",
+            timezone="Australia/Melbourne",
+            local_date=self._schedule_local_date(),
+            scheduled_for_at=self._utc(2026, 3, 23, 21, 15),
+            slot_index=1,
+            trigger_source="daily_scheduler",
+            state=ScheduledDiscoveryDispatchState.SCHEDULED,
+        )
+        mock_trigger.side_effect = [
+            RuntimeError("boom"),
+            {"job_id": "job-beta"},
+        ]
+
+        first_result = run_daily_discovery_scheduler(now=self._melbourne_8am())
+        second_result = run_daily_discovery_scheduler(now=self._melbourne_816am())
+
+        self.assertEqual(first_result["failed"], 1)
+        self.assertEqual(second_result["queued"], 1)
+
+        first_dispatch.refresh_from_db()
+        second_dispatch.refresh_from_db()
+        self.assertEqual(first_dispatch.state, ScheduledDiscoveryDispatchState.FAILED)
+        self.assertEqual(second_dispatch.state, ScheduledDiscoveryDispatchState.QUEUED)
+        self.assertEqual(second_dispatch.content_factory_job_id, "job-beta")
+
+    @patch("integrations.services.daily_discovery.trigger_article_generation")
+    def test_scheduler_expires_previous_day_open_dispatches_before_new_day_runs(self, mock_trigger):
+        mock_trigger.return_value = {"job_id": "job-alpha"}
+        stale_dispatch = ScheduledDiscoveryDispatch.objects.create(
+            slack_user_id="U-ALPHA",
+            domain="alpha.example.com",
+            timezone="Australia/Melbourne",
+            local_date=calendar_date(2026, 3, 23),
+            scheduled_for_at=self._utc(2026, 3, 22, 21, 0),
+            slot_index=0,
+            trigger_source="daily_scheduler",
+            state=ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT,
+            content_factory_job_id="old-job",
+        )
+
+        result = run_daily_discovery_scheduler(now=self._melbourne_8am())
+
+        stale_dispatch.refresh_from_db()
+        self.assertEqual(stale_dispatch.state, ScheduledDiscoveryDispatchState.EXPIRED)
+        self.assertEqual(result["expired_dispatches"], 1)
+        self.assertEqual(
+            ScheduledDiscoveryDispatch.objects.filter(
+                local_date=self._schedule_local_date(),
+                state=ScheduledDiscoveryDispatchState.QUEUED,
+            ).count(),
+            1,
+        )
+
+    @patch("integrations.services.daily_discovery.trigger_article_generation")
+    def test_enqueue_is_idempotent_for_same_day(self, mock_trigger):
         mock_trigger.return_value = {"job_id": "job-123"}
 
         first = enqueue_scheduled_discovery(
-            slack_user_id="U-SCHED",
-            domain="example.com",
-            now=self._melbourne_due_now(),
+            slack_user_id="U-ALPHA",
+            domain="alpha.example.com",
+            now=self._melbourne_807am(),
         )
         second = enqueue_scheduled_discovery(
-            slack_user_id="U-SCHED",
-            domain="example.com",
-            now=self._melbourne_due_now(),
+            slack_user_id="U-ALPHA",
+            domain="alpha.example.com",
+            now=self._melbourne_807am(),
         )
 
         self.assertEqual(first["status"], "queued")
         self.assertEqual(second["status"], "skipped")
+        self.assertEqual(second["reason"], "dispatch_already_exists")
         self.assertEqual(ScheduledDiscoveryDispatch.objects.count(), 1)
         self.assertEqual(mock_trigger.call_count, 1)
 
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
-    @patch("integrations.services.daily_discovery.trigger_article_generation")
-    def test_enqueue_skips_when_open_suggestion_exists_without_creating_new_dispatch(self, mock_trigger, mock_get_user_profile):
-        mock_get_user_profile.return_value = {"tz": "Australia/Melbourne"}
-        mock_trigger.return_value = {"job_id": "job-existing"}
-        ScheduledDiscoveryDispatch.objects.create(
-            slack_user_id="U-SCHED",
-            domain="example.com",
-            timezone="Australia/Melbourne",
-            local_date=calendar_date(2026, 3, 23),
-            state=ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT,
-            content_factory_job_id="job-existing",
-        )
-
-        result = enqueue_scheduled_discovery(
-            slack_user_id="U-SCHED",
-            domain="example.com",
-            local_date=calendar_date(2026, 3, 24),
-            now=self._melbourne_due_now(),
-        )
-
-        self.assertEqual(result["status"], "skipped")
-        self.assertEqual(result["reason"], "open_suggestion_exists")
-        self.assertEqual(ScheduledDiscoveryDispatch.objects.count(), 1)
-        mock_trigger.assert_not_called()
-
-    def test_expire_stale_queued_dispatches_marks_failed_timeout(self):
-        dispatch = ScheduledDiscoveryDispatch.objects.create(
-            slack_user_id="U-SCHED",
-            domain="example.com",
-            timezone="Australia/Melbourne",
-            local_date=calendar_date(2026, 3, 24),
-            state=ScheduledDiscoveryDispatchState.QUEUED,
-        )
-        stale_time = timezone.now() - timedelta(hours=3)
-        ScheduledDiscoveryDispatch.objects.filter(pk=dispatch.pk).update(updated_at=stale_time)
-
-        expired = expire_stale_queued_dispatches(now=timezone.now())
-
-        self.assertEqual(expired, 1)
-        dispatch.refresh_from_db()
-        self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.FAILED_TIMEOUT)
-
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
-    def test_timezone_resolution_falls_back_to_config_then_default(self, mock_get_user_profile):
-        mock_get_user_profile.return_value = {}
+    def test_timezone_resolution_uses_shared_schedule_timezone(self):
         self.config.default_timezone = "America/Los_Angeles"
         self.config.save(update_fields=["default_timezone"])
 
-        timezone_name = resolve_daily_discovery_timezone("U-SCHED", config=self.config)
-
-        self.assertEqual(timezone_name, "America/Los_Angeles")
-
-        self.config.default_timezone = ""
-        self.config.save(update_fields=["default_timezone"])
-
-        timezone_name = resolve_daily_discovery_timezone("U-SCHED", config=self.config)
+        timezone_name = resolve_daily_discovery_timezone("U-ALPHA", config=self.config)
 
         self.assertEqual(timezone_name, DEFAULT_SCHEDULE_TIMEZONE)
 
@@ -192,6 +232,7 @@ class ScheduledDiscoveryReplayEndpointTests(TestCase):
             name="Replay Example",
             domain="replay-example.com",
             competitors=["competitor-a.com"],
+            seed_keywords=["replay keyword"],
         )
         OrganizationContentConfig.objects.create(
             organization=self.org,
@@ -200,9 +241,7 @@ class ScheduledDiscoveryReplayEndpointTests(TestCase):
         )
 
     @patch("integrations.services.daily_discovery.trigger_article_generation")
-    @patch("integrations.services.daily_discovery.SlackService.get_user_profile")
-    def test_replay_endpoint_queues_specific_target(self, mock_get_user_profile, mock_trigger):
-        mock_get_user_profile.return_value = {"tz": "Australia/Melbourne"}
+    def test_replay_endpoint_queues_specific_target(self, mock_trigger):
         mock_trigger.return_value = {"job_id": "replay-job-1"}
 
         response = self.client.post(
@@ -237,6 +276,7 @@ class DeferredScheduledConfirmRefundTests(TestCase):
             name="Confirm Example",
             domain="confirm-example.com",
             competitors=["competitor-a.com"],
+            seed_keywords=["confirm keyword"],
         )
         OrganizationContentConfig.objects.create(
             organization=self.org,

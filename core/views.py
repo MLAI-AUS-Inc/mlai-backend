@@ -939,7 +939,10 @@ class ContentFactoryOrgConfigView(APIView):
             'domain': org.domain,
             'competitors': org.competitors,
             'seed_keywords': org.seed_keywords,
+            'connected_slack_user_id': config.connected_slack_user_id if config else None,
             'default_timezone': config.default_timezone if config else "",
+            'daily_discovery_enabled': config.daily_discovery_enabled if config else False,
+            'daily_discovery_priority': config.daily_discovery_priority if config else 0,
             'article_template': config.article_template if config else None,
             'design_guide': config.design_guide if config else None,
             'resource_prompt': config.resource_prompt if config else None,
@@ -1008,12 +1011,76 @@ class ContentFactoryOrgConfigView(APIView):
 
         if org_updated:
             org.save()
-        
+
+        existing_config = getattr(org, 'content_config', None)
+        current_enabled = bool(getattr(existing_config, 'daily_discovery_enabled', False))
+        current_priority = int(getattr(existing_config, 'daily_discovery_priority', 0) or 0)
+        current_owner = str(getattr(existing_config, 'connected_slack_user_id', '') or '').strip()
+        current_github_repo = str(getattr(existing_config, 'github_repo', '') or '').strip()
+
+        if 'daily_discovery_priority' in data:
+            try:
+                resulting_priority = int(data.get('daily_discovery_priority'))
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'daily_discovery_priority must be an integer'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if resulting_priority < 0:
+                return Response(
+                    {'error': 'daily_discovery_priority must be 0 or greater'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            resulting_priority = current_priority
+
+        resulting_enabled = bool(data.get('daily_discovery_enabled')) if 'daily_discovery_enabled' in data else current_enabled
+        raw_owner = data.get('connected_slack_user_id') if 'connected_slack_user_id' in data else current_owner
+        resulting_owner = str(raw_owner or '').strip()
+        resulting_github_repo = (
+            str(data.get('github_repo') or '').strip()
+            if 'github_repo' in data
+            else current_github_repo
+        )
+
+        from integrations.services.daily_discovery import (
+            count_enabled_daily_discovery_configs,
+            get_daily_discovery_max_targets,
+            infer_daily_discovery_owner,
+        )
+
+        inferred_owner = infer_daily_discovery_owner(
+            domain=normalized_domain,
+            connected_slack_user_id=resulting_owner,
+            github_repo=resulting_github_repo,
+            config=existing_config,
+        )
+
+        if resulting_enabled and not inferred_owner:
+            return Response(
+                {'error': 'connected_slack_user_id is required when daily_discovery_enabled is true'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if resulting_enabled and not current_enabled:
+            enabled_count = count_enabled_daily_discovery_configs(
+                exclude_config_id=getattr(existing_config, 'id', None),
+            )
+            max_targets = get_daily_discovery_max_targets()
+            if enabled_count >= max_targets:
+                return Response(
+                    {'error': f'No more than {max_targets} organizations may have daily_discovery_enabled=true'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         # Prepare defaults dynamically to allow partial updates
         # Only include fields that are present in the request data
         defaults = {}
         target_fields = [
+            'connected_slack_user_id',
             'default_timezone',
+            'daily_discovery_enabled',
+            'daily_discovery_priority',
             'article_template',
             'design_guide',
             'resource_prompt',
@@ -1036,6 +1103,13 @@ class ContentFactoryOrgConfigView(APIView):
         for field in target_fields:
             if field in data:
                 defaults[field] = data[field]
+
+        if 'connected_slack_user_id' in defaults:
+            defaults['connected_slack_user_id'] = resulting_owner or None
+        if resulting_enabled and inferred_owner:
+            defaults['connected_slack_user_id'] = inferred_owner
+        if 'daily_discovery_priority' in data:
+            defaults['daily_discovery_priority'] = resulting_priority
 
         if 'article_system' in data:
             current_article_system = resolve_article_system(getattr(org, 'content_config', None))
@@ -4153,8 +4227,18 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
-        from .models import ContentFactoryJob, Organization
-        from integrations.services.daily_discovery import mark_scheduled_dispatch_topic_selection_sent
+        from .models import ContentFactoryJob, Organization, ScheduledDiscoveryDispatch
+        from integrations.services.article_generation import (
+            CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+            SCHEDULED_DAILY_TRIGGER_SOURCE,
+        )
+        from integrations.services.daily_discovery import (
+            get_daily_discovery_schedule_channel_name,
+            is_scheduled_daily_job,
+            mark_scheduled_dispatch_failed,
+            mark_scheduled_dispatch_topic_selection_sent,
+        )
+        from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -4187,19 +4271,29 @@ class ContentFactoryCallbackView(APIView):
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
         job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
-        channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
-        mark_scheduled_dispatch_topic_selection_sent(
-            job_id=job_id,
-            slack_channel_id=channel_id,
-            slack_thread_ts=thread_ts,
-        )
-        
+        dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
+        scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
+        if scheduled_daily_job:
+            request_meta = dict(job.request_meta or {})
+            update_fields = []
+            if request_meta.get("trigger_source") != SCHEDULED_DAILY_TRIGGER_SOURCE:
+                request_meta["trigger_source"] = SCHEDULED_DAILY_TRIGGER_SOURCE
+                update_fields.append("request_meta")
+            if not job.billing_status:
+                job.billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED
+                update_fields.append("billing_status")
+            if update_fields:
+                job.request_meta = request_meta
+                update_fields.append("updated_at")
+                job.save(update_fields=update_fields)
+
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
-        
+
         if slack_user_id and options:
             # Fetch organization context for explanations
             company_context = None
             competitors = []
+            org = None
             try:
                 # Simple normalization (should ideally match what other views do)
                 normalized_domain = domain.lower().strip()
@@ -4304,18 +4398,99 @@ class ContentFactoryCallbackView(APIView):
                 "elements": action_elements
             })
 
-            upsert_live_progress_card(
-                job,
-                data=data,
-                summary_text="Research complete. Choose one of the topic options below to continue.",
-            )
-            self._send_job_message(
-                job=job,
-                data=data,
-                slack_user_id=slack_user_id,
-                text="Topic selection ready for review",
-                blocks=blocks,
-            )
+            if scheduled_daily_job:
+                owner_slack_user_id = str(
+                    getattr(getattr(org, 'content_config', None), 'connected_slack_user_id', '') or slack_user_id
+                ).strip()
+                if owner_slack_user_id:
+                    blocks.insert(
+                        1,
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"<@{owner_slack_user_id}> your scheduled research for *{domain}* is ready.",
+                            },
+                        },
+                    )
+
+                channel_name = get_daily_discovery_schedule_channel_name()
+                channel_id = SlackService.get_channel_id_by_name(channel_name)
+                if not channel_id:
+                    error_message = (
+                        f"Scheduled discovery could not post to Slack because #{channel_name} could not be resolved."
+                    )
+                    mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
+                    job.status = 'error'
+                    job.error_message = error_message
+                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    return Response(
+                        {
+                            'status': 'processed_with_error',
+                            'message': error_message,
+                            'job_id': job_id,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                sent, message_ts = SlackService.send_message(
+                    channel_id,
+                    f"Scheduled topic selection ready for {domain}",
+                    blocks=blocks,
+                )
+                if not sent or not message_ts:
+                    error_message = (
+                        f"Scheduled discovery could not post the topic selection card into #{channel_name}."
+                    )
+                    mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
+                    job.status = 'error'
+                    job.error_message = error_message
+                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    return Response(
+                        {
+                            'status': 'processed_with_error',
+                            'message': error_message,
+                            'job_id': job_id,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                job.slack_channel_id = channel_id
+                job.slack_root_message_ts = message_ts
+                job.slack_thread_ts = message_ts
+                job.save(
+                    update_fields=[
+                        'slack_channel_id',
+                        'slack_root_message_ts',
+                        'slack_thread_ts',
+                        'updated_at',
+                    ]
+                )
+                mark_scheduled_dispatch_topic_selection_sent(
+                    job_id=job_id,
+                    slack_channel_id=channel_id,
+                    slack_message_ts=message_ts,
+                    slack_thread_ts=message_ts,
+                )
+            else:
+                channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+                mark_scheduled_dispatch_topic_selection_sent(
+                    job_id=job_id,
+                    slack_channel_id=channel_id,
+                    slack_thread_ts=thread_ts,
+                )
+                upsert_live_progress_card(
+                    job,
+                    data=data,
+                    summary_text="Research complete. Choose one of the topic options below to continue.",
+                )
+                self._send_job_message(
+                    job=job,
+                    data=data,
+                    slack_user_id=slack_user_id,
+                    text="Topic selection ready for review",
+                    blocks=blocks,
+                )
         
         return Response({
             'status': 'received',

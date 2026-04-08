@@ -130,6 +130,14 @@ class OrganizationContentConfig(models.Model):
         default="",
         help_text="Default IANA timezone for scheduled content suggestions when a user timezone is unavailable",
     )
+    daily_discovery_enabled = models.BooleanField(
+        default=False,
+        help_text="Whether this organization participates in the shared daily discovery queue.",
+    )
+    daily_discovery_priority = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Lower numbers run earlier in the shared daily discovery queue.",
+    )
     article_template = models.TextField(blank=True, null=True)
     design_guide = models.TextField(blank=True, null=True)
     resource_prompt = models.TextField(blank=True, null=True)
@@ -387,12 +395,14 @@ class ContentFactoryJob(models.Model):
 
 
 class ScheduledDiscoveryDispatchState(models.TextChoices):
+    SCHEDULED = "scheduled", "Scheduled"
     QUEUED = "queued", "Queued"
     TOPIC_SELECTION_SENT = "topic_selection_sent", "Topic Selection Sent"
     CONFIRMED = "confirmed", "Confirmed"
     CANCELLED = "cancelled", "Cancelled"
     FAILED = "failed", "Failed"
     FAILED_TIMEOUT = "failed_timeout", "Failed Timeout"
+    EXPIRED = "expired", "Expired"
 
 
 class ScheduledDiscoveryDispatch(models.Model):
@@ -404,11 +414,13 @@ class ScheduledDiscoveryDispatch(models.Model):
     domain = models.CharField(max_length=255, db_index=True)
     timezone = models.CharField(max_length=64, default="Australia/Melbourne")
     local_date = models.DateField(db_index=True)
+    scheduled_for_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    slot_index = models.PositiveSmallIntegerField(default=0)
     trigger_source = models.CharField(max_length=50, default="daily_scheduler", db_index=True)
     state = models.CharField(
         max_length=30,
         choices=ScheduledDiscoveryDispatchState.choices,
-        default=ScheduledDiscoveryDispatchState.QUEUED,
+        default=ScheduledDiscoveryDispatchState.SCHEDULED,
         db_index=True,
     )
     content_factory_job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)

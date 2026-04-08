@@ -156,16 +156,36 @@ def refresh_github_token(slack_user_id: str) -> dict:
         raise TokenRefreshError("No refresh token available. Please re-authenticate with GitHub.")
 
     # Call GitHub's token refresh endpoint
-    token_resp = http_requests.post(
-        "https://github.com/login/oauth/access_token",
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": integration.github_refresh_token,
-        },
-        timeout=20,
+    started_at = time.monotonic()
+    try:
+        token_resp = http_requests.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+                "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": integration.github_refresh_token,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        duration_ms = (time.monotonic() - started_at) * 1000
+        logger.warning(
+            "github_http_call_failed action=refresh_user_token slack_user_id=%s duration_ms=%.2f exc_type=%s exc=%r",
+            slack_user_id,
+            duration_ms,
+            exc.__class__.__name__,
+            exc,
+        )
+        raise
+
+    duration_ms = (time.monotonic() - started_at) * 1000
+    logger.info(
+        "github_http_call action=refresh_user_token slack_user_id=%s status=%s duration_ms=%.2f",
+        slack_user_id,
+        token_resp.status_code,
+        duration_ms,
     )
 
     if token_resp.status_code != 200:
@@ -704,13 +724,33 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     # Actually, /repos/:owner/:repo/commits/HEAD works for default branch
     url = f"https://api.github.com/repos/{repo_name}/commits/HEAD"
 
-    resp = http_requests.get(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.v3+json",
-        },
-        timeout=10
+    started_at = time.monotonic()
+    try:
+        resp = http_requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            timeout=10
+        )
+    except Exception as exc:
+        duration_ms = (time.monotonic() - started_at) * 1000
+        logger.warning(
+            "github_http_call_failed action=get_latest_repo_sha repo=%s duration_ms=%.2f exc_type=%s exc=%r",
+            repo_name,
+            duration_ms,
+            exc.__class__.__name__,
+            exc,
+        )
+        raise
+
+    duration_ms = (time.monotonic() - started_at) * 1000
+    logger.info(
+        "github_http_call action=get_latest_repo_sha repo=%s status=%s duration_ms=%.2f",
+        repo_name,
+        resp.status_code,
+        duration_ms,
     )
     if resp.status_code == 404:
         # Fallback to master if HEAD fails (unlikely)

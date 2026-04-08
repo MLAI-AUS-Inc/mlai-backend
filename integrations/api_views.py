@@ -54,6 +54,17 @@ def _serialize_connected_domain(config) -> dict:
         "last_scanned_sha": getattr(config, "last_scanned_sha", None),
     }
 
+
+def _query_param_enabled(raw_value, *, default: bool = True) -> bool:
+    if raw_value is None:
+        return default
+    normalized = str(raw_value).strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    return default
+
 class GithubTokenIdentityView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -102,6 +113,10 @@ class GithubTokenIdentityView(APIView):
 
         requested_domain = normalize_domain(request.query_params.get('domain') or "")
         requested_domain = requested_domain or None
+        include_repo_freshness = _query_param_enabled(
+            request.query_params.get("include_repo_freshness"),
+            default=True,
+        )
 
         integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
         owned_configs = list(get_owned_org_configs(slack_user_id))
@@ -207,7 +222,7 @@ class GithubTokenIdentityView(APIView):
         access_revoked = False
         token_refreshed = False
 
-        if not requires_domain_selection:
+        if include_repo_freshness and not requires_domain_selection:
             try:
                 from integrations.services.article_generation import ArticleGenerationError, get_github_credentials_for_domain
                 from integrations.services.github import get_latest_repo_sha, is_token_expired, refresh_github_token, TokenRefreshError

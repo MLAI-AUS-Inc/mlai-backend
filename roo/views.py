@@ -874,6 +874,50 @@ class CoworkingViewSet(viewsets.ViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['post'], url_path='booking-help')
+    def booking_help(self, request):
+        """Send a Slack booking reminder without exposing Slack APIs to clients."""
+        slack_user_id = (request.data.get('slack_user_id') or '').strip()
+        reason_code = (request.data.get('reason_code') or '').strip()
+        access_event_id = (request.data.get('access_event_id') or '').strip()
+
+        if not slack_user_id or not reason_code or not access_event_id:
+            return Response(
+                {'error': 'slack_user_id, reason_code, and access_event_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        text = (
+            "Reachy could not open the office door because there is no active coworking booking for today. "
+            "Please create a booking in Slack, then try again."
+        )
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "*Office booking required*\n"
+                        "Reachy could not open the office door because there is no active coworking booking for today."
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Reason: `{reason_code}` · Access event: `{access_event_id}`",
+                    }
+                ],
+            },
+        ]
+        sent, message_ts = SlackService.send_dm(slack_user_id, text, blocks=blocks)
+        if not sent:
+            return Response({'error': 'Failed to send Slack booking help message'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({'queued': True, 'message_ts': message_ts, 'access_event_id': access_event_id})
+
 
 class RewardsViewSet(viewsets.ViewSet):
     """Rewards catalog and redemption management."""

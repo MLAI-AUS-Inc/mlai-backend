@@ -33,6 +33,7 @@ urlpatterns = [
     path('coworking/book/', CoworkingViewSet.as_view({'post': 'book'}), name='coworking-book'),
     path('coworking/cancel/', CoworkingViewSet.as_view({'post': 'cancel'}), name='coworking-cancel'),
     path('coworking/my-bookings/', CoworkingViewSet.as_view({'get': 'my_bookings'}), name='coworking-my-bookings'),
+    path('coworking/booking-help/', CoworkingViewSet.as_view({'post': 'booking_help'}), name='coworking-booking-help'),
     path('coworking/set-capacity/', CoworkingViewSet.as_view({'post': 'set_capacity'}), name='coworking-set-capacity'),
     
     # ============================================================

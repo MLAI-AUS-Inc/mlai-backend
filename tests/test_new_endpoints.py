@@ -627,8 +627,23 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
 
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.get_channel_id_by_name')
     @patch('integrations.services.slack.SlackService.send_dm')
-    def test_topic_selection_callback(self, mock_send_dm):
+    def test_topic_selection_callback_posts_scheduled_daily_to_shared_channel(
+        self,
+        mock_send_dm,
+        mock_get_channel_id,
+        mock_send_message,
+    ):
+        mock_get_channel_id.return_value = "C-VIBE"
+        mock_send_message.return_value = (True, "171234.567")
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U123",
+            scan_summary="scan ready",
+        )
         ScheduledDiscoveryDispatch.objects.create(
             slack_user_id="U123",
             domain="mlai.au",
@@ -637,39 +652,55 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             state=ScheduledDiscoveryDispatchState.QUEUED,
             content_factory_job_id="job-123",
         )
-        url = reverse('content_factory_callback')
-        data = {
-            "event_type": "topic_selection",
-            "job_id": "job-123",
-            "domain": "mlai.au",
-            "slack_user_id": "U123",
-            "selection": {
-                "selected_keyword": "ai agents",
-                "selection_reason": "High volume",
-                "total_opportunities": 5,
-                "volume": 2400,
-                "difficulty": 35,
-                "tier": "tier_1",
-                "opportunity_index": 85.2
-            }
-        }
-        
-        response = self.client.post(url, data, format='json')
-        
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "topic_selection",
+                "job_id": "job-123",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "selection": {
+                    "selected_keyword": "ai agents",
+                    "selection_reason": "High volume",
+                    "options": [
+                        {
+                            "keyword": "ai agents",
+                            "volume": 2400,
+                            "difficulty": 35,
+                            "opportunity_index": 85.2,
+                        }
+                    ],
+                },
+            },
+            format='json',
+        )
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(ContentFactoryJob.objects.filter(job_id="job-123").exists())
-        
+
         job = ContentFactoryJob.objects.get(job_id="job-123")
         self.assertEqual(job.status, 'awaiting_confirmation')
         self.assertEqual(job.selected_keyword, "ai agents")
         self.assertEqual(job.slack_user_id, "U123")
+        self.assertEqual(job.billing_status, "deferred")
+        self.assertEqual(job.request_meta["trigger_source"], "scheduled_daily")
+        self.assertEqual(job.slack_channel_id, "C-VIBE")
+        self.assertEqual(job.slack_root_message_ts, "171234.567")
+        self.assertEqual(job.slack_thread_ts, "171234.567")
         dispatch = ScheduledDiscoveryDispatch.objects.get(content_factory_job_id="job-123")
         self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.TOPIC_SELECTION_SENT)
-        
-        mock_send_dm.assert_called_once()
-        call_args = mock_send_dm.call_args
-        self.assertEqual(call_args[0][0], "U123")
-        self.assertIn("Topic selection ready", call_args[0][1])
+        self.assertEqual(dispatch.slack_channel_id, "C-VIBE")
+        self.assertEqual(dispatch.slack_message_ts, "171234.567")
+        self.assertEqual(dispatch.slack_thread_ts, "171234.567")
+
+        mock_get_channel_id.assert_called_once_with("vibe-marketing")
+        mock_send_message.assert_called_once()
+        self.assertEqual(mock_send_message.call_args[0][0], "C-VIBE")
+        self.assertNotIn("thread_ts", mock_send_message.call_args[1])
+        blocks = mock_send_message.call_args[1]["blocks"]
+        self.assertIn("<@U123> your scheduled research for *mlai.au* is ready.", blocks[1]["text"]["text"])
+        mock_send_dm.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')

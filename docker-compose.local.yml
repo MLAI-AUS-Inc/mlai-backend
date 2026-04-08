@@ -22,7 +22,7 @@ services:
 
   scheduler:
     build: .
-    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 300; done"
+    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 60; done"
     environment:
       APP_ENV: local
     volumes:

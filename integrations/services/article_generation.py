@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 import requests as http_requests
 from django.conf import settings
@@ -856,16 +857,36 @@ def refresh_org_github_token(domain: str) -> dict:
         raise TokenRefreshError("No refresh token available for this organization. Please re-authenticate with GitHub.")
 
     # Call GitHub's token refresh endpoint
-    token_resp = http_requests.post(
-        "https://github.com/login/oauth/access_token",
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
-            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": config.github_refresh_token_encrypted,
-        },
-        timeout=20,
+    started_at = time.monotonic()
+    try:
+        token_resp = http_requests.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+                "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": config.github_refresh_token_encrypted,
+            },
+            timeout=20,
+        )
+    except Exception as exc:
+        duration_ms = (time.monotonic() - started_at) * 1000
+        logger.warning(
+            "github_http_call_failed action=refresh_org_token domain=%s duration_ms=%.2f exc_type=%s exc=%r",
+            domain,
+            duration_ms,
+            exc.__class__.__name__,
+            exc,
+        )
+        raise
+
+    duration_ms = (time.monotonic() - started_at) * 1000
+    logger.info(
+        "github_http_call action=refresh_org_token domain=%s status=%s duration_ms=%.2f",
+        domain,
+        token_resp.status_code,
+        duration_ms,
     )
 
     if token_resp.status_code != 200:

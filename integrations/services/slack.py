@@ -11,6 +11,7 @@ class SlackService:
     """Service for interacting with Slack API."""
     
     _client: Optional[WebClient] = None
+    _channel_name_cache: Dict[str, str] = {}
 
     @classmethod
     def get_client(cls) -> WebClient:
@@ -178,6 +179,12 @@ class SlackService:
     @classmethod
     def get_channel_id_by_name(cls, channel_name: str) -> Optional[str]:
         """Resolve a public channel name (without #) to its Slack channel ID."""
+        normalized_name = str(channel_name or "").strip().lstrip("#")
+        if not normalized_name:
+            return None
+        if normalized_name in cls._channel_name_cache:
+            return cls._channel_name_cache[normalized_name]
+
         client = cls.get_client()
         try:
             cursor = None
@@ -187,12 +194,13 @@ class SlackService:
                     kwargs["cursor"] = cursor
                 response = client.conversations_list(**kwargs)
                 for ch in response["channels"]:
-                    if ch["name"] == channel_name:
+                    if ch["name"] == normalized_name:
+                        cls._channel_name_cache[normalized_name] = ch["id"]
                         return ch["id"]
                 cursor = response.get("response_metadata", {}).get("next_cursor")
                 if not cursor:
                     break
-            logger.warning(f"Channel '{channel_name}' not found")
+            logger.warning(f"Channel '{normalized_name}' not found")
             return None
         except SlackApiError as e:
             logger.error(f"Error listing channels: {e.response['error']}")

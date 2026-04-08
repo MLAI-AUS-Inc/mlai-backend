@@ -1,12 +1,14 @@
 import os
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Organization, OrganizationContentConfig
+from integrations.models import UserIntegration
 
 
+@override_settings(SCHEDULED_DISCOVERY_MAX_TARGETS=1)
 class ContentFactoryOrgConfigTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -148,3 +150,82 @@ class ContentFactoryOrgConfigTests(TestCase):
 
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
         self.assertEqual(get_response.data["repo_execution_contract"], execution_contract)
+
+    def test_org_config_round_trips_daily_discovery_fields(self):
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "connected_slack_user_id": "U-MLAI",
+                "daily_discovery_enabled": True,
+                "daily_discovery_priority": 3,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.connected_slack_user_id, "U-MLAI")
+        self.assertTrue(self.config.daily_discovery_enabled)
+        self.assertEqual(self.config.daily_discovery_priority, 3)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["connected_slack_user_id"], "U-MLAI")
+        self.assertTrue(get_response.data["daily_discovery_enabled"])
+        self.assertEqual(get_response.data["daily_discovery_priority"], 3)
+
+    def test_enabling_daily_discovery_requires_owner(self):
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "daily_discovery_enabled": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("connected_slack_user_id", response.data["error"])
+
+    def test_enabling_daily_discovery_infers_owner_from_repo_and_enforces_max_targets(self):
+        UserIntegration.objects.create(
+            slack_user_id="U-OWNER",
+            github_repo="owner/mlai-au",
+        )
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "github_repo": "owner/mlai-au",
+                "daily_discovery_enabled": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.connected_slack_user_id, "U-OWNER")
+        self.assertTrue(self.config.daily_discovery_enabled)
+
+        second_org = Organization.objects.create(name="Beta", domain="beta.example.com")
+        OrganizationContentConfig.objects.create(
+            organization=second_org,
+            connected_slack_user_id="U-BETA",
+        )
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "beta.example.com",
+                "daily_discovery_enabled": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("No more than 1 organizations", response.data["error"])

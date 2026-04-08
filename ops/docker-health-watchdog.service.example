@@ -1,0 +1,16 @@
+[Unit]
+Description=MLAI backend Docker health watchdog
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/mlai-backend
+Environment=WATCHDOG_SERVICE_NAME=web
+Environment=WATCHDOG_INTERVAL_SECONDS=60
+ExecStart=/srv/mlai-backend/ops/docker-health-watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
