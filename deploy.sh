@@ -88,8 +88,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🐘 Starting database..."
     docker compose up -d db
 
-    echo "🏗️ Building web and scheduler images..."
-    docker compose build web scheduler
+    echo "🏗️ Building web, scheduler, and bridge-worker images..."
+    docker compose build web scheduler bridge-worker
 
     echo "🔍 Inspecting for stale generated migrations..."
     inspect_stale_migration \
@@ -110,8 +110,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "✅ Verifying migration readiness..."
     docker compose run --rm --no-deps web python manage.py migrate --check --noinput
 
-    echo "🌐 Starting web and scheduler services..."
-    docker compose up -d web scheduler
+    echo "🌐 Starting web, scheduler, and bridge-worker services..."
+    docker compose up -d web scheduler bridge-worker
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"

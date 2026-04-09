@@ -52,6 +52,33 @@ class GroundednessStatus(models.TextChoices):
     FAILED = "failed", "Failed"
     NEEDS_REVIEW = "needs_review", "Needs Review"
 
+
+class CommunityBridgePlatform(models.TextChoices):
+    SLACK = "slack", "Slack"
+    DISCORD = "discord", "Discord"
+
+
+class CommunityBridgeDeliveryType(models.TextChoices):
+    CREATE = "create", "Create"
+    EDIT = "edit", "Edit"
+    DELETE = "delete", "Delete"
+
+
+class CommunityBridgeDeliveryStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    PROCESSING = "processing", "Processing"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+    DEAD = "dead", "Dead"
+
+
+class CommunityBridgeReceiptStatus(models.TextChoices):
+    ACCEPTED = "accepted", "Accepted"
+    ENQUEUED = "enqueued", "Enqueued"
+    IGNORED = "ignored", "Ignored"
+    DUPLICATE = "duplicate", "Duplicate"
+    FAILED = "failed", "Failed"
+
 class GoogleConnection(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='google_connection')
     google_email = models.EmailField()
@@ -471,3 +498,188 @@ class MonthlyUpdateDraft(models.Model):
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
+
+
+class CommunityBridgeChannel(models.Model):
+    slack_channel_id = models.CharField(max_length=100, unique=True, db_index=True)
+    slack_channel_name = models.CharField(max_length=255, blank=True, default="")
+    discord_guild_id = models.CharField(max_length=100, blank=True, default="")
+    discord_channel_id = models.CharField(max_length=100, unique=True, db_index=True)
+    discord_channel_name = models.CharField(max_length=255, blank=True, default="")
+    enabled = models.BooleanField(default=True, db_index=True)
+    sync_edits = models.BooleanField(default=True)
+    sync_deletes = models.BooleanField(default=True)
+    sync_replies = models.BooleanField(default=True)
+    pilot_settings = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_channel"
+        ordering = ["slack_channel_id"]
+
+    def __str__(self):
+        slack_label = self.slack_channel_name or self.slack_channel_id
+        discord_label = self.discord_channel_name or self.discord_channel_id
+        return f"{slack_label} -> {discord_label}"
+
+
+class CommunityBridgeReceipt(models.Model):
+    channel = models.ForeignKey(
+        CommunityBridgeChannel,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="receipts",
+    )
+    platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices, db_index=True)
+    receipt_key = models.CharField(max_length=255)
+    event_type = models.CharField(max_length=50, blank=True, default="")
+    source_channel_id = models.CharField(max_length=100, blank=True, default="")
+    source_message_id = models.CharField(max_length=100, blank=True, default="")
+    source_parent_message_id = models.CharField(max_length=100, blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=CommunityBridgeReceiptStatus.choices,
+        default=CommunityBridgeReceiptStatus.ACCEPTED,
+        db_index=True,
+    )
+    queued_delivery_count = models.PositiveSmallIntegerField(default=0)
+    payload = models.JSONField(default=dict, blank=True)
+    error_text = models.TextField(blank=True, default="")
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_receipt"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["platform", "receipt_key"],
+                name="community_bridge_receipt_platform_key_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["platform", "status", "created_at"], name="bridge_rcpt_status_idx"),
+            models.Index(fields=["source_channel_id", "source_message_id"], name="bridge_rcpt_msg_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.platform}:{self.receipt_key}"
+
+
+class CommunityBridgeMessageLink(models.Model):
+    channel = models.ForeignKey(
+        CommunityBridgeChannel,
+        on_delete=models.CASCADE,
+        related_name="message_links",
+    )
+    source_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices, db_index=True)
+    source_channel_id = models.CharField(max_length=100, db_index=True)
+    source_message_id = models.CharField(max_length=100, db_index=True)
+    source_parent_message_id = models.CharField(max_length=100, blank=True, default="")
+    source_author_id = models.CharField(max_length=100, blank=True, default="")
+    destination_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices, db_index=True)
+    destination_channel_id = models.CharField(max_length=100, db_index=True)
+    destination_message_id = models.CharField(max_length=100, db_index=True)
+    destination_parent_message_id = models.CharField(max_length=100, blank=True, default="")
+    source_payload = models.JSONField(default=dict, blank=True)
+    destination_payload = models.JSONField(default=dict, blank=True)
+    source_deleted_at = models.DateTimeField(null=True, blank=True)
+    destination_deleted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_message_link"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "source_platform",
+                    "source_channel_id",
+                    "source_message_id",
+                    "destination_platform",
+                ],
+                name="community_bridge_link_source_unique",
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    "destination_platform",
+                    "destination_channel_id",
+                    "destination_message_id",
+                    "source_platform",
+                ],
+                name="community_bridge_link_destination_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["source_platform", "source_channel_id", "source_message_id"],
+                name="bridge_link_source_lookup_idx",
+            ),
+            models.Index(
+                fields=["destination_platform", "destination_channel_id", "destination_message_id"],
+                name="bridge_link_dest_lookup_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.source_platform}:{self.source_message_id}"
+            f" -> {self.destination_platform}:{self.destination_message_id}"
+        )
+
+
+class CommunityBridgeDelivery(models.Model):
+    channel = models.ForeignKey(
+        CommunityBridgeChannel,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+    )
+    receipt = models.ForeignKey(
+        CommunityBridgeReceipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="deliveries",
+    )
+    target_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices, db_index=True)
+    source_platform = models.CharField(max_length=20, choices=CommunityBridgePlatform.choices, db_index=True)
+    delivery_type = models.CharField(max_length=20, choices=CommunityBridgeDeliveryType.choices)
+    status = models.CharField(
+        max_length=20,
+        choices=CommunityBridgeDeliveryStatus.choices,
+        default=CommunityBridgeDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    source_event_key = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    source_channel_id = models.CharField(max_length=100, blank=True, default="")
+    source_message_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    source_parent_message_id = models.CharField(max_length=100, blank=True, default="")
+    target_channel_id = models.CharField(max_length=100, blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=5)
+    available_at = models.DateTimeField(db_index=True)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_delivery"
+        ordering = ["available_at", "id"]
+        indexes = [
+            models.Index(fields=["status", "available_at"], name="bridge_dlv_ready_idx"),
+            models.Index(fields=["target_platform", "status", "available_at"], name="bridge_dlv_tgt_idx"),
+            models.Index(fields=["source_platform", "source_message_id"], name="bridge_dlv_src_msg_idx"),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.delivery_type}:{self.source_platform}:{self.source_message_id}"
+            f" -> {self.target_platform} ({self.status})"
+        )

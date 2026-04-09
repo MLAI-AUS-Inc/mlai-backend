@@ -39,6 +39,25 @@ services:
           - mlai-backend-scheduler
     restart: unless-stopped
 
+  bridge-worker:
+    build: .
+    command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
+    environment:
+      APP_ENV: local
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-bridge-worker
+    restart: unless-stopped
+
 networks:
   local-shared:
     name: mlai-local-shared

@@ -1,5 +1,6 @@
 from django.urls import path
 from . import api_views
+from . import api_views_bridge
 from . import api_views_startup_updates
 
 urlpatterns = [
@@ -39,4 +40,7 @@ urlpatterns = [
     path('startup-updates/runs/<str:run_id>/draft-results', api_views_startup_updates.StartupUpdateDraftResultsView.as_view(), name='startup_updates_draft_results'),
     path('startup-updates/drafts', api_views_startup_updates.StartupUpdateDraftListView.as_view(), name='startup_updates_draft_list'),
     path('startup-updates/drafts/<int:draft_id>', api_views_startup_updates.StartupUpdateDraftDetailView.as_view(), name='startup_updates_draft_detail'),
+
+    # Community bridge
+    path('bridge/slack/events', api_views_bridge.SlackCommunityBridgeEventView.as_view(), name='community_bridge_slack_events'),
 ]
