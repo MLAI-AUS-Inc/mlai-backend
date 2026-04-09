@@ -779,13 +779,18 @@ class CoworkingViewSet(viewsets.ViewSet):
             )
 
         try:
-            booking = CoworkingService.book(
+            booking, created = CoworkingService.book(
                 user=user,
                 booking_date=booking_date,
                 created_by_slack_id=slack_user_id,
                 slack_channel_id=slack_channel_id,
             )
-            return Response(CoworkingBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+            response_data = CoworkingBookingSerializer(booking).data
+            if not created:
+                response_data["already_booked"] = True
+                response_data["idempotent"] = True
+                return Response(response_data, status=status.HTTP_200_OK)
+            return Response(response_data, status=status.HTTP_201_CREATED)
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except InsufficientBalanceError as e:

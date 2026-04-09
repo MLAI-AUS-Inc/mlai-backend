@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 import threading
 
 from django.db import close_old_connections
@@ -5,9 +6,10 @@ from django.test import TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from .models import ChannelFirstPost, Ledger, PointsAdmin, PointsRequest
+from .models import ChannelFirstPost, CoworkingBooking, Ledger, PointsAccount, PointsAdmin, PointsRequest
 from django.contrib.auth import get_user_model
 from unittest.mock import patch
+from .services import PointsService
 
 User = get_user_model()
 
@@ -417,6 +419,56 @@ class PointsRequestViewSetTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data['error'], 'Not a points admin')
+
+
+class CoworkingViewSetTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('coworking-book')
+        self.user = User.objects.create_user(
+            email='coworking@example.com',
+            slack_id='UCOBOOK',
+        )
+        PointsService.award(
+            user=self.user,
+            delta=10,
+            source='MANUAL',
+            description='Coworking setup',
+            created_by_slack_id='UADMIN',
+            idempotency_key='coworking_api_setup',
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_endpoint_is_idempotent_for_existing_booking(self, mock_permission):
+        booking_date = (date.today() + timedelta(days=1)).isoformat()
+
+        first_response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.user.slack_id,
+                'date': booking_date,
+                'slack_channel_id': 'C123',
+            },
+            format='json',
+        )
+        second_response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.user.slack_id,
+                'date': booking_date,
+                'slack_channel_id': 'C123',
+            },
+            format='json',
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(second_response.data['already_booked'])
+        self.assertTrue(second_response.data['idempotent'])
+        self.assertEqual(
+            CoworkingBooking.objects.filter(user=self.user, date=booking_date, status='booked').count(),
+            1,
+        )
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 6)
 
 
 class FirstChannelPostAwardViewTests(APITestCase):

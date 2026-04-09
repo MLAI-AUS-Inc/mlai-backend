@@ -1,6 +1,12 @@
+import json
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.db import OperationalError
+from django.http import HttpResponse
+from django.test import RequestFactory, SimpleTestCase, TestCase
+
+from core.middleware import PointsEndpointTimeoutMiddleware, RequestLoggingMiddleware
 
 
 class HealthCheckTests(TestCase):
@@ -60,3 +66,68 @@ class HealthCheckTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "error")
+
+    def test_health_points_returns_ok(self):
+        response = self.client.get("/healthz/points")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(response.json()["subsystem"], "points")
+
+    @patch("mlai.views.connections")
+    def test_health_points_returns_503_when_database_ping_fails(self, mock_connections):
+        mock_connection = MagicMock()
+        mock_connection.cursor.side_effect = RuntimeError("db unavailable")
+        mock_connections.__getitem__.return_value = mock_connection
+
+        response = self.client.get("/healthz/points")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "error")
+        self.assertEqual(response.json()["subsystem"], "points")
+
+
+class RequestLoggingMiddlewareTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    @patch("core.middleware.logger")
+    def test_request_logging_logs_start_and_finish_with_same_request_id(self, mock_logger):
+        middleware = RequestLoggingMiddleware(lambda request: HttpResponse("ok"))
+        request = self.factory.get("/healthz/ready", HTTP_X_REQUEST_ID="mlai-test-request")
+
+        response = middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], "mlai-test-request")
+        self.assertEqual(mock_logger.info.call_count, 2)
+        start_log = mock_logger.info.call_args_list[0]
+        finish_log = mock_logger.info.call_args_list[1]
+        self.assertEqual(start_log.args[0], "request_started request_id=%s method=%s path=%s")
+        self.assertEqual(start_log.args[1], "mlai-test-request")
+        self.assertEqual(finish_log.args[0], "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.2f")
+        self.assertEqual(finish_log.args[1], "mlai-test-request")
+
+
+class PointsEndpointTimeoutMiddlewareTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    @patch("core.middleware.transaction.atomic", return_value=nullcontext())
+    @patch("core.middleware.connection")
+    def test_points_timeout_returns_503_with_request_id(self, mock_connection, _mock_atomic):
+        mock_connection.vendor = "postgresql"
+        mock_connection.cursor.return_value.__enter__.return_value = MagicMock()
+        middleware = PointsEndpointTimeoutMiddleware(
+            lambda request: (_ for _ in ()).throw(
+                OperationalError("canceling statement due to statement timeout")
+            )
+        )
+        request = self.factory.get("/api/v1/points/coworking/availability/")
+        request.request_id = "mlai-timeout-request"
+
+        response = middleware(request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response["X-Request-ID"], "mlai-timeout-request")
+        self.assertEqual(json.loads(response.content)["message"], "Points subsystem timed out")

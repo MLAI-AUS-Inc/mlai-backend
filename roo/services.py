@@ -100,12 +100,15 @@ class PointsService:
         # Calculate start of current ISO week (Monday)
         today = timezone.now().date()
         start_of_week = today - timedelta(days=today.weekday())
-        
+        start_of_week_dt = timezone.make_aware(
+            datetime.combine(start_of_week, datetime.min.time())
+        )
+
         # Sum points awarded by this admin this week
         used = Ledger.objects.filter(
             kind='EARN',
             created_by_slack_id=slack_id,
-            created_at__date__gte=start_of_week
+            created_at__gte=start_of_week_dt
         ).aggregate(total=db_models.Sum('delta'))['total'] or 0
         
         return {
@@ -396,7 +399,7 @@ class CoworkingService:
         booking_date: date,
         created_by_slack_id: str,
         slack_channel_id: Optional[str] = None,
-    ) -> CoworkingBooking:
+    ) -> Tuple[CoworkingBooking, bool]:
         """
         Book a coworking spot for a specific date.
         
@@ -430,7 +433,7 @@ class CoworkingService:
             status='booked'
         ).first()
         if existing:
-            raise ValueError("You already have a booking for this date")
+            return existing, False
         
         # Check availability
         available, capacity = CoworkingService.check_availability(booking_date)
@@ -465,7 +468,7 @@ class CoworkingService:
             slack_channel_id=slack_channel_id,
         )
         
-        return booking
+        return booking, True
     
     @staticmethod
     @transaction.atomic

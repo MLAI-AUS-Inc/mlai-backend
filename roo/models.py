@@ -228,6 +228,9 @@ class Ledger(models.Model):
         verbose_name = "Ledger Entry"
         verbose_name_plural = "Ledger Entries"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_by_slack_id', 'created_at'], name='roo_ledger_admin_week_idx'),
+        ]
 
     def __str__(self):
         if self.delta is not None and self.user:
@@ -300,6 +303,9 @@ class CoworkingBooking(models.Model):
         verbose_name = "Coworking Booking"
         verbose_name_plural = "Coworking Bookings"
         ordering = ['-date']
+        indexes = [
+            models.Index(fields=['date', 'status'], name='roo_cowork_date_status_idx'),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['user', 'date'],

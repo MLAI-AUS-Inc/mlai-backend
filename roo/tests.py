@@ -227,12 +227,13 @@ class CoworkingServiceTests(TestCase):
         """Test that booking deducts points."""
         booking_date = date.today() + timedelta(days=1)
         
-        booking = CoworkingService.book(
+        booking, created = CoworkingService.book(
             user=self.user,
             booking_date=booking_date,
             created_by_slack_id=self.user.slack_id
         )
         
+        self.assertTrue(created)
         self.assertEqual(booking.status, 'booked')
         self.assertEqual(booking.points_cost, 4)  # Cost from COWORKING_DAY reward catalog
         
@@ -248,11 +249,12 @@ class CoworkingServiceTests(TestCase):
         
         # First booking should succeed
         user1 = self.user
-        booking1 = CoworkingService.book(
+        booking1, created = CoworkingService.book(
             user=user1,
             booking_date=booking_date,
             created_by_slack_id=user1.slack_id
         )
+        self.assertTrue(created)
         self.assertEqual(booking1.status, 'booked')
         
         # Second booking should fail
@@ -285,11 +287,12 @@ class CoworkingServiceTests(TestCase):
         
         booking_date = date.today() + timedelta(days=7)  # Far in future
         
-        booking = CoworkingService.book(
+        booking, created = CoworkingService.book(
             user=self.user,
             booking_date=booking_date,
             created_by_slack_id=self.user.slack_id
         )
+        self.assertTrue(created)
         
         initial_balance = PointsAccount.objects.get(user=self.user).balance
         
@@ -304,6 +307,31 @@ class CoworkingServiceTests(TestCase):
         if refunded:
             account = PointsAccount.objects.get(user=self.user)
             self.assertEqual(account.balance, initial_balance + 4)
+
+    def test_book_is_idempotent_for_existing_active_booking(self):
+        """Test that repeat bookings for the same day return the existing booking."""
+        booking_date = date.today() + timedelta(days=3)
+
+        booking1, created1 = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+        booking2, created2 = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(created1)
+        self.assertFalse(created2)
+        self.assertEqual(booking1.id, booking2.id)
+        self.assertEqual(
+            CoworkingBooking.objects.filter(user=self.user, date=booking_date, status='booked').count(),
+            1,
+        )
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 6)
 
 
 class PermissionTests(TestCase):

@@ -15,11 +15,12 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from .views import health_check, health_live, health_ready
+from .views import health_check, health_live, health_points, health_ready
 
 urlpatterns = [
     path('', health_check, name='health_check'),
     path('healthz/live', health_live, name='health_live'),
+    path('healthz/points', health_points, name='health_points'),
     path('healthz/ready', health_ready, name='health_ready'),
     path('admin/', admin.site.urls),
     path('api/v1/auth/', include('core.urls')),

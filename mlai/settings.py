@@ -92,6 +92,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'core.middleware.RequestLoggingMiddleware',
+    'core.middleware.PointsEndpointTimeoutMiddleware',
 ]
 
 ROOT_URLCONF = 'mlai.urls'
@@ -137,6 +138,9 @@ if default_config.get('ENGINE') == 'django.db.backends.sqlite3':
 DATABASES = {
     'default': default_config
 }
+
+POINTS_STATEMENT_TIMEOUT_MS = int(os.getenv('POINTS_STATEMENT_TIMEOUT_MS', '12000'))
+POINTS_LOCK_TIMEOUT_MS = int(os.getenv('POINTS_LOCK_TIMEOUT_MS', '5000'))
 
 
 AUTH_USER_MODEL = 'core.User'
