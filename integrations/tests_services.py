@@ -4,6 +4,7 @@ from django.test import TestCase
 from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
+from integrations.content_factory_contract import CONTENT_FACTORY_REQUEST_SOURCE
 from core.models import Organization, OrganizationContentConfig
 from integrations.services.github import scan_github_project, scaffold_articles_directory, ScanError
 
@@ -54,6 +55,7 @@ class GithubServiceTest(TestCase):
         self.assertIn('/api/runs/scan', args[0])
         self.assertEqual(kwargs['json']['slack_user_id'], self.slack_user_id)
         self.assertEqual(kwargs['json']['domain'], self.domain)
+        self.assertEqual(kwargs['json']['request_source'], CONTENT_FACTORY_REQUEST_SOURCE)
         
         # Verify Headers
         headers = kwargs['headers']
@@ -94,8 +96,41 @@ class GithubServiceTest(TestCase):
         self.assertNotIn('slack_channel_id', payload)
         self.assertNotIn('slack_thread_ts', payload)
         self.assertEqual(payload['domain'], self.domain)
+        self.assertEqual(payload['request_source'], CONTENT_FACTORY_REQUEST_SOURCE)
         self.assertTrue(payload['scaffold_if_missing'])
         self.assertTrue(payload['generate_components'])
+
+    @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")
+    @patch('integrations.services.github.http_requests.post')
+    def test_scan_github_project_includes_backend_validation_detail_for_422(self, mock_post, _mock_get_latest_sha):
+        import requests
+
+        mock_response = MagicMock()
+        mock_response.status_code = 422
+        mock_response.text = (
+            '{"detail":[{"type":"missing","loc":["body","request_source"],'
+            '"msg":"Field required"}]}'
+        )
+        mock_response.json.return_value = {
+            "detail": [
+                {
+                    "type": "missing",
+                    "loc": ["body", "request_source"],
+                    "msg": "Field required",
+                }
+            ]
+        }
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "422 Client Error: Unprocessable Entity for url: http://content-factory.test/api/runs/scan",
+            response=mock_response,
+        )
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(ScanError) as context:
+            scan_github_project(self.slack_user_id, domain=self.domain)
+
+        self.assertIn("Failed to trigger scan", str(context.exception))
+        self.assertIn("body.request_source: Field required", str(context.exception))
 
     @patch('integrations.services.github.time.sleep', return_value=None)
     @patch('integrations.services.github.get_latest_repo_sha', return_value="sha_123")

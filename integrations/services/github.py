@@ -9,6 +9,10 @@ from django.urls import reverse
 from django.db.models import Q
 
 from integrations.models import UserIntegration
+from integrations.content_factory_contract import (
+    CONTENT_FACTORY_REQUEST_SOURCE,
+    require_roo_request_source,
+)
 from integrations.utils import normalize_domain
 from integrations.services.github_connections import build_github_oauth_url
 from core.article_system import merge_article_system, resolve_article_system
@@ -87,6 +91,64 @@ def coerce_scan_error(message: str) -> ScanError:
     if is_github_auth_scan_error_message(message):
         return GitHubAuthScanError(message)
     return ScanError(message)
+
+
+def _stringify_content_factory_detail(detail) -> str:
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                message = str(item.get("msg") or item.get("message") or "").strip()
+                if not message:
+                    continue
+                location = item.get("loc") or []
+                if isinstance(location, (list, tuple)) and location:
+                    location_text = ".".join(str(part) for part in location)
+                    parts.append(f"{location_text}: {message}")
+                else:
+                    parts.append(message)
+            elif item:
+                parts.append(str(item).strip())
+        return "; ".join(part for part in parts if part)
+
+    if isinstance(detail, dict):
+        for key in ("message", "error", "detail"):
+            value = detail.get(key)
+            if value:
+                text = _stringify_content_factory_detail(value)
+                if text:
+                    return text
+        return json.dumps(detail)
+
+    return str(detail or "").strip()
+
+
+def _extract_content_factory_error_detail(response) -> str:
+    if response is None:
+        return ""
+
+    try:
+        data = response.json()
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        for key in ("detail", "error", "message"):
+            value = data.get(key)
+            if value:
+                text = _stringify_content_factory_detail(value)
+                if text:
+                    return text
+
+    return str(getattr(response, "text", "") or "").strip()
+
+
+def _build_scan_request_error_message(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    detail = _extract_content_factory_error_detail(response)
+    if detail:
+        return f"Failed to trigger scan: {detail}"
+    return f"Failed to trigger scan: {str(exc)}"
 
 
 def build_github_reconnect_blocks(slack_user_id: str, domain: str = None) -> tuple[str, list]:
@@ -281,6 +343,7 @@ def scan_github_project(
     domain: str = None,
     scaffold_if_missing: bool = True,
     generate_components: bool = True,
+    request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
 ) -> dict:
     """
     Trigger a repository scan via Content Factory.
@@ -299,6 +362,11 @@ def scan_github_project(
     Raises:
         ScanError: If validation fails or the external call fails.
     """
+    try:
+        request_source = require_roo_request_source(request_source)
+    except ValueError as exc:
+        raise ScanError(str(exc))
+
     # Resolve credentials via domain-aware resolution (org-level preferred, domain-verified user-level)
     from core.models import Organization, OrganizationContentConfig, ContentFactoryJob
     from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
@@ -405,6 +473,7 @@ def scan_github_project(
             "slack_user_id": slack_user_id,
             "github_repo": github_repo,
             "domain": resolved_domain,
+            "request_source": request_source,
             "existing_artifacts": existing_artifacts,
             "scaffold_if_missing": scaffold_if_missing,
             "generate_components": generate_components,
@@ -467,6 +536,7 @@ def scan_github_project(
                         'github_repo': github_repo,
                         'scaffold_if_missing': scaffold_if_missing,
                         'generate_components': generate_components,
+                        'request_source': request_source,
                     },
                 )
                 logger.info(f"Scan job created: {job_id} for {resolved_domain} (channel={slack_channel_id}, thread={slack_thread_ts})")
@@ -537,7 +607,7 @@ def scan_github_project(
         if hasattr(e, 'response') and e.response is not None:
              logger.error(f"Response status: {e.response.status_code}")
              logger.error(f"Response body: {e.response.text}")
-        raise ScanError(f"Failed to trigger scan: {str(e)}")
+        raise coerce_scan_error(_build_scan_request_error_message(e))
     except ScanError:
         raise
     except Exception as e:
@@ -945,7 +1015,13 @@ def decide_scan_scaffold(
         raise ScanError(f"Failed to submit scaffold {normalized_decision}: {str(e)}")
 
 
-def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_thread_ts: str = None, domain: str = None):
+def trigger_scan_async(
+    slack_user_id: str,
+    slack_channel_id: str = None,
+    slack_thread_ts: str = None,
+    domain: str = None,
+    request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+):
     """
     Trigger a scan in a background thread.
     Logs errors instead of raising them (fire-and-forget).
@@ -992,6 +1068,7 @@ def trigger_scan_async(slack_user_id: str, slack_channel_id: str = None, slack_t
                 slack_thread_ts=thread_ts,
                 scaffold_if_missing=True,
                 generate_components=True,
+                request_source=request_source,
             )
             
             import json as _json

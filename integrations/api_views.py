@@ -12,6 +12,7 @@ from core.content_factory_auth import content_factory_github_connection_state
 from .models import UserIntegration
 from core.article_system import article_system_ready, recommended_next_action as derive_recommended_next_action, resolve_article_system
 from core.permissions import HasRooApiKey
+from integrations.content_factory_contract import require_roo_request_source
 from integrations.services.github_connections import build_github_oauth_url, get_owned_org_configs
 from integrations.utils import normalize_domain
 
@@ -574,6 +575,14 @@ class GithubScanView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            request_source = require_roo_request_source(request.data.get("request_source"))
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         # Resolve domain
         normalized_domain = normalize_domain(domain)
 
@@ -724,6 +733,7 @@ class GithubScanView(APIView):
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
             domain=normalized_domain,
+            request_source=request_source,
         )
 
         return Response({
