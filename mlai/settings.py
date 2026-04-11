@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'hospital',
+    'innovate_connect_alliance',
     'core',
     'esafety',
     'vibe_raising',
@@ -231,6 +232,7 @@ DEFAULT_FRONTEND_URL = os.getenv('DEFAULT_FRONTEND_URL') or (
 )
 MEDHACK_URL = os.getenv('MEDHACK_URL') or DEFAULT_FRONTEND_URL
 ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
+INNOVATE_CONNECT_ALLIANCE_URL = os.getenv('INNOVATE_CONNECT_ALLIANCE_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')

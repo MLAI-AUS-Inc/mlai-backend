@@ -2,6 +2,8 @@ from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
 
+from .content_factory_auth import content_factory_github_connection_state
+
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, role='participant', password=None, **extra_fields):
         if not email:
@@ -223,11 +225,7 @@ class OrganizationContentConfig(models.Model):
 
     @property
     def github_connection_state(self) -> str:
-        if self.has_github_token and self.has_github_repo:
-            return "connected"
-        if self.has_github_token:
-            return "repo_selection_required"
-        return "auth_required"
+        return content_factory_github_connection_state(self)
 
 
 class GeneratedComponent(models.Model):
