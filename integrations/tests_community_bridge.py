@@ -3,10 +3,13 @@ import hashlib
 import hmac
 import json
 import time
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import discord
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -187,6 +190,85 @@ class SlackCommunityBridgeEventViewTests(TestCase):
         receipt = CommunityBridgeReceipt.objects.get(receipt_key="EvBridgeIgnored")
         self.assertEqual(receipt.status, CommunityBridgeReceiptStatus.IGNORED)
         self.assertEqual(CommunityBridgeDelivery.objects.count(), 0)
+
+
+class CommunityBridgeSetupCommandTests(TestCase):
+    def test_command_creates_mapping_from_discord_url(self):
+        out = StringIO()
+
+        call_command(
+            "upsert_community_bridge_channel",
+            slack_channel_id="C-SLACK-PILOT",
+            slack_channel_name="community-pilot",
+            discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
+            discord_channel_name="welcome-and-rules",
+            stdout=out,
+        )
+
+        payload = json.loads(out.getvalue())
+        channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-SLACK-PILOT")
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(channel.discord_guild_id, "1492063515987410957")
+        self.assertEqual(channel.discord_channel_id, "1492063517191180340")
+        self.assertEqual(channel.discord_channel_name, "welcome-and-rules")
+        self.assertTrue(channel.enabled)
+        self.assertTrue(channel.sync_edits)
+        self.assertTrue(channel.sync_deletes)
+        self.assertTrue(channel.sync_replies)
+
+    def test_command_updates_existing_mapping(self):
+        CommunityBridgeChannel.objects.create(
+            slack_channel_id="C-SLACK-PILOT",
+            slack_channel_name="old-name",
+            discord_guild_id="1492063515987410957",
+            discord_channel_id="1492063517191180340",
+            discord_channel_name="old-discord-name",
+            enabled=False,
+            sync_edits=False,
+            sync_deletes=False,
+            sync_replies=False,
+        )
+        out = StringIO()
+
+        call_command(
+            "upsert_community_bridge_channel",
+            slack_channel_id="C-SLACK-PILOT",
+            slack_channel_name="community-pilot",
+            discord_guild_id="1492063515987410957",
+            discord_channel_id="1492063517191180340",
+            discord_channel_name="welcome-and-rules",
+            no_sync_replies=True,
+            stdout=out,
+        )
+
+        payload = json.loads(out.getvalue())
+        channel = CommunityBridgeChannel.objects.get(slack_channel_id="C-SLACK-PILOT")
+
+        self.assertEqual(payload["status"], "updated")
+        self.assertEqual(channel.slack_channel_name, "community-pilot")
+        self.assertEqual(channel.discord_channel_name, "welcome-and-rules")
+        self.assertTrue(channel.enabled)
+        self.assertTrue(channel.sync_edits)
+        self.assertTrue(channel.sync_deletes)
+        self.assertFalse(channel.sync_replies)
+
+    def test_command_rejects_conflicting_discord_channel_mapping(self):
+        CommunityBridgeChannel.objects.create(
+            slack_channel_id="C-SLACK-ONE",
+            discord_guild_id="1492063515987410957",
+            discord_channel_id="1492063517191180340",
+        )
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "Discord channel 1492063517191180340 is already mapped to Slack channel C-SLACK-ONE.",
+        ):
+            call_command(
+                "upsert_community_bridge_channel",
+                slack_channel_id="C-SLACK-TWO",
+                discord_url="https://discord.com/channels/1492063515987410957/1492063517191180340",
+            )
 
 
 @override_settings(

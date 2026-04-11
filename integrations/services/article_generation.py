@@ -13,6 +13,10 @@ from core.models import OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
 from integrations.services.github import ensure_valid_token, TokenRefreshError
 from integrations.services.github_connections import build_github_oauth_url
+from integrations.content_factory_contract import (
+    CONTENT_FACTORY_REQUEST_SOURCE,
+    require_roo_request_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +26,6 @@ FAILURE_RUN_STATUSES = {"failed", "error", "denied"}
 BLOCKED_RUN_STATUSES = {"blocked", "blocked_verification"}
 REVIEWABLE_RUN_STATUSES = {"pr_opened", "needs_review"}
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
-CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
@@ -263,10 +266,13 @@ def resolve_article_delivery_mode(
 
 
 def _require_roo_request_source(article_request: dict) -> str:
-    request_source = str(article_request.get("request_source") or "").strip()
-    if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
-        raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
-    return request_source
+    try:
+        return require_roo_request_source(
+            article_request.get("request_source"),
+            error_message="Content Factory article requests must originate from Roo Slackbot.",
+        )
+    except ValueError as exc:
+        raise ArticleGenerationError(str(exc))
 
 
 def _get_client_request_id(article_request: dict) -> str:

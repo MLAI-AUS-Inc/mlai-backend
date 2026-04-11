@@ -4,6 +4,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from unittest.mock import patch
 from .models import UserIntegration
+from .content_factory_contract import CONTENT_FACTORY_REQUEST_SOURCE
 
 class GithubScanEndpointTest(TestCase):
     def setUp(self):
@@ -32,7 +33,11 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': self.slack_user_id, 'domain': self.domain}, 
+                {
+                    'slack_user_id': self.slack_user_id,
+                    'domain': self.domain,
+                    'request_source': CONTENT_FACTORY_REQUEST_SOURCE,
+                }, 
                 format='json',
                 **headers
             )
@@ -47,6 +52,7 @@ class GithubScanEndpointTest(TestCase):
             slack_channel_id=None,
             slack_thread_ts=None,
             domain=self.domain,
+            request_source=CONTENT_FACTORY_REQUEST_SOURCE,
         )
 
     def test_scan_unauthorized(self):
@@ -62,7 +68,11 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': 'unknown_user', 'domain': self.domain}, 
+                {
+                    'slack_user_id': 'unknown_user',
+                    'domain': self.domain,
+                    'request_source': CONTENT_FACTORY_REQUEST_SOURCE,
+                }, 
                 format='json',
                 **headers
             )
@@ -77,8 +87,48 @@ class GithubScanEndpointTest(TestCase):
         with self.settings(INTERNAL_API_KEY=self.api_key):
             response = self.client.post(
                 self.url, 
-                {'slack_user_id': self.slack_user_id, 'domain': self.domain}, 
+                {
+                    'slack_user_id': self.slack_user_id,
+                    'domain': self.domain,
+                    'request_source': CONTENT_FACTORY_REQUEST_SOURCE,
+                }, 
                 format='json',
                 **headers
             )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch('integrations.api_views.trigger_scan_async')
+    def test_scan_rejects_missing_request_source(self, mock_trigger_scan):
+        headers = {'HTTP_X_API_KEY': self.api_key}
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            response = self.client.post(
+                self.url,
+                {'slack_user_id': self.slack_user_id, 'domain': self.domain},
+                format='json',
+                **headers
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data['error'], 'request_source must be roo_slackbot')
+        mock_trigger_scan.assert_not_called()
+
+    @patch('integrations.api_views.trigger_scan_async')
+    def test_scan_rejects_invalid_request_source(self, mock_trigger_scan):
+        headers = {'HTTP_X_API_KEY': self.api_key}
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            response = self.client.post(
+                self.url,
+                {
+                    'slack_user_id': self.slack_user_id,
+                    'domain': self.domain,
+                    'request_source': 'manual_test',
+                },
+                format='json',
+                **headers
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data['error'], 'request_source must be roo_slackbot')
+        mock_trigger_scan.assert_not_called()

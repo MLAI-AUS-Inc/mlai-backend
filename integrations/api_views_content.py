@@ -22,9 +22,12 @@ from integrations.services.article_generation import (
     SCHEDULED_DAILY_TRIGGER_SOURCE,
 )
 from core.content_factory_progress import maybe_send_still_working_ping, upsert_live_progress_card
+from integrations.content_factory_contract import (
+    CONTENT_FACTORY_REQUEST_SOURCE,
+    require_roo_request_source,
+)
 
 logger = logging.getLogger(__name__)
-CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 PUBLISH_READY_STAGE = "content_ready"
 PUBLISH_IN_PROGRESS_SOURCE_STAGES = {
     "promotion_requested",
@@ -38,10 +41,11 @@ PUBLISH_IN_PROGRESS_CHILD_STAGES = PUBLISH_IN_PROGRESS_SOURCE_STAGES - {"promoti
 
 
 def _validate_roo_content_request(request, *, require_client_request_id: bool = False) -> Optional[Response]:
-    request_source = str(request.data.get("request_source") or "").strip()
-    if request_source != CONTENT_FACTORY_REQUEST_SOURCE:
+    try:
+        require_roo_request_source(request.data.get("request_source"))
+    except ValueError as exc:
         return Response(
-            {"error": "request_source must be roo_slackbot"},
+            {"error": str(exc)},
             status=status.HTTP_403_FORBIDDEN,
         )
 

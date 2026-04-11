@@ -161,6 +161,40 @@ class ContentFactoryGitHubReconnectEndpointTests(TestCase):
         self.assertEqual(payload["trigger"], "manual")
         self.assertEqual(payload["pending_action"], "publish_article")
 
+    def test_reconnect_endpoint_returns_auth_started_when_token_is_near_expiry(self):
+        org = Organization.objects.create(domain="mlai.au", name="MLAI")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_encrypted="gh-token",
+            github_token_expires_at=timezone.now() + timezone.timedelta(minutes=4),
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                        "trigger": "manual",
+                        "pending_action": "publish_article",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "auth_started")
+        self.assertEqual(payload["connection_state"], "auth_required")
+        self.assertEqual(payload["domain"], "mlai.au")
+        self.assertEqual(payload["github_repo"], "MLAI-AUS-Inc/mlai-au")
+        self.assertEqual(payload["trigger"], "manual")
+        self.assertEqual(payload["pending_action"], "publish_article")
+        self.assertIn("auth_url", payload)
+
     def test_reconnect_endpoint_returns_auth_started_when_domain_auth_missing(self):
         Organization.objects.create(domain="mlai.au", name="MLAI")
 

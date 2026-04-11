@@ -34,6 +34,7 @@ from .content_factory_progress import (
     maybe_send_still_working_ping,
     upsert_live_progress_card,
 )
+from .content_factory_auth import content_factory_github_connection_state
 from .content_factory_delivery import (
     build_content_factory_preview_url,
     build_content_ready_blocks,
@@ -94,6 +95,8 @@ def _normalize_app_context(app_value, default='hospital'):
         return 'hospital'
     if app in ('esafety', 'e-safety'):
         return 'esafety'
+    if app in ('innovate-connect-alliance', 'innovate_connect_alliance', 'ica'):
+        return 'innovate-connect-alliance'
     if app in ('vibe-raising', 'vibe_raising', 'viberaising'):
         return 'vibe-raising'
     return default
@@ -144,6 +147,8 @@ def _frontend_base_url(app_context):
         return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), default_origin)
     if app_context == 'esafety':
         return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), default_origin)
+    if app_context == 'innovate-connect-alliance':
+        return _origin_from_url(getattr(settings, 'INNOVATE_CONNECT_ALLIANCE_URL', None), default_origin)
     if app_context == 'vibe-raising':
         return _origin_from_url(getattr(settings, 'VIBE_RAISING_URL', None), default_origin)
     return default_origin
@@ -250,18 +255,7 @@ def _normalize_content_factory_domain(domain: str) -> str:
 
 
 def _content_factory_github_connection_state(config) -> str:
-    if not config or not str(getattr(config, "github_token_encrypted", "") or "").strip():
-        return "auth_required"
-
-    expires_at = getattr(config, "github_token_expires_at", None)
-    if expires_at:
-        buffer_time = timezone.timedelta(minutes=5)
-        if timezone.now() >= (expires_at - buffer_time):
-            return "auth_required"
-
-    if str(getattr(config, "github_repo", "") or "").strip():
-        return "connected"
-    return "repo_selection_required"
+    return content_factory_github_connection_state(config)
 
 
 def _content_factory_github_auth_url(*, slack_user_id: str, domain: Optional[str] = None) -> str:
@@ -435,6 +429,8 @@ class MagicLinkVerifyView(APIView):
                     redirect_path = next_param
                 elif app_param == 'esafety':
                     redirect_path = "/esafety/dashboard"
+                elif app_param == 'innovate-connect-alliance':
+                    redirect_path = "/innovate-connect-alliance"
                 elif app_param == 'vibe-raising':
                     redirect_path = "/vibe-raising"
                 else:
@@ -588,9 +584,22 @@ class CurrentUserView(APIView):
                 "avatar_url": esafety_team.avatar_url,
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
+
+        innovate_connect_alliance_team = user.innovate_connect_alliance_teams.first() if hasattr(user, 'innovate_connect_alliance_teams') else None
+        innovate_connect_alliance_team_data = None
+        if innovate_connect_alliance_team:
+            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            innovate_connect_alliance_team_data = {
+                "team_name": innovate_connect_alliance_team.team_name,
+                "team_id": innovate_connect_alliance_team.team_id,
+                "avatar_url": innovate_connect_alliance_team.avatar_url,
+                "member_count": innovate_connect_alliance_team.members.count(),
+                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= innovate_connect_alliance_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+            }
         
         # Determine primary team for backward compatibility (prefer hospital)
-        primary_team_data = hospital_team_data if hospital_team_data else esafety_team_data
+        primary_team_data = hospital_team_data or innovate_connect_alliance_team_data or esafety_team_data
 
         data = {
             'first_name': user.first_name,
@@ -601,8 +610,10 @@ class CurrentUserView(APIView):
             'about': user.about,
             'role': user.role,
             'is_superuser': user.is_superuser,
+            'has_team': user.has_team,
             'team': primary_team_data,  # Backward compatibility
             'hospital_team': hospital_team_data,
+            'innovate_connect_alliance_team': innovate_connect_alliance_team_data,
             'esafety_team': esafety_team_data,
             'avatar_url': user.avatar_url,
             'personas': user.personas,
@@ -711,7 +722,19 @@ class UpdateProfileView(APIView):
         # Handle team avatar upload
         team_avatar_file = request.FILES.get('team_avatar')
         if team_avatar_file:
-            team = user.hospital_teams.first() or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
+            app_context = _normalize_app_context(request.data.get('app'), default='')
+            if app_context == 'hospital':
+                team = user.hospital_teams.first()
+            elif app_context == 'esafety':
+                team = user.esafety_teams.first()
+            elif app_context == 'innovate-connect-alliance':
+                team = user.innovate_connect_alliance_teams.first()
+            else:
+                team = (
+                    user.hospital_teams.first()
+                    or (user.innovate_connect_alliance_teams.first() if hasattr(user, 'innovate_connect_alliance_teams') else None)
+                    or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
+                )
             if team:
                 try:
                     from PIL import Image
@@ -765,7 +788,20 @@ class UpdateProfileView(APIView):
                 "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
             }
 
-        primary_team_data = hospital_team_data if hospital_team_data else esafety_team_data
+        innovate_connect_alliance_team = user.innovate_connect_alliance_teams.first()
+        innovate_connect_alliance_team_data = None
+        if innovate_connect_alliance_team:
+            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            innovate_connect_alliance_team_data = {
+                "team_name": innovate_connect_alliance_team.team_name,
+                "team_id": innovate_connect_alliance_team.team_id,
+                "avatar_url": innovate_connect_alliance_team.avatar_url,
+                "member_count": innovate_connect_alliance_team.members.count(),
+                "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= innovate_connect_alliance_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
+                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+            }
+
+        primary_team_data = hospital_team_data or innovate_connect_alliance_team_data or esafety_team_data
 
         data = {
             'full_name': user.full_name,
@@ -776,6 +812,7 @@ class UpdateProfileView(APIView):
             'is_superuser': user.is_superuser,
             'team': primary_team_data,
             'hospital_team': hospital_team_data,
+            'innovate_connect_alliance_team': innovate_connect_alliance_team_data,
             'esafety_team': esafety_team_data,
             'has_team': user.has_team,
             'avatar_url': user.avatar_url,

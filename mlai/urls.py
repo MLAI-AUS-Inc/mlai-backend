@@ -25,6 +25,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/auth/', include('core.urls')),
     path('api/v1/hackathons/esafety/', include('esafety.urls')),
+    path('api/v1/hackathons/innovate-connect-alliance/', include('innovate_connect_alliance.urls')),
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/vibe-raising/', include('vibe_raising.urls')),

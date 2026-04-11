@@ -8,9 +8,11 @@ from rest_framework import status
 from django.db.models import Q
 from django.urls import reverse
 
+from core.content_factory_auth import content_factory_github_connection_state
 from .models import UserIntegration
 from core.article_system import article_system_ready, recommended_next_action as derive_recommended_next_action, resolve_article_system
 from core.permissions import HasRooApiKey
+from integrations.content_factory_contract import require_roo_request_source
 from integrations.services.github_connections import build_github_oauth_url, get_owned_org_configs
 from integrations.utils import normalize_domain
 
@@ -24,17 +26,7 @@ def trigger_scan_async(*args, **kwargs):
 
 
 def _derive_connection_state(config) -> str:
-    state = getattr(config, "github_connection_state", None)
-    if state:
-        return state
-
-    has_token = bool(str(getattr(config, "github_token_encrypted", "") or "").strip())
-    has_repo = bool(str(getattr(config, "github_repo", "") or "").strip())
-    if has_token and has_repo:
-        return "connected"
-    if has_token:
-        return "repo_selection_required"
-    return "auth_required"
+    return content_factory_github_connection_state(config)
 
 
 def _serialize_connected_domain(config) -> dict:
@@ -583,6 +575,14 @@ class GithubScanView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            request_source = require_roo_request_source(request.data.get("request_source"))
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         # Resolve domain
         normalized_domain = normalize_domain(domain)
 
@@ -733,6 +733,7 @@ class GithubScanView(APIView):
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
             domain=normalized_domain,
+            request_source=request_source,
         )
 
         return Response({
