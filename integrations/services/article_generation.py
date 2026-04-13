@@ -5,11 +5,12 @@ import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
+from core.content_factory_progress import upsert_live_progress_card
 from core.article_system import (
     resolve_article_system_with_source,
 )
 from integrations.models import UserIntegration
-from core.models import OrganizationContentConfig, Organization
+from core.models import ContentFactoryJob, OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
 from integrations.services.github import ensure_valid_token, TokenRefreshError
 from integrations.services.github_connections import build_github_oauth_url
@@ -42,6 +43,7 @@ AUTH_REQUIRED_ERROR_CODE = "AUTH_REQUIRED"
 AUTH_REQUIRED_MISSING_STEP = "github_auth"
 AUTH_REQUIRED_NEXT_ACTION = "reconnect_github"
 AUTH_REQUIRED_RESUME_HINT = "reconnect_github_then_retry"
+ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED_ERROR_CODE = "article_dependency_strategy_unresolved"
 
 
 class ArticleGenerationError(Exception):
@@ -76,6 +78,181 @@ class ArticleSystemActionRequiredError(ArticleGenerationError):
         self.recommended_action = recommended_action
         self.hint = hint
         self.resolution_source = resolution_source
+
+
+def _coerce_optional_int(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _blocked_notification_key(
+    *,
+    error_code: str,
+    blocked_step: str,
+    recovery_attempt: Optional[int],
+    recovery_exhausted: bool,
+) -> str:
+    return (
+        f"blocked:{error_code}:{blocked_step}:{int(recovery_attempt or 0)}:"
+        f"{1 if recovery_exhausted else 0}"
+    )
+
+
+def _blocked_summary_text(
+    *,
+    error_code: str,
+    blocked_step: str,
+    error_message: str,
+    retry_after_seconds: Optional[int],
+    recovery_attempt: Optional[int],
+    recovery_exhausted: bool,
+) -> str:
+    if error_code == ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED_ERROR_CODE:
+        if recovery_exhausted:
+            return (
+                f"Run blocked at {blocked_step}: repository contract refresh did not resolve the "
+                "article dependency strategy. Run a fresh repo scan, then retry the article."
+            )
+        if recovery_attempt:
+            return (
+                f"Run blocked at {blocked_step}: repository contract ambiguity detected. "
+                "Refreshing the repository contract automatically."
+            )
+
+    retry_suffix = ""
+    if retry_after_seconds is not None:
+        retry_suffix = f" Retrying when capacity returns (next check in ~{retry_after_seconds}s)."
+    return f"Run blocked at {blocked_step}: {error_message}{retry_suffix}"
+
+
+def _blocked_visible_message(*, domain: Optional[str]) -> str:
+    subject = domain or "this repository"
+    return (
+        f"I refreshed the repository contract once, but the article surface is still ambiguous for "
+        f"{subject}. Run a fresh repo scan, then retry the article."
+    )
+
+
+def _maybe_notify_exhausted_block(
+    job: ContentFactoryJob,
+    *,
+    error_code: str,
+    blocked_step: str,
+    recovery_attempt: Optional[int],
+    recovery_exhausted: bool,
+) -> None:
+    if error_code != ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED_ERROR_CODE or not recovery_exhausted:
+        return
+    if not job.slack_user_id:
+        return
+
+    request_meta = dict(job.request_meta or {})
+    notification_key = _blocked_notification_key(
+        error_code=error_code,
+        blocked_step=blocked_step,
+        recovery_attempt=recovery_attempt,
+        recovery_exhausted=recovery_exhausted,
+    )
+    if request_meta.get("blocked_visible_notification_key") == notification_key:
+        return
+
+    from integrations.services.slack import SlackService
+
+    thread_ts = str(job.slack_thread_ts or job.slack_root_message_ts or "").strip()
+    text = _blocked_visible_message(domain=job.domain)
+    try:
+        if job.slack_channel_id and thread_ts:
+            SlackService.send_message(job.slack_channel_id, text, thread_ts=thread_ts)
+        else:
+            SlackService.send_dm(job.slack_user_id, text)
+    except Exception as exc:
+        logger.warning("Failed to send exhausted blocked notification for job %s: %s", job.job_id, exc)
+        return
+
+    request_meta["blocked_visible_notification_key"] = notification_key
+    job.request_meta = request_meta
+    job.save(update_fields=["request_meta", "updated_at"])
+
+
+def sync_blocked_job_state(
+    job: ContentFactoryJob,
+    result: dict,
+    *,
+    update_card: bool = True,
+    allow_visible_notification: bool = True,
+) -> None:
+    error_message = result.get('error') or result.get('error_message') or 'Generation is blocked waiting for capacity'
+    error_code = str(result.get("error_code") or "blocked").strip() or "blocked"
+    blocked_step = str(result.get("blocked_step") or result.get("current_step") or "unknown").strip() or "unknown"
+    retry_after_seconds = _coerce_optional_int(result.get("retry_after_seconds"))
+    recovery_attempt = _coerce_optional_int(result.get("recovery_attempt"))
+    recovery_exhausted = bool(result.get("recovery_exhausted"))
+
+    update_fields = []
+    result_domain = str(result.get("domain") or "").strip()
+    if result_domain and job.domain != result_domain:
+        job.domain = result_domain
+        update_fields.append("domain")
+    result_slack_user_id = str(result.get("slack_user_id") or "").strip()
+    if result_slack_user_id and job.slack_user_id != result_slack_user_id:
+        job.slack_user_id = result_slack_user_id
+        update_fields.append("slack_user_id")
+    if job.status != 'blocked':
+        job.status = 'blocked'
+        update_fields.append('status')
+
+    formatted_error = f"[{error_code}] {error_message}"
+    if job.error_message != formatted_error:
+        job.error_message = formatted_error
+        update_fields.append('error_message')
+
+    request_meta = dict(job.request_meta or {})
+    blocked_meta = {
+        "blocked_step": blocked_step,
+        "blocked_error_code": error_code,
+        "blocked_retry_after_seconds": retry_after_seconds,
+        "blocked_preferred_queue": result.get("preferred_queue"),
+        "blocked_fallback_policy": result.get("fallback_policy"),
+        "blocked_next_step": result.get("next_step"),
+        "blocked_rerunnable_step": result.get("rerunnable_step"),
+        "blocked_recovery_attempt": recovery_attempt,
+        "blocked_recovery_exhausted": recovery_exhausted,
+    }
+    if any(request_meta.get(key) != value for key, value in blocked_meta.items()):
+        request_meta.update(blocked_meta)
+        job.request_meta = request_meta
+        update_fields.append('request_meta')
+
+    if update_fields:
+        job.save(update_fields=[*update_fields, 'updated_at'])
+
+    if update_card:
+        upsert_live_progress_card(
+            job,
+            data=result,
+            summary_text=_blocked_summary_text(
+                error_code=error_code,
+                blocked_step=blocked_step,
+                error_message=error_message,
+                retry_after_seconds=retry_after_seconds,
+                recovery_attempt=recovery_attempt,
+                recovery_exhausted=recovery_exhausted,
+            ),
+            failed=False,
+        )
+
+    if allow_visible_notification:
+        _maybe_notify_exhausted_block(
+            job,
+            error_code=error_code,
+            blocked_step=blocked_step,
+            recovery_attempt=recovery_attempt,
+            recovery_exhausted=recovery_exhausted,
+        )
 
 
 def _raise_article_system_action_required(
@@ -1502,52 +1679,18 @@ def _handle_status_blocked(job_id: str, result: dict):
     Handle a blocked job detected during status polling.
     Updates the local ContentFactoryJob without treating the run as terminal.
     """
-    from core.models import ContentFactoryJob
-
     try:
         job = ContentFactoryJob.objects.get(job_id=job_id)
     except ContentFactoryJob.DoesNotExist:
         logger.warning(f"Blocked status for unknown job {job_id}")
         return
 
-    error_message = result.get('error') or result.get('error_message') or 'Generation is blocked waiting for capacity'
-    error_code = str(result.get("error_code") or "blocked")
-    blocked_step = str(result.get("blocked_step") or result.get("current_step") or "").strip()
-
-    update_fields = ['updated_at']
-    if job.status != 'blocked':
-        job.status = 'blocked'
-        update_fields.append('status')
-
-    formatted_error = f"[{error_code}] {error_message}"
-    if job.error_message != formatted_error:
-        job.error_message = formatted_error
-        update_fields.append('error_message')
-
-    request_meta = dict(job.request_meta or {})
-    blocked_changed = False
-    for key, value in (
-        ("blocked_step", blocked_step),
-        ("blocked_error_code", error_code),
-        ("blocked_retry_after_seconds", result.get("retry_after_seconds")),
-        ("blocked_preferred_queue", result.get("preferred_queue")),
-        ("blocked_fallback_policy", result.get("fallback_policy")),
-    ):
-        if request_meta.get(key) != value:
-            request_meta[key] = value
-            blocked_changed = True
-    if blocked_changed:
-        job.request_meta = request_meta
-        update_fields.append('request_meta')
-
-    if len(update_fields) > 1:
-        job.save(update_fields=update_fields)
-
+    sync_blocked_job_state(job, result, update_card=True, allow_visible_notification=True)
     logger.info(
         "Updated job %s to blocked: %s: %s",
         job_id,
-        error_code,
-        error_message,
+        result.get("error_code") or "blocked",
+        result.get('error') or result.get('error_message') or 'Generation is blocked waiting for capacity',
     )
 
 

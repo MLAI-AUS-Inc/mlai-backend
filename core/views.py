@@ -3898,6 +3898,7 @@ class ContentFactoryCallbackView(APIView):
     def _handle_generation_blocked(self, data):
         """Handle generation_blocked event from content-factory."""
         from .models import ContentFactoryJob
+        from integrations.services.article_generation import sync_blocked_job_state
 
         job_id = data.get('job_id')
         run_id = data.get('run_id') or job_id
@@ -3920,27 +3921,7 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
-
-        if any(
-            value for value in (
-                blocked_step,
-                preferred_queue,
-                fallback_policy,
-                retry_after_seconds,
-            )
-        ):
-            request_meta = dict(job.request_meta or {})
-            request_meta.update(
-                {
-                    "blocked_step": blocked_step,
-                    "blocked_error_code": error_code,
-                    "blocked_preferred_queue": preferred_queue,
-                    "blocked_fallback_policy": fallback_policy,
-                    "blocked_retry_after_seconds": retry_after_seconds,
-                }
-            )
-            job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+        sync_blocked_job_state(job, data, update_card=True, allow_visible_notification=True)
 
         logger.warning(
             "Generation blocked for job %s run %s workflow=%s (%s): [%s] %s",
@@ -3950,17 +3931,6 @@ class ContentFactoryCallbackView(APIView):
             domain,
             error_code,
             error_message,
-        )
-
-        retry_suffix = ""
-        if retry_after_seconds is not None:
-            retry_suffix = f" Retrying when capacity returns (next check in ~{retry_after_seconds}s)."
-
-        upsert_live_progress_card(
-            job,
-            data=data,
-            summary_text=f"Run blocked at {blocked_step}: {error_message}{retry_suffix}",
-            failed=False,
         )
 
         return Response({
