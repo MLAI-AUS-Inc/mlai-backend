@@ -1076,9 +1076,15 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_dm.assert_not_called()
         mock_send_message.assert_not_called()
 
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')
-    def test_generation_blocked_marks_job_blocked_without_terminal_notification(self, mock_send_dm, mock_send_message):
+    def test_generation_blocked_marks_job_blocked_without_terminal_notification(
+        self,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
         user = User.objects.create_user(email="blocked@example.com", password="password", slack_id="U123")
         PointsAccount.objects.create(user=user, balance=14)
         ContentFactoryJob.objects.create(
@@ -1117,8 +1123,62 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.billing_status, "charged")
         self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
         self.assertEqual(job.request_meta.get("blocked_preferred_queue"), "build-verifier")
+        mock_upsert_live_progress_card.assert_called_once()
         mock_send_dm.assert_not_called()
         mock_send_message.assert_not_called()
+
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_blocked_dependency_recovery_exhausted_posts_one_thread_message(
+        self,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
+        ContentFactoryJob.objects.create(
+            job_id="blocked-exhausted-run-1",
+            domain="skedy.io",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"domain": "skedy.io"},
+        )
+
+        payload = {
+            "event_type": "generation_blocked",
+            "job_id": "blocked-exhausted-run-1",
+            "run_id": "blocked-exhausted-run-1",
+            "workflow": "direct_generate",
+            "domain": "skedy.io",
+            "slack_user_id": "U123",
+            "blocked_step": "validate_render_dependencies",
+            "error_code": "article_dependency_strategy_unresolved",
+            "error": "Article dependency strategy is unresolved",
+            "next_step": "synthesize_repository_contract",
+            "rerunnable_step": "synthesize_repository_contract",
+            "recovery_attempt": 2,
+            "recovery_exhausted": True,
+        }
+
+        first = self.client.post(reverse('content_factory_callback'), payload, format='json')
+        second = self.client.post(reverse('content_factory_callback'), payload, format='json')
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="blocked-exhausted-run-1")
+        self.assertEqual(job.status, "blocked")
+        self.assertEqual(job.request_meta.get("blocked_rerunnable_step"), "synthesize_repository_contract")
+        self.assertEqual(job.request_meta.get("blocked_recovery_attempt"), 2)
+        self.assertTrue(job.request_meta.get("blocked_recovery_exhausted"))
+        self.assertTrue(job.request_meta.get("blocked_visible_notification_key"))
+        mock_upsert_live_progress_card.assert_called()
+        mock_send_dm.assert_not_called()
+        self.assertEqual(mock_send_message.call_count, 1)
+        self.assertEqual(mock_send_message.call_args.kwargs["thread_ts"], "123.456")
+        self.assertIn("skedy.io", mock_send_message.call_args.args[1])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_scaffold_complete_uses_parent_run_thread_context(self, mock_send_message):
@@ -2621,8 +2681,17 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
 
 class ArticleGenerationStatusTests(TestCase):
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
     @patch('integrations.services.article_generation._handle_status_failure')
-    def test_check_generation_status_marks_blocked_run_without_terminal_failure(self, mock_handle_status_failure):
+    def test_check_generation_status_marks_blocked_run_without_terminal_failure(
+        self,
+        mock_handle_status_failure,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
         from integrations.services import article_generation
 
         ContentFactoryJob.objects.create(
@@ -2658,6 +2727,72 @@ class ArticleGenerationStatusTests(TestCase):
         self.assertEqual(job.status, "blocked")
         self.assertIn("verifier_capacity_unavailable", job.error_message)
         self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
+        mock_upsert_live_progress_card.assert_called_once()
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    @patch('integrations.services.article_generation._handle_status_failure')
+    def test_check_generation_status_notifies_once_when_dependency_recovery_is_exhausted(
+        self,
+        mock_handle_status_failure,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
+        from integrations.services import article_generation
+
+        ContentFactoryJob.objects.create(
+            job_id="blocked-poll-exhausted-1",
+            domain="skedy.io",
+            slack_user_id="U123",
+            status="generating",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            request_meta={"domain": "skedy.io"},
+        )
+
+        class _FakeResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {
+                    "job_id": "blocked-poll-exhausted-1",
+                    "run_id": "blocked-poll-exhausted-1",
+                    "status": "blocked",
+                    "current_step": "validate_render_dependencies",
+                    "blocked_step": "validate_render_dependencies",
+                    "error_code": "article_dependency_strategy_unresolved",
+                    "error": "Article dependency strategy is unresolved",
+                    "next_step": "synthesize_repository_contract",
+                    "rerunnable_step": "synthesize_repository_contract",
+                    "recovery_attempt": 2,
+                    "recovery_exhausted": True,
+                }
+
+        with patch('integrations.services.article_generation.http_requests.get', return_value=_FakeResponse()):
+            first = article_generation.check_generation_status("blocked-poll-exhausted-1")
+            second = article_generation.check_generation_status("blocked-poll-exhausted-1")
+
+        self.assertEqual(first["status"], "blocked")
+        self.assertEqual(second["status"], "blocked")
+        mock_handle_status_failure.assert_not_called()
+        job = ContentFactoryJob.objects.get(job_id="blocked-poll-exhausted-1")
+        self.assertEqual(job.status, "blocked")
+        self.assertEqual(job.request_meta.get("blocked_next_step"), "synthesize_repository_contract")
+        self.assertEqual(job.request_meta.get("blocked_rerunnable_step"), "synthesize_repository_contract")
+        self.assertEqual(job.request_meta.get("blocked_recovery_attempt"), 2)
+        self.assertTrue(job.request_meta.get("blocked_recovery_exhausted"))
+        self.assertTrue(job.request_meta.get("blocked_visible_notification_key"))
+        self.assertEqual(mock_send_message.call_count, 1)
+        self.assertEqual(mock_send_message.call_args.kwargs["thread_ts"], "123.456")
+        self.assertIn("skedy.io", mock_send_message.call_args.args[1])
+        mock_send_dm.assert_not_called()
+        self.assertEqual(mock_upsert_live_progress_card.call_count, 2)
 
     @patch('integrations.services.article_generation._handle_status_failure')
     def test_check_generation_status_marks_needs_review_run_without_terminal_failure(self, mock_handle_status_failure):
