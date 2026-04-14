@@ -8,27 +8,52 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 signer = TimestampSigner()
+MAGIC_LINK_KIND_USER = "user"
+MAGIC_LINK_KIND_PENDING_SIGNUP = "pending_signup"
 
 # Load API Key from environment
 CUSTOMER_IO_API_KEY = os.getenv('CUSTOMERIO_API_KEY')
 
-def generate_magic_link(user, base_url="https://www.med-hack.com"):
-    """
-    Generates a signed magic link for the user.
-    """
-    data = {'email': user.email}
+def _generate_magic_link_from_payload(data, base_url="https://www.med-hack.com"):
     token = signer.sign_object(data)
     return f"{base_url}/verify-email?token={token}"
 
+
+def generate_magic_link(user, base_url="https://www.med-hack.com"):
+    """
+    Generates a signed magic link for an existing user.
+    """
+    return _generate_magic_link_from_payload(
+        {
+            'kind': MAGIC_LINK_KIND_USER,
+            'email': user.email,
+        },
+        base_url=base_url,
+    )
+
+
+def generate_pending_magic_link(pending_signup, base_url="https://www.med-hack.com"):
+    """
+    Generates a signed magic link for a pending Vibe Raising signup.
+    """
+    return _generate_magic_link_from_payload(
+        {
+            'kind': MAGIC_LINK_KIND_PENDING_SIGNUP,
+            'pending_signup_id': pending_signup.id,
+            'email': pending_signup.email,
+        },
+        base_url=base_url,
+    )
+
 def verify_magic_link(token, max_age=3600):
     """
-    Verifies the magic link token and returns the email if valid.
+    Verifies the magic link token and returns the payload if valid.
     """
     try:
         data = signer.unsign_object(token, max_age=max_age)
         email = data.get('email')
         logger.info(f"Magic link token verified successfully for email {email}")
-        return email
+        return data
     except SignatureExpired:
         logger.warning("Magic link token has expired.")
         return None
@@ -36,7 +61,15 @@ def verify_magic_link(token, max_age=3600):
         logger.warning("Magic link token is invalid.")
         return None
 
-def send_magic_link_email(user, magic_link, message_id="2"):
+def send_magic_link_email_to_address(
+    email,
+    magic_link,
+    *,
+    identifier,
+    first_name="",
+    full_name="",
+    message_id="2",
+):
     """
     Sends the magic link email using Customer.io.
     """
@@ -48,9 +81,7 @@ def send_magic_link_email(user, magic_link, message_id="2"):
 
     # Prepare display name
     # Prepare display name
-    full_name = user.full_name
-    first_name = user.first_name
-    display_name = full_name or user.email
+    display_name = full_name or first_name or email
 
     # Build request body as dictionary (not SendEmailRequest object)
     request_body = {
@@ -60,16 +91,30 @@ def send_magic_link_email(user, magic_link, message_id="2"):
             "first_name": first_name or display_name,
             "full_name": display_name,
         },
-        "to": user.email,
+        "to": email,
         "identifiers": {
-            "id": str(user.id),
+            "id": str(identifier),
         },
     }
 
     try:
         response = client.send_email(request_body)
-        logger.info(f"Magic link email sent to {user.email} using message_id {message_id}: {response}")
+        logger.info(f"Magic link email sent to {email} using message_id {message_id}: {response}")
         return response
     except Exception as e:
-        logger.error(f"Error sending email to {user.email}: {e}")
+        logger.error(f"Error sending email to {email}: {e}")
         raise e
+
+
+def send_magic_link_email(user, magic_link, message_id="2"):
+    """
+    Sends the magic link email using Customer.io for an existing user.
+    """
+    return send_magic_link_email_to_address(
+        user.email,
+        magic_link,
+        identifier=user.id,
+        first_name=user.first_name,
+        full_name=user.full_name,
+        message_id=message_id,
+    )

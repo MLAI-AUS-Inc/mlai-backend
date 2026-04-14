@@ -43,7 +43,7 @@ class CustomJWTAuthentication(JWTAuthentication):
                 logger.error(f"Unexpected error during cookie authentication: {str(e)}")
                 return None
         else:
-            logger.warning("No access_token cookie found in request")
+            logger.info("No access_token cookie found in request")
         
         # No valid authentication found
         return None
