@@ -25,9 +25,7 @@ from .serializers import MyTokenObtainPairSerializer
 from .email_utils import (
     MAGIC_LINK_KIND_PENDING_SIGNUP,
     generate_magic_link,
-    generate_pending_magic_link,
     send_magic_link_email,
-    send_magic_link_email_to_address,
     verify_magic_link,
 )
 from .article_system import (
@@ -262,38 +260,6 @@ def _normalize_content_factory_domain(domain: str) -> str:
     return domain
 
 
-def _get_or_create_vibe_raising_pending_signup(email, next_path=None, role='participant'):
-    normalized_email = User.objects.normalize_email(email)
-    pending_signup = (
-        VibeRaisingPendingSignup.objects
-        .filter(app='vibe-raising', email__iexact=normalized_email, used_at__isnull=True)
-        .order_by('-created_at')
-        .first()
-    )
-
-    if pending_signup:
-        update_fields = []
-        if next_path != pending_signup.next_path:
-            pending_signup.next_path = next_path
-            update_fields.append('next_path')
-        if role and role != pending_signup.role:
-            pending_signup.role = role
-            update_fields.append('role')
-        if update_fields:
-            pending_signup.save(update_fields=[*update_fields, 'updated_at'])
-        return pending_signup, False
-
-    return (
-        VibeRaisingPendingSignup.objects.create(
-            email=normalized_email,
-            app='vibe-raising',
-            next_path=next_path,
-            role=role or 'participant',
-        ),
-        True,
-    )
-
-
 def _content_factory_github_connection_state(config) -> str:
     return content_factory_github_connection_state(config)
 
@@ -303,6 +269,24 @@ def _content_factory_github_auth_url(*, slack_user_id: str, domain: Optional[str
 
     normalized_domain = _normalize_content_factory_domain(domain or "")
     return build_github_auth_url(slack_user_id or "", domain=normalized_domain or None)
+
+
+class CheckUserView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        data = request.data
+        email = data.get('email')
+        _normalize_app_context(data.get('app'), default='hospital')
+
+        if not email:
+            return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {"user_exists": User.objects.filter(email__iexact=email).exists()},
+            status=status.HTTP_200_OK,
+        )
 
 class SendMagicLinkView(APIView):
     authentication_classes = []
@@ -319,44 +303,8 @@ class SendMagicLinkView(APIView):
 
         try:
             user = User.objects.filter(email__iexact=email).first()
-            
+
             if not user:
-                if app == 'vibe-raising':
-                    pending_signup, created = _get_or_create_vibe_raising_pending_signup(
-                        email,
-                        next_path=next_path,
-                        role='participant',
-                    )
-                    base_url = _frontend_base_url(app)
-                    magic_link = generate_pending_magic_link(pending_signup, base_url=base_url)
-                    magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
-
-                    logger.info(
-                        "Generated Vibe Raising pending-signup magic link for %s (signup_id=%s created=%s)",
-                        pending_signup.email,
-                        pending_signup.id,
-                        created,
-                    )
-                    send_magic_link_email_to_address(
-                        pending_signup.email,
-                        magic_link,
-                        identifier=f"pending-signup:{pending_signup.id}",
-                        message_id="2",
-                    )
-                    logger.info(
-                        "Sent magic link to pending Vibe Raising signup: %s (signup_id=%s)",
-                        pending_signup.email,
-                        pending_signup.id,
-                    )
-                    return Response(
-                        {
-                            "user_exists": False,
-                            "magic_link_sent": True,
-                            "message": "Magic link sent to your email.",
-                        },
-                        status=status.HTTP_200_OK
-                    )
-
                 # User does not exist, return specific response to frontend
                 return Response(
                     {"user_exists": False, "message": "User does not exist."}, 
