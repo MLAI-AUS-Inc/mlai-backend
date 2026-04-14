@@ -4,8 +4,6 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from core.models import VibeRaisingPendingSignup
-
 User = get_user_model()
 
 
@@ -164,7 +162,7 @@ class AuthContractTests(TestCase):
 
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')
     @patch('core.views.send_magic_link_email')
-    def test_send_magic_link_returns_missing_user_without_creating_vibe_pending_signup(self, mock_send):
+    def test_send_magic_link_returns_missing_user_for_vibe_raising(self, mock_send):
         response = self.client.post(
             '/api/v1/auth/send-magic-link/',
             {'email': 'new-vibe@example.com', 'app': 'vibe-raising', 'next': '/vibe-raising'},
@@ -174,7 +172,6 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data['user_exists'])
         self.assertEqual(response.data['message'], 'User does not exist.')
-        self.assertFalse(VibeRaisingPendingSignup.objects.filter(email='new-vibe@example.com').exists())
         mock_send.assert_not_called()
 
     @override_settings(INNOVATE_CONNECT_ALLIANCE_URL='http://localhost:4100')
@@ -288,55 +285,11 @@ class AuthContractTests(TestCase):
         'core.views.verify_magic_link',
         return_value={'kind': 'pending_signup', 'pending_signup_id': 1, 'email': 'pending-vibe@example.com'},
     )
-    def test_verify_magic_link_creates_vibe_raising_user_from_pending_signup(self, mock_verify):
-        pending_signup = VibeRaisingPendingSignup.objects.create(
-            id=1,
-            email='pending-vibe@example.com',
-            app='vibe-raising',
-            next_path='/vibe-raising',
-            role='participant',
-        )
-
+    def test_verify_magic_link_rejects_pending_signup_tokens(self, mock_verify):
         response = self.client.get(
             '/api/v1/auth/verify-magic-link/?token=test-token&app=vibe-raising&next=/vibe-raising'
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(User.objects.filter(email='pending-vibe@example.com').exists())
-        created_user = User.objects.get(email='pending-vibe@example.com')
-        self.assertEqual(response.data['user']['id'], created_user.id)
-        self.assertEqual(response.data['redirect'], '/vibe-raising')
-        self.assertIn('access_token', response.cookies)
-        self.assertIn('refresh_token', response.cookies)
-
-        pending_signup.refresh_from_db()
-        self.assertIsNotNone(pending_signup.used_at)
-
-    @patch(
-        'core.views.verify_magic_link',
-        return_value={'kind': 'pending_signup', 'pending_signup_id': 1, 'email': 'existing-pending@example.com'},
-    )
-    def test_verify_magic_link_reuses_existing_user_for_pending_signup(self, mock_verify):
-        existing_user = User.objects.create_user(email='existing-pending@example.com', role='participant')
-        existing_user.is_active = False
-        existing_user.save(update_fields=['is_active'])
-        pending_signup = VibeRaisingPendingSignup.objects.create(
-            id=1,
-            email='existing-pending@example.com',
-            app='vibe-raising',
-            next_path='/vibe-raising',
-            role='participant',
-        )
-
-        response = self.client.get(
-            '/api/v1/auth/verify-magic-link/?token=test-token&app=vibe-raising&next=/vibe-raising'
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['user']['id'], existing_user.id)
-        self.assertIn('access_token', response.cookies)
-
-        existing_user.refresh_from_db()
-        self.assertTrue(existing_user.is_active)
-        pending_signup.refresh_from_db()
-        self.assertIsNotNone(pending_signup.used_at)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], 'Invalid or expired token.')
+        self.assertFalse(User.objects.filter(email='pending-vibe@example.com').exists())

@@ -5,7 +5,7 @@ from datetime import date as calendar_date
 from typing import Optional
 from urllib.parse import urlparse
 from django.core import signing
-from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db import OperationalError, connection, transaction
 from django.db.models import Q
 from django.contrib.auth import get_user_model, login as auth_login
 from django.http import HttpResponse
@@ -23,7 +23,7 @@ from django.views import View
 
 from .serializers import MyTokenObtainPairSerializer
 from .email_utils import (
-    MAGIC_LINK_KIND_PENDING_SIGNUP,
+    MAGIC_LINK_KIND_USER,
     generate_magic_link,
     send_magic_link_email,
     verify_magic_link,
@@ -69,7 +69,6 @@ from .models import (
     GeneratedComponent,
     Organization,
     OrganizationContentConfig,
-    VibeRaisingPendingSignup,
 )
 from integrations.services.github_connections import get_owned_org_configs
 from .serializers import (
@@ -428,64 +427,12 @@ class MagicLinkVerifyView(APIView):
                     return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
 
                 token_kind = token_data.get('kind')
-                user_created_during_verify = False
+                if token_kind not in (None, MAGIC_LINK_KIND_USER):
+                    logger.warning("Unsupported magic link token kind: %s", token_kind)
+                    return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
 
-                if token_kind == MAGIC_LINK_KIND_PENDING_SIGNUP:
-                    pending_signup_id = token_data.get('pending_signup_id')
-                    if not pending_signup_id:
-                        logger.warning("Pending-signup token missing signup id for %s", email)
-                        return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
-
-                    with transaction.atomic():
-                        pending_signup = (
-                            VibeRaisingPendingSignup.objects.select_for_update()
-                            .filter(id=pending_signup_id)
-                            .first()
-                        )
-                        if pending_signup is None:
-                            logger.error("Pending Vibe Raising signup %s not found for %s", pending_signup_id, email)
-                            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
-
-                        if pending_signup.email.lower() != email.lower():
-                            logger.error(
-                                "Pending Vibe Raising signup email mismatch for signup_id=%s token_email=%s stored_email=%s",
-                                pending_signup_id,
-                                email,
-                                pending_signup.email,
-                            )
-                            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
-
-                        user = User.objects.filter(email__iexact=email).first()
-                        if user is None:
-                            try:
-                                user = User.objects.create_user(
-                                    email=email,
-                                    role=pending_signup.role or 'participant',
-                                )
-                            except IntegrityError:
-                                user = User.objects.get(email__iexact=email)
-                            else:
-                                user_created_during_verify = True
-
-                        if pending_signup.used_at is None:
-                            pending_signup.used_at = timezone.now()
-                            pending_signup.save(update_fields=['used_at', 'updated_at'])
-
-                    if user_created_during_verify:
-                        logger.info(
-                            "Created new Vibe Raising user during magic link verification: %s (signup_id=%s)",
-                            email,
-                            pending_signup_id,
-                        )
-                    else:
-                        logger.info(
-                            "Reused existing user during Vibe Raising magic link verification: %s (signup_id=%s)",
-                            email,
-                            pending_signup_id,
-                        )
-                else:
-                    user = User.objects.get(email__iexact=email)
-                    logger.info("Verified magic link for existing user: %s", email)
+                user = User.objects.get(email__iexact=email)
+                logger.info("Verified magic link for existing user: %s", email)
 
                 if not user.is_active:
                     user.is_active = True
