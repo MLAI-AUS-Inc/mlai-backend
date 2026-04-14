@@ -5,7 +5,7 @@ from datetime import date as calendar_date
 from typing import Optional
 from urllib.parse import urlparse
 from django.core import signing
-from django.db import OperationalError, connection, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.models import Q
 from django.contrib.auth import get_user_model, login as auth_login
 from django.http import HttpResponse
@@ -22,7 +22,14 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views import View
 
 from .serializers import MyTokenObtainPairSerializer
-from .email_utils import generate_magic_link, send_magic_link_email, verify_magic_link
+from .email_utils import (
+    MAGIC_LINK_KIND_PENDING_SIGNUP,
+    generate_magic_link,
+    generate_pending_magic_link,
+    send_magic_link_email,
+    send_magic_link_email_to_address,
+    verify_magic_link,
+)
 from .article_system import (
     article_system_ready,
     merge_article_system,
@@ -64,6 +71,7 @@ from .models import (
     GeneratedComponent,
     Organization,
     OrganizationContentConfig,
+    VibeRaisingPendingSignup,
 )
 from integrations.services.github_connections import get_owned_org_configs
 from .serializers import (
@@ -254,6 +262,38 @@ def _normalize_content_factory_domain(domain: str) -> str:
     return domain
 
 
+def _get_or_create_vibe_raising_pending_signup(email, next_path=None, role='participant'):
+    normalized_email = User.objects.normalize_email(email)
+    pending_signup = (
+        VibeRaisingPendingSignup.objects
+        .filter(app='vibe-raising', email__iexact=normalized_email, used_at__isnull=True)
+        .order_by('-created_at')
+        .first()
+    )
+
+    if pending_signup:
+        update_fields = []
+        if next_path != pending_signup.next_path:
+            pending_signup.next_path = next_path
+            update_fields.append('next_path')
+        if role and role != pending_signup.role:
+            pending_signup.role = role
+            update_fields.append('role')
+        if update_fields:
+            pending_signup.save(update_fields=[*update_fields, 'updated_at'])
+        return pending_signup, False
+
+    return (
+        VibeRaisingPendingSignup.objects.create(
+            email=normalized_email,
+            app='vibe-raising',
+            next_path=next_path,
+            role=role or 'participant',
+        ),
+        True,
+    )
+
+
 def _content_factory_github_connection_state(config) -> str:
     return content_factory_github_connection_state(config)
 
@@ -281,6 +321,42 @@ class SendMagicLinkView(APIView):
             user = User.objects.filter(email__iexact=email).first()
             
             if not user:
+                if app == 'vibe-raising':
+                    pending_signup, created = _get_or_create_vibe_raising_pending_signup(
+                        email,
+                        next_path=next_path,
+                        role='participant',
+                    )
+                    base_url = _frontend_base_url(app)
+                    magic_link = generate_pending_magic_link(pending_signup, base_url=base_url)
+                    magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
+
+                    logger.info(
+                        "Generated Vibe Raising pending-signup magic link for %s (signup_id=%s created=%s)",
+                        pending_signup.email,
+                        pending_signup.id,
+                        created,
+                    )
+                    send_magic_link_email_to_address(
+                        pending_signup.email,
+                        magic_link,
+                        identifier=f"pending-signup:{pending_signup.id}",
+                        message_id="2",
+                    )
+                    logger.info(
+                        "Sent magic link to pending Vibe Raising signup: %s (signup_id=%s)",
+                        pending_signup.email,
+                        pending_signup.id,
+                    )
+                    return Response(
+                        {
+                            "user_exists": False,
+                            "magic_link_sent": True,
+                            "message": "Magic link sent to your email.",
+                        },
+                        status=status.HTTP_200_OK
+                    )
+
                 # User does not exist, return specific response to frontend
                 return Response(
                     {"user_exists": False, "message": "User does not exist."}, 
@@ -302,7 +378,7 @@ class SendMagicLinkView(APIView):
             logger.info(f"Sent magic link to existing user: {email} for app {app}")
 
             return Response(
-                {"user_exists": True, "message": "Magic link sent to your email."},
+                {"user_exists": True, "magic_link_sent": True, "message": "Magic link sent to your email."},
                 status=status.HTTP_200_OK
             )
 
@@ -395,10 +471,73 @@ class MagicLinkVerifyView(APIView):
     def get(self, request):
         token = request.query_params.get('token')
         logger.info("Received magic link verification request.")
-        email = verify_magic_link(token)
-        if email:
+        token_data = verify_magic_link(token)
+        if token_data:
             try:
-                user = User.objects.get(email=email)
+                email = token_data.get('email')
+                if not email:
+                    logger.warning("Magic link token payload missing email.")
+                    return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+
+                token_kind = token_data.get('kind')
+                user_created_during_verify = False
+
+                if token_kind == MAGIC_LINK_KIND_PENDING_SIGNUP:
+                    pending_signup_id = token_data.get('pending_signup_id')
+                    if not pending_signup_id:
+                        logger.warning("Pending-signup token missing signup id for %s", email)
+                        return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+
+                    with transaction.atomic():
+                        pending_signup = (
+                            VibeRaisingPendingSignup.objects.select_for_update()
+                            .filter(id=pending_signup_id)
+                            .first()
+                        )
+                        if pending_signup is None:
+                            logger.error("Pending Vibe Raising signup %s not found for %s", pending_signup_id, email)
+                            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+
+                        if pending_signup.email.lower() != email.lower():
+                            logger.error(
+                                "Pending Vibe Raising signup email mismatch for signup_id=%s token_email=%s stored_email=%s",
+                                pending_signup_id,
+                                email,
+                                pending_signup.email,
+                            )
+                            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+
+                        user = User.objects.filter(email__iexact=email).first()
+                        if user is None:
+                            try:
+                                user = User.objects.create_user(
+                                    email=email,
+                                    role=pending_signup.role or 'participant',
+                                )
+                            except IntegrityError:
+                                user = User.objects.get(email__iexact=email)
+                            else:
+                                user_created_during_verify = True
+
+                        if pending_signup.used_at is None:
+                            pending_signup.used_at = timezone.now()
+                            pending_signup.save(update_fields=['used_at', 'updated_at'])
+
+                    if user_created_during_verify:
+                        logger.info(
+                            "Created new Vibe Raising user during magic link verification: %s (signup_id=%s)",
+                            email,
+                            pending_signup_id,
+                        )
+                    else:
+                        logger.info(
+                            "Reused existing user during Vibe Raising magic link verification: %s (signup_id=%s)",
+                            email,
+                            pending_signup_id,
+                        )
+                else:
+                    user = User.objects.get(email__iexact=email)
+                    logger.info("Verified magic link for existing user: %s", email)
 
                 if not user.is_active:
                     user.is_active = True

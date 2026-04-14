@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from core.models import VibeRaisingPendingSignup
 
 User = get_user_model()
 
@@ -114,6 +115,28 @@ class AuthContractTests(TestCase):
         mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
         mock_send.assert_called_once()
 
+    @override_settings(VIBE_RAISING_URL='http://localhost:5173')
+    @patch('core.views.send_magic_link_email_to_address')
+    @patch('core.views.generate_pending_magic_link')
+    def test_send_magic_link_creates_pending_vibe_raising_signup_for_unknown_email(self, mock_generate, mock_send):
+        mock_generate.return_value = 'http://localhost:5173/verify?token=vibe-pending'
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': 'new-vibe@example.com', 'app': 'vibe-raising', 'next': '/vibe-raising'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['user_exists'])
+        self.assertTrue(response.data['magic_link_sent'])
+
+        pending_signup = VibeRaisingPendingSignup.objects.get(email='new-vibe@example.com')
+        self.assertEqual(pending_signup.app, 'vibe-raising')
+        self.assertEqual(pending_signup.next_path, '/vibe-raising')
+        mock_generate.assert_called_once_with(pending_signup, base_url='http://localhost:5173')
+        mock_send.assert_called_once()
+
     @override_settings(INNOVATE_CONNECT_ALLIANCE_URL='http://localhost:4100')
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link')
@@ -148,7 +171,7 @@ class AuthContractTests(TestCase):
         mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
         mock_send.assert_called_once()
 
-    @patch('core.views.verify_magic_link', return_value='verify@example.com')
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'verify@example.com'})
     def test_verify_magic_link_returns_redirect_and_user_id(self, mock_verify):
         user = User.objects.create_user(
             email='verify@example.com',
@@ -177,7 +200,7 @@ class AuthContractTests(TestCase):
         self.assertTrue(user.is_active)
         mock_verify.assert_called_once_with('test-token')
 
-    @patch('core.views.verify_magic_link', return_value='vibe-verify@example.com')
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'vibe-verify@example.com'})
     def test_verify_magic_link_defaults_to_vibe_raising_redirect(self, mock_verify):
         user = User.objects.create_user(
             email='vibe-verify@example.com',
@@ -199,7 +222,7 @@ class AuthContractTests(TestCase):
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
 
-    @patch('core.views.verify_magic_link', return_value='ica-verify@example.com')
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'ica-verify@example.com'})
     def test_verify_magic_link_defaults_to_innovate_connect_alliance_redirect(self, mock_verify):
         user = User.objects.create_user(
             email='ica-verify@example.com',
@@ -220,3 +243,60 @@ class AuthContractTests(TestCase):
         self.assertTrue(response.data['next_url'].endswith('/innovate-connect-alliance'))
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
+
+    @patch(
+        'core.views.verify_magic_link',
+        return_value={'kind': 'pending_signup', 'pending_signup_id': 1, 'email': 'pending-vibe@example.com'},
+    )
+    def test_verify_magic_link_creates_vibe_raising_user_from_pending_signup(self, mock_verify):
+        pending_signup = VibeRaisingPendingSignup.objects.create(
+            id=1,
+            email='pending-vibe@example.com',
+            app='vibe-raising',
+            next_path='/vibe-raising',
+            role='participant',
+        )
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=vibe-raising&next=/vibe-raising'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(User.objects.filter(email='pending-vibe@example.com').exists())
+        created_user = User.objects.get(email='pending-vibe@example.com')
+        self.assertEqual(response.data['user']['id'], created_user.id)
+        self.assertEqual(response.data['redirect'], '/vibe-raising')
+        self.assertIn('access_token', response.cookies)
+        self.assertIn('refresh_token', response.cookies)
+
+        pending_signup.refresh_from_db()
+        self.assertIsNotNone(pending_signup.used_at)
+
+    @patch(
+        'core.views.verify_magic_link',
+        return_value={'kind': 'pending_signup', 'pending_signup_id': 1, 'email': 'existing-pending@example.com'},
+    )
+    def test_verify_magic_link_reuses_existing_user_for_pending_signup(self, mock_verify):
+        existing_user = User.objects.create_user(email='existing-pending@example.com', role='participant')
+        existing_user.is_active = False
+        existing_user.save(update_fields=['is_active'])
+        pending_signup = VibeRaisingPendingSignup.objects.create(
+            id=1,
+            email='existing-pending@example.com',
+            app='vibe-raising',
+            next_path='/vibe-raising',
+            role='participant',
+        )
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=vibe-raising&next=/vibe-raising'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['user']['id'], existing_user.id)
+        self.assertIn('access_token', response.cookies)
+
+        existing_user.refresh_from_db()
+        self.assertTrue(existing_user.is_active)
+        pending_signup.refresh_from_db()
+        self.assertIsNotNone(pending_signup.used_at)

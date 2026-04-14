@@ -65,6 +65,25 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.email
 
+
+class VibeRaisingPendingSignup(models.Model):
+    email = models.EmailField(db_index=True)
+    app = models.CharField(max_length=64, default='vibe-raising')
+    next_path = models.CharField(max_length=255, blank=True, null=True)
+    role = models.CharField(max_length=20, choices=User.ROLE_CHOICES, default='participant')
+    used_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['app', 'email', 'used_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.email} ({self.app})"
+
+
 class Hackathon(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True)
