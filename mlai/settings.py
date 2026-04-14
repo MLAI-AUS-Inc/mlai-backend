@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import subprocess
 from datetime import timedelta
 from corsheaders.defaults import default_headers
 
@@ -33,6 +34,38 @@ def _resolve_app_env(*, debug: bool, raw_env: str = "") -> str:
     return "local" if debug else "production"
 
 
+def _resolve_app_release(base_dir: str) -> str:
+    for env_name in (
+        "APP_RELEASE",
+        "GIT_SHA",
+        "COMMIT_SHA",
+        "RENDER_GIT_COMMIT",
+        "SOURCE_VERSION",
+        "VERCEL_GIT_COMMIT_SHA",
+    ):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            return raw[:12]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=base_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return "unknown"
+
+    if result.returncode == 0:
+        value = (result.stdout or "").strip()
+        if value:
+            return value
+
+    return "unknown"
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,6 +84,7 @@ RAW_APP_ENV = os.getenv('APP_ENV', '').strip().lower()
 DEBUG_DEFAULT = False if RAW_APP_ENV in {'production', 'prod'} else True
 DEBUG = _env_is_true('DEBUG', DEBUG_DEFAULT)
 APP_ENV = _resolve_app_env(debug=DEBUG, raw_env=RAW_APP_ENV)
+APP_RELEASE = _resolve_app_release(BASE_DIR)
 IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test'}
 IS_PRODUCTION_ENV = not IS_LOCAL_ENV
 
