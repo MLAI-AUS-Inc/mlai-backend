@@ -13,6 +13,28 @@ class AuthContractTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
+    def test_check_user_returns_true_for_existing_email(self):
+        User.objects.create_user(email='existing@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/check-user/',
+            {'email': 'existing@example.com', 'app': 'vibe-raising'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['user_exists'])
+
+    def test_check_user_returns_false_for_missing_email(self):
+        response = self.client.post(
+            '/api/v1/auth/check-user/',
+            {'email': 'missing@example.com', 'app': 'vibe-raising'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['user_exists'])
+
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=abc')
     def test_create_user_returns_contract_shape(self, mock_generate, mock_send):
@@ -106,21 +128,21 @@ class AuthContractTests(TestCase):
     def test_send_magic_link_uses_vibe_raising_frontend_origin(self, mock_generate, mock_send):
         user = User.objects.create_user(email='vibe-origin@example.com', role='participant')
 
-        self.client.post(
+        response = self.client.post(
             '/api/v1/auth/send-magic-link/',
             {'email': 'vibe-origin@example.com', 'app': 'vibe-raising', 'next': '/vibe-raising'},
             format='json',
         )
 
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['user_exists'])
+        self.assertTrue(response.data['magic_link_sent'])
         mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
         mock_send.assert_called_once()
 
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')
-    @patch('core.views.send_magic_link_email_to_address')
-    @patch('core.views.generate_pending_magic_link')
-    def test_send_magic_link_creates_pending_vibe_raising_signup_for_unknown_email(self, mock_generate, mock_send):
-        mock_generate.return_value = 'http://localhost:5173/verify?token=vibe-pending'
-
+    @patch('core.views.send_magic_link_email')
+    def test_send_magic_link_returns_missing_user_without_creating_vibe_pending_signup(self, mock_send):
         response = self.client.post(
             '/api/v1/auth/send-magic-link/',
             {'email': 'new-vibe@example.com', 'app': 'vibe-raising', 'next': '/vibe-raising'},
@@ -129,13 +151,9 @@ class AuthContractTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data['user_exists'])
-        self.assertTrue(response.data['magic_link_sent'])
-
-        pending_signup = VibeRaisingPendingSignup.objects.get(email='new-vibe@example.com')
-        self.assertEqual(pending_signup.app, 'vibe-raising')
-        self.assertEqual(pending_signup.next_path, '/vibe-raising')
-        mock_generate.assert_called_once_with(pending_signup, base_url='http://localhost:5173')
-        mock_send.assert_called_once()
+        self.assertEqual(response.data['message'], 'User does not exist.')
+        self.assertFalse(VibeRaisingPendingSignup.objects.filter(email='new-vibe@example.com').exists())
+        mock_send.assert_not_called()
 
     @override_settings(INNOVATE_CONNECT_ALLIANCE_URL='http://localhost:4100')
     @patch('core.views.send_magic_link_email')

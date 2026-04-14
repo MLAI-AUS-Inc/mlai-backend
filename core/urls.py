@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path('check-user/', views.CheckUserView.as_view(), name='check_user'),
     path('send-magic-link/', views.SendMagicLinkView.as_view(), name='send_magic_link'),
     path('create-user/', views.CreateUserView.as_view(), name='create_user'),
     path('verify-magic-link/', views.MagicLinkVerifyView.as_view(), name='verify_magic_link'),
