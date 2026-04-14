@@ -77,7 +77,10 @@ class VibeRaisingPendingSignup(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['app', 'email', 'used_at']),
+            models.Index(
+                fields=['app', 'email', 'used_at'],
+                name='core_vibera_app_f19741_idx',
+            ),
         ]
 
     def __str__(self):
