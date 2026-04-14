@@ -44,6 +44,12 @@ AUTH_REQUIRED_MISSING_STEP = "github_auth"
 AUTH_REQUIRED_NEXT_ACTION = "reconnect_github"
 AUTH_REQUIRED_RESUME_HINT = "reconnect_github_then_retry"
 ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED_ERROR_CODE = "article_dependency_strategy_unresolved"
+CONTENT_FACTORY_FAST_QUEUE_CONNECT_TIMEOUT_SECONDS = 3
+CONTENT_FACTORY_FAST_QUEUE_READ_TIMEOUT_SECONDS = 8
+CONTENT_FACTORY_FAST_QUEUE_RETRY_COUNT = 1
+CONTENT_FACTORY_FAST_QUEUE_RETRYABLE_STATUSES = {502, 503, 504}
+CONTENT_FACTORY_TERMINAL_JOB_STATUSES = {"completed", "error", "cancelled"}
+CONTENT_FACTORY_BACKEND_UNAVAILABLE_ERROR_CODE = "CONTENT_FACTORY_UNAVAILABLE"
 
 
 class ArticleGenerationError(Exception):
@@ -78,6 +84,16 @@ class ArticleSystemActionRequiredError(ArticleGenerationError):
         self.recommended_action = recommended_action
         self.hint = hint
         self.resolution_source = resolution_source
+
+
+class ContentFactoryBackendUnavailableError(ArticleGenerationError):
+    """Raised when mlai-backend cannot reliably reach Content Factory."""
+
+    def __init__(self, payload: dict):
+        self.payload = dict(payload or {})
+        super().__init__(
+            self.payload.get("message") or "Content Factory is unavailable right now."
+        )
 
 
 def _coerce_optional_int(value) -> Optional[int]:
@@ -614,6 +630,207 @@ def _get_content_factory_user_for_job(job):
         return UserModel.objects.filter(email__iexact=user_email).first()
 
     return None
+
+
+def _get_content_factory_base_url() -> str:
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip()
+    if base_url:
+        return base_url.rstrip("/")
+    if getattr(settings, "IS_LOCAL_ENV", False):
+        return "http://localhost:8001"
+    raise ArticleGenerationError("CONTENT_FACTORY_URL is not configured.")
+
+
+def _build_content_factory_headers() -> dict:
+    api_key = getattr(settings, "CONTENT_FACTORY_API_KEY", None)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-KEY"] = api_key
+    return headers
+
+
+def _build_content_factory_backend_unavailable_payload(
+    *,
+    operation: str,
+    endpoint: str,
+    domain: Optional[str],
+    source_run_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    status_code: Optional[int] = None,
+) -> dict:
+    message = str(reason or "Content Factory is unavailable right now.").strip()
+    payload = {
+        "status": "backend_unavailable",
+        "error_code": CONTENT_FACTORY_BACKEND_UNAVAILABLE_ERROR_CODE,
+        "service": "content_factory",
+        "operation": operation,
+        "endpoint": endpoint,
+        "domain": domain,
+        "retryable": True,
+        "message": message,
+        "error": message,
+    }
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
+    if job_id:
+        payload["job_id"] = job_id
+        payload["run_id"] = job_id
+    if status_code is not None:
+        payload["status_code"] = status_code
+    return payload
+
+
+def _raise_content_factory_backend_unavailable(
+    *,
+    operation: str,
+    endpoint: str,
+    domain: Optional[str],
+    source_run_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    status_code: Optional[int] = None,
+) -> None:
+    raise ContentFactoryBackendUnavailableError(
+        _build_content_factory_backend_unavailable_payload(
+            operation=operation,
+            endpoint=endpoint,
+            domain=domain,
+            source_run_id=source_run_id,
+            job_id=job_id,
+            reason=reason,
+            status_code=status_code,
+        )
+    )
+
+
+def _post_content_factory_queue_request(
+    endpoint: str,
+    *,
+    payload: dict,
+    headers: dict,
+    operation: str,
+    domain: Optional[str],
+    source_run_id: Optional[str] = None,
+) -> object:
+    attempts = CONTENT_FACTORY_FAST_QUEUE_RETRY_COUNT + 1
+    timeout = (
+        CONTENT_FACTORY_FAST_QUEUE_CONNECT_TIMEOUT_SECONDS,
+        CONTENT_FACTORY_FAST_QUEUE_READ_TIMEOUT_SECONDS,
+    )
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = http_requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+        except http_requests.exceptions.RequestException as exc:
+            logger.warning(
+                "Content Factory queue request failed attempt %s/%s operation=%s endpoint=%s exc=%r",
+                attempt,
+                attempts,
+                operation,
+                endpoint,
+                exc,
+            )
+            if attempt < attempts:
+                continue
+            _raise_content_factory_backend_unavailable(
+                operation=operation,
+                endpoint=endpoint,
+                domain=domain,
+                source_run_id=source_run_id,
+                reason=str(exc),
+            )
+
+        if response.status_code in CONTENT_FACTORY_FAST_QUEUE_RETRYABLE_STATUSES:
+            logger.warning(
+                "Content Factory queue request returned retryable status attempt %s/%s operation=%s endpoint=%s status=%s body=%s",
+                attempt,
+                attempts,
+                operation,
+                endpoint,
+                response.status_code,
+                response.text,
+            )
+            if attempt < attempts:
+                continue
+            _raise_content_factory_backend_unavailable(
+                operation=operation,
+                endpoint=endpoint,
+                domain=domain,
+                source_run_id=source_run_id,
+                reason=response.text,
+                status_code=response.status_code,
+            )
+
+        return response
+
+    _raise_content_factory_backend_unavailable(
+        operation=operation,
+        endpoint=endpoint,
+        domain=domain,
+        source_run_id=source_run_id,
+    )
+
+
+def _find_active_confirm_child_job(
+    *,
+    source_run_id: Optional[str],
+    confirmed_keyword: Optional[str] = None,
+    custom_title: Optional[str] = None,
+):
+    if not source_run_id:
+        return None
+
+    candidates = list(
+        ContentFactoryJob.objects.filter(request_meta__source_run_id=source_run_id)
+        .exclude(status__in=CONTENT_FACTORY_TERMINAL_JOB_STATUSES)
+        .order_by("-updated_at", "-created_at")
+    )
+    if not candidates:
+        return None
+
+    expected_targets = {
+        str(custom_title or "").strip().lower(),
+        str(confirmed_keyword or "").strip().lower(),
+    }
+    expected_targets.discard("")
+
+    def sort_key(job):
+        request_meta = dict(job.request_meta or {})
+        topic = str(request_meta.get("topic") or "").strip().lower()
+        target_keyword = str(request_meta.get("target_keyword") or "").strip().lower()
+        return (
+            0 if expected_targets and {topic, target_keyword} & expected_targets else 1,
+            -int(job.updated_at.timestamp()),
+            -int(job.created_at.timestamp()),
+        )
+
+    return sorted(candidates, key=sort_key)[0]
+
+
+def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) -> dict:
+    request_meta = dict(job.request_meta or {})
+    payload = {
+        "job_id": job.job_id,
+        "run_id": job.job_id,
+        "status": job.status or "queued",
+        "message": "Topic confirmation is already in progress for this thread.",
+        "domain": job.domain,
+    }
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
+    blocked_error = str(request_meta.get("blocked_error_code") or "").strip()
+    if blocked_error:
+        payload["error_code"] = blocked_error
+    if job.error_message:
+        payload["error"] = job.error_message
+        payload["message"] = job.error_message
+    return payload
 
 
 def maybe_auto_refund_terminal_failure(job, *, error_code: Optional[str], error_message: Optional[str]) -> tuple[bool, int]:
@@ -1348,11 +1565,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         competitors = config.organization.competitors or []
         seed_keywords = config.organization.seed_keywords or []
 
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+    content_factory_url = _get_content_factory_base_url()
+    headers = _build_content_factory_headers()
 
     # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
@@ -1377,11 +1591,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         logger.info(f"Research mode enabled for {resolved_domain}. Triggering discovery at {discovery_endpoint}.")
 
         try:
-            response = http_requests.post(
+            response = _post_content_factory_queue_request(
                 discovery_endpoint,
-                json=payload,
+                payload=payload,
                 headers=headers,
-                timeout=600,
+                operation="queue_discovery",
+                domain=resolved_domain,
             )
 
             if response.status_code not in [200, 202]:
@@ -1436,19 +1651,18 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "message": "Discovery started",
                 "job_status_url": f"{content_factory_url.rstrip('/')}/api/runs/{job_id}",
             }
-        except ArticleGenerationError:
-            raise
-        except http_requests.exceptions.RequestException as e:
-            logger.error(f"Failed to connect to Content Factory discovery endpoint: {e}")
+        except ContentFactoryBackendUnavailableError:
             if charged_user is not None:
                 _refund_content_factory_request(
                     user=charged_user,
                     slack_user_id=slack_user_id,
                     article_request=article_request,
                     resolved_domain=resolved_domain,
-                    reason=f"discovery request exception: {e}",
+                    reason="Content Factory queue path unavailable during discovery start",
                 )
-            raise ArticleGenerationError(f"Failed to trigger discovery: {str(e)}")
+            raise
+        except ArticleGenerationError:
+            raise
 
     article_system, article_system_source = resolve_article_system_with_source(config)
     logger.info(
@@ -1529,11 +1743,13 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     )
 
     try:
-        response = http_requests.post(
+        response = _post_content_factory_queue_request(
             generate_endpoint,
-            json=payload,
+            payload=payload,
             headers=headers,
-            timeout=600  # allow CF to enqueue/return job id without premature timeout
+            operation="queue_article",
+            domain=resolved_domain,
+            source_run_id=article_request.get("source_run_id"),
         )
         
         if response.status_code in [200, 202]:
@@ -1605,18 +1821,17 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             )
             raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
 
-    except ArticleGenerationError:
-        raise
-    except http_requests.exceptions.RequestException as e:
-        logger.error(f"Failed to connect to Content Factory: {e}")
+    except ContentFactoryBackendUnavailableError:
         _refund_content_factory_request(
             user=charged_user,
             slack_user_id=slack_user_id,
             article_request=article_request,
             resolved_domain=resolved_domain,
-            reason=f"article request exception: {e}",
+            reason="Content Factory queue path unavailable during article start",
         )
-        raise ArticleGenerationError(f"Failed to trigger generation: {str(e)}")
+        raise
+    except ArticleGenerationError:
+        raise
 
 
 def _handle_status_failure(job_id: str, result: dict):
@@ -1767,13 +1982,10 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
             if resolved_mode:
                 selected_mode = resolved_mode
 
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    content_factory_url = _get_content_factory_base_url()
     endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/delivery-mode"
 
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+    headers = _build_content_factory_headers()
 
     logger.info("Selecting article delivery mode %s for %s", selected_mode, job_id)
 
@@ -1824,15 +2036,12 @@ def check_generation_status(job_id: str) -> dict:
         dict: { "job_id": "...", "status": "...", "progress": int, "current_step": "...", "error": ... }
     """
 
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    content_factory_url = _get_content_factory_base_url()
     status_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}"
     status_endpoint_legacy = f"{content_factory_url.rstrip('/')}/api/pipeline/publish/status/{job_id}"
     status_endpoint_old_backend = f"{content_factory_url.rstrip('/')}/api/v1/content/jobs/{job_id}"
 
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+    headers = _build_content_factory_headers()
 
     try:
         response = http_requests.get(status_endpoint, headers=headers, timeout=30)
@@ -1910,13 +2119,10 @@ def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) 
         dict: { "status": "published", "preview_url": "...", "pr_url": "...", "branch_name": "..." }
     """
     # Publishing is now an approval transition on an existing run.
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    content_factory_url = _get_content_factory_base_url()
     publish_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/approve"
-    
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+
+    headers = _build_content_factory_headers()
 
     logger.info(f"Publishing article to: {publish_endpoint}")
 
@@ -1953,13 +2159,10 @@ def promote_article_bundle(
     """
     from core.models import ContentFactoryJob
 
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    content_factory_url = _get_content_factory_base_url()
     promote_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/promote-bundle"
 
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+    headers = _build_content_factory_headers()
 
     source_job = ContentFactoryJob.objects.filter(job_id=job_id).first()
     resolved_slack_user_id = slack_user_id or (source_job.slack_user_id if source_job else "") or ""
@@ -2100,6 +2303,23 @@ def confirm_topic(
         )
         progress_message_ts = source_job.progress_message_ts or progress_message_ts
 
+    existing_child_job = _find_active_confirm_child_job(
+        source_run_id=source_run_id,
+        confirmed_keyword=confirmed_keyword,
+        custom_title=custom_title,
+    )
+    if existing_child_job:
+        logger.info(
+            "Reusing existing confirmed-topic child job %s for source_run_id=%s status=%s",
+            existing_child_job.job_id,
+            source_run_id,
+            existing_child_job.status,
+        )
+        return _serialize_existing_confirm_child_job(
+            existing_child_job,
+            source_run_id=source_run_id,
+        )
+
     config = None
     try:
         org = Organization.objects.get(domain=normalized_domain)
@@ -2159,24 +2379,22 @@ def confirm_topic(
         payload["source_run_id"] = source_run_id
 
     # 3. Call Content Factory
-    content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://209.38.83.23:80')
+    content_factory_url = _get_content_factory_base_url()
     confirm_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/article"
-    
-    api_key = getattr(settings, 'CONTENT_FACTORY_API_KEY', None)
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-API-KEY"] = api_key
+    headers = _build_content_factory_headers()
 
     # Debug logging
     masked_payload = payload.copy()
     logger.info(f"Confirming topic at {confirm_endpoint} with payload: {masked_payload}")
 
     try:
-        response = http_requests.post(
+        response = _post_content_factory_queue_request(
             confirm_endpoint,
-            json=payload,
+            payload=payload,
             headers=headers,
-            timeout=30
+            operation="confirm_topic",
+            domain=normalized_domain,
+            source_run_id=source_run_id,
         )
         
         if response.status_code in [200, 202]:
@@ -2234,13 +2452,12 @@ def confirm_topic(
                 )
             raise ArticleGenerationError(f"Topic confirmation failed: {response.text}")
             
-    except http_requests.exceptions.RequestException as e:
-        logger.error(f"Failed to connect to Content Factory: {e}")
+    except ContentFactoryBackendUnavailableError:
         if deferred_charge_started:
             _refund_deferred_discovery_job_on_confirm_failure(
                 source_job=source_job,
                 slack_user_id=slack_user_id,
                 domain=normalized_domain,
-                reason=str(e),
+                reason="Content Factory queue path unavailable during topic confirmation",
             )
-        raise ArticleGenerationError(f"Failed to confirm topic: {str(e)}")
+        raise

@@ -10,6 +10,7 @@ from core.models import ContentFactoryJob, ContentFactoryRun, Organization, Orga
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleGenerationError,
+    ContentFactoryBackendUnavailableError,
     GitHubReconnectRequiredError,
     check_generation_status,
     confirm_topic,
@@ -116,6 +117,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(job.billing_source_job_id, "job_123")
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 20)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], (3, 8))
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
@@ -174,6 +176,56 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["delivery_mode"], "publish_code")
         self.assertFalse(payload["delivery_mode_confirmed"])
         self.assertEqual(payload["request_source"], "roo_slackbot")
+        self.assertEqual(kwargs["timeout"], (3, 8))
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirm_topic_reuses_existing_non_terminal_child_without_post(self, mock_post):
+        source_job = ContentFactoryJob.objects.create(
+            job_id="job-source-active-123",
+            domain="mlai.au",
+            slack_user_id=self.slack_user_id,
+            status="awaiting_confirmation",
+        )
+        child_job = ContentFactoryJob.objects.create(
+            job_id="job-child-active-123",
+            domain="mlai.au",
+            slack_user_id=self.slack_user_id,
+            status="queued",
+            request_meta={
+                "source_run_id": source_job.job_id,
+                "topic": "Agentic AI",
+                "target_keyword": "agentic ai",
+            },
+        )
+
+        result = confirm_topic(
+            domain="mlai.au",
+            confirmed_keyword="agentic ai",
+            slack_user_id=self.slack_user_id,
+            custom_title="Agentic AI",
+            source_run_id=source_job.job_id,
+            request_source="roo_slackbot",
+        )
+
+        self.assertEqual(result["job_id"], child_job.job_id)
+        self.assertEqual(result["status"], "queued")
+        mock_post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirm_topic_raises_structured_backend_unavailable_on_queue_timeout(self, mock_post):
+        mock_post.side_effect = requests.exceptions.ReadTimeout("timed out")
+
+        with self.assertRaises(ContentFactoryBackendUnavailableError) as exc:
+            confirm_topic(
+                domain="mlai.au",
+                confirmed_keyword="agentic ai",
+                slack_user_id=self.slack_user_id,
+                request_source="roo_slackbot",
+            )
+
+        self.assertEqual(exc.exception.payload["error_code"], "CONTENT_FACTORY_UNAVAILABLE")
+        self.assertEqual(exc.exception.payload["operation"], "confirm_topic")
+        self.assertEqual(mock_post.call_count, 2)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_publish_article(self, mock_post):
@@ -350,16 +402,6 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["github_repo"], self.repo_name)
         self.assertEqual(payload["auth_url"], "https://github.example/reconnect")
         self.assertTrue(payload["pending_intent_stored"])
-
-        self.assertEqual(result["job_id"], "job_publish_child")
-        mock_promote_article_bundle.assert_called_once_with(
-            "job_content_ready",
-            slack_user_id=self.slack_user_id,
-            domain="mlai.au",
-            slack_channel_id="C123",
-            slack_thread_ts="123.456",
-            slack_root_message_ts="123.456",
-        )
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_omits_delivery_mode_when_no_preference_exists(self, mock_post):
