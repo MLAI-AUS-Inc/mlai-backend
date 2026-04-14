@@ -35,6 +35,28 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data['user_exists'])
 
+    def test_current_user_returns_401_for_anonymous_requests(self):
+        response = self.client.get('/api/v1/auth/me/')
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.data['error'], 'Not authenticated')
+        self.assertTrue(getattr(response, '_has_been_logged', False))
+
+    def test_current_user_returns_authenticated_user_payload(self):
+        user = User.objects.create_user(
+            email='current-user@example.com',
+            role='participant',
+            first_name='Current',
+            last_name='User',
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get('/api/v1/auth/me/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['email'], 'current-user@example.com')
+        self.assertEqual(response.data['full_name'], 'Current User')
+
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=abc')
     def test_create_user_returns_contract_shape(self, mock_generate, mock_send):

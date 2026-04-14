@@ -639,12 +639,14 @@ class CookieTokenRefreshView(TokenRefreshView):
         return response
 
 class CurrentUserView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         user = request.user
         if not user.is_authenticated:
-            return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
+            response = Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
+            response._has_been_logged = True
+            return response
         
         # Retrieve hospital team
         hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
