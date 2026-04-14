@@ -9,7 +9,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 signer = TimestampSigner()
 MAGIC_LINK_KIND_USER = "user"
-MAGIC_LINK_KIND_PENDING_SIGNUP = "pending_signup"
 
 # Load API Key from environment
 CUSTOMER_IO_API_KEY = os.getenv('CUSTOMERIO_API_KEY')
@@ -27,20 +26,6 @@ def generate_magic_link(user, base_url="https://www.med-hack.com"):
         {
             'kind': MAGIC_LINK_KIND_USER,
             'email': user.email,
-        },
-        base_url=base_url,
-    )
-
-
-def generate_pending_magic_link(pending_signup, base_url="https://www.med-hack.com"):
-    """
-    Generates a signed magic link for a pending Vibe Raising signup.
-    """
-    return _generate_magic_link_from_payload(
-        {
-            'kind': MAGIC_LINK_KIND_PENDING_SIGNUP,
-            'pending_signup_id': pending_signup.id,
-            'email': pending_signup.email,
         },
         base_url=base_url,
     )
