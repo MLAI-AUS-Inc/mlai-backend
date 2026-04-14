@@ -16,6 +16,9 @@ def health_check(request):
             {
                 "status": "error",
                 "message": "Database migration readiness check failed",
+                "service": "mlai-backend",
+                "app_env": getattr(settings, "APP_ENV", "unknown"),
+                "release": getattr(settings, "APP_RELEASE", "unknown"),
                 "error": str(exc),
             },
             status=503,
@@ -26,12 +29,23 @@ def health_check(request):
             {
                 "status": "not_ready",
                 "message": "Unapplied migrations detected",
+                "service": "mlai-backend",
+                "app_env": getattr(settings, "APP_ENV", "unknown"),
+                "release": getattr(settings, "APP_RELEASE", "unknown"),
                 "pending_migrations": len(pending_migrations),
             },
             status=503,
         )
 
-    return JsonResponse({"status": "ok", "message": "MLAI Backend is running"})
+    return JsonResponse(
+        {
+            "status": "ok",
+            "message": "MLAI Backend is running",
+            "service": "mlai-backend",
+            "app_env": getattr(settings, "APP_ENV", "unknown"),
+            "release": getattr(settings, "APP_RELEASE", "unknown"),
+        }
+    )
 
 
 def health_live(request):
@@ -40,6 +54,7 @@ def health_live(request):
             "status": "ok",
             "service": "mlai-backend",
             "app_env": getattr(settings, "APP_ENV", "unknown"),
+            "release": getattr(settings, "APP_RELEASE", "unknown"),
         }
     )
 
@@ -51,6 +66,9 @@ def health_ready(request):
             {
                 "status": "error",
                 "message": "Database configuration missing",
+                "service": "mlai-backend",
+                "app_env": getattr(settings, "APP_ENV", "unknown"),
+                "release": getattr(settings, "APP_RELEASE", "unknown"),
             },
             status=503,
         )
@@ -64,6 +82,9 @@ def health_ready(request):
             {
                 "status": "error",
                 "message": "Database readiness check failed",
+                "service": "mlai-backend",
+                "app_env": getattr(settings, "APP_ENV", "unknown"),
+                "release": getattr(settings, "APP_RELEASE", "unknown"),
                 "error": str(exc),
             },
             status=503,
@@ -74,6 +95,7 @@ def health_ready(request):
             "status": "ok",
             "service": "mlai-backend",
             "app_env": getattr(settings, "APP_ENV", "unknown"),
+            "release": getattr(settings, "APP_RELEASE", "unknown"),
         }
     )
 
@@ -107,6 +129,8 @@ def health_points(request):
                 "status": "error",
                 "service": "mlai-backend",
                 "subsystem": "points",
+                "app_env": getattr(settings, "APP_ENV", "unknown"),
+                "release": getattr(settings, "APP_RELEASE", "unknown"),
                 "message": "Points subsystem health check failed",
                 "error": str(exc),
             },
@@ -119,5 +143,6 @@ def health_points(request):
             "service": "mlai-backend",
             "subsystem": "points",
             "app_env": getattr(settings, "APP_ENV", "unknown"),
+            "release": getattr(settings, "APP_RELEASE", "unknown"),
         }
     )
