@@ -2535,6 +2535,49 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("No promotable content-ready article", response.data["error"])
 
+    def test_resolve_thread_returns_active_confirm_child_for_confirm_topic(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-parent-confirm",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="confirmed",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+        )
+        ContentFactoryJob.objects.create(
+            job_id="job-child-confirm",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="blocked",
+            slack_channel_id="C123",
+            slack_root_message_ts="123.456",
+            slack_thread_ts="123.456",
+            error_message="[token_refresh_unavailable] Token refresh is temporarily unavailable.",
+            request_meta={
+                "source_run_id": "job-parent-confirm",
+                "blocked_error_code": "token_refresh_unavailable",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_job_resolve_thread'),
+            {
+                "slack_user_id": "U123",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "123.456",
+                "requested_action": "confirm_topic",
+                "job_id": "job-parent-confirm",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["requested_action"], "confirm_topic")
+        self.assertEqual(response.data["job_id"], "job-child-confirm")
+        self.assertEqual(response.data["status"], "blocked")
+        self.assertEqual(response.data["error_code"], "token_refresh_unavailable")
+
     def test_seo_written_article_create_updates_existing_slug_instead_of_raising(self):
         org = Organization.objects.create(name="MLAI", domain="mlai.au")
         article = WrittenArticle.objects.create(

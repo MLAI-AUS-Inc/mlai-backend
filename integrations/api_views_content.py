@@ -17,6 +17,7 @@ from integrations.services.article_generation import (
     set_article_delivery_mode,
     ArticleGenerationError,
     ArticleSystemActionRequiredError,
+    ContentFactoryBackendUnavailableError,
     GitHubReconnectRequiredError,
     CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
     SCHEDULED_DAILY_TRIGGER_SOURCE,
@@ -38,6 +39,16 @@ PUBLISH_IN_PROGRESS_SOURCE_STAGES = {
     "auto_approved",
 }
 PUBLISH_IN_PROGRESS_CHILD_STAGES = PUBLISH_IN_PROGRESS_SOURCE_STAGES - {"promotion_requested"}
+CONFIRM_THREAD_ACTIVE_STATUSES = {
+    "queued",
+    "generating",
+    "blocked",
+    "auth_required",
+    "awaiting_delivery_mode",
+    "awaiting_approval",
+    "needs_review",
+    "pr_opened",
+}
 
 
 def _validate_roo_content_request(request, *, require_client_request_id: bool = False) -> Optional[Response]:
@@ -56,6 +67,17 @@ def _validate_roo_content_request(request, *, require_client_request_id: bool = 
         )
 
     return None
+
+
+def _handle_backend_unavailable_error(exc: ContentFactoryBackendUnavailableError) -> Response:
+    payload = dict(getattr(exc, "payload", {}) or {})
+    if "error" not in payload:
+        payload["error"] = str(exc)
+    payload.setdefault("message", payload["error"])
+    payload.setdefault("error_code", "CONTENT_FACTORY_UNAVAILABLE")
+    payload.setdefault("status", "backend_unavailable")
+    payload.setdefault("retryable", True)
+    return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_request: dict = None) -> Response:
@@ -256,6 +278,103 @@ def _resolve_publishable_job_for_thread(
 
     return None
 
+
+def _resolve_confirm_job_for_thread(
+    *,
+    slack_user_id: str,
+    slack_channel_id: str,
+    slack_thread_ts: str,
+    domain: Optional[str] = None,
+    source_job_id: Optional[str] = None,
+):
+    from core.models import ContentFactoryJob
+
+    resolved_user_id = str(slack_user_id or "").strip()
+    resolved_channel_id = str(slack_channel_id or "").strip()
+    resolved_thread_ts = str(slack_thread_ts or "").strip()
+    resolved_domain = str(domain or "").strip().lower()
+    resolved_source_job_id = str(source_job_id or "").strip()
+
+    if not (resolved_user_id and resolved_channel_id and resolved_thread_ts):
+        return None
+
+    jobs = list(
+        ContentFactoryJob.objects.filter(
+            slack_user_id=resolved_user_id,
+            slack_channel_id=resolved_channel_id,
+        ).filter(
+            Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
+        )
+    )
+    if resolved_domain:
+        domain_matched = [job for job in jobs if str(job.domain or "").strip().lower() == resolved_domain]
+        if domain_matched:
+            jobs = domain_matched
+
+    if resolved_source_job_id:
+        chained = []
+        for job in jobs:
+            request_meta = dict(job.request_meta or {})
+            if job.job_id == resolved_source_job_id or str(request_meta.get("source_run_id") or "").strip() == resolved_source_job_id:
+                chained.append(job)
+        if chained:
+            jobs = chained
+
+    candidates = [job for job in jobs if str(job.status or "").strip() in CONFIRM_THREAD_ACTIVE_STATUSES]
+    if not candidates:
+        return None
+
+    status_rank = {
+        "awaiting_delivery_mode": 0,
+        "blocked": 1,
+        "auth_required": 2,
+        "generating": 3,
+        "queued": 4,
+        "awaiting_approval": 5,
+        "needs_review": 6,
+        "pr_opened": 7,
+    }
+
+    def sort_key(job):
+        request_meta = dict(job.request_meta or {})
+        is_exact_source_match = (
+            resolved_source_job_id
+            and (
+                job.job_id == resolved_source_job_id
+                or str(request_meta.get("source_run_id") or "").strip() == resolved_source_job_id
+            )
+        )
+        is_child = bool(str(request_meta.get("source_run_id") or "").strip())
+        return (
+            0 if is_exact_source_match else 1,
+            0 if is_child else 1,
+            status_rank.get(str(job.status or "").strip(), 99),
+            -int(job.updated_at.timestamp()),
+            -int(job.created_at.timestamp()),
+        )
+
+    resolved_job = sorted(candidates, key=sort_key)[0]
+    request_meta = dict(resolved_job.request_meta or {})
+    error_code = str(request_meta.get("blocked_error_code") or "").strip()
+    if not error_code and str(resolved_job.status or "").strip() == "auth_required":
+        error_code = "AUTH_REQUIRED"
+
+    payload = {
+        "resolution": "in_progress",
+        "requested_action": "confirm_topic",
+        "job_id": resolved_job.job_id,
+        "active_job_id": resolved_job.job_id,
+        "status": resolved_job.status,
+        "domain": resolved_job.domain,
+        "source_run_id": str(request_meta.get("source_run_id") or resolved_job.job_id).strip(),
+    }
+    if error_code:
+        payload["error_code"] = error_code
+    if resolved_job.error_message:
+        payload["error"] = resolved_job.error_message
+        payload["message"] = resolved_job.error_message
+    return payload
+
 class ContentGenerateView(APIView):
     """
     Trigger content generation pipeline.
@@ -297,6 +416,9 @@ class ContentGenerateView(APIView):
         try:
             result = trigger_article_generation(slack_user_id, article_request)
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except ContentFactoryBackendUnavailableError as e:
+            logger.warning(f"Content Factory backend unavailable during generation: {e}")
+            return _handle_backend_unavailable_error(e)
         except GitHubReconnectRequiredError as e:
             logger.warning(f"GitHub reconnect required: {e}")
             return _handle_auth_required_error(e, slack_user_id, article_request=article_request)
@@ -356,24 +478,40 @@ class ContentResolveThreadView(APIView):
         domain = str(request.data.get("domain") or "").strip()
         requested_action = str(request.data.get("requested_action") or "").strip()
 
-        if requested_action != "publish_pr":
-            return Response({"error": "requested_action must be publish_pr"}, status=status.HTTP_400_BAD_REQUEST)
+        if requested_action not in {"publish_pr", "confirm_topic"}:
+            return Response(
+                {"error": "requested_action must be publish_pr or confirm_topic"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not all([slack_user_id, slack_channel_id, slack_thread_ts]):
             return Response(
                 {"error": "slack_user_id, slack_channel_id, and slack_thread_ts are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        resolved = _resolve_publishable_job_for_thread(
-            slack_user_id=slack_user_id,
-            slack_channel_id=slack_channel_id,
-            slack_thread_ts=slack_thread_ts,
-            domain=domain or None,
-        )
+        if requested_action == "confirm_topic":
+            resolved = _resolve_confirm_job_for_thread(
+                slack_user_id=slack_user_id,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+                domain=domain or None,
+                source_job_id=request.data.get("job_id"),
+            )
+        else:
+            resolved = _resolve_publishable_job_for_thread(
+                slack_user_id=slack_user_id,
+                slack_channel_id=slack_channel_id,
+                slack_thread_ts=slack_thread_ts,
+                domain=domain or None,
+            )
         if not resolved:
             return Response(
                 {
-                    "error": "No promotable content-ready article was found for this Slack thread.",
+                    "error": (
+                        "No active content-factory article was found for this Slack thread."
+                        if requested_action == "confirm_topic"
+                        else "No promotable content-ready article was found for this Slack thread."
+                    ),
                     "requested_action": requested_action,
                 },
                 status=status.HTTP_404_NOT_FOUND,
@@ -552,6 +690,8 @@ class ContentConfirmView(APIView):
 
                 mark_scheduled_dispatch_confirmed(job_id=source_run_id)
             return Response(result, status=status.HTTP_202_ACCEPTED)
+        except ContentFactoryBackendUnavailableError as e:
+            return _handle_backend_unavailable_error(e)
         except GitHubReconnectRequiredError as e:
             return _handle_auth_required_error(
                 e,
@@ -708,7 +848,11 @@ class ContentJobConfirmView(APIView):
                 target_job = child_job
             else:
                 target_job = ContentFactoryJob.objects.filter(job_id=active_job_id).first()
-            if target_job and result_status != "awaiting_delivery_mode":
+            if target_job and result_status in {"blocked", "auth_required"}:
+                if target_job.status != result_status:
+                    target_job.status = result_status
+                    target_job.save(update_fields=["status", "updated_at"])
+            if target_job and result_status not in {"awaiting_delivery_mode", "blocked", "auth_required"}:
                 upsert_live_progress_card(
                     target_job,
                     summary_text="Topic confirmed. Roo is writing the draft now.",
@@ -731,6 +875,18 @@ class ContentJobConfirmView(APIView):
                     },
                     status=status.HTTP_200_OK,
                 )
+            if result_status in {"blocked", "auth_required"}:
+                return Response(
+                    {
+                        "status": result_status,
+                        "job_id": active_job_id,
+                        "run_id": active_job_id,
+                        **({"source_run_id": job.job_id} if active_job_id != job.job_id else {}),
+                        "message": result.get("message") or result.get("error") or "Article generation is waiting on a dependency.",
+                        "cf_response": result,
+                    },
+                    status=status.HTTP_200_OK,
+                )
             return Response({
                 "status": "confirmed",
                 "job_id": active_job_id,
@@ -746,6 +902,8 @@ class ContentJobConfirmView(APIView):
                 slack_user_id,
                 article_request={"domain": resolved_domain, "topic": confirmed_keyword},
             )
+        except ContentFactoryBackendUnavailableError as e:
+            return _handle_backend_unavailable_error(e)
         except ArticleSystemActionRequiredError as e:
             return _handle_article_system_action_required(e, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
         except ArticleGenerationError as e:

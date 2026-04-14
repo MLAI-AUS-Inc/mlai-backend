@@ -13,6 +13,7 @@ from core.models import (
     ScheduledDiscoveryDispatchState,
     User,
 )
+from integrations.services.article_generation import ContentFactoryBackendUnavailableError
 from roo.models import Ledger
 
 
@@ -178,6 +179,32 @@ class ContentJobConfirmTest(TestCase):
         dispatch.refresh_from_db()
         self.assertEqual(dispatch.state, ScheduledDiscoveryDispatchState.CONFIRMED)
         mock_confirm_topic.assert_called_once()
+
+    @patch("integrations.services.article_generation.confirm_topic")
+    def test_confirm_returns_structured_503_when_content_factory_is_unavailable(self, mock_confirm_topic):
+        mock_confirm_topic.side_effect = ContentFactoryBackendUnavailableError(
+            {
+                "status": "backend_unavailable",
+                "error_code": "CONTENT_FACTORY_UNAVAILABLE",
+                "message": "Content Factory is unavailable right now.",
+                "retryable": True,
+            }
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "slack_user_id": "U123",
+                "domain": "example.com",
+                "option_index": 0,
+                "request_source": "roo_slackbot",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["error_code"], "CONTENT_FACTORY_UNAVAILABLE")
+        self.assertEqual(response.data["status"], "backend_unavailable")
 
     def test_cancel_marks_job_and_dispatch_cancelled(self):
         dispatch = ScheduledDiscoveryDispatch.objects.create(
