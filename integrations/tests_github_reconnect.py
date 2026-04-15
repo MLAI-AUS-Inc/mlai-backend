@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from core.models import Organization, OrganizationContentConfig
 from integrations.models import UserIntegration
+from integrations.services.article_generation import ArticleGenerationError
 from integrations.services.github import (
     AUTH_RECONNECT_TEXT,
     GitHubAuthScanError,
@@ -255,6 +256,60 @@ class ContentFactoryGitHubReconnectEndpointTests(TestCase):
         self.assertEqual(payload["connection_state"], "connected")
         self.assertEqual(payload["credential_source"], "user")
         self.assertEqual(payload["github_repo"], "MLAI-AUS-Inc/mlai-au")
+
+    @patch('integrations.services.article_generation.refresh_github_token')
+    @patch('integrations.services.article_generation.get_github_credentials_for_domain')
+    def test_reconnect_endpoint_force_refreshes_user_token_before_returning_auth_started(
+        self,
+        mock_get_credentials,
+        mock_refresh_github_token,
+    ):
+        org = Organization.objects.create(domain="mlai.au", name="MLAI")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            connected_slack_user_id="U_OTHER",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+        UserIntegration.objects.create(
+            slack_user_id="U123",
+            github_access_token="stale-user-token",
+            github_refresh_token="refresh-token",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+        mock_get_credentials.side_effect = [
+            ArticleGenerationError("stale access token"),
+            {
+                "token": "fresh-user-token",
+                "repo": "MLAI-AUS-Inc/mlai-au",
+                "source": "user",
+            },
+        ]
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                        "trigger": "preflight",
+                        "pending_action": "write_article",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "already_connected")
+        self.assertEqual(payload["connection_state"], "connected")
+        self.assertEqual(payload["credential_source"], "user")
+        mock_refresh_github_token.assert_called_once_with("U123")
+        self.assertEqual(mock_get_credentials.call_count, 2)
 
     def test_reconnect_endpoint_returns_auth_started_when_repo_selection_needed(self):
         org = Organization.objects.create(domain="mlai.au", name="MLAI")

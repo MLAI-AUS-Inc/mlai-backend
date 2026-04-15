@@ -3,6 +3,7 @@ from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from urllib.parse import parse_qs, urlparse
 from integrations.models import UserIntegration
+from integrations.services.article_generation import ArticleGenerationError
 from integrations.services.github import scan_github_project, get_latest_repo_sha
 from integrations.services.github_connections import parse_github_oauth_state
 from core.models import Organization, OrganizationContentConfig
@@ -202,6 +203,45 @@ class SmartScanTests(TestCase):
         self.assertFalse(response.data['has_updates'])
         self.assertFalse(response.data['repo_has_new_commits'])
         self.assertIsNone(response.data['current_sha'])
+
+    @patch('integrations.services.article_generation.refresh_github_token')
+    @patch('integrations.services.article_generation.get_github_credentials_for_domain')
+    def test_status_endpoint_force_refreshes_user_token_when_initial_resolution_fails(
+        self,
+        mock_get_credentials,
+        mock_refresh_github_token,
+    ):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        self.integration.github_refresh_token = 'refresh-token'
+        self.integration.save(update_fields=['github_refresh_token'])
+        mock_get_credentials.side_effect = [
+            ArticleGenerationError("stale access token"),
+            {
+                "token": "fresh-user-token",
+                "repo": "owner/repo",
+                "source": "user",
+                "integration": self.integration,
+            },
+        ]
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(
+            f'/api/v1/integrations/github/{self.user_id}/?domain={self.domain}&include_repo_freshness=0'
+        )
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['domain_connected'])
+        self.assertFalse(response.data['needs_github_auth'])
+        self.assertEqual(response.data['connection_state'], 'connected')
+        self.assertEqual(response.data['credential_source'], 'user')
+        mock_refresh_github_token.assert_called_once_with(self.user_id)
+        self.assertEqual(mock_get_credentials.call_count, 2)
 
     @patch('integrations.services.article_generation.ensure_valid_token', return_value='fresh-user-token')
     def test_status_endpoint_uses_user_fallback_for_domain_owned_by_other_user(self, mock_ensure_valid_token):
