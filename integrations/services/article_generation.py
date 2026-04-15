@@ -12,7 +12,7 @@ from core.article_system import (
 from integrations.models import UserIntegration
 from core.models import ContentFactoryJob, OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
-from integrations.services.github import ensure_valid_token, TokenRefreshError
+from integrations.services.github import ensure_valid_token, refresh_github_token, TokenRefreshError
 from integrations.services.github_connections import build_github_oauth_url
 from integrations.content_factory_contract import (
     CONTENT_FACTORY_REQUEST_SOURCE,
@@ -1541,7 +1541,41 @@ def resolve_content_factory_connection_for_domain(
         credential_source = str(creds.get("source") or "").strip() or "none"
         connection_state = "connected" if github_repo else "repo_selection_required"
         config = creds.get("config") or config
-    except ArticleGenerationError:
+    except ArticleGenerationError as exc:
+        forced_user_refresh_attempted = False
+        if slack_user_id:
+            integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
+            if integration and integration.github_refresh_token:
+                try:
+                    logger.info(
+                        "Attempting forced user-token refresh for %s during Content Factory connection resolution on %s",
+                        slack_user_id,
+                        normalized_domain,
+                    )
+                    refresh_github_token(slack_user_id)
+                    forced_user_refresh_attempted = True
+                except Exception as refresh_exc:
+                    logger.warning(
+                        "Forced user-token refresh failed for %s during Content Factory connection resolution on %s: %s",
+                        slack_user_id,
+                        normalized_domain,
+                        refresh_exc,
+                    )
+
+        if forced_user_refresh_attempted:
+            try:
+                creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
+                github_repo = creds.get("repo") or github_repo
+                credential_source = str(creds.get("source") or "").strip() or "none"
+                connection_state = "connected" if github_repo else "repo_selection_required"
+                config = creds.get("config") or config
+            except ArticleGenerationError:
+                logger.warning(
+                    "Content Factory connection resolution still requires auth after forced refresh for %s on %s: %s",
+                    slack_user_id,
+                    normalized_domain,
+                    exc,
+                )
         if config and config.github_token_encrypted and not config.github_repo:
             connection_state = "repo_selection_required"
 
