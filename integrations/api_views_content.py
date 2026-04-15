@@ -112,6 +112,36 @@ def _is_delegated_content_request(*, slack_user_id: Optional[str], requested_by_
     return bool(requester and effective and requester != effective)
 
 
+def _resolve_explicit_requested_by_slack_user_id(
+    *,
+    slack_user_id: Optional[str],
+    request_data=None,
+    job=None,
+) -> str:
+    effective = str(slack_user_id or "").strip()
+    explicit_request_supplied = False
+    explicit_request_candidate = None
+    if request_data is not None:
+        try:
+            explicit_request_supplied = "requested_by_slack_user_id" in request_data
+        except Exception:
+            pass
+        try:
+            explicit_request_candidate = request_data.get("requested_by_slack_user_id")
+        except Exception:
+            explicit_request_candidate = None
+
+    if explicit_request_supplied:
+        value = str(explicit_request_candidate or "").strip()
+        return value if value and value != effective else ""
+
+    if job is not None:
+        value = str((getattr(job, "request_meta", {}) or {}).get("requested_by_slack_user_id") or "").strip()
+        if value and value != effective:
+            return value
+    return ""
+
+
 def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_request: dict = None) -> Response:
     """
     Parse a PREREQUISITE_MISSING error, store pending intent, and return a structured 412 response.
@@ -488,8 +518,13 @@ class ContentGenerateView(APIView):
             "user_first_name": request.data.get("user_first_name"),
             "user_last_name": request.data.get("user_last_name"),
             "user_avatar_url": request.data.get("user_avatar_url"),
-            "requested_by_slack_user_id": request.data.get("requested_by_slack_user_id"),
         }
+        requested_by_slack_user_id = _resolve_explicit_requested_by_slack_user_id(
+            slack_user_id=slack_user_id,
+            request_data=request.data,
+        )
+        if requested_by_slack_user_id:
+            article_request["requested_by_slack_user_id"] = requested_by_slack_user_id
 
         try:
             result = trigger_article_generation(slack_user_id, article_request)
@@ -650,21 +685,27 @@ class ContentPublishPrView(APIView):
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if not job:
             return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
-        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+        resolved_slack_user_id = slack_user_id or job.slack_user_id
+        requested_by_slack_user_id = _resolve_explicit_requested_by_slack_user_id(
             slack_user_id=slack_user_id or job.slack_user_id,
             request_data=request.data,
             job=job,
         )
 
         try:
+            publish_kwargs = {
+                "slack_user_id": resolved_slack_user_id,
+                "domain": job.domain,
+                "slack_channel_id": job.slack_channel_id or "",
+                "slack_thread_ts": job.slack_thread_ts or "",
+                "slack_root_message_ts": job.slack_root_message_ts or "",
+            }
+            if requested_by_slack_user_id:
+                publish_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
+
             result = publish_article_as_pr(
                 job_id,
-                slack_user_id=slack_user_id or job.slack_user_id,
-                requested_by_slack_user_id=requested_by_slack_user_id,
-                domain=job.domain,
-                slack_channel_id=job.slack_channel_id or "",
-                slack_thread_ts=job.slack_thread_ts or "",
-                slack_root_message_ts=job.slack_root_message_ts or "",
+                **publish_kwargs,
             )
             return Response(result, status=status.HTTP_200_OK)
         except GitHubReconnectRequiredError as e:
@@ -718,7 +759,7 @@ class ContentConfirmView(APIView):
         slack_thread_ts = request.data.get('slack_thread_ts')
         slack_root_message_ts = request.data.get('slack_root_message_ts') or slack_thread_ts
         progress_message_ts = request.data.get('progress_message_ts')
-        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+        requested_by_slack_user_id = _resolve_explicit_requested_by_slack_user_id(
             slack_user_id=slack_user_id,
             request_data=request.data,
         )
@@ -737,21 +778,26 @@ class ContentConfirmView(APIView):
             )
 
         try:
+            confirm_kwargs = {
+                "domain": domain,
+                "confirmed_keyword": confirmed_keyword,
+                "slack_user_id": slack_user_id,
+                "custom_title": custom_title,
+                "skip_alternatives": skip_alternatives,
+                "source_run_id": source_run_id,
+                "slack_channel_id": slack_channel_id,
+                "slack_thread_ts": slack_thread_ts,
+                "slack_root_message_ts": slack_root_message_ts,
+                "progress_message_ts": progress_message_ts,
+                "delivery_mode": request.data.get("delivery_mode"),
+                "delivery_mode_confirmed": request.data.get("delivery_mode_confirmed"),
+                "request_source": request.data.get("request_source"),
+            }
+            if requested_by_slack_user_id:
+                confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
+
             result = confirm_topic(
-                domain=domain,
-                confirmed_keyword=confirmed_keyword,
-                slack_user_id=slack_user_id,
-                requested_by_slack_user_id=requested_by_slack_user_id,
-                custom_title=custom_title,
-                skip_alternatives=skip_alternatives,
-                source_run_id=source_run_id,
-                slack_channel_id=slack_channel_id,
-                slack_thread_ts=slack_thread_ts,
-                slack_root_message_ts=slack_root_message_ts,
-                progress_message_ts=progress_message_ts,
-                delivery_mode=request.data.get("delivery_mode"),
-                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
-                request_source=request.data.get("request_source"),
+                **confirm_kwargs,
             )
             new_job_id = result.get("job_id") or result.get("run_id")
             if source_run_id and new_job_id:
@@ -861,10 +907,6 @@ class ContentJobConfirmView(APIView):
         slack_user_id = request.data.get('slack_user_id')
         domain = request.data.get('domain')
         custom_title = request.data.get('custom_title')
-        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
-            slack_user_id=slack_user_id,
-            request_data=request.data,
-        )
 
         if not all([job_id, slack_user_id]):
             return Response({"error": "job_id and slack_user_id are required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -873,6 +915,11 @@ class ContentJobConfirmView(APIView):
             job = ContentFactoryJob.objects.get(job_id=job_id)
         except ContentFactoryJob.DoesNotExist:
             return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+        requested_by_slack_user_id = _resolve_explicit_requested_by_slack_user_id(
+            slack_user_id=slack_user_id,
+            request_data=request.data,
+            job=job,
+        )
 
         # Extract all options from selection_data for building skip_alternatives
         options = []
@@ -930,22 +977,25 @@ class ContentJobConfirmView(APIView):
 
         # Trigger article generation via Content Factory HTTP API
         try:
-            result = confirm_topic(
-                domain=resolved_domain,
-                confirmed_keyword=confirmed_keyword,
-                slack_user_id=slack_user_id,
-                requested_by_slack_user_id=requested_by_slack_user_id,
-                custom_title=custom_title,
-                skip_alternatives=skip_alternatives if skip_alternatives else None,
-                source_run_id=job_id,
-                slack_channel_id=job.slack_channel_id,
-                slack_thread_ts=job.slack_thread_ts,
-                slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
-                progress_message_ts=job.progress_message_ts,
-                delivery_mode=request.data.get("delivery_mode"),
-                delivery_mode_confirmed=request.data.get("delivery_mode_confirmed"),
-                request_source=request.data.get("request_source"),
-            )
+            confirm_kwargs = {
+                "domain": resolved_domain,
+                "confirmed_keyword": confirmed_keyword,
+                "slack_user_id": slack_user_id,
+                "custom_title": custom_title,
+                "skip_alternatives": skip_alternatives if skip_alternatives else None,
+                "source_run_id": job_id,
+                "slack_channel_id": job.slack_channel_id,
+                "slack_thread_ts": job.slack_thread_ts,
+                "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
+                "progress_message_ts": job.progress_message_ts,
+                "delivery_mode": request.data.get("delivery_mode"),
+                "delivery_mode_confirmed": request.data.get("delivery_mode_confirmed"),
+                "request_source": request.data.get("request_source"),
+            }
+            if requested_by_slack_user_id:
+                confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
+
+            result = confirm_topic(**confirm_kwargs)
             result_status = str(result.get("status") or "").strip()
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
