@@ -1835,6 +1835,7 @@ class ContentFactoryGitHubStatusView(APIView):
 
     def get(self, request):
         domain = request.query_params.get('domain')
+        slack_user_id = str(request.query_params.get('slack_user_id') or '').strip()
 
         if not domain:
             return Response(
@@ -1853,24 +1854,32 @@ class ContentFactoryGitHubStatusView(APIView):
                 'message': 'Organization not found. Please set up the organization first.'
             }, status=status.HTTP_200_OK)
 
-        config = getattr(org, 'content_config', None)
+        from integrations.services.article_generation import resolve_content_factory_connection_for_domain
 
-        if not config or not config.github_token_encrypted:
+        connection_details = resolve_content_factory_connection_for_domain(
+            normalized_domain,
+            slack_user_id or None,
+        )
+        config = connection_details.get('config') or getattr(org, 'content_config', None)
+
+        if not config and not connection_details.get('github_repo'):
             return Response({
                 'connected': False,
                 'domain': normalized_domain,
-                'github_repo': config.github_repo if config else None,
+                'github_repo': None,
                 'message': 'No GitHub token configured for this organization.'
             }, status=status.HTTP_200_OK)
 
-        token_valid = _content_factory_github_connection_state(config) != "auth_required"
+        token_valid = not bool(connection_details.get('needs_github_auth'))
 
         response_data = {
             'connected': token_valid,
             'domain': normalized_domain,
-            'github_repo': config.github_repo,
-            'github_user_name': config.github_user_name,
+            'github_repo': connection_details.get('github_repo') or getattr(config, 'github_repo', None),
+            'github_user_name': getattr(config, 'github_user_name', None),
             'token_valid': token_valid,
+            'connection_state': connection_details.get('connection_state'),
+            'credential_source': connection_details.get('credential_source') or 'none',
         }
 
         if config.github_token_expires_at:
@@ -1901,13 +1910,25 @@ class ContentFactoryGitHubReconnectView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        config = None
-        if normalized_domain:
-            org = Organization.objects.filter(domain=normalized_domain).first()
-            config = getattr(org, 'content_config', None) if org else None
+        from integrations.services.article_generation import resolve_content_factory_connection_for_domain
 
-        resolved_repo = github_repo or (str(getattr(config, 'github_repo', '') or '').strip() or None)
-        connection_state = _content_factory_github_connection_state(config)
+        connection_details = (
+            resolve_content_factory_connection_for_domain(
+                normalized_domain,
+                slack_user_id or None,
+            )
+            if normalized_domain
+            else {
+                'github_repo': github_repo,
+                'connection_state': 'auth_required',
+                'credential_source': 'none',
+            }
+        )
+
+        resolved_repo = github_repo or (
+            str(connection_details.get('github_repo') or '').strip() or None
+        )
+        connection_state = connection_details.get('connection_state') or 'auth_required'
         auth_url = _content_factory_github_auth_url(
             slack_user_id=slack_user_id,
             domain=normalized_domain or None,
@@ -1917,6 +1938,7 @@ class ContentFactoryGitHubReconnectView(APIView):
             'domain': normalized_domain or None,
             'github_repo': resolved_repo,
             'connection_state': connection_state,
+            'credential_source': connection_details.get('credential_source') or 'none',
             'trigger': trigger,
             'pending_action': pending_action,
         }
@@ -2311,6 +2333,16 @@ class ContentFactoryCallbackView(APIView):
             job_id=job_id,
             defaults=defaults,
         )
+        requested_by_slack_user_id = str(
+            (self.request.data or {}).get('requested_by_slack_user_id')
+            or ''
+        ).strip()
+        if requested_by_slack_user_id:
+            request_meta = dict(job.request_meta or {})
+            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                job.request_meta = request_meta
+                job.save(update_fields=['request_meta', 'updated_at'])
         return job
 
     def _resolve_job_thread_context(self, *, job, data):
@@ -2326,16 +2358,35 @@ class ContentFactoryCallbackView(APIView):
             root_message_ts = thread_ts or ''
         return channel_id, root_message_ts, thread_ts
 
+    def _callback_requested_by_slack_user_id(self, *, job, data):
+        request_meta = dict(getattr(job, 'request_meta', {}) or {}) if job else {}
+        return str(
+            data.get('requested_by_slack_user_id')
+            or request_meta.get('requested_by_slack_user_id')
+            or ''
+        ).strip()
+
+    def _callback_recipient_slack_user_id(self, *, job, data, fallback_slack_user_id=None):
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        if requested_by_slack_user_id:
+            return requested_by_slack_user_id
+        return str(fallback_slack_user_id or '').strip()
+
     def _send_job_message(self, *, job, data, slack_user_id, text, blocks=None, allow_dm_fallback=True):
         from integrations.services.slack import SlackService
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
+        recipient_slack_user_id = self._callback_recipient_slack_user_id(
+            job=job,
+            data=data,
+            fallback_slack_user_id=slack_user_id,
+        )
 
         if channel_id and thread_ts:
             SlackService.send_message(channel_id, text, blocks=blocks, thread_ts=thread_ts)
             return True
-        if allow_dm_fallback and slack_user_id:
-            SlackService.send_dm(slack_user_id, text, blocks=blocks)
+        if allow_dm_fallback and recipient_slack_user_id:
+            SlackService.send_dm(recipient_slack_user_id, text, blocks=blocks)
             return True
         return False
 
@@ -2670,6 +2721,9 @@ class ContentFactoryCallbackView(APIView):
         request_meta = dict(job.request_meta or {})
         if data.get('recommended_delivery_mode'):
             request_meta['recommended_delivery_mode'] = data.get('recommended_delivery_mode')
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        if requested_by_slack_user_id:
+            request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
@@ -3140,7 +3194,14 @@ class ContentFactoryCallbackView(APIView):
                 "article_json": {},
             }
 
-        if slack_user_id:
+        recipient_slack_user_id = self._callback_recipient_slack_user_id(
+            job=job,
+            data=data,
+            fallback_slack_user_id=slack_user_id,
+        )
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+
+        if recipient_slack_user_id:
             channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
             publish_button_value = None
             if job_id and channel_id and thread_ts:
@@ -3148,6 +3209,7 @@ class ContentFactoryCallbackView(APIView):
                     "job_id": job_id,
                     "domain": domain,
                     "slack_user_id": slack_user_id,
+                    "requested_by_slack_user_id": requested_by_slack_user_id or recipient_slack_user_id,
                     "channel_id": channel_id,
                     "thread_ts": thread_ts,
                 }
@@ -3176,12 +3238,12 @@ class ContentFactoryCallbackView(APIView):
                             )
                 else:
                     SlackService.send_dm(
-                        slack_user_id,
+                        recipient_slack_user_id,
                         fallback_text,
                         blocks=blocks,
                     )
             except Exception as exc:
-                logger.warning(f"Failed to send content_ready notification to {slack_user_id}: {exc}")
+                logger.warning(f"Failed to send content_ready notification to {recipient_slack_user_id}: {exc}")
 
         return Response(
             {
@@ -3304,6 +3366,18 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': error_message,
             }
         )
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        recipient_slack_user_id = self._callback_recipient_slack_user_id(
+            job=job,
+            data=data,
+            fallback_slack_user_id=slack_user_id,
+        )
+        if requested_by_slack_user_id:
+            request_meta = dict(job.request_meta or {})
+            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                job.request_meta = request_meta
+                job.save(update_fields=['request_meta', 'updated_at'])
 
         # 1. Attempt Automatic Token Refresh
         refreshed = False
@@ -3337,6 +3411,7 @@ class ContentFactoryCallbackView(APIView):
                          domain=domain,
                          confirmed_keyword=job.selected_keyword,
                          slack_user_id=slack_user_id,
+                         requested_by_slack_user_id=requested_by_slack_user_id or None,
                          slack_channel_id=job.slack_channel_id,
                          slack_thread_ts=job.slack_thread_ts,
                          slack_root_message_ts=job.slack_root_message_ts or job.slack_thread_ts,
@@ -3359,10 +3434,11 @@ class ContentFactoryCallbackView(APIView):
         # 3. Fallback: Notify user via Slack (Manual Re-auth)
         try:
              self._send_auth_required_notification(
-                 slack_user_id,
+                 recipient_slack_user_id,
                  domain,
                  error_message,
                  job_id,
+                 effective_slack_user_id=slack_user_id,
                  github_repo=github_repo,
                  reason_code=reason_code,
              )
@@ -3381,14 +3457,30 @@ class ContentFactoryCallbackView(APIView):
         error_message,
         job_id,
         *,
+        effective_slack_user_id=None,
         github_repo=None,
         reason_code=None,
     ):
         from integrations.services.slack import SlackService
 
         try:
+            recipient_slack_user_id = str(slack_user_id or '').strip()
+            effective_slack_user_id = str(effective_slack_user_id or recipient_slack_user_id or '').strip()
+            delegated_request = bool(
+                recipient_slack_user_id
+                and effective_slack_user_id
+                and recipient_slack_user_id != effective_slack_user_id
+            )
+            if delegated_request:
+                text = (
+                    f"GitHub auth for <@{effective_slack_user_id}> isn't available for {domain}. "
+                    "Ask them to reconnect GitHub, then retry the delegated run."
+                )
+                SlackService.send_dm(recipient_slack_user_id, text)
+                return
+
             auth_url = _content_factory_github_auth_url(
-                slack_user_id=slack_user_id,
+                slack_user_id=recipient_slack_user_id,
                 domain=domain,
             )
 
@@ -3442,7 +3534,7 @@ class ContentFactoryCallbackView(APIView):
                 }
             ]
 
-            SlackService.send_dm(slack_user_id, text, blocks=blocks)
+            SlackService.send_dm(recipient_slack_user_id, text, blocks=blocks)
             
         except Exception as e:
             logger.error(f"Error constructing/sending Slack notification: {e}")
@@ -4363,6 +4455,13 @@ class ContentFactoryCallbackView(APIView):
                 'selection_data': selection,
             }
         )
+        requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        if requested_by_slack_user_id:
+            request_meta = dict(job.request_meta or {})
+            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                job.request_meta = request_meta
+                job.save(update_fields=['request_meta', 'updated_at'])
         job.last_progress_milestone_key = 'awaiting_confirmation'
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
@@ -5780,6 +5879,10 @@ class ContentFactoryRunControlView(APIView):
                 result = publish_article_as_pr(
                     run_id,
                     slack_user_id=(job.slack_user_id if job else None),
+                    requested_by_slack_user_id=(
+                        str(((job.request_meta or {}) if job else {}).get("requested_by_slack_user_id") or "").strip()
+                        or None
+                    ),
                     domain=((job.domain if job else None) or (run.domain if run else None)),
                     slack_channel_id=(job.slack_channel_id if job else ""),
                     slack_thread_ts=(job.slack_thread_ts if job else ""),

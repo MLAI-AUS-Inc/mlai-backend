@@ -80,6 +80,38 @@ def _handle_backend_unavailable_error(exc: ContentFactoryBackendUnavailableError
     return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
+def _resolve_requested_by_slack_user_id(
+    *,
+    slack_user_id: Optional[str],
+    article_request: Optional[dict] = None,
+    request_data=None,
+    job=None,
+) -> str:
+    candidates = []
+    if request_data is not None:
+        try:
+            candidates.append(request_data.get("requested_by_slack_user_id"))
+        except Exception:
+            pass
+    if isinstance(article_request, dict):
+        candidates.append(article_request.get("requested_by_slack_user_id"))
+    if job is not None:
+        candidates.append((getattr(job, "request_meta", {}) or {}).get("requested_by_slack_user_id"))
+    candidates.append(slack_user_id)
+
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_delegated_content_request(*, slack_user_id: Optional[str], requested_by_slack_user_id: Optional[str]) -> bool:
+    effective = str(slack_user_id or "").strip()
+    requester = str(requested_by_slack_user_id or "").strip()
+    return bool(requester and effective and requester != effective)
+
+
 def _handle_prerequisite_error(error_str: str, slack_user_id: str, article_request: dict = None) -> Response:
     """
     Parse a PREREQUISITE_MISSING error, store pending intent, and return a structured 412 response.
@@ -149,7 +181,19 @@ def _handle_auth_required_error(
     *,
     article_request: dict = None,
     pending_intent: dict = None,
+    requested_by_slack_user_id: Optional[str] = None,
 ) -> Response:
+    resolved_requested_by_slack_user_id = (
+        str(requested_by_slack_user_id or "").strip()
+        or _resolve_requested_by_slack_user_id(
+            slack_user_id=slack_user_id,
+            article_request=article_request,
+        )
+    )
+    delegated_request = _is_delegated_content_request(
+        slack_user_id=slack_user_id,
+        requested_by_slack_user_id=resolved_requested_by_slack_user_id,
+    )
     intent = pending_intent
     if intent is None and article_request:
         intent = {
@@ -158,8 +202,12 @@ def _handle_auth_required_error(
             "stored_at": timezone.now().isoformat(),
         }
 
-    pending_stored = _store_pending_intent(slack_user_id, intent)
+    pending_stored = False
+    if not delegated_request:
+        pending_stored = _store_pending_intent(slack_user_id, intent)
     payload = dict(error.payload)
+    if resolved_requested_by_slack_user_id:
+        payload["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
     payload["pending_intent_stored"] = pending_stored
     return Response(payload, status=status.HTTP_412_PRECONDITION_FAILED)
 
@@ -185,7 +233,11 @@ def _resume_pending_article_intent(slack_user_id: str, domain: str) -> Optional[
 
 
 def _handle_article_system_action_required(error: ArticleSystemActionRequiredError, slack_user_id: str, article_request: dict = None) -> Response:
-    pending_stored = _store_pending_article_intent(slack_user_id, article_request)
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+        slack_user_id=slack_user_id,
+        article_request=article_request,
+    )
+    pending_stored = _store_pending_article_intent(requested_by_slack_user_id or slack_user_id, article_request)
     return Response(
         {
             "error": str(error),
@@ -220,12 +272,19 @@ def _resolve_publishable_job_for_thread(
 
     jobs = list(
         ContentFactoryJob.objects.filter(
-            slack_user_id=resolved_user_id,
             slack_channel_id=resolved_channel_id,
         ).filter(
             Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
         )
     )
+    jobs = [
+        job
+        for job in jobs
+        if resolved_user_id in {
+            str(job.slack_user_id or "").strip(),
+            str((job.request_meta or {}).get("requested_by_slack_user_id") or "").strip(),
+        }
+    ]
     if resolved_domain:
         domain_matched = [job for job in jobs if str(job.domain or "").strip().lower() == resolved_domain]
         if domain_matched:
@@ -252,12 +311,16 @@ def _resolve_publishable_job_for_thread(
     promoted_publish_job_id = str(source_meta.get("promoted_publish_job_id") or "").strip()
 
     if source_publish_stage == PUBLISH_READY_STAGE:
-        return {
+        resolved = {
             "resolution": "ready",
             "job_id": source_job.job_id,
             "domain": source_job.domain,
             "publish_stage": source_publish_stage,
         }
+        requested_by_slack_user_id = str((source_job.request_meta or {}).get("requested_by_slack_user_id") or "").strip()
+        if requested_by_slack_user_id:
+            resolved["requested_by_slack_user_id"] = requested_by_slack_user_id
+        return resolved
 
     if source_publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES and promoted_publish_job_id:
         child_job = ContentFactoryJob.objects.filter(job_id=promoted_publish_job_id).first()
@@ -268,13 +331,17 @@ def _resolve_publishable_job_for_thread(
             child_publish_stage in PUBLISH_IN_PROGRESS_CHILD_STAGES
             or source_publish_stage in PUBLISH_IN_PROGRESS_SOURCE_STAGES
         ):
-            return {
+            resolved = {
                 "resolution": "in_progress",
                 "job_id": source_job.job_id,
                 "domain": source_job.domain,
                 "publish_stage": effective_publish_stage,
                 "promoted_publish_job_id": promoted_publish_job_id,
             }
+            requested_by_slack_user_id = str((source_job.request_meta or {}).get("requested_by_slack_user_id") or "").strip()
+            if requested_by_slack_user_id:
+                resolved["requested_by_slack_user_id"] = requested_by_slack_user_id
+            return resolved
 
     return None
 
@@ -300,12 +367,19 @@ def _resolve_confirm_job_for_thread(
 
     jobs = list(
         ContentFactoryJob.objects.filter(
-            slack_user_id=resolved_user_id,
             slack_channel_id=resolved_channel_id,
         ).filter(
             Q(slack_thread_ts=resolved_thread_ts) | Q(slack_root_message_ts=resolved_thread_ts)
         )
     )
+    jobs = [
+        job
+        for job in jobs
+        if resolved_user_id in {
+            str(job.slack_user_id or "").strip(),
+            str((job.request_meta or {}).get("requested_by_slack_user_id") or "").strip(),
+        }
+    ]
     if resolved_domain:
         domain_matched = [job for job in jobs if str(job.domain or "").strip().lower() == resolved_domain]
         if domain_matched:
@@ -368,6 +442,9 @@ def _resolve_confirm_job_for_thread(
         "domain": resolved_job.domain,
         "source_run_id": str(request_meta.get("source_run_id") or resolved_job.job_id).strip(),
     }
+    requested_by_slack_user_id = str(request_meta.get("requested_by_slack_user_id") or "").strip()
+    if requested_by_slack_user_id:
+        payload["requested_by_slack_user_id"] = requested_by_slack_user_id
     if error_code:
         payload["error_code"] = error_code
     if resolved_job.error_message:
@@ -411,6 +488,7 @@ class ContentGenerateView(APIView):
             "user_first_name": request.data.get("user_first_name"),
             "user_last_name": request.data.get("user_last_name"),
             "user_avatar_url": request.data.get("user_avatar_url"),
+            "requested_by_slack_user_id": request.data.get("requested_by_slack_user_id"),
         }
 
         try:
@@ -421,7 +499,12 @@ class ContentGenerateView(APIView):
             return _handle_backend_unavailable_error(e)
         except GitHubReconnectRequiredError as e:
             logger.warning(f"GitHub reconnect required: {e}")
-            return _handle_auth_required_error(e, slack_user_id, article_request=article_request)
+            return _handle_auth_required_error(
+                e,
+                slack_user_id,
+                article_request=article_request,
+                requested_by_slack_user_id=request.data.get("requested_by_slack_user_id"),
+            )
         except ArticleSystemActionRequiredError as e:
             logger.warning(f"Article system action required: {e}")
             return _handle_article_system_action_required(e, slack_user_id, article_request)
@@ -473,17 +556,19 @@ class ContentResolveThreadView(APIView):
 
     def post(self, request):
         slack_user_id = str(request.data.get("slack_user_id") or "").strip()
+        requested_by_slack_user_id = str(request.data.get("requested_by_slack_user_id") or "").strip()
         slack_channel_id = str(request.data.get("slack_channel_id") or "").strip()
         slack_thread_ts = str(request.data.get("slack_thread_ts") or "").strip()
         domain = str(request.data.get("domain") or "").strip()
         requested_action = str(request.data.get("requested_action") or "").strip()
+        thread_lookup_slack_user_id = requested_by_slack_user_id or slack_user_id
 
         if requested_action not in {"publish_pr", "confirm_topic"}:
             return Response(
                 {"error": "requested_action must be publish_pr or confirm_topic"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not all([slack_user_id, slack_channel_id, slack_thread_ts]):
+        if not all([thread_lookup_slack_user_id, slack_channel_id, slack_thread_ts]):
             return Response(
                 {"error": "slack_user_id, slack_channel_id, and slack_thread_ts are required"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -491,7 +576,7 @@ class ContentResolveThreadView(APIView):
 
         if requested_action == "confirm_topic":
             resolved = _resolve_confirm_job_for_thread(
-                slack_user_id=slack_user_id,
+                slack_user_id=thread_lookup_slack_user_id,
                 slack_channel_id=slack_channel_id,
                 slack_thread_ts=slack_thread_ts,
                 domain=domain or None,
@@ -499,7 +584,7 @@ class ContentResolveThreadView(APIView):
             )
         else:
             resolved = _resolve_publishable_job_for_thread(
-                slack_user_id=slack_user_id,
+                slack_user_id=thread_lookup_slack_user_id,
                 slack_channel_id=slack_channel_id,
                 slack_thread_ts=slack_thread_ts,
                 domain=domain or None,
@@ -517,6 +602,9 @@ class ContentResolveThreadView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        resolved["effective_slack_user_id"] = slack_user_id
+        if requested_by_slack_user_id:
+            resolved.setdefault("requested_by_slack_user_id", requested_by_slack_user_id)
         return Response(resolved, status=status.HTTP_200_OK)
 
 
@@ -562,11 +650,17 @@ class ContentPublishPrView(APIView):
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if not job:
             return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+            slack_user_id=slack_user_id or job.slack_user_id,
+            request_data=request.data,
+            job=job,
+        )
 
         try:
             result = publish_article_as_pr(
                 job_id,
                 slack_user_id=slack_user_id or job.slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
                 domain=job.domain,
                 slack_channel_id=job.slack_channel_id or "",
                 slack_thread_ts=job.slack_thread_ts or "",
@@ -577,10 +671,12 @@ class ContentPublishPrView(APIView):
             return _handle_auth_required_error(
                 e,
                 slack_user_id or job.slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
                 pending_intent={
                     "type": "publish_article_as_pr",
                     "job_id": job_id,
                     "domain": job.domain,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
                     "stored_at": timezone.now().isoformat(),
                 },
             )
@@ -622,6 +718,10 @@ class ContentConfirmView(APIView):
         slack_thread_ts = request.data.get('slack_thread_ts')
         slack_root_message_ts = request.data.get('slack_root_message_ts') or slack_thread_ts
         progress_message_ts = request.data.get('progress_message_ts')
+        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+            slack_user_id=slack_user_id,
+            request_data=request.data,
+        )
 
         if not all([domain, confirmed_keyword, slack_user_id]):
             return Response(
@@ -641,6 +741,7 @@ class ContentConfirmView(APIView):
                 domain=domain,
                 confirmed_keyword=confirmed_keyword,
                 slack_user_id=slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
                 custom_title=custom_title,
                 skip_alternatives=skip_alternatives,
                 source_run_id=source_run_id,
@@ -670,19 +771,24 @@ class ContentConfirmView(APIView):
                                 "skip_alternatives": skip_alternatives,
                                 "source_run_id": source_run_id,
                                 "request_source": request.data.get("request_source"),
-                            "slack_channel_id": slack_channel_id,
-                            "slack_thread_ts": slack_thread_ts,
-                            "slack_root_message_ts": slack_root_message_ts,
-                        },
-                        "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
-                        "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
-                        "slack_root_message_ts": slack_root_message_ts or source_job.slack_root_message_ts or source_job.slack_thread_ts,
-                        "progress_message_ts": progress_message_ts or source_job.progress_message_ts,
-                        "client_request_id": source_job.client_request_id,
-                        "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
-                        "billing_amount": source_job.billing_amount,
-                        "billing_status": "reused",
-                        "billing_ledger_id": source_job.billing_ledger_id,
+                                "requested_by_slack_user_id": requested_by_slack_user_id,
+                                "slack_channel_id": slack_channel_id,
+                                "slack_thread_ts": slack_thread_ts,
+                                "slack_root_message_ts": slack_root_message_ts,
+                            },
+                            "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
+                            "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
+                            "slack_root_message_ts": (
+                                slack_root_message_ts
+                                or source_job.slack_root_message_ts
+                                or source_job.slack_thread_ts
+                            ),
+                            "progress_message_ts": progress_message_ts or source_job.progress_message_ts,
+                            "client_request_id": source_job.client_request_id,
+                            "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
+                            "billing_amount": source_job.billing_amount,
+                            "billing_status": "reused",
+                            "billing_ledger_id": source_job.billing_ledger_id,
                         },
                     )
             if source_run_id:
@@ -696,14 +802,35 @@ class ContentConfirmView(APIView):
             return _handle_auth_required_error(
                 e,
                 slack_user_id,
-                article_request={"domain": domain, "topic": confirmed_keyword},
+                article_request={
+                    "domain": domain,
+                    "topic": confirmed_keyword,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                },
+                requested_by_slack_user_id=requested_by_slack_user_id,
             )
         except ArticleSystemActionRequiredError as e:
-            return _handle_article_system_action_required(e, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
+            return _handle_article_system_action_required(
+                e,
+                slack_user_id,
+                {
+                    "domain": domain,
+                    "topic": confirmed_keyword,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                },
+            )
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
-                return _handle_prerequisite_error(error_str, slack_user_id, {"domain": domain, "topic": confirmed_keyword})
+                return _handle_prerequisite_error(
+                    error_str,
+                    slack_user_id,
+                    {
+                        "domain": domain,
+                        "topic": confirmed_keyword,
+                        "requested_by_slack_user_id": requested_by_slack_user_id,
+                    },
+                )
             return Response({"error": error_str}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"Unexpected error in confirm view: {e}")
@@ -734,6 +861,10 @@ class ContentJobConfirmView(APIView):
         slack_user_id = request.data.get('slack_user_id')
         domain = request.data.get('domain')
         custom_title = request.data.get('custom_title')
+        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(
+            slack_user_id=slack_user_id,
+            request_data=request.data,
+        )
 
         if not all([job_id, slack_user_id]):
             return Response({"error": "job_id and slack_user_id are required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -770,7 +901,9 @@ class ContentJobConfirmView(APIView):
             return Response({"error": "No keyword specified and job has no selected_keyword"}, status=status.HTTP_400_BAD_REQUEST)
         if not resolved_domain:
             return Response({"error": "No domain specified and job has no domain"}, status=status.HTTP_400_BAD_REQUEST)
-        request_meta = job.request_meta or {}
+        request_meta = dict(job.request_meta or {})
+        if requested_by_slack_user_id:
+            request_meta["requested_by_slack_user_id"] = requested_by_slack_user_id
         uses_deferred_billing = (
             str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
             and str(job.billing_status or "").strip() in {"", CONTENT_FACTORY_BILLING_STATUS_DEFERRED}
@@ -792,7 +925,8 @@ class ContentJobConfirmView(APIView):
         job.status = 'confirmed'
         job.selected_keyword = confirmed_keyword
         job.slack_user_id = slack_user_id
-        job.save()
+        job.request_meta = request_meta
+        job.save(update_fields=["status", "selected_keyword", "slack_user_id", "request_meta", "updated_at"])
 
         # Trigger article generation via Content Factory HTTP API
         try:
@@ -800,6 +934,7 @@ class ContentJobConfirmView(APIView):
                 domain=resolved_domain,
                 confirmed_keyword=confirmed_keyword,
                 slack_user_id=slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
                 custom_title=custom_title,
                 skip_alternatives=skip_alternatives if skip_alternatives else None,
                 source_run_id=job_id,
@@ -829,6 +964,7 @@ class ContentJobConfirmView(APIView):
                             "skip_alternatives": skip_alternatives,
                             "source_run_id": job_id,
                             "request_source": request.data.get("request_source"),
+                            "requested_by_slack_user_id": requested_by_slack_user_id,
                             "slack_channel_id": job.slack_channel_id,
                             "slack_thread_ts": job.slack_thread_ts,
                             "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
@@ -900,16 +1036,37 @@ class ContentJobConfirmView(APIView):
             return _handle_auth_required_error(
                 e,
                 slack_user_id,
-                article_request={"domain": resolved_domain, "topic": confirmed_keyword},
+                article_request={
+                    "domain": resolved_domain,
+                    "topic": confirmed_keyword,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                },
+                requested_by_slack_user_id=requested_by_slack_user_id,
             )
         except ContentFactoryBackendUnavailableError as e:
             return _handle_backend_unavailable_error(e)
         except ArticleSystemActionRequiredError as e:
-            return _handle_article_system_action_required(e, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
+            return _handle_article_system_action_required(
+                e,
+                slack_user_id,
+                {
+                    "domain": resolved_domain,
+                    "topic": confirmed_keyword,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                },
+            )
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
-                return _handle_prerequisite_error(error_str, slack_user_id, {"domain": resolved_domain, "topic": confirmed_keyword})
+                return _handle_prerequisite_error(
+                    error_str,
+                    slack_user_id,
+                    {
+                        "domain": resolved_domain,
+                        "topic": confirmed_keyword,
+                        "requested_by_slack_user_id": requested_by_slack_user_id,
+                    },
+                )
             logger.exception(f"Failed to trigger generation for job {job_id}: {e}")
             return Response({"error": error_str}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:

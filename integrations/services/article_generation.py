@@ -475,11 +475,36 @@ def _get_client_request_id(article_request: dict) -> str:
     return client_request_id
 
 
+def _resolve_requested_by_slack_user_id(
+    slack_user_id: Optional[str],
+    article_request: Optional[dict],
+) -> str:
+    if isinstance(article_request, dict):
+        requested_by = str(article_request.get("requested_by_slack_user_id") or "").strip()
+        if requested_by:
+            return requested_by
+    return str(slack_user_id or "").strip()
+
+
+def _is_delegated_content_request(
+    slack_user_id: Optional[str],
+    article_request: Optional[dict],
+) -> bool:
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
+    effective_slack_user_id = str(slack_user_id or "").strip()
+    return bool(
+        requested_by_slack_user_id
+        and effective_slack_user_id
+        and requested_by_slack_user_id != effective_slack_user_id
+    )
+
+
 def _ensure_content_factory_user(slack_user_id: str, article_request: dict):
     from core.slack_users import ensure_slack_user
     from roo.services import PointsService
 
-    existing_user = PointsService.get_user_by_slack_id(slack_user_id)
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
+    existing_user = PointsService.get_user_by_slack_id(requested_by_slack_user_id)
     if existing_user:
         PointsService.get_or_create_account(existing_user)
         return existing_user
@@ -489,7 +514,7 @@ def _ensure_content_factory_user(slack_user_id: str, article_request: dict):
         raise ArticleGenerationError("A Slack email is required before starting this Content Factory run.")
 
     user = ensure_slack_user(
-        slack_id=slack_user_id,
+        slack_id=requested_by_slack_user_id,
         email=email,
         first_name=article_request.get("user_first_name") or "",
         last_name=article_request.get("user_last_name") or "",
@@ -542,6 +567,7 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
 
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     client_request_id = _get_client_request_id(article_request)
     cost_points = get_content_factory_article_cost_points(resolved_domain)
     existing_refunded = (
@@ -567,7 +593,7 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
             delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
             description=_build_content_factory_charge_description(resolved_domain, article_request),
-            created_by_slack_id=slack_user_id,
+            created_by_slack_id=requested_by_slack_user_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
             reference_id=client_request_id,
@@ -596,12 +622,13 @@ def _refund_content_factory_request(
     if cost_points == 0:
         return None
 
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     ledger, _ = PointsService.refund(
         user=user,
         delta=cost_points,
         source=CONTENT_FACTORY_LEDGER_SOURCE,
         description=f"Automatic refund for failed Content Factory start for {resolved_domain}: {reason}",
-        created_by_slack_id=slack_user_id,
+        created_by_slack_id=requested_by_slack_user_id,
         idempotency_key=f"content_factory:refund:{client_request_id}",
         reference_type="CONTENT_FACTORY",
         reference_id=client_request_id,
@@ -618,13 +645,17 @@ def _get_content_factory_user_for_job(job):
     from django.contrib.auth import get_user_model
 
     UserModel = get_user_model()
-    slack_user_id = str(getattr(job, "slack_user_id", "") or "").strip()
+    request_meta = getattr(job, "request_meta", {}) or {}
+    slack_user_id = str(
+        request_meta.get("requested_by_slack_user_id")
+        or getattr(job, "slack_user_id", "")
+        or ""
+    ).strip()
     if slack_user_id:
         user = UserModel.objects.filter(slack_id=slack_user_id).first()
         if user:
             return user
 
-    request_meta = getattr(job, "request_meta", {}) or {}
     user_email = str(request_meta.get("user_email") or "").strip().lower()
     if user_email:
         return UserModel.objects.filter(email__iexact=user_email).first()
@@ -1492,6 +1523,39 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
     )
 
 
+def resolve_content_factory_connection_for_domain(
+    domain: str,
+    slack_user_id: Optional[str] = None,
+) -> dict:
+    normalized_domain = normalize_domain(domain) if domain else None
+    github_repo, config, _repo_source = _resolve_github_repo_for_domain(
+        normalized_domain,
+        slack_user_id,
+    )
+    connection_state = "auth_required"
+    credential_source = "none"
+
+    try:
+        creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)
+        github_repo = creds.get("repo") or github_repo
+        credential_source = str(creds.get("source") or "").strip() or "none"
+        connection_state = "connected" if github_repo else "repo_selection_required"
+        config = creds.get("config") or config
+    except ArticleGenerationError:
+        if config and config.github_token_encrypted and not config.github_repo:
+            connection_state = "repo_selection_required"
+
+    return {
+        "domain": normalized_domain,
+        "config": config,
+        "github_repo": github_repo,
+        "connection_state": connection_state,
+        "needs_github_auth": connection_state == "auth_required",
+        "domain_connected": connection_state == "connected",
+        "credential_source": credential_source,
+    }
+
+
 def trigger_article_generation(slack_user_id: str, article_request: dict) -> dict:
     """
     Trigger article generation via Content Factory.
@@ -1571,6 +1635,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     # Research Mode: if topic is missing, use the dedicated discovery endpoint.
     if not topic:
         discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
+        requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
         scheduled_daily_request = _is_scheduled_daily_request(article_request)
         charged_user = None
         charge_ledger = None
@@ -1587,6 +1652,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             "slack_user_id": slack_user_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if requested_by_slack_user_id and requested_by_slack_user_id != str(slack_user_id or "").strip():
+            payload["requested_by_slack_user_id"] = requested_by_slack_user_id
 
         logger.info(f"Research mode enabled for {resolved_domain}. Triggering discovery at {discovery_endpoint}.")
 
@@ -1722,6 +1789,9 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "competitors": competitors,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
     }
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
+    if requested_by_slack_user_id and requested_by_slack_user_id != str(slack_user_id or "").strip():
+        payload["requested_by_slack_user_id"] = requested_by_slack_user_id
     if github_repo:
         payload["github_repo"] = github_repo
     if delivery_mode is not None:
@@ -2149,6 +2219,7 @@ def promote_article_bundle(
     job_id: str,
     *,
     slack_user_id: str = None,
+    requested_by_slack_user_id: str = None,
     domain: str = None,
     slack_channel_id: str = "",
     slack_thread_ts: str = "",
@@ -2166,6 +2237,12 @@ def promote_article_bundle(
 
     source_job = ContentFactoryJob.objects.filter(job_id=job_id).first()
     resolved_slack_user_id = slack_user_id or (source_job.slack_user_id if source_job else "") or ""
+    source_request_meta = dict(getattr(source_job, "request_meta", {}) or {}) if source_job else {}
+    resolved_requested_by_slack_user_id = (
+        requested_by_slack_user_id
+        or str(source_request_meta.get("requested_by_slack_user_id") or "").strip()
+        or resolved_slack_user_id
+    )
     resolved_domain = domain or (source_job.domain if source_job else "") or ""
     resolved_channel_id = slack_channel_id or (source_job.slack_channel_id if source_job else "") or ""
     resolved_thread_ts = slack_thread_ts or (source_job.slack_thread_ts if source_job else "") or ""
@@ -2206,6 +2283,7 @@ def promote_article_bundle(
                     "source_run_id": job_id,
                     "promotion_source": "promote_bundle",
                     "requested_delivery_mode": "publish_code",
+                    "requested_by_slack_user_id": resolved_requested_by_slack_user_id,
                 },
                 slack_channel_id=resolved_channel_id,
                 slack_thread_ts=resolved_thread_ts,
@@ -2216,6 +2294,8 @@ def promote_article_bundle(
                 request_meta = dict(source_job.request_meta or {})
                 request_meta["promoted_publish_job_id"] = child_job_id
                 request_meta["publish_stage"] = "promotion_requested"
+                if resolved_requested_by_slack_user_id:
+                    request_meta["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
                 if request_meta != (source_job.request_meta or {}):
                     source_job.request_meta = request_meta
                     source_job.save(update_fields=["request_meta", "updated_at"])
@@ -2231,6 +2311,7 @@ def publish_article_as_pr(
     job_id: str,
     *,
     slack_user_id: str = None,
+    requested_by_slack_user_id: str = None,
     domain: str = None,
     slack_channel_id: str = "",
     slack_thread_ts: str = "",
@@ -2242,6 +2323,7 @@ def publish_article_as_pr(
     return promote_article_bundle(
         job_id,
         slack_user_id=slack_user_id,
+        requested_by_slack_user_id=requested_by_slack_user_id,
         domain=domain,
         slack_channel_id=slack_channel_id,
         slack_thread_ts=slack_thread_ts,
@@ -2253,6 +2335,7 @@ def confirm_topic(
     domain: str,
     confirmed_keyword: str,
     slack_user_id: str,
+    requested_by_slack_user_id: str = None,
     custom_title: str = None,
     skip_alternatives: list = None,
     source_run_id: str = None,
@@ -2336,6 +2419,11 @@ def confirm_topic(
         article_system.get('directory_path') or article_system.get('directory_name'),
     )
     source_request_meta = dict(getattr(source_job, "request_meta", {}) or {}) if source_job else {}
+    resolved_requested_by_slack_user_id = (
+        str(requested_by_slack_user_id or "").strip()
+        or str(source_request_meta.get("requested_by_slack_user_id") or "").strip()
+        or str(slack_user_id or "").strip()
+    )
     request_context = {
         "delivery_mode": delivery_mode if delivery_mode is not None else source_request_meta.get("delivery_mode"),
         "delivery_mode_confirmed": (
@@ -2366,6 +2454,8 @@ def confirm_topic(
         "custom_title": custom_title,
         "request_source": request_source,
     }
+    if resolved_requested_by_slack_user_id and resolved_requested_by_slack_user_id != str(slack_user_id or "").strip():
+        payload["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
     if github_repo:
         payload["github_repo"] = github_repo
     if delivery_mode is not None:
@@ -2415,6 +2505,7 @@ def confirm_topic(
                         "skip_alternatives": skip_alternatives or [],
                         "source_run_id": source_run_id,
                         "request_source": request_source,
+                        "requested_by_slack_user_id": resolved_requested_by_slack_user_id,
                         "slack_channel_id": slack_channel_id or "",
                         "slack_thread_ts": slack_thread_ts or "",
                         "slack_root_message_ts": slack_root_message_ts or slack_thread_ts or "",

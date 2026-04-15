@@ -120,6 +120,28 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(mock_post.call_args.kwargs["timeout"], (3, 8))
 
     @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_payload_includes_requested_by_slack_user_id(self, mock_post):
+        self.config.article_delivery_mode = "publish_code"
+        self.config.save(update_fields=["article_delivery_mode"])
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_delegated_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = self._article_request(requested_by_slack_user_id="U_REQUESTER")
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_delegated_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["slack_user_id"], self.slack_user_id)
+        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
+
+        job = ContentFactoryJob.objects.get(job_id="job_delegated_123")
+        self.assertEqual(job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
+
+    @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
         self.config.article_delivery_mode = "publish_code"
         self.config.save(update_fields=["article_delivery_mode"])
@@ -177,6 +199,30 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertFalse(payload["delivery_mode_confirmed"])
         self.assertEqual(payload["request_source"], "roo_slackbot")
         self.assertEqual(kwargs["timeout"], (3, 8))
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_confirm_topic_payload_includes_requested_by_slack_user_id(self, mock_post):
+        self.config.article_delivery_mode = "publish_code"
+        self.config.save(update_fields=["article_delivery_mode"])
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "job_confirm_delegated_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = confirm_topic(
+                domain="mlai.au",
+                confirmed_keyword="agentic ai",
+                slack_user_id=self.slack_user_id,
+                requested_by_slack_user_id="U_REQUESTER",
+                custom_title="Agentic AI",
+                request_source="roo_slackbot",
+            )
+
+        self.assertEqual(result["job_id"], "job_confirm_delegated_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["slack_user_id"], self.slack_user_id)
+        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_confirm_topic_reuses_existing_non_terminal_child_without_post(self, mock_post):
@@ -257,6 +303,7 @@ class ArticleGenerationServiceTest(TestCase):
             slack_channel_id="C123",
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
+            request_meta={"requested_by_slack_user_id": "U_REQUESTER"},
         )
 
         mock_response = MagicMock()
@@ -281,6 +328,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(child_job.slack_root_message_ts, "123.456")
         self.assertEqual(child_job.request_meta["source_run_id"], "job_content_ready")
         self.assertEqual(child_job.request_meta["promotion_source"], "promote_bundle")
+        self.assertEqual(child_job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
 
     @patch("integrations.services.article_generation.promote_article_bundle")
     def test_publish_article_as_pr_delegates_to_promote_bundle(self, mock_promote_article_bundle):
@@ -292,6 +340,17 @@ class ArticleGenerationServiceTest(TestCase):
         result = publish_article_as_pr(
             "job_content_ready",
             slack_user_id=self.slack_user_id,
+            requested_by_slack_user_id="U_REQUESTER",
+            domain="mlai.au",
+            slack_channel_id="C123",
+            slack_thread_ts="123.456",
+            slack_root_message_ts="123.456",
+        )
+        self.assertEqual(result["job_id"], "job_publish_child")
+        mock_promote_article_bundle.assert_called_once_with(
+            "job_content_ready",
+            slack_user_id=self.slack_user_id,
+            requested_by_slack_user_id="U_REQUESTER",
             domain="mlai.au",
             slack_channel_id="C123",
             slack_thread_ts="123.456",
@@ -402,6 +461,44 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["github_repo"], self.repo_name)
         self.assertEqual(payload["auth_url"], "https://github.example/reconnect")
         self.assertTrue(payload["pending_intent_stored"])
+
+    @patch("integrations.api_views_content.trigger_article_generation")
+    def test_content_generate_view_delegated_auth_required_does_not_store_pending_intent(self, mock_trigger):
+        mock_trigger.side_effect = GitHubReconnectRequiredError(
+            {
+                "status": "precondition_failed",
+                "error_code": "AUTH_REQUIRED",
+                "missing_step": "github_auth",
+                "next_action": "reconnect_github",
+                "requires_user_action": True,
+                "resume_hint": "reconnect_github_then_retry",
+                "domain": "mlai.au",
+                "github_repo": self.repo_name,
+                "reason_code": "missing_or_expired_credentials",
+                "message": "Reconnect GitHub before continuing.",
+                "auth_url": "https://github.example/reconnect",
+            }
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/v1/content/generate",
+                data={
+                    "slack_user_id": self.slack_user_id,
+                    "requested_by_slack_user_id": "U_REQUESTER",
+                    "domain": "mlai.au",
+                    "topic": "AI Agents",
+                    "target_keyword": "agentic ai",
+                    "request_source": "roo_slackbot",
+                    "client_request_id": "content-generate-auth-required-delegated",
+                },
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 412)
+        payload = response.json()
+        self.assertEqual(payload["requested_by_slack_user_id"], "U_REQUESTER")
+        self.assertFalse(payload["pending_intent_stored"])
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_omits_delivery_mode_when_no_preference_exists(self, mock_post):
