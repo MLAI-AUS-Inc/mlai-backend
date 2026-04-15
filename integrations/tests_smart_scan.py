@@ -177,7 +177,7 @@ class SmartScanTests(TestCase):
         self.assertFalse(response.data['repo_has_new_commits'])
         self.assertIsNone(response.data['current_sha'])
         mock_get_sha.assert_not_called()
-        mock_get_credentials.assert_not_called()
+        mock_get_credentials.assert_called_once_with(self.domain, self.user_id)
 
     def test_status_endpoint_marks_domain_auth_required_when_token_is_near_expiry(self):
         from rest_framework.test import APIRequestFactory
@@ -202,6 +202,32 @@ class SmartScanTests(TestCase):
         self.assertFalse(response.data['has_updates'])
         self.assertFalse(response.data['repo_has_new_commits'])
         self.assertIsNone(response.data['current_sha'])
+
+    @patch('integrations.services.article_generation.ensure_valid_token', return_value='fresh-user-token')
+    def test_status_endpoint_uses_user_fallback_for_domain_owned_by_other_user(self, mock_ensure_valid_token):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        self.config.connected_slack_user_id = 'U_OTHER'
+        self.config.save(update_fields=['connected_slack_user_id'])
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(
+            f'/api/v1/integrations/github/{self.user_id}/?domain={self.domain}&include_repo_freshness=0'
+        )
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['domain_connected'])
+        self.assertFalse(response.data['needs_github_auth'])
+        self.assertEqual(response.data['connection_state'], 'connected')
+        self.assertEqual(response.data['credential_source'], 'user')
+        self.assertEqual(response.data['domain_source'], 'user')
+        self.assertEqual(response.data['domain_github_repo'], 'owner/repo')
+        mock_ensure_valid_token.assert_called_once_with(self.user_id)
 
     @patch('integrations.services.github.get_latest_repo_sha')
     def test_status_endpoint_prefers_research_after_completed_domain_scan(self, mock_get_sha):

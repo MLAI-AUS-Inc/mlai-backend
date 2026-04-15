@@ -166,17 +166,29 @@ class GithubTokenIdentityView(APIView):
 
         domain_info = {}
         if requested_domain:
-            connection_state = _derive_connection_state(active_config) if active_config else "auth_required"
+            from integrations.services.article_generation import resolve_content_factory_connection_for_domain
+
+            connection_details = resolve_content_factory_connection_for_domain(
+                requested_domain,
+                slack_user_id,
+            )
+            active_config = connection_details.get("config") or active_config
+            connection_state = connection_details.get("connection_state") or (
+                _derive_connection_state(active_config) if active_config else "auth_required"
+            )
             domain_info = {
                 "domain": requested_domain,
-                "domain_connected": bool(active_config and connection_state == "connected"),
-                "needs_github_auth": connection_state == "auth_required",
+                "domain_connected": bool(connection_details.get("domain_connected")),
+                "needs_github_auth": bool(connection_details.get("needs_github_auth")),
                 "connection_state": connection_state,
+                "credential_source": connection_details.get("credential_source") or "none",
                 "oauth_url": build_github_oauth_url(requested_domain, slack_user_id),
             }
-            if active_config and active_config.github_repo:
-                domain_info["domain_github_repo"] = active_config.github_repo
-                domain_info["domain_source"] = "org"
+            resolved_domain_repo = str(connection_details.get("github_repo") or "").strip()
+            if resolved_domain_repo:
+                domain_info["domain_github_repo"] = resolved_domain_repo
+                domain_info["domain_source"] = connection_details.get("credential_source") or "org"
+                github_repo = resolved_domain_repo
 
         if integration is None and not connected_domains:
             if domain_info:
@@ -228,12 +240,13 @@ class GithubTokenIdentityView(APIView):
                         creds = get_github_credentials_for_domain(active_domain, slack_user_id)
                         resolved_repo = creds['repo']
                         resolved_token = creds['token']
-                        if active_config is not None:
-                            domain_info["domain_connected"] = True
-                            domain_info["domain_github_repo"] = resolved_repo
-                            domain_info["domain_source"] = creds['source']
-                            domain_info["connection_state"] = _derive_connection_state(active_config)
-                            domain_info.pop("needs_github_auth", None)
+                        domain_info["domain_connected"] = True
+                        domain_info["domain_github_repo"] = resolved_repo
+                        domain_info["domain_source"] = creds['source']
+                        domain_info["credential_source"] = creds['source']
+                        domain_info["connection_state"] = "connected" if resolved_repo else "repo_selection_required"
+                        domain_info["needs_github_auth"] = False
+                        github_repo = resolved_repo
                     except ArticleGenerationError:
                         resolved_repo = None
                         resolved_token = None

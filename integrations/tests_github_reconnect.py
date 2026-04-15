@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from core.models import Organization, OrganizationContentConfig
+from integrations.models import UserIntegration
 from integrations.services.github import (
     AUTH_RECONNECT_TEXT,
     GitHubAuthScanError,
@@ -217,6 +218,43 @@ class ContentFactoryGitHubReconnectEndpointTests(TestCase):
         self.assertEqual(payload["connection_state"], "auth_required")
         self.assertEqual(payload["domain"], "mlai.au")
         self.assertIn("auth_url", payload)
+
+    def test_reconnect_endpoint_returns_already_connected_for_user_fallback_credentials(self):
+        org = Organization.objects.create(domain="mlai.au", name="MLAI")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            connected_slack_user_id="U_OTHER",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+        UserIntegration.objects.create(
+            slack_user_id="U123",
+            github_access_token="user-token",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=2),
+        )
+
+        with self.settings(ROO_API_KEY="roo-test-key"):
+            response = self.client.post(
+                "/api/content-factory/github/reconnect",
+                data=json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U123",
+                        "trigger": "manual",
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="roo-test-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "already_connected")
+        self.assertEqual(payload["connection_state"], "connected")
+        self.assertEqual(payload["credential_source"], "user")
+        self.assertEqual(payload["github_repo"], "MLAI-AUS-Inc/mlai-au")
 
     def test_reconnect_endpoint_returns_auth_started_when_repo_selection_needed(self):
         org = Organization.objects.create(domain="mlai.au", name="MLAI")
