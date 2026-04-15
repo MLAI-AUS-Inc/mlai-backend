@@ -5823,18 +5823,24 @@ class ContentFactoryRunControlView(APIView):
                 return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 
             try:
-                result = publish_article_as_pr(
-                    run_id,
-                    slack_user_id=(job.slack_user_id if job else None),
-                    requested_by_slack_user_id=(
-                        str(((job.request_meta or {}) if job else {}).get("requested_by_slack_user_id") or "").strip()
-                        or None
-                    ),
-                    domain=((job.domain if job else None) or (run.domain if run else None)),
-                    slack_channel_id=(job.slack_channel_id if job else ""),
-                    slack_thread_ts=(job.slack_thread_ts if job else ""),
-                    slack_root_message_ts=(job.slack_root_message_ts if job else ""),
+                effective_slack_user_id = str((job.slack_user_id if job else None) or "").strip() or None
+                requested_by_slack_user_id = (
+                    str(((job.request_meta or {}) if job else {}).get("requested_by_slack_user_id") or "").strip()
                 )
+                if requested_by_slack_user_id == str(effective_slack_user_id or "").strip():
+                    requested_by_slack_user_id = ""
+
+                publish_kwargs = {
+                    "slack_user_id": effective_slack_user_id,
+                    "domain": ((job.domain if job else None) or (run.domain if run else None)),
+                    "slack_channel_id": (job.slack_channel_id if job else ""),
+                    "slack_thread_ts": (job.slack_thread_ts if job else ""),
+                    "slack_root_message_ts": (job.slack_root_message_ts if job else ""),
+                }
+                if requested_by_slack_user_id:
+                    publish_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
+
+                result = publish_article_as_pr(run_id, **publish_kwargs)
                 return Response(result, status=status.HTTP_200_OK)
             except ArticleGenerationError as exc:
                 return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
