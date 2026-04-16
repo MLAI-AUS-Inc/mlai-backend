@@ -1377,22 +1377,25 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         job = ContentFactoryJob.objects.get(job_id="job-draft-pr-preview")
         self.assertEqual(job.request_meta.get("publish_stage"), "awaiting_preview")
         self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertEqual(job.request_meta.get("preview_url", ""), "")
         self.assertIn(
             "/api/content-factory/runs/job-draft-pr-preview/preview/",
-            job.request_meta.get("preview_url", ""),
+            job.request_meta.get("artifact_preview_url", ""),
         )
-        self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        self.assertIn("sig=", job.request_meta.get("artifact_preview_url", ""))
+        self.assertEqual(job.request_meta.get("primary_action_url"), "https://github.com/example/pr/12")
+        self.assertEqual(job.request_meta.get("primary_action_label"), "Open PR")
         self.assertEqual(
             job.request_meta.get("preview_screenshot_urls"),
             ["https://storage.example.com/previews/job-draft-pr-preview.png"],
         )
         mock_send_message.assert_called_once()
-        self.assertIn("Preview ready for mlai.au:", mock_send_message.call_args[0][1])
+        self.assertIn("Draft PR ready for mlai.au:", mock_send_message.call_args[0][1])
         blocks = mock_send_message.call_args[1]["blocks"]
         self.assertIn("Draft PR created", blocks[0]["text"]["text"])
         self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
-        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
-        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        button_texts = [element["text"]["text"] for element in blocks[1]["elements"]]
+        self.assertEqual(button_texts[:2], ["Open PR", "Open Evidence Preview"])
         self.assertEqual(blocks[2]["type"], "image")
         self.assertEqual(
             blocks[2]["image_url"],
@@ -1400,9 +1403,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         )
         self.assertIn(
             "/api/content-factory/runs/job-draft-pr-preview/preview/",
-            blocks[1]["elements"][0]["url"],
+            blocks[1]["elements"][1]["url"],
         )
-        self.assertIn("sig=", blocks[1]["elements"][0]["url"])
+        self.assertIn("sig=", blocks[1]["elements"][1]["url"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_draft_pr_created_callback_downgrades_unverified_repo_preview_to_artifact_preview(self, mock_send_message):
@@ -1444,19 +1447,23 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-draft-pr-unverified-preview")
-        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
-        self.assertTrue(job.request_meta.get("preview_content_verified"))
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "repo_preview")
+        self.assertFalse(job.request_meta.get("preview_content_verified"))
         self.assertEqual(
             job.request_meta.get("repo_preview_candidate_url"),
             "https://preview.example.com/articles/featured/test-article",
         )
+        self.assertEqual(job.request_meta.get("preview_url", ""), "")
         self.assertIn(
             "/api/content-factory/runs/job-draft-pr-unverified-preview/preview/",
-            job.request_meta.get("preview_url", ""),
+            job.request_meta.get("artifact_preview_url", ""),
         )
+        self.assertEqual(job.request_meta.get("primary_action_url"), "https://github.com/example/pr/13")
+        self.assertEqual(job.request_meta.get("primary_action_label"), "Open PR")
+        self.assertEqual(job.request_meta.get("primary_action_kind"), "pull_request")
         blocks = mock_send_message.call_args[1]["blocks"]
-        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
-        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        button_texts = [element["text"]["text"] for element in blocks[1]["elements"]]
+        self.assertEqual(button_texts[:3], ["Open PR", "Open Evidence Preview", "Open Candidate Preview"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_generation_pr_opened_callback_marks_job_needs_review(self, mock_send_message):
@@ -1580,22 +1587,25 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         job = ContentFactoryJob.objects.get(job_id="job-pr-opened-preview")
         self.assertEqual(job.status, "needs_review")
         self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
+        self.assertEqual(job.request_meta.get("preview_url", ""), "")
         self.assertIn(
             "/api/content-factory/runs/job-pr-opened-preview/preview/",
-            job.request_meta.get("preview_url", ""),
+            job.request_meta.get("artifact_preview_url", ""),
         )
-        self.assertIn("sig=", job.request_meta.get("preview_url", ""))
+        self.assertIn("sig=", job.request_meta.get("artifact_preview_url", ""))
+        self.assertEqual(job.request_meta.get("primary_action_url"), "https://github.com/example/pr/77")
+        self.assertEqual(job.request_meta.get("primary_action_label"), "Open review PR")
         self.assertEqual(
             job.request_meta.get("preview_screenshot_urls"),
             ["https://storage.example.com/previews/job-pr-opened-preview.png"],
         )
         self.assertEqual(mock_send_message.call_count, 2)
         pr_notification_call = mock_send_message.call_args_list[1]
-        self.assertIn("Review bundle preview ready for mlai.au:", pr_notification_call[0][1])
+        self.assertIn("Review bundle ready for mlai.au:", pr_notification_call[0][1])
         blocks = pr_notification_call[1]["blocks"]
         self.assertIn("Review PR created", blocks[0]["text"]["text"])
-        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
-        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        button_texts = [element["text"]["text"] for element in blocks[1]["elements"]]
+        self.assertEqual(button_texts[:2], ["Open review PR", "Open Evidence Preview"])
         self.assertEqual(blocks[2]["type"], "image")
         self.assertEqual(
             blocks[2]["image_url"],
@@ -1644,29 +1654,32 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         job = ContentFactoryJob.objects.get(job_id="job-pr-opened-raw-preview")
         self.assertEqual(job.status, "needs_review")
-        self.assertEqual(job.request_meta.get("preview_surface_kind"), "artifact_preview")
-        self.assertTrue(job.request_meta.get("preview_content_verified"))
+        self.assertEqual(job.request_meta.get("preview_surface_kind"), "repo_preview")
+        self.assertFalse(job.request_meta.get("preview_content_verified"))
         self.assertEqual(
             job.request_meta.get("repo_preview_candidate_url"),
             "https://content-how-to-raise-your-first-million.example.dev/articles/featured/how-to-raise-your-first-million",
         )
+        self.assertEqual(job.request_meta.get("preview_url", ""), "")
         self.assertIn(
             "/api/content-factory/runs/job-pr-opened-raw-preview/preview/",
-            job.request_meta.get("preview_url", ""),
+            job.request_meta.get("artifact_preview_url", ""),
         )
+        self.assertEqual(job.request_meta.get("primary_action_url"), "https://github.com/example/pr/78")
+        self.assertEqual(job.request_meta.get("primary_action_label"), "Open review PR")
         self.assertEqual(mock_send_message.call_count, 2)
         pr_notification_call = mock_send_message.call_args_list[1]
-        self.assertIn("Review bundle preview ready for mlai.au:", pr_notification_call[0][1])
+        self.assertIn("Review bundle ready for mlai.au:", pr_notification_call[0][1])
         blocks = pr_notification_call[1]["blocks"]
         self.assertIn("Review PR created", blocks[0]["text"]["text"])
         self.assertNotIn("Preview route:", blocks[0]["text"]["text"])
-        self.assertEqual(blocks[1]["elements"][0]["text"]["text"], "Open Preview")
-        self.assertEqual(blocks[1]["elements"][1]["text"]["text"], "Open PR")
+        button_texts = [element["text"]["text"] for element in blocks[1]["elements"]]
+        self.assertEqual(button_texts[:3], ["Open review PR", "Open Evidence Preview", "Open Candidate Preview"])
         self.assertIn(
             "/api/content-factory/runs/job-pr-opened-raw-preview/preview/",
-            blocks[1]["elements"][0]["url"],
+            blocks[1]["elements"][1]["url"],
         )
-        self.assertIn("sig=", blocks[1]["elements"][0]["url"])
+        self.assertIn("sig=", blocks[1]["elements"][1]["url"])
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.article_generation.publish_article')

@@ -254,6 +254,158 @@ def render_content_preview_error_page(*, title: str, message: str) -> str:
 </html>"""
 
 
+def _normalized_review_surfaces(
+    *,
+    pr_url: str = "",
+    preview_url: str = "",
+    review_surfaces: Optional[Iterable[Dict[str, Any]]] = None,
+    primary_action_url: str = "",
+    primary_action_label: str = "",
+    primary_action_kind: str = "",
+    primary_action_verified: Optional[bool] = None,
+    primary_review_url: str = "",
+    primary_review_label: str = "",
+    artifact_preview_url: str = "",
+) -> List[Dict[str, Any]]:
+    surfaces_by_key: Dict[str, Dict[str, Any]] = {}
+
+    def _add_surface(
+        *,
+        url: str,
+        label: str,
+        kind: str,
+        verified: bool = False,
+        primary: bool = False,
+        purpose: str = "",
+    ) -> None:
+        normalized_url = _string(url)
+        normalized_label = _string(label)
+        normalized_kind = _string(kind)
+        if not normalized_url or not normalized_label:
+            return
+        key = normalized_url
+        existing = surfaces_by_key.get(key)
+        payload = {
+            "url": normalized_url,
+            "label": normalized_label,
+            "kind": normalized_kind or "review_surface",
+            "verified": bool(verified),
+            "primary": bool(primary),
+            "purpose": _string(purpose) or "review_surface",
+        }
+        if existing is None:
+            surfaces_by_key[key] = payload
+            return
+        existing.update(
+            {
+                "label": existing.get("label") or payload["label"],
+                "kind": existing.get("kind") or payload["kind"],
+                "verified": bool(existing.get("verified") or payload["verified"]),
+                "primary": bool(existing.get("primary") or payload["primary"]),
+                "purpose": existing.get("purpose") or payload["purpose"],
+            }
+        )
+
+    for item in review_surfaces or []:
+        if not isinstance(item, dict):
+            continue
+        _add_surface(
+            url=item.get("url"),
+            label=item.get("label"),
+            kind=item.get("kind"),
+            verified=bool(item.get("verified")),
+            primary=bool(item.get("primary")),
+            purpose=item.get("purpose"),
+        )
+
+    normalized_primary_action_url = _string(primary_action_url) or _string(primary_review_url)
+    normalized_primary_action_label = _string(primary_action_label) or _string(primary_review_label)
+    normalized_primary_action_kind = _string(primary_action_kind)
+    normalized_primary_action_verified = (
+        bool(primary_action_verified)
+        if primary_action_verified is not None
+        else bool(normalized_primary_action_url)
+    )
+
+    if normalized_primary_action_url:
+        _add_surface(
+            url=normalized_primary_action_url,
+            label=normalized_primary_action_label or "Open Review",
+            kind=normalized_primary_action_kind or "review_surface",
+            verified=normalized_primary_action_verified,
+            primary=True,
+        )
+
+    if pr_url:
+        _add_surface(
+            url=pr_url,
+            label="Open PR",
+            kind="pull_request",
+            verified=True,
+            primary=False,
+            purpose="code_review",
+        )
+    if preview_url:
+        _add_surface(
+            url=preview_url,
+            label="Open Preview",
+            kind="remote_preview",
+            verified=True,
+            primary=False,
+            purpose="rendered_article_preview",
+        )
+    if artifact_preview_url:
+        _add_surface(
+            url=artifact_preview_url,
+            label="Open Evidence Preview",
+            kind="artifact_preview",
+            verified=True,
+            primary=False,
+            purpose="preview_evidence",
+        )
+
+    surfaces = list(surfaces_by_key.values())
+    surfaces.sort(key=lambda item: (0 if item.get("primary") else 1, 0 if item.get("verified") else 1, item.get("label") or ""))
+    return surfaces
+
+
+def _review_surface_buttons(
+    *,
+    pr_url: str = "",
+    preview_url: str = "",
+    review_surfaces: Optional[Iterable[Dict[str, Any]]] = None,
+    primary_action_url: str = "",
+    primary_action_label: str = "",
+    primary_action_kind: str = "",
+    primary_action_verified: Optional[bool] = None,
+    primary_review_url: str = "",
+    primary_review_label: str = "",
+    artifact_preview_url: str = "",
+) -> List[Dict[str, Any]]:
+    buttons: List[Dict[str, Any]] = []
+    for surface in _normalized_review_surfaces(
+        pr_url=pr_url,
+        preview_url=preview_url,
+        review_surfaces=review_surfaces,
+        primary_action_url=primary_action_url,
+        primary_action_label=primary_action_label,
+        primary_action_kind=primary_action_kind,
+        primary_action_verified=primary_action_verified,
+        primary_review_url=primary_review_url,
+        primary_review_label=primary_review_label,
+        artifact_preview_url=artifact_preview_url,
+    ):
+        buttons.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": surface["label"]},
+                **({"style": "primary"} if surface.get("primary") else {}),
+                "url": surface["url"],
+            }
+        )
+    return buttons
+
+
 def build_draft_pr_created_blocks(
     *,
     domain: str,
@@ -262,8 +414,14 @@ def build_draft_pr_created_blocks(
     route_path: str = "",
     preview_url: str = "",
     review_surface_kind: str = "",
+    primary_action_url: str = "",
+    primary_action_label: str = "",
+    primary_action_kind: str = "",
+    primary_action_verified: Optional[bool] = None,
     primary_review_url: str = "",
     primary_review_label: str = "",
+    review_surfaces: Optional[Iterable[Dict[str, Any]]] = None,
+    artifact_preview_url: str = "",
     route_is_live: Optional[bool] = None,
     intended_route_path: str = "",
     bundle_primary_path: str = "",
@@ -299,32 +457,18 @@ def build_draft_pr_created_blocks(
     if normalized_bundle_primary_path:
         section_text += f"\nBundle: `{normalized_bundle_primary_path}`"
 
-    actions: List[Dict[str, Any]] = []
-    if normalized_primary_review_url:
-        actions.append(
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": normalized_primary_review_label},
-                "style": "primary",
-                "url": normalized_primary_review_url,
-            }
-        )
-    if pr_url and pr_url != normalized_primary_review_url:
-        actions.append(
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Open PR"},
-                "url": pr_url,
-            }
-        )
-    if preview_url and preview_url != normalized_primary_review_url:
-        actions.append(
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Open Preview"},
-                "url": preview_url,
-            }
-        )
+    actions = _review_surface_buttons(
+        pr_url=pr_url,
+        preview_url=preview_url,
+        review_surfaces=review_surfaces,
+        primary_action_url=primary_action_url,
+        primary_action_label=primary_action_label,
+        primary_action_kind=primary_action_kind,
+        primary_action_verified=primary_action_verified,
+        primary_review_url=normalized_primary_review_url,
+        primary_review_label=normalized_primary_review_label,
+        artifact_preview_url=artifact_preview_url,
+    )
 
     blocks = [
         {
@@ -355,8 +499,14 @@ def build_preview_ready_blocks(
     preview_url: str,
     pr_number: Optional[int] = None,
     route_path: str = "",
+    primary_action_url: str = "",
+    primary_action_label: str = "",
+    primary_action_kind: str = "",
+    primary_action_verified: Optional[bool] = None,
     primary_review_url: str = "",
     primary_review_label: str = "",
+    review_surfaces: Optional[Iterable[Dict[str, Any]]] = None,
+    artifact_preview_url: str = "",
     route_is_live: Optional[bool] = None,
     preview_screenshot_urls: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -382,19 +532,18 @@ def build_preview_ready_blocks(
         },
         {
             "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": normalized_primary_review_label},
-                    "style": "primary",
-                    "url": normalized_primary_review_url,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Open PR"},
-                    "url": pr_url,
-                },
-            ],
+            "elements": _review_surface_buttons(
+                pr_url=pr_url,
+                preview_url=preview_url,
+                review_surfaces=review_surfaces,
+                primary_action_url=primary_action_url,
+                primary_action_label=primary_action_label,
+                primary_action_kind=primary_action_kind,
+                primary_action_verified=primary_action_verified,
+                primary_review_url=normalized_primary_review_url,
+                primary_review_label=normalized_primary_review_label,
+                artifact_preview_url=artifact_preview_url,
+            ),
         },
     ]
     image_block = _preview_screenshot_block(

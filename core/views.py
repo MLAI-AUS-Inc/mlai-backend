@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from datetime import date as calendar_date
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 from django.core import signing
 from django.db import IntegrityError, OperationalError, connection, transaction
@@ -2424,28 +2424,47 @@ class ContentFactoryCallbackView(APIView):
             'route_path',
             'intended_route_path',
             'preview_url',
+            'artifact_preview_url',
             'preview_screenshot_urls',
             'preview_surface_kind',
             'preview_content_verified',
             'repo_preview_candidate_url',
             'preview_failure_reason',
+            'primary_action',
+            'primary_action_url',
+            'primary_action_label',
+            'primary_action_kind',
+            'primary_action_verified',
             'primary_review_url',
             'primary_review_label',
+            'review_surfaces',
             'review_surface_kind',
             'bundle_primary_path',
         ):
             if field in data:
                 value = data.get(field)
-                if field == 'preview_content_verified':
+                if field in {'preview_content_verified', 'primary_action_verified'}:
                     request_meta[field] = bool(value)
-                elif field == 'preview_screenshot_urls':
-                    normalized_urls = [
-                        str(item).strip()
-                        for item in (value or [])
-                        if str(item).strip()
-                    ]
-                    if normalized_urls:
-                        request_meta[field] = normalized_urls
+                elif field in {'preview_screenshot_urls', 'review_surfaces'}:
+                    if field == 'preview_screenshot_urls':
+                        normalized_values = [
+                            str(item).strip()
+                            for item in (value or [])
+                            if str(item).strip()
+                        ]
+                    else:
+                        normalized_values = [
+                            item
+                            for item in (value or [])
+                            if isinstance(item, dict) and str(item.get('url') or '').strip()
+                        ]
+                    if normalized_values:
+                        request_meta[field] = normalized_values
+                    else:
+                        request_meta.pop(field, None)
+                elif field == 'primary_action':
+                    if isinstance(value, dict) and str(value.get('url') or '').strip():
+                        request_meta[field] = value
                     else:
                         request_meta.pop(field, None)
                 elif value:
@@ -2478,64 +2497,272 @@ class ContentFactoryCallbackView(APIView):
     def _enrich_review_preview_payload(self, data):
         payload = dict(data or {})
         run_id = str(payload.get('run_id') or payload.get('job_id') or '').strip()
+        pr_url = str(payload.get('pr_url') or '').strip()
         preview_url = str(payload.get('preview_url') or '').strip()
+        artifact_preview_url = str(payload.get('artifact_preview_url') or '').strip()
+        route_path = str(payload.get('route_path') or '').strip()
+        intended_route_path = str(payload.get('intended_route_path') or '').strip()
         route_is_live = bool(payload.get('route_is_live')) if payload.get('route_is_live') is not None else bool(preview_url)
         preview_surface_kind = str(payload.get('preview_surface_kind') or '').strip()
         review_surface_kind = str(payload.get('review_surface_kind') or '').strip()
+        primary_action_url = str(payload.get('primary_action_url') or '').strip()
+        primary_action_label = str(payload.get('primary_action_label') or '').strip()
+        primary_action_kind = str(payload.get('primary_action_kind') or '').strip()
+        primary_review_url = str(payload.get('primary_review_url') or '').strip()
+        primary_review_label = str(payload.get('primary_review_label') or '').strip()
         review_bundle_surface_kinds = {'fallback_bundle', 'patch_bundle', 'content_bundle'}
         is_review_bundle = review_surface_kind in review_bundle_surface_kinds
+
+        def _surface_purpose(kind: str) -> str:
+            normalized_kind = str(kind or '').strip()
+            if normalized_kind in {'pull_request', 'review_pr'}:
+                return 'code_review'
+            if normalized_kind == 'remote_preview':
+                return 'rendered_article_preview'
+            if normalized_kind == 'repo_preview_candidate':
+                return 'candidate_rendered_preview'
+            if normalized_kind == 'artifact_preview':
+                return 'preview_evidence'
+            if normalized_kind == 'article':
+                return 'published_article'
+            if normalized_kind == 'intended_article':
+                return 'intended_article_url'
+            return 'review_surface'
+
+        surfaces_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+        def _add_surface(
+            *,
+            kind: str,
+            url: str,
+            label: str,
+            verified: bool,
+            primary: bool = False,
+            purpose: str = "",
+        ) -> None:
+            normalized_url = str(url or '').strip()
+            normalized_kind = str(kind or '').strip()
+            normalized_label = str(label or '').strip()
+            if not normalized_url or not normalized_kind or not normalized_label:
+                return
+            key = (normalized_kind, normalized_url)
+            payload_item = {
+                'kind': normalized_kind,
+                'label': normalized_label,
+                'url': normalized_url,
+                'verified': bool(verified),
+                'primary': bool(primary),
+                'purpose': str(purpose or '').strip() or _surface_purpose(normalized_kind),
+            }
+            existing = surfaces_by_key.get(key)
+            if existing is None:
+                surfaces_by_key[key] = payload_item
+                return
+            existing.update(
+                {
+                    'label': existing.get('label') or payload_item['label'],
+                    'verified': bool(existing.get('verified') or payload_item['verified']),
+                    'primary': bool(existing.get('primary') or payload_item['primary']),
+                    'purpose': existing.get('purpose') or payload_item['purpose'],
+                }
+            )
+
+        for item in (payload.get('review_surfaces') or []):
+            if not isinstance(item, dict):
+                continue
+            _add_surface(
+                kind=item.get('kind'),
+                url=item.get('url'),
+                label=item.get('label'),
+                verified=bool(item.get('verified')),
+                primary=bool(item.get('primary')),
+                purpose=item.get('purpose'),
+            )
+
+        if not primary_action_url and primary_review_url:
+            primary_action_url = primary_review_url
+            primary_action_label = primary_action_label or primary_review_label
+
         is_content_factory_artifact_preview = (
             '/api/content-factory/runs/' in preview_url and '/preview' in preview_url
         )
         if not preview_surface_kind and preview_url and is_content_factory_artifact_preview:
             preview_surface_kind = 'artifact_preview'
-            payload['preview_surface_kind'] = preview_surface_kind
         elif not preview_surface_kind and preview_url:
             preview_surface_kind = 'repo_preview'
-            payload['preview_surface_kind'] = preview_surface_kind
+
         preview_content_verified_raw = payload.get('preview_content_verified')
         preview_content_verified = (
             bool(preview_content_verified_raw)
             if preview_content_verified_raw is not None
             else bool(preview_url) and preview_surface_kind == 'artifact_preview'
         )
+        primary_action_verified_raw = payload.get('primary_action_verified')
+        primary_action_verified = (
+            bool(primary_action_verified_raw)
+            if primary_action_verified_raw is not None
+            else bool(primary_action_url)
+        )
 
         if preview_url and preview_surface_kind == 'artifact_preview':
-            payload['preview_content_verified'] = True
-            payload['route_is_live'] = False
-            return payload
-
-        if preview_url and preview_surface_kind == 'repo_preview' and preview_content_verified and not is_review_bundle:
-            return payload
-
-        if preview_url and (is_review_bundle or (preview_surface_kind == 'repo_preview' and not preview_content_verified)):
-            payload['repo_preview_candidate_url'] = str(payload.get('repo_preview_candidate_url') or preview_url).strip()
-            payload['preview_url'] = ''
-            payload['preview_content_verified'] = False
-            payload['route_is_live'] = False
-
-        if not run_id:
-            return payload
-
-        run, content_package = _load_content_package_for_callback(run_id)
-        if not run or not content_package:
-            return payload
-
-        try:
-            artifact_preview_url = build_content_factory_preview_url(
-                request=self.request,
-                run_id=run.run_id,
+            artifact_preview_url = artifact_preview_url or preview_url
+            preview_url = ''
+            route_is_live = False
+            if route_path and not intended_route_path:
+                intended_route_path = route_path
+            route_path = ''
+        elif preview_url and preview_surface_kind == 'repo_preview' and preview_content_verified and not is_review_bundle:
+            _add_surface(
+                kind='remote_preview',
+                url=preview_url,
+                label='Open Preview',
+                verified=True,
+                purpose='rendered_article_preview',
             )
-        except Exception as exc:
-            logger.warning("Failed to build artifact preview URL for %s: %s", run_id, exc)
-            return payload
+        elif preview_url and (is_review_bundle or (preview_surface_kind == 'repo_preview' and not preview_content_verified)):
+            candidate_url = str(payload.get('repo_preview_candidate_url') or preview_url).strip()
+            if candidate_url:
+                payload['repo_preview_candidate_url'] = candidate_url
+                _add_surface(
+                    kind='repo_preview_candidate',
+                    url=candidate_url,
+                    label='Open Candidate Preview',
+                    verified=False,
+                    purpose='candidate_rendered_preview',
+                )
+            preview_url = ''
+            preview_content_verified = False
+            route_is_live = False
+            if route_path and not intended_route_path:
+                intended_route_path = route_path
+            route_path = ''
 
-        payload['preview_url'] = artifact_preview_url
-        payload['preview_surface_kind'] = 'artifact_preview'
-        payload['preview_content_verified'] = True
-        payload['primary_review_url'] = artifact_preview_url
-        payload['primary_review_label'] = 'Open Preview'
-        payload['route_is_live'] = False
+        if not artifact_preview_url:
+            for surface in surfaces_by_key.values():
+                if surface.get('kind') == 'artifact_preview':
+                    artifact_preview_url = str(surface.get('url') or '').strip()
+                    break
+
+        if run_id and not artifact_preview_url:
+            run, content_package = _load_content_package_for_callback(run_id)
+            if run and content_package:
+                try:
+                    artifact_preview_url = build_content_factory_preview_url(
+                        request=self.request,
+                        run_id=run.run_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to build artifact preview URL for %s: %s", run_id, exc)
+
+        if artifact_preview_url:
+            _add_surface(
+                kind='artifact_preview',
+                url=artifact_preview_url,
+                label='Open Evidence Preview',
+                verified=True,
+                purpose='preview_evidence',
+            )
+            if not preview_surface_kind:
+                preview_surface_kind = 'artifact_preview'
+
+        if pr_url:
+            _add_surface(
+                kind='review_pr' if is_review_bundle else 'pull_request',
+                url=pr_url,
+                label='Open review PR' if is_review_bundle else 'Open PR',
+                verified=True,
+                purpose='code_review',
+            )
+
+        if preview_url:
+            _add_surface(
+                kind='remote_preview',
+                url=preview_url,
+                label='Open Preview',
+                verified=bool(preview_content_verified),
+                purpose='rendered_article_preview',
+            )
+
+        repo_preview_candidate_url = str(payload.get('repo_preview_candidate_url') or '').strip()
+        if primary_action_url and pr_url:
+            if repo_preview_candidate_url and primary_action_url == repo_preview_candidate_url:
+                primary_action_url = pr_url
+                primary_action_label = 'Open review PR' if is_review_bundle else 'Open PR'
+                primary_action_kind = 'review_pr' if is_review_bundle else 'pull_request'
+                primary_action_verified = True
+            elif artifact_preview_url and primary_action_url == artifact_preview_url and not preview_url:
+                primary_action_url = pr_url
+                primary_action_label = 'Open review PR' if is_review_bundle else 'Open PR'
+                primary_action_kind = 'review_pr' if is_review_bundle else 'pull_request'
+                primary_action_verified = True
+
+        if not primary_action_url:
+            if preview_url and preview_content_verified and not is_review_bundle:
+                primary_action_url = preview_url
+                primary_action_label = primary_action_label or 'Open Preview'
+                primary_action_kind = primary_action_kind or 'remote_preview'
+                primary_action_verified = True
+            elif pr_url:
+                primary_action_url = pr_url
+                primary_action_label = primary_action_label or ('Open review PR' if is_review_bundle else 'Open PR')
+                primary_action_kind = primary_action_kind or ('review_pr' if is_review_bundle else 'pull_request')
+                primary_action_verified = True
+            elif artifact_preview_url:
+                primary_action_url = artifact_preview_url
+                primary_action_label = primary_action_label or 'Open Evidence Preview'
+                primary_action_kind = primary_action_kind or 'artifact_preview'
+                primary_action_verified = True
+        elif not primary_action_kind:
+            if preview_url and primary_action_url == preview_url:
+                primary_action_kind = 'remote_preview'
+            elif artifact_preview_url and primary_action_url == artifact_preview_url:
+                primary_action_kind = 'artifact_preview'
+            elif pr_url and primary_action_url == pr_url:
+                primary_action_kind = 'review_pr' if is_review_bundle else 'pull_request'
+            else:
+                primary_action_kind = review_surface_kind or 'review_surface'
+
+        if primary_action_url:
+            _add_surface(
+                kind=primary_action_kind or 'review_surface',
+                url=primary_action_url,
+                label=primary_action_label or 'Open Review',
+                verified=bool(primary_action_verified),
+                primary=True,
+            )
+
+        review_surfaces = sorted(
+            surfaces_by_key.values(),
+            key=lambda item: (
+                0 if item.get('primary') else 1,
+                0 if item.get('verified') else 1,
+                item.get('kind') or '',
+                item.get('url') or '',
+            ),
+        )
+
+        primary_action = {
+            'url': primary_action_url,
+            'label': primary_action_label or 'Open Review',
+            'kind': primary_action_kind or 'review_surface',
+            'verified': bool(primary_action_verified),
+        } if primary_action_url else None
+
+        payload['preview_url'] = preview_url
+        payload['artifact_preview_url'] = artifact_preview_url
+        payload['preview_surface_kind'] = preview_surface_kind
+        payload['preview_content_verified'] = bool(preview_content_verified)
+        payload['route_is_live'] = bool(route_is_live)
+        payload['route_path'] = route_path
+        payload['intended_route_path'] = intended_route_path
+        payload['primary_action'] = primary_action
+        payload['primary_action_url'] = primary_action_url
+        payload['primary_action_label'] = primary_action_label or ('Open Review' if primary_action_url else '')
+        payload['primary_action_kind'] = primary_action_kind or ('review_surface' if primary_action_url else '')
+        payload['primary_action_verified'] = bool(primary_action_verified) if primary_action_url else False
+        payload['primary_review_url'] = payload['primary_action_url']
+        payload['primary_review_label'] = payload['primary_action_label']
+        payload['review_surfaces'] = review_surfaces
         return payload
 
     def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
@@ -2753,9 +2980,19 @@ class ContentFactoryCallbackView(APIView):
             for item in (data.get('preview_screenshot_urls') or [])
             if str(item).strip()
         ]
+        artifact_preview_url = str(data.get('artifact_preview_url') or '').strip()
         review_surface_kind = str(data.get('review_surface_kind') or '').strip()
+        primary_action_url = str(data.get('primary_action_url') or '').strip()
+        primary_action_label = str(data.get('primary_action_label') or '').strip()
+        primary_action_kind = str(data.get('primary_action_kind') or '').strip()
+        primary_action_verified = bool(data.get('primary_action_verified')) if data.get('primary_action_verified') is not None else bool(primary_action_url)
         primary_review_url = str(data.get('primary_review_url') or '').strip()
         primary_review_label = str(data.get('primary_review_label') or '').strip()
+        review_surfaces = [
+            item
+            for item in (data.get('review_surfaces') or [])
+            if isinstance(item, dict) and str(item.get('url') or '').strip()
+        ]
         intended_route_path = str(data.get('intended_route_path') or '').strip()
         bundle_primary_path = str(data.get('bundle_primary_path') or '').strip()
         route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
@@ -2799,9 +3036,15 @@ class ContentFactoryCallbackView(APIView):
                 pr_number=pr_number,
                 route_path=route_path,
                 preview_url=preview_url,
+                artifact_preview_url=artifact_preview_url,
                 review_surface_kind=review_surface_kind,
+                primary_action_url=primary_action_url,
+                primary_action_label=primary_action_label,
+                primary_action_kind=primary_action_kind,
+                primary_action_verified=primary_action_verified,
                 primary_review_url=primary_review_url,
                 primary_review_label=primary_review_label,
+                review_surfaces=review_surfaces,
                 route_is_live=route_is_live,
                 intended_route_path=intended_route_path,
                 bundle_primary_path=bundle_primary_path,
@@ -2813,10 +3056,10 @@ class ContentFactoryCallbackView(APIView):
                     data=data,
                     slack_user_id=slack_user_id,
                     text=(
-                        f"Review bundle preview ready for {domain}: {primary_review_url}"
-                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and primary_review_url
-                        else f"Preview ready for {domain}: {primary_review_url}"
-                        if preview_url and primary_review_url
+                        f"Review bundle preview ready for {domain}: {primary_action_url or primary_review_url}"
+                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and (primary_action_url or primary_review_url)
+                        else f"Preview ready for {domain}: {primary_action_url or primary_review_url}"
+                        if preview_url and (primary_action_url or primary_review_url)
                         else f"Draft PR ready for {domain}: {pr_url}"
                     ),
                     blocks=blocks,
@@ -2857,9 +3100,19 @@ class ContentFactoryCallbackView(APIView):
             for item in (data.get('preview_screenshot_urls') or [])
             if str(item).strip()
         ]
+        artifact_preview_url = str(data.get('artifact_preview_url') or '').strip()
         review_surface_kind = str(data.get('review_surface_kind') or '').strip()
+        primary_action_url = str(data.get('primary_action_url') or '').strip()
+        primary_action_label = str(data.get('primary_action_label') or '').strip()
+        primary_action_kind = str(data.get('primary_action_kind') or '').strip()
+        primary_action_verified = bool(data.get('primary_action_verified')) if data.get('primary_action_verified') is not None else bool(primary_action_url)
         primary_review_url = str(data.get('primary_review_url') or '').strip()
         primary_review_label = str(data.get('primary_review_label') or '').strip()
+        review_surfaces = [
+            item
+            for item in (data.get('review_surfaces') or [])
+            if isinstance(item, dict) and str(item.get('url') or '').strip()
+        ]
         intended_route_path = str(data.get('intended_route_path') or '').strip()
         bundle_primary_path = str(data.get('bundle_primary_path') or '').strip()
         route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
@@ -2937,9 +3190,15 @@ class ContentFactoryCallbackView(APIView):
                 pr_number=pr_number,
                 route_path=route_path,
                 preview_url=preview_url,
+                artifact_preview_url=artifact_preview_url,
                 review_surface_kind=review_surface_kind,
+                primary_action_url=primary_action_url,
+                primary_action_label=primary_action_label,
+                primary_action_kind=primary_action_kind,
+                primary_action_verified=primary_action_verified,
                 primary_review_url=primary_review_url,
                 primary_review_label=primary_review_label,
+                review_surfaces=review_surfaces,
                 route_is_live=route_is_live,
                 intended_route_path=intended_route_path,
                 bundle_primary_path=bundle_primary_path,
@@ -2951,12 +3210,12 @@ class ContentFactoryCallbackView(APIView):
                     data=data,
                     slack_user_id=slack_user_id,
                     text=(
-                        f"Review bundle preview ready for {domain}: {primary_review_url}"
-                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and primary_review_url
+                        f"Review bundle preview ready for {domain}: {primary_action_url or primary_review_url}"
+                        if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'} and preview_url and (primary_action_url or primary_review_url)
                         else f"Review bundle ready for {domain}: {pr_url}"
                         if review_surface_kind in {'fallback_bundle', 'patch_bundle', 'content_bundle'}
-                        else f"Preview ready for review for {domain}: {primary_review_url}"
-                        if preview_url and primary_review_url
+                        else f"Preview ready for review for {domain}: {primary_action_url or primary_review_url}"
+                        if preview_url and (primary_action_url or primary_review_url)
                         else f"Draft PR ready for review for {domain}: {pr_url}"
                         if review_required
                         else f"Draft PR opened for {domain}: {pr_url}"
@@ -3003,8 +3262,18 @@ class ContentFactoryCallbackView(APIView):
         ]
         pr_number = data.get('pr_number')
         route_path = str(data.get('route_path') or '').strip()
+        artifact_preview_url = str(data.get('artifact_preview_url') or '').strip()
+        primary_action_url = str(data.get('primary_action_url') or '').strip()
+        primary_action_label = str(data.get('primary_action_label') or '').strip()
+        primary_action_kind = str(data.get('primary_action_kind') or '').strip()
+        primary_action_verified = bool(data.get('primary_action_verified')) if data.get('primary_action_verified') is not None else bool(primary_action_url)
         primary_review_url = str(data.get('primary_review_url') or '').strip()
         primary_review_label = str(data.get('primary_review_label') or '').strip()
+        review_surfaces = [
+            item
+            for item in (data.get('review_surfaces') or [])
+            if isinstance(item, dict) and str(item.get('url') or '').strip()
+        ]
         route_is_live = bool(data.get('route_is_live')) if data.get('route_is_live') is not None else bool(preview_url)
         dedupe_key = self._callback_dedupe_key(data, event_name='preview_ready')
 
@@ -3034,8 +3303,14 @@ class ContentFactoryCallbackView(APIView):
                 preview_url=preview_url,
                 pr_number=pr_number,
                 route_path=route_path,
+                primary_action_url=primary_action_url,
+                primary_action_label=primary_action_label,
+                primary_action_kind=primary_action_kind,
+                primary_action_verified=primary_action_verified,
                 primary_review_url=primary_review_url,
                 primary_review_label=primary_review_label,
+                review_surfaces=review_surfaces,
+                artifact_preview_url=artifact_preview_url,
                 route_is_live=route_is_live,
                 preview_screenshot_urls=preview_screenshot_urls,
             )
@@ -3044,7 +3319,7 @@ class ContentFactoryCallbackView(APIView):
                     job=job,
                     data=data,
                     slack_user_id=slack_user_id,
-                    text=f"Preview ready for {domain}: {primary_review_url or preview_url}",
+                    text=f"Preview ready for {domain}: {primary_action_url or primary_review_url or preview_url}",
                     blocks=blocks,
                     allow_dm_fallback=True,
                 )
