@@ -1,7 +1,6 @@
 import logging
 import time
 from typing import Optional
-import requests as http_requests
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
@@ -18,6 +17,7 @@ from integrations.content_factory_contract import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     require_roo_request_source,
 )
+from integrations import http_client as http_requests
 
 logger = logging.getLogger(__name__)
 
@@ -1299,7 +1299,7 @@ def refresh_org_github_token(domain: str) -> dict:
                 "grant_type": "refresh_token",
                 "refresh_token": config.github_refresh_token_encrypted,
             },
-            timeout=20,
+            timeout=(3, 20),
         )
     except Exception as exc:
         duration_ms = (time.monotonic() - started_at) * 1000
@@ -2098,7 +2098,7 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
             endpoint,
             json={"delivery_mode": selected_mode},
             headers=headers,
-            timeout=120,
+            timeout=(3, 30),
         )
         if response.status_code in {200, 412}:
             payload = response.json()
@@ -2148,7 +2148,7 @@ def check_generation_status(job_id: str) -> dict:
     headers = _build_content_factory_headers()
 
     try:
-        response = http_requests.get(status_endpoint, headers=headers, timeout=30)
+        response = http_requests.get(status_endpoint, headers=headers, timeout=(3, 30))
         if response.status_code == 200:
             result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
             # Detect failure and update local state + notify user
@@ -2163,7 +2163,7 @@ def check_generation_status(job_id: str) -> dict:
             response = http_requests.get(
                 fallback_endpoint,
                 headers=headers,
-                timeout=30
+                timeout=(3, 30)
             )
             if response.status_code == 200:
                 result = augment_status_with_job_tracking(job_id, _maybe_auto_advance_run(job_id, response.json()))
@@ -2235,7 +2235,7 @@ def publish_article(job_id: str, slack_user_id: str = None, domain: str = None) 
             publish_endpoint,
             json={},
             headers=headers,
-            timeout=120,
+            timeout=(3, 30),
         )
         
         if response.status_code == 200:
@@ -2293,7 +2293,7 @@ def promote_article_bundle(
             promote_endpoint,
             json={},
             headers=headers,
-            timeout=120,
+            timeout=(3, 30),
         )
 
         if response.status_code != 200:

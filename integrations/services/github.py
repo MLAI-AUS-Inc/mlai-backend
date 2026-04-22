@@ -3,11 +3,11 @@ import logging
 import time
 import urllib.parse
 
-import requests as http_requests
 from django.conf import settings
 from django.urls import reverse
 from django.db.models import Q
 
+from integrations import http_client as http_requests
 from integrations.models import UserIntegration
 from integrations.content_factory_contract import (
     CONTENT_FACTORY_REQUEST_SOURCE,
@@ -229,7 +229,7 @@ def refresh_github_token(slack_user_id: str) -> dict:
                 "grant_type": "refresh_token",
                 "refresh_token": integration.github_refresh_token,
             },
-            timeout=20,
+            timeout=(3, 20),
         )
     except Exception as exc:
         duration_ms = (time.monotonic() - started_at) * 1000
@@ -402,11 +402,10 @@ def scan_github_project(
         logger.warning("No CONTENT_FACTORY_API_KEY found in settings! Scan request may fail.")
 
     # Early validation: Verify GitHub access before calling Content Factory
-    import requests as http_requests_lib
     current_sha = None
     try:
         current_sha = get_latest_repo_sha(github_token, github_repo)
-    except http_requests_lib.exceptions.HTTPError as e:
+    except http_requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             raise GitHubAuthScanError("GitHub token expired. Please reconnect your GitHub account.")
         elif e.response.status_code in [403, 404]:
@@ -483,10 +482,7 @@ def scan_github_project(
             scan_endpoint,
             json=payload,
             headers=headers,
-            # Fallback: Support legacy sync (long timeout) AND async (short response).
-            # If the backend is synchronous, this thread will block for up to 60 mins.
-            # If the backend is async (returns 202), it returns immediately.
-            timeout=3600, 
+            timeout=(3, 30),
         )
         
         # Handle both 202 Accepted (standard async) and 200 OK with job_id (potential new behavior)
@@ -552,7 +548,7 @@ def scan_github_project(
             for _ in range(max_retries):
                 time.sleep(5) 
                 try:
-                    status_resp = http_requests.get(status_url, headers=headers, timeout=10)
+                    status_resp = http_requests.get(status_url, headers=headers, timeout=(3, 10))
                     if status_resp.status_code == 200:
                         status_data = status_resp.json()
                         state = status_data.get('status')
@@ -802,7 +798,7 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github.v3+json",
             },
-            timeout=10
+            timeout=(3, 10)
         )
     except Exception as exc:
         duration_ms = (time.monotonic() - started_at) * 1000
@@ -875,7 +871,7 @@ def scaffold_articles_directory(
             scaffold_endpoint,
             json=payload,
             headers=headers,
-            timeout=120,
+            timeout=(3, 30),
         )
 
         if response.status_code in [200, 202]:
@@ -958,7 +954,7 @@ def decide_scan_scaffold(
         response = http_requests.post(
             action_endpoint,
             headers=headers,
-            timeout=120,
+            timeout=(3, 30),
         )
         data = response.json() if response.content else {}
 

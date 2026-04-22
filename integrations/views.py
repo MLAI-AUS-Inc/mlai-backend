@@ -1,7 +1,6 @@
 import secrets
 import urllib.parse
 import logging
-import requests
 from datetime import timedelta
 from typing import Optional, Set
 from django.conf import settings
@@ -16,6 +15,7 @@ from integrations.services.github_connections import (
     store_github_oauth_state,
     validate_github_oauth_state,
 )
+from integrations import http_client as requests
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -143,7 +143,7 @@ def google_callback(request):
                 "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
                 "grant_type": "authorization_code",
             },
-            timeout=20,
+            timeout=(3, 20),
         )
         token_resp.raise_for_status()
         token_data = token_resp.json()
@@ -168,7 +168,7 @@ def google_callback(request):
         ui_resp = requests.get(
             USERINFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=20,
+            timeout=(3, 20),
         )
         ui_resp.raise_for_status()
         google_email = ui_resp.json().get("email")
@@ -262,7 +262,7 @@ def github_callback(request):
             "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
             "code": code,
         },
-        timeout=20,
+        timeout=(3, 20),
     )
     token_resp.raise_for_status()
     token_data = token_resp.json()
@@ -286,7 +286,7 @@ def github_callback(request):
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/vnd.github.v3+json",
         },
-        timeout=20,
+        timeout=(3, 20),
     )
     user_resp.raise_for_status()
     github_user = user_resp.json()
@@ -301,7 +301,7 @@ def github_callback(request):
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/vnd.github.v3+json",
             },
-            timeout=20,
+            timeout=(3, 20),
         )
         repos_resp.raise_for_status()
         repos_data = repos_resp.json()

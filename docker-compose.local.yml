@@ -1,7 +1,7 @@
 services:
   web:
     build: .
-    command: sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-1} --timeout 300 --max-requests 1000 --max-requests-jitter 50 mlai.wsgi:application"
+    command: gunicorn --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --worker-class sync --keep-alive ${GUNICORN_KEEP_ALIVE:-2} --timeout ${GUNICORN_TIMEOUT:-30} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} --max-requests ${GUNICORN_MAX_REQUESTS:-300} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50} mlai.wsgi:application
     environment:
       APP_ENV: local
     volumes:

@@ -69,7 +69,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
         local file_path="\$3"
         local applied
 
-        applied=\$(migration_applied "\$app_label" "\$migration_name")
+        applied=\$(migration_applied "\$app_label" "\$migration_name" || echo no)
+        applied=\$(printf "%s\n" "\$applied" | tail -n 1)
         if [ -f "\$file_path" ] && [ "\$applied" != "yes" ]; then
             echo "🧹 Removing stale unapplied migration \$app_label.\$migration_name (\$file_path)"
             rm -f "\$file_path"
@@ -81,6 +82,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
             echo "   Restore the migration file before redeploying so Django sees a consistent graph."
             exit 1
         fi
+
+        return 0
     }
 
     docker network inspect mlai-shared >/dev/null 2>&1 || docker network create mlai-shared
@@ -104,11 +107,33 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🗺️ Migration plan..."
     docker compose run --rm --no-deps web python manage.py migrate --plan
 
+    restore_web_on_error() {
+        echo "⚠️ Deployment failed after web traffic was paused; restoring existing web service."
+        docker compose up -d web || true
+    }
+
+    echo "⏸️ Pausing web traffic before DB migrations..."
+    docker compose stop web || true
+    trap restore_web_on_error ERR
+
     echo "🗄️ Running migrations..."
     docker compose run --rm --no-deps web python manage.py migrate --noinput
 
     echo "✅ Verifying migration readiness..."
     docker compose run --rm --no-deps web python manage.py migrate --check --noinput
+
+    echo "🔒 Verifying coworking booking concurrency guard..."
+    docker compose run --rm --no-deps web python manage.py shell -c "
+from django.db import connection
+with connection.cursor() as cursor:
+    cursor.execute(\"SELECT to_regclass('public.unique_active_booking_per_user_date')\")
+    index_name = cursor.fetchone()[0]
+if not index_name:
+    raise SystemExit('unique_active_booking_per_user_date is missing')
+print(index_name)
+"
+
+    trap - ERR
 
     echo "🌐 Starting web, scheduler, and bridge-worker services..."
     docker compose up -d web scheduler bridge-worker

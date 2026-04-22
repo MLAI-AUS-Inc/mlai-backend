@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 
-import requests
 from django.conf import settings
 
+from integrations import http_client as requests
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _post_to_valley_harness(path: str, *, payload: dict | None = None) -> dict |
             endpoint,
             json=payload,
             headers={"X-API-Key": api_key},
-            timeout=10,
+            timeout=(3, 10),
         )
         response.raise_for_status()
         response_payload = response.json() if response.content else {}

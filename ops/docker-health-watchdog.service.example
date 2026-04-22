@@ -8,9 +8,13 @@ Type=simple
 WorkingDirectory=/srv/mlai-backend
 Environment=WATCHDOG_SERVICE_NAME=web
 Environment=WATCHDOG_INTERVAL_SECONDS=60
+Environment=WATCHDOG_MAX_RESTARTS=3
+Environment=WATCHDOG_RESTART_WINDOW_SECONDS=600
 ExecStart=/srv/mlai-backend/ops/docker-health-watchdog.sh
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=600
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
