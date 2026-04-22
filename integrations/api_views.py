@@ -230,7 +230,7 @@ class GithubTokenIdentityView(APIView):
             try:
                 from integrations.services.article_generation import ArticleGenerationError, get_github_credentials_for_domain
                 from integrations.services.github import get_latest_repo_sha, is_token_expired, refresh_github_token, TokenRefreshError
-                import requests
+                from integrations import http_client as requests
 
                 resolved_repo = github_repo
                 resolved_token = token

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from uuid import uuid4
 
@@ -17,9 +18,11 @@ class RequestLoggingMiddleware:
         started_at = time.monotonic()
         request_id = str(request.headers.get("X-Request-ID") or "").strip() or f"mlai-{uuid4().hex}"
         request.request_id = request_id
+        worker_pid = os.getpid()
         logger.info(
-            "request_started request_id=%s method=%s path=%s",
+            "request_started request_id=%s worker_pid=%s method=%s path=%s",
             request_id,
+            worker_pid,
             request.method,
             request.get_full_path(),
         )
@@ -29,8 +32,9 @@ class RequestLoggingMiddleware:
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000
             logger.exception(
-                "request_failed request_id=%s method=%s path=%s duration_ms=%.2f exc_type=%s",
+                "request_failed request_id=%s worker_pid=%s method=%s path=%s duration_ms=%.2f exc_type=%s",
                 request_id,
+                worker_pid,
                 request.method,
                 request.get_full_path(),
                 duration_ms,
@@ -41,8 +45,9 @@ class RequestLoggingMiddleware:
         duration_ms = (time.monotonic() - started_at) * 1000
         response["X-Request-ID"] = request_id
         logger.info(
-            "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+            "request_complete request_id=%s worker_pid=%s method=%s path=%s status=%s duration_ms=%.2f",
             request_id,
+            worker_pid,
             request.method,
             request.get_full_path(),
             response.status_code,
@@ -80,6 +85,7 @@ class PointsEndpointTimeoutMiddleware:
 
         statement_timeout_ms = int(getattr(settings, "POINTS_STATEMENT_TIMEOUT_MS", 12000))
         lock_timeout_ms = int(getattr(settings, "POINTS_LOCK_TIMEOUT_MS", 5000))
+        started_at = time.monotonic()
 
         try:
             with transaction.atomic():
@@ -92,11 +98,14 @@ class PointsEndpointTimeoutMiddleware:
                 raise
 
             request_id = getattr(request, "request_id", "")
+            duration_ms = (time.monotonic() - started_at) * 1000
             logger.warning(
-                "points_request_timed_out request_id=%s method=%s path=%s exc_type=%s error=%s",
+                "points_request_timed_out request_id=%s worker_pid=%s method=%s path=%s duration_ms=%.2f exc_type=%s error=%s",
                 request_id,
+                os.getpid(),
                 request.method,
                 request.get_full_path(),
+                duration_ms,
                 exc.__class__.__name__,
                 exc,
             )
