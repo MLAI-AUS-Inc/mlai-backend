@@ -14,9 +14,27 @@ ARTICLE_SYSTEM_TEMPLATE = {
     "reason": "",
     "source": "scan",
     "verified_at": None,
+    "system_type": "",
+    "route_template": "",
+    "content_source": None,
+    "publish_mutation_target": None,
+    "readiness": {},
+    "registry": {},
+    "diagnostics": {},
+    "registry_selection_cache": {},
+    "observability": {},
 }
 
 READY_STATES = {"existing", "roo_scaffolded"}
+REGISTRY_DRIVEN_SEO_TARGET_KIND = "registry_driven_seo"
+REGISTRY_ENTRY_DELIVERY_ADAPTER = "registry_entry"
+REGISTRY_ENTRY_STRATEGY = "registry_entry_patch"
+REGISTRY_READINESS_SUBSTATES = (
+    "structure_ready",
+    "mapping_ready",
+    "routing_ready",
+    "safety_ready",
+)
 
 
 def default_article_system() -> Dict[str, Any]:
@@ -36,7 +54,119 @@ def normalize_article_system(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         article_system["confidence"] = "low"
     if article_system["source"] not in {"scan", "scaffold", "manual_confirmed"}:
         article_system["source"] = "scan"
+    if not isinstance(article_system.get("readiness"), dict):
+        article_system["readiness"] = {}
+    if not isinstance(article_system.get("registry"), dict):
+        article_system["registry"] = {}
+    if not isinstance(article_system.get("diagnostics"), dict):
+        article_system["diagnostics"] = {}
+    if not isinstance(article_system.get("registry_selection_cache"), dict):
+        article_system["registry_selection_cache"] = {}
+    if not isinstance(article_system.get("observability"), dict):
+        article_system["observability"] = {}
     return article_system
+
+
+def _target_strategy(target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    strategy = (target or {}).get("registration_strategy")
+    return strategy if isinstance(strategy, dict) else {}
+
+
+def is_registry_driven_publish_target(target: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(target, dict):
+        return False
+    kind = str(target.get("kind") or "").strip()
+    adapter = str(target.get("delivery_adapter") or "").strip()
+    strategy = str(_target_strategy(target).get("type") or "").strip()
+    return (
+        kind == REGISTRY_DRIVEN_SEO_TARGET_KIND
+        or adapter == REGISTRY_ENTRY_DELIVERY_ADAPTER
+        or strategy == REGISTRY_ENTRY_STRATEGY
+    )
+
+
+def registry_target_readiness(target: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    if not is_registry_driven_publish_target(target):
+        return {key: False for key in REGISTRY_READINESS_SUBSTATES}
+
+    readiness = (target or {}).get("readiness")
+    if not isinstance(readiness, dict):
+        readiness = _target_strategy(target).get("readiness")
+    if not isinstance(readiness, dict):
+        readiness = {}
+
+    status = str(
+        (target or {}).get("registry_status")
+        or (target or {}).get("status")
+        or readiness.get("status")
+        or ""
+    ).strip()
+    all_ready = status == "publish_ready" or bool(readiness.get("publish_ready"))
+    return {
+        key: bool(readiness.get(key) or all_ready)
+        for key in REGISTRY_READINESS_SUBSTATES
+    }
+
+
+def registry_target_publish_ready(target: Optional[Dict[str, Any]]) -> bool:
+    if not is_registry_driven_publish_target(target):
+        return False
+    readiness = registry_target_readiness(target)
+    return all(readiness.get(key) for key in REGISTRY_READINESS_SUBSTATES)
+
+
+def _article_system_path_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return value.get("registry_path") or value.get("path") or value.get("file")
+
+
+def registry_publish_target_from_article_system(article_system: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(article_system, dict):
+        return None
+    if str(article_system.get("system_type") or "").strip() != REGISTRY_DRIVEN_SEO_TARGET_KIND:
+        return None
+
+    registry = article_system.get("registry")
+    if not isinstance(registry, dict):
+        registry = {}
+    registry_path = (
+        registry.get("path")
+        or _article_system_path_value(article_system.get("publish_mutation_target"))
+        or _article_system_path_value(article_system.get("content_source"))
+        or article_system.get("directory_path")
+        or article_system.get("directory_name")
+    )
+    readiness = article_system.get("readiness") if isinstance(article_system.get("readiness"), dict) else {}
+    diagnostics = article_system.get("diagnostics") if isinstance(article_system.get("diagnostics"), dict) else {}
+    observability = article_system.get("observability") if isinstance(article_system.get("observability"), dict) else {}
+    return {
+        "kind": REGISTRY_DRIVEN_SEO_TARGET_KIND,
+        "delivery_adapter": REGISTRY_ENTRY_DELIVERY_ADAPTER,
+        "readiness": readiness,
+        "diagnostics": diagnostics,
+        "observability": observability,
+        "registration_strategy": {
+            "type": REGISTRY_ENTRY_STRATEGY,
+            "registry_path": registry_path,
+            "route_template": article_system.get("route_template") or "",
+        },
+    }
+
+
+def best_registry_driven_publish_target(
+    publish_targets: Optional[list] = None,
+    article_system: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    targets = [item for item in (publish_targets or []) if isinstance(item, dict)]
+    article_system_target = registry_publish_target_from_article_system(article_system)
+    if article_system_target:
+        targets = [*targets, article_system_target]
+    registry_targets = [item for item in targets if is_registry_driven_publish_target(item)]
+    if not registry_targets:
+        return None
+    ready_target = next((item for item in registry_targets if registry_target_publish_ready(item)), None)
+    return ready_target or registry_targets[0]
 
 
 def infer_confidence(articles_status: Optional[Dict[str, Any]]) -> str:

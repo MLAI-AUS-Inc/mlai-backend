@@ -1635,6 +1635,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         if config.brand_name: existing_artifacts['brand_name'] = config.brand_name
         if config.article_path_pattern: existing_artifacts['article_path_pattern'] = config.article_path_pattern
         if config.registry_path: existing_artifacts['registry_path'] = config.registry_path
+        if config.article_system: existing_artifacts['article_system'] = config.article_system
         if config.publish_targets: existing_artifacts['publish_targets'] = config.publish_targets
         if config.default_publish_target_id: existing_artifacts['default_publish_target_id'] = config.default_publish_target_id
         if config.company_context: existing_artifacts['company_context'] = config.company_context
@@ -1796,6 +1797,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         if config.brand_name: existing_artifacts['brand_name'] = config.brand_name
         if config.article_path_pattern: existing_artifacts['article_path_pattern'] = config.article_path_pattern
         if config.registry_path: existing_artifacts['registry_path'] = config.registry_path
+        if config.article_system: existing_artifacts['article_system'] = config.article_system
         if config.publish_targets: existing_artifacts['publish_targets'] = config.publish_targets
         if config.default_publish_target_id: existing_artifacts['default_publish_target_id'] = config.default_publish_target_id
         if config.company_context: existing_artifacts['company_context'] = config.company_context
