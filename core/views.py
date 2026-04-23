@@ -3918,6 +3918,7 @@ class ContentFactoryCallbackView(APIView):
 
         article_system_state = article_system.get('state', 'missing')
         destination_summary = _scan_destination_summary(article_system, publish_targets)
+        blocks = None
 
         if not slack_user_id:
             return Response({'status': 'received', 'job_id': job_id}, status=status.HTTP_200_OK)
