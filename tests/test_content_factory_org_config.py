@@ -82,6 +82,100 @@ class ContentFactoryOrgConfigTests(TestCase):
             publish_targets[0]["target_id"],
         )
 
+    def test_org_config_round_trips_registry_driven_publish_target_metadata(self):
+        publish_targets = [
+            {
+                "target_id": "registry_driven_seo_shared_lib_seo_public_pages_ts",
+                "kind": "registry_driven_seo",
+                "delivery_adapter": "registry_entry",
+                "publish_capability": "direct",
+                "registry_status": "publish_ready",
+                "readiness": {
+                    "structure_ready": True,
+                    "mapping_ready": True,
+                    "routing_ready": True,
+                    "safety_ready": True,
+                },
+                "registration_strategy": {
+                    "type": "registry_entry_patch",
+                    "registry_path": "shared/lib/seo/public-pages.ts",
+                    "registry_export_name": "PUBLIC_PAGES",
+                    "parser_family": "typescript_static_array",
+                    "route_template": "/resources/guides/{slug}",
+                    "canonical_identity": {
+                        "primary": "canonicalPath",
+                        "secondary": "path",
+                        "fallback": "slug",
+                    },
+                    "field_mapping": {
+                        "slug": "id",
+                        "path": "canonicalPath",
+                        "title": "title",
+                        "description": "description",
+                        "content": "sections",
+                    },
+                    "content_adapter": {"type": "sections_array"},
+                    "insertion_strategy": {
+                        "type": "append_end_only",
+                        "order_semantics": "irrelevant",
+                    },
+                    "route_validation": {
+                        "registry_lookup": ["matches_detected_registry_lookup"],
+                    },
+                },
+                "observability": {
+                    "detection_score_breakdown": {"route_usage": 3, "field_match": 1},
+                    "fallback_reason": "",
+                },
+            }
+        ]
+        article_system = {
+            "state": "existing",
+            "directory_name": "registry",
+            "directory_path": "shared/lib/seo/public-pages.ts",
+            "confidence": "high",
+            "reason": "Detected registry-driven SEO system",
+            "source": "scan",
+            "verified_at": "2026-04-23T00:00:00+00:00",
+            "system_type": "registry_driven_seo",
+            "route_template": "/resources/guides/{slug}",
+            "readiness": publish_targets[0]["readiness"],
+            "registry": {
+                "path": "shared/lib/seo/public-pages.ts",
+                "export_name": "PUBLIC_PAGES",
+            },
+            "diagnostics": {
+                "detection_score_breakdown": {"route_usage": 3, "field_match": 1},
+            },
+        }
+
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "article_system": article_system,
+                "publish_targets": publish_targets,
+                "default_publish_target_id": publish_targets[0]["target_id"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.article_system["system_type"], "registry_driven_seo")
+        self.assertEqual(self.config.article_system["readiness"], publish_targets[0]["readiness"])
+        self.assertEqual(self.config.publish_targets, publish_targets)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["article_system"]["registry"]["export_name"], "PUBLIC_PAGES")
+        self.assertEqual(get_response.data["publish_targets"], publish_targets)
+
     def test_org_config_round_trips_build_healing_hints(self):
         hints = [
             {

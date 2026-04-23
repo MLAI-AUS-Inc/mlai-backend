@@ -10,7 +10,13 @@ from django.urls import reverse
 
 from core.content_factory_auth import content_factory_github_connection_state
 from .models import UserIntegration
-from core.article_system import article_system_ready, recommended_next_action as derive_recommended_next_action, resolve_article_system
+from core.article_system import (
+    article_system_ready,
+    best_registry_driven_publish_target,
+    recommended_next_action as derive_recommended_next_action,
+    registry_target_publish_ready,
+    resolve_article_system,
+)
 from core.permissions import HasRooApiKey
 from integrations.content_factory_contract import require_roo_request_source
 from integrations.services.github_connections import build_github_oauth_url, get_owned_org_configs
@@ -31,6 +37,8 @@ def _derive_connection_state(config) -> str:
 
 def _serialize_connected_domain(config) -> dict:
     article_system = resolve_article_system(config)
+    registry_target = best_registry_driven_publish_target(getattr(config, "publish_targets", None), article_system)
+    registry_ready = registry_target_publish_ready(registry_target)
     connection_state = _derive_connection_state(config)
     return {
         "domain": config.organization.domain,
@@ -39,7 +47,10 @@ def _serialize_connected_domain(config) -> dict:
         "scanned": bool(config.scan_summary),
         "articles_scaffolded": config.articles_scaffolded,
         "article_system": article_system,
-        "article_system_ready": article_system_ready(article_system),
+        "article_system_ready": article_system_ready(article_system) or registry_ready,
+        "registry_driven_seo_ready": registry_ready,
+        "publish_targets": config.publish_targets or [],
+        "default_publish_target_id": config.default_publish_target_id,
         "connection_state": connection_state,
         "needs_github_auth": connection_state == "auth_required",
         "last_scanned_at": getattr(config, "last_scanned_at", None),
@@ -301,6 +312,7 @@ class GithubTokenIdentityView(APIView):
         articles_scaffolded = False
         article_system = {}
         article_system_ready_flag = False
+        registry_driven_seo_ready = False
 
         try:
             from core.models import GeneratedComponent, Organization
@@ -314,13 +326,16 @@ class GithubTokenIdentityView(APIView):
                         scan_completed = GeneratedComponent.objects.filter(organization=org).exists()
                     articles_scaffolded = bool(config.articles_scaffolded)
                     article_system = resolve_article_system(config)
-                    article_system_ready_flag = article_system_ready(article_system)
+                    registry_target = best_registry_driven_publish_target(config.publish_targets, article_system)
+                    registry_driven_seo_ready = registry_target_publish_ready(registry_target)
+                    article_system_ready_flag = article_system_ready(article_system) or registry_driven_seo_ready
                     last_scanned_at = getattr(config, "last_scanned_at", None) or last_scanned_at
                     last_scanned_sha = getattr(config, "last_scanned_sha", None) or last_scanned_sha
             elif requires_domain_selection:
                 scan_completed = False
                 article_system = {}
                 article_system_ready_flag = False
+                registry_driven_seo_ready = False
         except Exception as e:
             logger.warning(f"Failed to derive scan readiness for {active_domain}: {e}")
 
@@ -334,6 +349,8 @@ class GithubTokenIdentityView(APIView):
             recommended_next_action = "connect_github"
         else:
             recommended_next_action = derive_recommended_next_action(scan_completed, article_system)
+            if registry_driven_seo_ready and recommended_next_action == "scaffold":
+                recommended_next_action = "research_article"
 
         response_data = {
             "slack_user_id": slack_user_id,
@@ -357,6 +374,9 @@ class GithubTokenIdentityView(APIView):
             "articles_scaffolded": articles_scaffolded,
             "article_system": article_system,
             "article_system_ready": article_system_ready_flag,
+            "registry_driven_seo_ready": registry_driven_seo_ready,
+            "publish_targets": getattr(active_config, "publish_targets", []) if active_config else [],
+            "default_publish_target_id": getattr(active_config, "default_publish_target_id", None) if active_config else None,
             "recommended_next_action": recommended_next_action,
             "last_article": last_article,
             "pending_intent": pending_intent,

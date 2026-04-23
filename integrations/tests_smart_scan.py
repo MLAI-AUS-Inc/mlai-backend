@@ -323,6 +323,48 @@ class SmartScanTests(TestCase):
         self.assertFalse(response.data['article_system_ready'])
 
     @patch('integrations.services.github.get_latest_repo_sha')
+    def test_status_endpoint_treats_publish_ready_registry_target_as_article_ready(self, mock_get_sha):
+        from rest_framework.test import APIRequestFactory
+        from integrations.api_views import GithubTokenIdentityView
+
+        self.integration.project_scanned = True
+        self.integration.save()
+        self.config.article_system = {}
+        self.config.publish_targets = [
+            {
+                "target_id": "registry_driven_seo_shared_lib_seo_public_pages_ts",
+                "kind": "registry_driven_seo",
+                "delivery_adapter": "registry_entry",
+                "registry_status": "publish_ready",
+                "readiness": {
+                    "structure_ready": True,
+                    "mapping_ready": True,
+                    "routing_ready": True,
+                    "safety_ready": True,
+                },
+                "registration_strategy": {
+                    "type": "registry_entry_patch",
+                    "registry_path": "shared/lib/seo/public-pages.ts",
+                    "route_template": "/resources/guides/{slug}",
+                },
+            }
+        ]
+        self.config.save(update_fields=['article_system', 'publish_targets'])
+        mock_get_sha.return_value = 'new_sha_999'
+
+        factory = APIRequestFactory()
+        view = GithubTokenIdentityView.as_view()
+        request = factory.get(f'/api/v1/integrations/github/{self.user_id}/?domain={self.domain}')
+
+        with patch('core.permissions.HasRooApiKey.has_permission', return_value=True):
+            response = view(request, slack_user_id=self.user_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['recommended_next_action'], 'research_article')
+        self.assertTrue(response.data['article_system_ready'])
+        self.assertTrue(response.data['registry_driven_seo_ready'])
+
+    @patch('integrations.services.github.get_latest_repo_sha')
     def test_status_endpoint_uses_scan_summary_article_system_fallback(self, mock_get_sha):
         from rest_framework.test import APIRequestFactory
         from integrations.api_views import GithubTokenIdentityView

@@ -951,6 +951,148 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertNotIn("existing article system", message)
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_persists_and_announces_registry_driven_target(self, mock_send_dm):
+        organization = Organization.objects.create(name="Skedy", domain="skedy.io")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            scan_summary="scan pending",
+            article_system={},
+            publish_targets=[],
+        )
+        readiness = {
+            "structure_ready": True,
+            "mapping_ready": True,
+            "routing_ready": True,
+            "safety_ready": True,
+        }
+        publish_targets = [
+            {
+                "target_id": "registry_driven_seo_shared_lib_seo_public_pages_ts",
+                "kind": "registry_driven_seo",
+                "delivery_adapter": "registry_entry",
+                "publish_capability": "direct",
+                "registry_status": "publish_ready",
+                "readiness": readiness,
+                "registration_strategy": {
+                    "type": "registry_entry_patch",
+                    "registry_path": "shared/lib/seo/public-pages.ts",
+                    "route_template": "/resources/guides/{slug}",
+                    "field_mapping": {
+                        "path": "canonicalPath",
+                        "title": "title",
+                        "description": "description",
+                        "content": "sections",
+                    },
+                    "content_adapter": {"type": "sections_array"},
+                },
+            }
+        ]
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-skedy-registry-1",
+                "run_id": "scan-skedy-registry-1",
+                "workflow": "repo_scan",
+                "domain": "skedy.io",
+                "slack_user_id": "U123",
+                "components_generated": False,
+                "components_count": 0,
+                "article_system": {
+                    "state": "existing",
+                    "directory_name": "registry",
+                    "directory_path": "shared/lib/seo/public-pages.ts",
+                    "confidence": "high",
+                    "reason": "Detected registry-driven SEO system",
+                    "source": "scan",
+                    "verified_at": "2026-04-23T00:00:00+00:00",
+                    "system_type": "registry_driven_seo",
+                    "route_template": "/resources/guides/{slug}",
+                    "readiness": readiness,
+                    "registry": {
+                        "path": "shared/lib/seo/public-pages.ts",
+                        "export_name": "PUBLIC_PAGES",
+                    },
+                },
+                "publish_targets": publish_targets,
+                "default_publish_target_id": publish_targets[0]["target_id"],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        self.assertEqual(config.article_system["system_type"], "registry_driven_seo")
+        self.assertEqual(config.publish_targets, publish_targets)
+        self.assertEqual(config.default_publish_target_id, publish_targets[0]["target_id"])
+
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertIn("registry-driven SEO system", message)
+        self.assertIn("shared/lib/seo/public-pages.ts", message)
+        self.assertIn("typed registry entries", message)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_persists_registry_target_without_article_system_payload(self, mock_send_dm):
+        organization = Organization.objects.create(name="Registry Co", domain="registry.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            scan_summary="scan pending",
+            article_system={},
+            publish_targets=[],
+        )
+        publish_targets = [
+            {
+                "target_id": "registry_driven_seo_src_data_pages_ts",
+                "kind": "registry_driven_seo",
+                "delivery_adapter": "registry_entry",
+                "publish_capability": "bundle_only",
+                "readiness": {
+                    "structure_ready": True,
+                    "mapping_ready": False,
+                    "routing_ready": True,
+                    "safety_ready": False,
+                },
+                "registration_strategy": {
+                    "type": "registry_entry_patch",
+                    "registry_path": "src/data/pages.ts",
+                    "diagnostics": {
+                        "issues": ["route field is ambiguous"],
+                    },
+                },
+            }
+        ]
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-registry-no-article-system",
+                "run_id": "scan-registry-no-article-system",
+                "workflow": "repo_scan",
+                "domain": "registry.example",
+                "slack_user_id": "U123",
+                "components_generated": False,
+                "components_count": 0,
+                "publish_targets": publish_targets,
+                "default_publish_target_id": publish_targets[0]["target_id"],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        self.assertEqual(config.publish_targets, publish_targets)
+        self.assertEqual(config.default_publish_target_id, publish_targets[0]["target_id"])
+
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args[0][1]
+        self.assertIn("registry-driven SEO system", message)
+        self.assertIn("not safe to patch automatically yet", message)
+        self.assertIn("route field is ambiguous", message)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_generation_failed_auto_discovery_no_opportunities_mentions_research_scope(self, mock_send_dm):
         response = self.client.post(
             reverse('content_factory_callback'),

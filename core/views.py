@@ -30,8 +30,10 @@ from .email_utils import (
 )
 from .article_system import (
     article_system_ready,
+    best_registry_driven_publish_target,
     merge_article_system,
     normalize_article_system,
+    registry_target_publish_ready,
     resolve_article_system,
 )
 from .content_factory_progress import (
@@ -218,6 +220,35 @@ def _scan_destination_summary(article_system, publish_targets):
     resolved = normalize_article_system(article_system)
     location = resolved.get("directory_path") or resolved.get("directory_name") or "your content directory"
     targets = [item for item in (publish_targets or []) if isinstance(item, dict)]
+
+    registry_target = best_registry_driven_publish_target(targets, resolved)
+    if registry_target:
+        strategy = registry_target.get("registration_strategy") if isinstance(registry_target.get("registration_strategy"), dict) else {}
+        registry_path = (
+            strategy.get("registry_path")
+            or registry_target.get("registry_path")
+            or registry_target.get("content_source")
+            or location
+        )
+        readiness = registry_target.get("readiness") if isinstance(registry_target.get("readiness"), dict) else {}
+        if registry_target_publish_ready(registry_target):
+            return (
+                f"I found a registry-driven SEO system at `{registry_path}`.\n\n"
+                f"Roo can publish new SEO pages by adding typed registry entries through the existing route, metadata, sitemap, and schema structure."
+            )
+
+        issues = registry_target.get("diagnostics") or strategy.get("diagnostics") or readiness.get("diagnostics") or {}
+        if isinstance(issues, dict):
+            issue_items = issues.get("issues") or issues.get("blocking_issues") or []
+        else:
+            issue_items = []
+        issue_text = ""
+        if issue_items:
+            issue_text = "\n\nCurrent blockers: " + "; ".join(str(item).strip() for item in issue_items[:3] if str(item).strip())
+        return (
+            f"I found a registry-driven SEO system at `{registry_path}`, but it is not safe to patch automatically yet.{issue_text}\n\n"
+            f"Roo can draft content now, or direct publish can be enabled with a resolved registry target or `.content-factory/target.yml`."
+        )
 
     if any(
         str(item.get("kind") or "").strip() == "bundle_only_article_directory"
@@ -3870,6 +3901,17 @@ class ContentFactoryCallbackView(APIView):
                     config.save(update_fields=update_fields)
                 article_system = merged_article_system
             else:
+                update_fields = []
+                if publish_targets != (config.publish_targets or []):
+                    config.publish_targets = publish_targets
+                    update_fields.append('publish_targets')
+                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                if normalized_default_target_id != config.default_publish_target_id:
+                    config.default_publish_target_id = normalized_default_target_id
+                    update_fields.append('default_publish_target_id')
+                if update_fields:
+                    update_fields.append('updated_at')
+                    config.save(update_fields=update_fields)
                 article_system = resolve_article_system(config)
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
             pass
