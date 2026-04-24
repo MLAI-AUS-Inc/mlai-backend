@@ -47,9 +47,17 @@ ssh $USER@$DROPLET_IP << EOF
     sed -i 's/DEBUG=.*/DEBUG=False/' .env
     sed -i 's/ALLOWED_HOSTS=.*/ALLOWED_HOSTS=api.mlai.au,209.38.85.60,localhost,127.0.0.1,esafety.localhost/' .env
     sed -i 's|CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://mlai.au,https://www.mlai.au|' .env
-    sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://api.mlai.au|' .env
-    if ! grep -q '^VALLEY_HARNESS_URL=' .env; then
+    sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://mlai.au,https://www.mlai.au,https://api.mlai.au|' .env
+    if grep -q '^VALLEY_HARNESS_URL=' .env; then
+        sed -i 's|^VALLEY_HARNESS_URL=$|VALLEY_HARNESS_URL=http://valley-api:8080|' .env
+    else
         echo "VALLEY_HARNESS_URL=http://valley-api:8080" >> .env
+    fi
+    if ! grep -Eq '^VALLEY_HARNESS_URL=.+' .env; then
+        echo "WARNING: VALLEY_HARNESS_URL is blank; Vibe Raising email draft runs will not reach Valley."
+    fi
+    if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
+        echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
 
     migration_applied() {

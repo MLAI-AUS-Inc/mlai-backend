@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from core.models import ContentFactoryRun, Organization
 from integrations.models import GoogleConnection
@@ -46,6 +47,10 @@ class GoogleOAuthViewTests(TestCase):
             session.pop("google_oauth_next", None)
         session.save()
 
+    def _set_access_token_cookie(self, user=None):
+        refresh = RefreshToken.for_user(user or self.user)
+        self.client.cookies["access_token"] = str(refresh.access_token)
+
     def test_google_connect_stores_state_and_validated_next(self):
         self.client.force_login(self.user)
 
@@ -78,6 +83,36 @@ class GoogleOAuthViewTests(TestCase):
         self.assertEqual(
             self.client.session.get("google_oauth_next"),
             "http://localhost:5173/vibe-raising/create-update?email_draft=1",
+        )
+
+    def test_google_connect_accepts_platform_jwt_cookie_without_session(self):
+        self._set_access_token_cookie()
+
+        response = self.client.get(
+            reverse("google_connect"),
+            {"next": "http://localhost:5173/vibe-raising/create-update?email_draft=1"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("https://accounts.google.com/o/oauth2/v2/auth?"))
+        session = self.client.session
+        self.assertEqual(str(self.user.id), session.get("_auth_user_id"))
+        self.assertEqual(
+            session.get("google_oauth_next"),
+            "http://localhost:5173/vibe-raising/create-update?email_draft=1",
+        )
+        self.assertTrue(session.get("google_oauth_state"))
+
+    def test_google_connect_redirects_unauthenticated_users_to_platform_login(self):
+        response = self.client.get(
+            reverse("google_connect"),
+            {"next": "http://localhost:5173/vibe-raising/create-update?email_draft=1"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            "http://localhost:5173/platform/login?app=vibe-raising&next=%2Fvibe-raising%2Fcreate-update%3Femail_draft%3D1",
         )
 
     def test_google_connect_ignores_invalid_next(self):
@@ -125,6 +160,36 @@ class GoogleOAuthViewTests(TestCase):
         )
         self.assertNotIn("google_oauth_state", self.client.session)
         self.assertNotIn("google_oauth_next", self.client.session)
+
+    def test_google_callback_saves_connection_and_redirects_to_vibe_raising_next(self):
+        self._login_and_seed_oauth_state(
+            next_url="http://localhost:5173/vibe-raising/create-update?email_draft=1",
+        )
+
+        with patch(
+            "integrations.views.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "scope": "https://www.googleapis.com/auth/gmail.readonly openid",
+                }
+            ),
+        ), patch(
+            "integrations.views.requests.get",
+            return_value=_json_response({"email": "founder@gmail.com"}),
+        ):
+            response = self.client.get(
+                reverse("google_callback"),
+                {"state": "google-state", "code": "oauth-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            "http://localhost:5173/vibe-raising/create-update?email_draft=1",
+        )
+        self.assertTrue(GoogleConnection.objects.filter(user=self.user, google_email="founder@gmail.com").exists())
 
     def test_google_callback_does_not_fetch_subject_preview(self):
         self._login_and_seed_oauth_state()
