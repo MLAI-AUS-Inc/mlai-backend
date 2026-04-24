@@ -1,6 +1,7 @@
 # core/firebase_utils.py
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
+from google.api_core.exceptions import NotFound
 import logging
 import os
 import uuid
@@ -148,3 +149,74 @@ def upload_file_to_storage(file_obj, destination_path, content_type=None):
     except Exception as e:
         logger.error(f'Failed to upload file to Firebase Storage: {str(e)}', exc_info=True)
         raise
+
+
+def firebase_storage_media_url(destination_path, token=None):
+    """Build a Firebase Storage media URL for a token-protected object."""
+    bucket = get_storage_bucket()
+    encoded_name = urllib.parse.quote(destination_path, safe='')
+    token_param = f"&token={token}" if token else ""
+    return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/{encoded_name}?alt=media{token_param}"
+
+
+def create_signed_upload_url(destination_path, content_type, expires_in=timedelta(minutes=15)):
+    """Create a signed PUT URL for direct browser uploads to Firebase/GCS."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=expires_in,
+        method="PUT",
+        content_type=content_type,
+    )
+
+
+def finalize_uploaded_storage_object(destination_path, content_type=None):
+    """Verify an uploaded object exists and attach a Firebase download token."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    try:
+        blob.reload()
+    except NotFound as exc:
+        raise FileNotFoundError(destination_path) from exc
+
+    token = str(uuid.uuid4())
+    metadata = dict(blob.metadata or {})
+    metadata["firebaseStorageDownloadTokens"] = token
+    blob.metadata = metadata
+    if content_type:
+        blob.content_type = content_type
+    blob.patch()
+
+    return {
+        "url": firebase_storage_media_url(destination_path, token=token),
+        "contentType": blob.content_type or content_type or "",
+        "fileSizeBytes": int(blob.size or 0),
+    }
+
+
+def configure_storage_cors(origins=None):
+    """Configure CORS for direct browser uploads to Firebase/GCS."""
+    bucket = get_storage_bucket()
+    allowed_origins = origins or [
+        "https://mlai.au",
+        "https://www.mlai.au",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
+    bucket.cors = [
+        {
+            "origin": allowed_origins,
+            "method": ["PUT", "OPTIONS"],
+            "responseHeader": ["Content-Type", "x-goog-resumable"],
+            "maxAgeSeconds": 3600,
+        },
+        {
+            "origin": allowed_origins,
+            "method": ["GET", "HEAD", "OPTIONS"],
+            "responseHeader": ["Content-Type"],
+            "maxAgeSeconds": 3600,
+        },
+    ]
+    bucket.patch()
+    return bucket.cors

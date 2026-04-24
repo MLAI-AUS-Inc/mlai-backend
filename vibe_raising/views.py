@@ -18,7 +18,11 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.firebase_utils import upload_file_to_storage
+from core.firebase_utils import (
+    create_signed_upload_url,
+    finalize_uploaded_storage_object,
+    upload_file_to_storage,
+)
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
 from integrations.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
 from integrations.services.startup_updates import (
@@ -53,6 +57,7 @@ logger = logging.getLogger(__name__)
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 VALLEY_META_KEY = "_valley_meta"
 MAX_VIBE_RAISING_VIDEO_SIZE_BYTES = 250 * 1024 * 1024
+VIBE_RAISING_SIGNED_UPLOAD_TTL = timedelta(minutes=15)
 VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -66,6 +71,7 @@ VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".ogv": "video/ogg",
     ".mkv": "video/x-matroska",
 }
+VIBE_RAISING_VIDEO_CONTENT_TYPES = set(VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES.values()) | {"video/mp4"}
 EMAIL_DRAFT_DISPLAY_STAGES = {
     "profile_resolution": "Preparing company context",
     "gmail_backfill": "Scanning recent Gmail messages",
@@ -547,18 +553,75 @@ def _ensure_binding_for_company(*, user, company):
     return organization, startup_profile, binding
 
 
-def _resolve_vibe_raising_video_content_type(uploaded_file):
-    content_type = str(getattr(uploaded_file, "content_type", "") or "").split(";")[0].strip().lower()
-    if content_type.startswith("video/"):
+def _normalize_vibe_raising_video_content_type(*, content_type="", filename=""):
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type in VIBE_RAISING_VIDEO_CONTENT_TYPES:
         return content_type
 
-    filename = str(getattr(uploaded_file, "name", "") or "")
+    filename = str(filename or "")
     guessed_type, _encoding = mimetypes.guess_type(filename)
-    if guessed_type and guessed_type.startswith("video/"):
+    if guessed_type and guessed_type in VIBE_RAISING_VIDEO_CONTENT_TYPES:
         return guessed_type
 
     extension = Path(filename).suffix.lower()
     return VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES.get(extension, "")
+
+
+def _resolve_vibe_raising_video_content_type(uploaded_file):
+    return _normalize_vibe_raising_video_content_type(
+        content_type=getattr(uploaded_file, "content_type", ""),
+        filename=getattr(uploaded_file, "name", ""),
+    )
+
+
+def _parse_vibe_raising_video_size(raw_size):
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _validate_vibe_raising_video_metadata(*, filename, content_type, file_size_bytes):
+    resolved_content_type = _normalize_vibe_raising_video_content_type(
+        content_type=content_type,
+        filename=filename,
+    )
+    if not resolved_content_type:
+        raise ValueError("Uploaded file must be a supported video.")
+
+    parsed_size = _parse_vibe_raising_video_size(file_size_bytes)
+    if parsed_size is None:
+        raise ValueError("fileSizeBytes is required.")
+
+    if parsed_size > MAX_VIBE_RAISING_VIDEO_SIZE_BYTES:
+        raise ValueError(
+            f"Video exceeds maximum size of {MAX_VIBE_RAISING_VIDEO_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+
+    return resolved_content_type, parsed_size
+
+
+def _vibe_raising_video_storage_prefix(*, user, organization):
+    return os.path.join(
+        "vibe-raising",
+        "update-videos",
+        f"org-{organization.id}",
+        f"user-{user.id}",
+    )
+
+
+def _vibe_raising_video_storage_path(*, user, organization, filename, content_type):
+    stem = slugify(Path(filename or "update-video").stem) or "update-video"
+    extension = Path(filename or "").suffix.lower()
+    if extension not in VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES:
+        extension = mimetypes.guess_extension(content_type) or ".mp4"
+
+    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
+    return os.path.join(
+        _vibe_raising_video_storage_prefix(user=user, organization=organization),
+        f"{timestamp}-{stem}-{uuid4().hex[:8]}{extension}",
+    )
 
 
 def _store_vibe_raising_update_video(*, user, organization, video_file):
@@ -572,18 +635,11 @@ def _store_vibe_raising_update_video(*, user, organization, video_file):
         )
 
     filename = video_file.name or "update-video"
-    stem = slugify(Path(filename).stem) or "update-video"
-    extension = Path(filename).suffix.lower()
-    if extension not in VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES:
-        extension = mimetypes.guess_extension(content_type) or ".mp4"
-
-    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
-    storage_path = os.path.join(
-        "vibe-raising",
-        "update-videos",
-        f"org-{organization.id}",
-        f"user-{user.id}",
-        f"{timestamp}-{stem}-{uuid4().hex[:8]}{extension}",
+    storage_path = _vibe_raising_video_storage_path(
+        user=user,
+        organization=organization,
+        filename=filename,
+        content_type=content_type,
     )
     video_url = upload_file_to_storage(video_file, storage_path, content_type=content_type)
 
@@ -593,6 +649,71 @@ def _store_vibe_raising_update_video(*, user, organization, video_file):
         "contentType": content_type,
         "fileSizeBytes": video_file.size,
         "originalFilename": filename,
+    }
+
+
+def _create_vibe_raising_signed_video_upload(*, user, organization, filename, content_type, file_size_bytes):
+    resolved_content_type, parsed_size = _validate_vibe_raising_video_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    storage_path = _vibe_raising_video_storage_path(
+        user=user,
+        organization=organization,
+        filename=filename,
+        content_type=resolved_content_type,
+    )
+    upload_url = create_signed_upload_url(
+        storage_path,
+        resolved_content_type,
+        expires_in=VIBE_RAISING_SIGNED_UPLOAD_TTL,
+    )
+    expires_at = timezone.now() + VIBE_RAISING_SIGNED_UPLOAD_TTL
+    return {
+        "uploadUrl": upload_url,
+        "storagePath": storage_path,
+        "contentType": resolved_content_type,
+        "fileSizeBytes": parsed_size,
+        "expiresAt": expires_at.isoformat(),
+        "maxUploadBytes": MAX_VIBE_RAISING_VIDEO_SIZE_BYTES,
+        "requiredHeaders": {"Content-Type": resolved_content_type},
+    }
+
+
+def _complete_vibe_raising_signed_video_upload(
+    *,
+    user,
+    organization,
+    storage_path,
+    filename,
+    content_type,
+    file_size_bytes,
+):
+    expected_prefix = f"{_vibe_raising_video_storage_prefix(user=user, organization=organization)}/"
+    if not str(storage_path or "").startswith(expected_prefix):
+        raise ValueError("Invalid upload path.")
+
+    resolved_content_type, parsed_size = _validate_vibe_raising_video_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    finalized = finalize_uploaded_storage_object(storage_path, content_type=resolved_content_type)
+    actual_size = int(finalized.get("fileSizeBytes") or parsed_size)
+    if actual_size > MAX_VIBE_RAISING_VIDEO_SIZE_BYTES:
+        raise ValueError(
+            f"Video exceeds maximum size of {MAX_VIBE_RAISING_VIDEO_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+    if parsed_size and actual_size and parsed_size != actual_size:
+        raise ValueError("Uploaded video size does not match the finalized object.")
+
+    return {
+        "videoUrl": finalized["url"],
+        "storagePath": storage_path,
+        "contentType": finalized.get("contentType") or resolved_content_type,
+        "fileSizeBytes": actual_size,
+        "originalFilename": filename or "update-video",
     }
 
 
@@ -1069,6 +1190,103 @@ class VibeRaisingVideoUploadView(APIView):
             )
 
         return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class VibeRaisingVideoUploadSessionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        if not context["domain"]:
+            return Response(
+                {"detail": "Add a company domain before uploading videos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "update-video"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+
+        company = context["company"]
+        organization, _startup_profile, _binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+
+        try:
+            payload = _create_vibe_raising_signed_video_upload(
+                user=request.user,
+                organization=organization,
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Failed to create Vibe Raising video upload session")
+            return Response(
+                {"detail": f"Failed to create upload session: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class VibeRaisingVideoUploadCompleteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        if not context["domain"]:
+            return Response(
+                {"detail": "Add a company domain before uploading videos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        storage_path = str(request.data.get("storagePath") or "").strip()
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "update-video"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+        if not storage_path:
+            return Response({"detail": "storagePath is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        company = context["company"]
+        organization, _startup_profile, _binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+
+        try:
+            payload = _complete_vibe_raising_signed_video_upload(
+                user=request.user,
+                organization=organization,
+                storage_path=storage_path,
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except FileNotFoundError:
+            return Response(
+                {"detail": "Uploaded video was not found in storage. Please upload it again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            logger.exception("Failed to finalize Vibe Raising update video")
+            return Response(
+                {"detail": f"Failed to finalize video upload: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class VibeRaisingMonthlyUpdateView(APIView):
