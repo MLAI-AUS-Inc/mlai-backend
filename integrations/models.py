@@ -53,6 +53,28 @@ class GroundednessStatus(models.TextChoices):
     NEEDS_REVIEW = "needs_review", "Needs Review"
 
 
+class FinancialProvider(models.TextChoices):
+    STRIPE = "stripe", "Stripe"
+    XERO = "xero", "Xero"
+    BASIQ = "basiq", "Basiq"
+
+
+class FinancialConnectionStatus(models.TextChoices):
+    CONNECTED = "connected", "Connected"
+    ACTION_REQUIRED = "action_required", "Action Required"
+    DISCONNECTED = "disconnected", "Disconnected"
+    ERROR = "error", "Error"
+
+
+class FinancialRecordType(models.TextChoices):
+    SUBSCRIPTION = "subscription", "Subscription"
+    INVOICE = "invoice", "Invoice"
+    PAYMENT = "payment", "Payment"
+    REPEATING_INVOICE = "repeating_invoice", "Repeating Invoice"
+    BANK_TRANSACTION = "bank_transaction", "Bank Transaction"
+    BANK_ACCOUNT = "bank_account", "Bank Account"
+
+
 class CommunityBridgePlatform(models.TextChoices):
     SLACK = "slack", "Slack"
     DISCORD = "discord", "Discord"
@@ -498,6 +520,185 @@ class MonthlyUpdateDraft(models.Model):
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
+
+
+class FinancialConnection(models.Model):
+    organization = models.ForeignKey(
+        "core.Organization",
+        on_delete=models.CASCADE,
+        related_name="financial_connections",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="financial_connections",
+    )
+    provider = models.CharField(max_length=20, choices=FinancialProvider.choices, db_index=True)
+    external_account_id = models.CharField(max_length=255, db_index=True)
+    display_name = models.CharField(max_length=255, blank=True, default="")
+    access_token = EncryptedTextField(null=True, blank=True)
+    refresh_token = EncryptedTextField(null=True, blank=True)
+    token_type = models.CharField(max_length=64, blank=True, default="")
+    scopes = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=FinancialConnectionStatus.choices,
+        default=FinancialConnectionStatus.CONNECTED,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField(null=True, blank=True)
+    sync_cursor = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    connected_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "provider", "external_account_id"],
+                name="financial_connection_provider_external_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "provider", "status"], name="fin_conn_org_prov_stat_idx"),
+            models.Index(fields=["user", "provider", "updated_at"], name="fin_conn_user_provider_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.provider}:{self.external_account_id}"
+
+
+class FinancialAccount(models.Model):
+    organization = models.ForeignKey(
+        "core.Organization",
+        on_delete=models.CASCADE,
+        related_name="financial_accounts",
+    )
+    connection = models.ForeignKey(
+        FinancialConnection,
+        on_delete=models.CASCADE,
+        related_name="accounts",
+    )
+    provider = models.CharField(max_length=20, choices=FinancialProvider.choices, db_index=True)
+    external_account_id = models.CharField(max_length=255, db_index=True)
+    display_name = models.CharField(max_length=255, blank=True, default="")
+    currency = models.CharField(max_length=12, blank=True, default="")
+    account_type = models.CharField(max_length=64, blank=True, default="")
+    selected_for_revenue = models.BooleanField(default=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "external_account_id"],
+                name="financial_account_connection_external_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "provider"], name="fin_account_org_provider_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.provider}:{self.display_name or self.external_account_id}"
+
+
+class ExternalFinancialRecord(models.Model):
+    organization = models.ForeignKey(
+        "core.Organization",
+        on_delete=models.CASCADE,
+        related_name="external_financial_records",
+    )
+    connection = models.ForeignKey(
+        FinancialConnection,
+        on_delete=models.CASCADE,
+        related_name="external_records",
+    )
+    account = models.ForeignKey(
+        FinancialAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="external_records",
+    )
+    provider = models.CharField(max_length=20, choices=FinancialProvider.choices, db_index=True)
+    object_type = models.CharField(max_length=40, choices=FinancialRecordType.choices, db_index=True)
+    external_id = models.CharField(max_length=255)
+    source_status = models.CharField(max_length=100, blank=True, default="")
+    customer_ref = models.CharField(max_length=255, blank=True, default="")
+    period_start = models.DateField(null=True, blank=True)
+    period_end = models.DateField(null=True, blank=True)
+    amount = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    currency = models.CharField(max_length=12, blank=True, default="")
+    occurred_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    updated_at_source = models.DateTimeField(null=True, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    raw_hash = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "object_type", "external_id"],
+                name="external_financial_record_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "provider", "object_type"], name="fin_rec_org_prov_type_idx"),
+            models.Index(fields=["organization", "period_start"], name="fin_record_org_period_idx"),
+            models.Index(fields=["organization", "currency"], name="fin_record_org_currency_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.provider}:{self.object_type}:{self.external_id}"
+
+
+class MonthlyRevenueSnapshot(models.Model):
+    organization = models.ForeignKey(
+        "core.Organization",
+        on_delete=models.CASCADE,
+        related_name="monthly_revenue_snapshots",
+    )
+    run = models.ForeignKey(
+        "core.ContentFactoryRun",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="monthly_revenue_snapshots",
+    )
+    month = models.DateField(db_index=True)
+    currency = models.CharField(max_length=12, db_index=True)
+    mrr_amount = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    mrr_growth_rate = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    mrr_delta = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    cash_collected_amount = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    recognized_revenue_amount = models.DecimalField(max_digits=20, decimal_places=4, null=True, blank=True)
+    confidence = models.FloatField(default=0.0)
+    source_mix = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    source_record_ids = models.JSONField(default=list, blank=True)
+    calculated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "month", "currency"],
+                name="monthly_revenue_snapshot_org_month_currency_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "month"], name="monthly_revenue_org_month_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.month}:{self.currency}:{self.mrr_amount}"
 
 
 class CommunityBridgeChannel(models.Model):

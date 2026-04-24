@@ -2,6 +2,9 @@ from django.contrib import admin
 from .models import (
     CommunityBridgeChannel,
     CommunityBridgeDelivery,
+    ExternalFinancialRecord,
+    FinancialAccount,
+    FinancialConnection,
     CommunityBridgeMessageLink,
     CommunityBridgeReceipt,
     GmailAttachmentArtifact,
@@ -10,6 +13,7 @@ from .models import (
     GmailThreadArtifact,
     GoogleConnection,
     MonthlyUpdateDraft,
+    MonthlyRevenueSnapshot,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -112,6 +116,36 @@ class GoogleConnectionAdmin(admin.ModelAdmin):
 class StartupProfileAdmin(admin.ModelAdmin):
     list_display = ("organization", "default_currency", "updated_at")
     search_fields = ("organization__name", "organization__domain")
+
+
+@admin.register(FinancialConnection)
+class FinancialConnectionAdmin(admin.ModelAdmin):
+    list_display = ("organization", "provider", "display_name", "status", "last_synced_at", "updated_at")
+    search_fields = ("organization__domain", "display_name", "external_account_id", "user__email")
+    list_filter = ("provider", "status", "updated_at")
+    readonly_fields = ("connected_at", "created_at", "updated_at", "last_synced_at")
+
+
+@admin.register(FinancialAccount)
+class FinancialAccountAdmin(admin.ModelAdmin):
+    list_display = ("organization", "provider", "display_name", "currency", "account_type", "selected_for_revenue")
+    search_fields = ("organization__domain", "display_name", "external_account_id")
+    list_filter = ("provider", "selected_for_revenue", "account_type")
+
+
+@admin.register(ExternalFinancialRecord)
+class ExternalFinancialRecordAdmin(admin.ModelAdmin):
+    list_display = ("organization", "provider", "object_type", "external_id", "source_status", "amount", "currency", "period_start")
+    search_fields = ("organization__domain", "external_id", "customer_ref")
+    list_filter = ("provider", "object_type", "source_status", "currency")
+    readonly_fields = ("raw_hash", "created_at", "updated_at")
+
+
+@admin.register(MonthlyRevenueSnapshot)
+class MonthlyRevenueSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("organization", "month", "currency", "mrr_amount", "mrr_growth_rate", "cash_collected_amount", "confidence")
+    search_fields = ("organization__domain",)
+    list_filter = ("currency", "month", "calculated_at")
 
 
 @admin.register(UserStartupBinding)

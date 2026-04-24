@@ -10,12 +10,24 @@ from django.contrib.auth import login as auth_login
 from django.utils import timezone
 from hospital.authentication import CustomJWTAuthentication
 from .models import GoogleConnection, UserIntegration
+from integrations.services.finance import (
+    build_stripe_oauth_url,
+    build_xero_oauth_url,
+    enqueue_financial_sync_run,
+    exchange_stripe_oauth_code,
+    exchange_xero_oauth_code,
+    fetch_xero_connections,
+    upsert_stripe_connection,
+    upsert_xero_connections,
+)
 from integrations.services.github_connections import (
     build_github_installation_url,
     build_github_oauth_state,
     store_github_oauth_state,
     validate_github_oauth_state,
 )
+from integrations.services.startup_updates import bind_user_to_startup, resolve_or_create_profile
+from integrations.utils import normalize_domain
 from integrations import http_client as requests
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -23,6 +35,7 @@ USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_OAUTH_STATE_SESSION_KEY = "google_oauth_state"
 GOOGLE_OAUTH_NEXT_SESSION_KEY = "google_oauth_next"
 GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
+FINANCE_OAUTH_SUCCESS_PATH = "/settings?finance_connected=true"
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +57,8 @@ def _known_frontend_origins() -> Set[str]:
             _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
             _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
             _origin_from_url(getattr(settings, "VIBE_RAISING_URL", None)),
+            _origin_from_url(getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", None)),
+            _origin_from_url(getattr(settings, "CONTENT_FACTORY_URL", None)),
         )
         if origin
     }
@@ -81,6 +96,17 @@ def _default_google_success_url() -> str:
 
     fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
     return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
+
+
+def _default_finance_success_url(provider: str) -> str:
+    path = f"{FINANCE_OAUTH_SUCCESS_PATH}&provider={urllib.parse.quote(provider)}"
+    for setting_name in ("VIBE_RAISING_URL", "DEFAULT_FRONTEND_URL", "MEDHACK_URL", "ESAFETY_URL"):
+        origin = _origin_from_url(getattr(settings, setting_name, None))
+        if origin:
+            return f"{origin}{path}"
+
+    fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+    return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{path}"
 
 
 def _vibe_raising_frontend_origin() -> str:
@@ -254,6 +280,122 @@ def google_callback(request):
     # Redirect to frontend
     return redirect(success_url or _default_google_success_url())
 
+
+def stripe_connect(request):
+    return _financial_connect(request, provider="stripe")
+
+
+def xero_connect(request):
+    return _financial_connect(request, provider="xero")
+
+
+def stripe_callback(request):
+    return _financial_callback(request, provider="stripe")
+
+
+def xero_callback(request):
+    return _financial_callback(request, provider="xero")
+
+
+def _financial_connect(request, *, provider: str):
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(request.GET.get("next")))
+
+    domain = normalize_domain(request.GET.get("domain") or "")
+    if not domain:
+        return HttpResponseBadRequest("Missing domain")
+
+    if provider == "stripe" and not getattr(settings, "STRIPE_CONNECT_CLIENT_ID", ""):
+        return HttpResponseBadRequest("Stripe Connect is not configured.")
+    if provider == "xero" and not getattr(settings, "XERO_CLIENT_ID", ""):
+        return HttpResponseBadRequest("Xero OAuth is not configured.")
+
+    _ensure_django_session_for_user(request, user)
+    state = secrets.token_urlsafe(32)
+    request.session[f"{provider}_oauth_state"] = state
+    request.session[f"{provider}_oauth_domain"] = domain
+
+    next_url = _normalize_google_next(request.GET.get("next"))
+    if next_url:
+        request.session[f"{provider}_oauth_next"] = next_url
+    else:
+        request.session.pop(f"{provider}_oauth_next", None)
+
+    if provider == "stripe":
+        return redirect(build_stripe_oauth_url(state=state))
+    if provider == "xero":
+        return redirect(build_xero_oauth_url(state=state))
+    return HttpResponseBadRequest("Unsupported financial provider.")
+
+
+def _financial_callback(request, *, provider: str):
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(None))
+
+    state = request.GET.get("state")
+    state_key = f"{provider}_oauth_state"
+    domain_key = f"{provider}_oauth_domain"
+    next_key = f"{provider}_oauth_next"
+    if not state or state != request.session.get(state_key):
+        return HttpResponseBadRequest("Invalid state")
+
+    request.session.pop(state_key, None)
+    domain = normalize_domain(request.session.pop(domain_key, "") or "")
+    success_url = _normalize_google_next(request.session.pop(next_key, None))
+    if not domain:
+        return HttpResponseBadRequest("Missing OAuth domain context.")
+
+    if request.GET.get("error"):
+        return HttpResponseBadRequest(f"OAuth error: {request.GET.get('error')}")
+
+    code = request.GET.get("code")
+    if not code:
+        return HttpResponseBadRequest("Missing code")
+
+    organization, _profile = resolve_or_create_profile(domain=domain)
+    bind_user_to_startup(
+        user=user,
+        organization=organization,
+        google_connection=getattr(user, "google_connection", None),
+        role="founder",
+        is_default_for_gmail=False,
+    )
+
+    try:
+        if provider == "stripe":
+            token_data = exchange_stripe_oauth_code(code)
+            upsert_stripe_connection(
+                organization=organization,
+                user=user,
+                token_payload=token_data,
+            )
+        elif provider == "xero":
+            token_data = exchange_xero_oauth_code(code)
+            access_token = token_data.get("access_token")
+            if not access_token:
+                return HttpResponseBadRequest("Missing access token in Xero OAuth response.")
+            tenants = fetch_xero_connections(access_token)
+            if not tenants:
+                return HttpResponseBadRequest("No Xero tenants were returned for this account.")
+            upsert_xero_connections(
+                organization=organization,
+                user=user,
+                token_payload=token_data,
+                tenants=tenants,
+            )
+        else:
+            return HttpResponseBadRequest("Unsupported financial provider.")
+    except requests.RequestException:
+        logger.exception("Failed to complete %s OAuth callback for user %s", provider, user.id)
+        return HttpResponseBadRequest(f"Failed to connect {provider}.")
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+
+    enqueue_financial_sync_run(organization=organization, user=user, trigger=f"{provider}_oauth")
+    return redirect(success_url or _default_finance_success_url(provider))
+
 def github_connect(request):
     """
     Initiates GitHub App installation flow.
@@ -373,6 +515,7 @@ def github_callback(request):
         repos = []
 
     selected_repo = repos[0]["full_name"] if len(repos) == 1 else None
+    is_web_actor = str(slack_user_id or "").startswith("web_")
 
     retry_message = ""
     domain_display = ""
@@ -438,7 +581,7 @@ def github_callback(request):
                 )
 
         # Notify via Slack and auto-trigger scan only when the installation is bound to one repo.
-        if slack_user_id and selected_repo:
+        if slack_user_id and selected_repo and not is_web_actor:
             try:
                 from integrations.services.slack import SlackService
                 SlackService.send_dm(
@@ -454,7 +597,13 @@ def github_callback(request):
                 trigger_scan_async(slack_user_id, domain=normalized_domain)
             except Exception as e:
                 logger.warning(f"Failed to auto-trigger scan for {normalized_domain}: {e}")
-        elif slack_user_id:
+        elif slack_user_id and selected_repo and is_web_actor:
+            logger.info(
+                "GitHub connected for web Content Factory actor %s/%s; skipping Slack DM and legacy auto-scan.",
+                slack_user_id,
+                normalized_domain,
+            )
+        elif slack_user_id and not is_web_actor:
             try:
                 from integrations.services.slack import SlackService
                 SlackService.send_dm(
@@ -527,7 +676,8 @@ def github_callback(request):
         {domain_display}
         {repo_list_html}
         {retry_message}
-        <p>You can now close this window and return to Slack.</p>
+        <p>You can now close this window and return to Content Factory.</p>
+        {f'<p><a href="{settings.DEFAULT_FRONTEND_URL.rstrip("/")}/content-factory?domain={normalized_domain}" style="color:#2563eb;">Return to Content Factory</a></p>' if is_web_actor and normalized_domain else ''}
     </body>
     </html>
     """)

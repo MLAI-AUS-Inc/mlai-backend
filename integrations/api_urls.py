@@ -1,6 +1,7 @@
 from django.urls import path
 from . import api_views
 from . import api_views_bridge
+from . import api_views_finance
 from . import api_views_startup_updates
 
 urlpatterns = [
@@ -40,6 +41,16 @@ urlpatterns = [
     path('startup-updates/runs/<str:run_id>/draft-results', api_views_startup_updates.StartupUpdateDraftResultsView.as_view(), name='startup_updates_draft_results'),
     path('startup-updates/drafts', api_views_startup_updates.StartupUpdateDraftListView.as_view(), name='startup_updates_draft_list'),
     path('startup-updates/drafts/<int:draft_id>', api_views_startup_updates.StartupUpdateDraftDetailView.as_view(), name='startup_updates_draft_detail'),
+
+    # Financial integrations / deterministic revenue metrics
+    path('financial/status', api_views_finance.FinancialStatusView.as_view(), name='financial_status'),
+    path('financial/sync', api_views_finance.FinancialSyncView.as_view(), name='financial_sync'),
+    path('financial/connections/<int:connection_id>', api_views_finance.FinancialConnectionDetailView.as_view(), name='financial_connection_detail'),
+    path('financial/stripe/webhook', api_views_finance.StripeFinancialWebhookView.as_view(), name='financial_stripe_webhook'),
+    path('financial/runs', api_views_finance.FinancialRunCreateView.as_view(), name='financial_run_create'),
+    path('financial/runs/<str:run_id>/sync-next-page', api_views_finance.FinancialRunSyncNextPageView.as_view(), name='financial_run_sync_next_page'),
+    path('financial/runs/<str:run_id>/calculate-monthly-revenue', api_views_finance.FinancialRunCalculateView.as_view(), name='financial_run_calculate'),
+    path('financial/runs/<str:run_id>/revenue-snapshots', api_views_finance.FinancialRunSnapshotsView.as_view(), name='financial_run_snapshots'),
 
     # Community bridge
     path('bridge/slack/events', api_views_bridge.SlackCommunityBridgeEventView.as_view(), name='community_bridge_slack_events'),

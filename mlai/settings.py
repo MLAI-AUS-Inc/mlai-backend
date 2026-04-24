@@ -303,6 +303,7 @@ MEDHACK_URL = os.getenv('MEDHACK_URL') or DEFAULT_FRONTEND_URL
 ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 INNOVATE_CONNECT_ALLIANCE_URL = os.getenv('INNOVATE_CONNECT_ALLIANCE_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
+CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
@@ -341,6 +342,31 @@ GOOGLE_OAUTH_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+]
+
+# Financial OAuth settings
+STRIPE_CONNECT_CLIENT_ID = os.environ.get("STRIPE_CONNECT_CLIENT_ID", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_API_VERSION = os.environ.get("STRIPE_API_VERSION", "2026-02-25.clover")
+STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
+    "STRIPE_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/stripe",
+)
+
+XERO_CLIENT_ID = os.environ.get("XERO_CLIENT_ID", "")
+XERO_CLIENT_SECRET = os.environ.get("XERO_CLIENT_SECRET", "")
+XERO_OAUTH_REDIRECT_URI = os.environ.get(
+    "XERO_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/xero",
+)
+XERO_OAUTH_SCOPES = [
+    item.strip()
+    for item in os.environ.get(
+        "XERO_OAUTH_SCOPES",
+        "openid profile email offline_access accounting.transactions.read accounting.settings.read",
+    ).split()
+    if item.strip()
 ]
 
 # GitHub App Settings (for GitHub App installation flow)
