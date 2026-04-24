@@ -10,6 +10,7 @@ from email.utils import getaddresses
 from typing import Iterable, Optional
 
 import httplib2
+import google_auth_httplib2
 from django.conf import settings
 from django.utils import timezone
 from google.oauth2.credentials import Credentials
@@ -83,6 +84,31 @@ GMAIL_API_RETRYABLE_EXCEPTIONS = (
     TimeoutError,
     httplib2.HttpLib2Error,
 )
+DEFAULT_GMAIL_API_HTTP_TIMEOUT_SECONDS = 4.0
+DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS = 5
+
+
+def _gmail_api_http_timeout_seconds() -> float:
+    raw_value = getattr(settings, "GMAIL_API_HTTP_TIMEOUT_SECONDS", DEFAULT_GMAIL_API_HTTP_TIMEOUT_SECONDS)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        value = DEFAULT_GMAIL_API_HTTP_TIMEOUT_SECONDS
+    return max(1.0, value)
+
+
+def _gmail_metadata_page_max_results() -> int:
+    raw_value = getattr(settings, "GMAIL_METADATA_PAGE_MAX_RESULTS", DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS
+    return max(1, value)
+
+
+def _effective_metadata_page_size(max_results: int) -> int:
+    requested = max(1, int(max_results or _gmail_metadata_page_max_results()))
+    return min(requested, _gmail_metadata_page_max_results())
 
 
 def get_refreshed_credentials(connection: GoogleConnection):
@@ -104,7 +130,9 @@ def get_refreshed_credentials(connection: GoogleConnection):
 
 def build_gmail_service(connection: GoogleConnection, *, cache_discovery: bool = False):
     creds = get_refreshed_credentials(connection)
-    return build("gmail", "v1", credentials=creds, cache_discovery=cache_discovery)
+    http = httplib2.Http(timeout=_gmail_api_http_timeout_seconds())
+    authorized_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
+    return build("gmail", "v1", http=authorized_http, cache_discovery=cache_discovery)
 
 
 def build_backfill_query(*, after_dt, before_dt) -> str:
@@ -164,8 +192,9 @@ def list_message_page(
     query: str,
     page_token: Optional[str] = None,
     max_results: int = 500,
+    service=None,
 ) -> dict:
-    service = build_gmail_service(connection, cache_discovery=False)
+    service = service or build_gmail_service(connection, cache_discovery=False)
     return _execute_gmail_request(
         lambda: (
             service.users()
@@ -183,8 +212,8 @@ def list_message_page(
     )
 
 
-def get_message_metadata(connection: GoogleConnection, message_id: str) -> dict:
-    service = build_gmail_service(connection, cache_discovery=False)
+def get_message_metadata(connection: GoogleConnection, message_id: str, *, service=None) -> dict:
+    service = service or build_gmail_service(connection, cache_discovery=False)
     return _execute_gmail_request(
         lambda: (
             service.users()
@@ -236,8 +265,9 @@ def list_history_page(
     start_history_id: str,
     page_token: Optional[str] = None,
     max_results: int = 250,
+    service=None,
 ) -> dict:
-    service = build_gmail_service(connection, cache_discovery=False)
+    service = service or build_gmail_service(connection, cache_discovery=False)
     try:
         return _execute_gmail_request(
             lambda: (
@@ -462,7 +492,15 @@ def sync_message_metadata_page(
     max_results: int = 500,
 ) -> dict:
     query = build_backfill_query(after_dt=after_dt, before_dt=before_dt)
-    page = list_message_page(connection, query=query, page_token=page_token, max_results=max_results)
+    effective_max_results = _effective_metadata_page_size(max_results)
+    service = build_gmail_service(connection, cache_discovery=False)
+    page = list_message_page(
+        connection,
+        query=query,
+        page_token=page_token,
+        max_results=effective_max_results,
+        service=service,
+    )
     message_ids = [
         str(item.get("id") or "").strip()
         for item in (page.get("messages", []) or [])
@@ -482,7 +520,7 @@ def sync_message_metadata_page(
             reused_existing_count += 1
             continue
 
-        metadata = get_message_metadata(connection, message_id)
+        metadata = get_message_metadata(connection, message_id, service=service)
         artifacts.append(
             upsert_message_artifact_from_message_data(
                 organization=organization,
@@ -496,6 +534,8 @@ def sync_message_metadata_page(
         "mode": "backfill",
         "result_size_estimate": int(page.get("resultSizeEstimate") or 0),
         "next_page_token": page.get("nextPageToken"),
+        "requested_max_results": int(max_results or 0),
+        "effective_max_results": effective_max_results,
         "reused_existing_count": reused_existing_count,
         "artifacts": artifacts,
     }
@@ -510,11 +550,14 @@ def sync_history_metadata_page(
     page_token: Optional[str] = None,
     max_results: int = 250,
 ) -> dict:
+    effective_max_results = _effective_metadata_page_size(max_results)
+    service = build_gmail_service(connection, cache_discovery=False)
     page = list_history_page(
         connection,
         start_history_id=start_history_id,
         page_token=page_token,
-        max_results=max_results,
+        max_results=effective_max_results,
+        service=service,
     )
 
     message_ids = []
@@ -542,7 +585,7 @@ def sync_history_metadata_page(
             reused_existing_count += 1
             continue
 
-        metadata = get_message_metadata(connection, message_id)
+        metadata = get_message_metadata(connection, message_id, service=service)
         artifacts.append(
             upsert_message_artifact_from_message_data(
                 organization=organization,
@@ -558,6 +601,8 @@ def sync_history_metadata_page(
         "history_id": str(page.get("historyId") or "").strip(),
         "result_size_estimate": len(message_ids),
         "next_page_token": page.get("nextPageToken"),
+        "requested_max_results": int(max_results or 0),
+        "effective_max_results": effective_max_results,
         "reused_existing_count": reused_existing_count,
         "artifacts": artifacts,
     }

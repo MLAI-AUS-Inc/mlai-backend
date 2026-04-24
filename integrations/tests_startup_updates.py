@@ -546,12 +546,14 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["mode"], "backfill")
         self.assertTrue(response.data["cursor_reset"])
 
+    @patch("integrations.services.gmail.build_gmail_service")
     @patch("integrations.services.gmail.get_message_metadata")
     @patch("integrations.services.gmail.list_message_page")
     def test_ingest_next_page_persists_hard_filtered_messages_as_irrelevant(
         self,
         mock_list_message_page,
         mock_get_message_metadata,
+        _mock_build_gmail_service,
     ):
         message_id = "msg-hard-filter"
         internal_date = timezone.now()
@@ -595,12 +597,14 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertIn("hard_filtered_gmail_category", artifact.heuristic_reasons)
         self.assertEqual(response.data["relevance_counts"]["irrelevant"], 1)
 
+    @patch("integrations.services.gmail.build_gmail_service")
     @patch("integrations.services.gmail.get_message_metadata")
     @patch("integrations.services.gmail.list_message_page")
     def test_ingest_next_page_reuses_existing_metadata_without_refetch(
         self,
         mock_list_message_page,
         mock_get_message_metadata,
+        _mock_build_gmail_service,
     ):
         artifact = GmailMessageArtifact.objects.create(
             organization=self.organization,
