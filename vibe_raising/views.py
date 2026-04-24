@@ -296,9 +296,9 @@ def _serialize_draft_for_form(draft):
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
-        "highlights": _join_text_items(structured_memo.get("highlights")),
-        "challenges": _join_text_items(structured_memo.get("lowlights")),
-        "asks": _join_text_items(structured_memo.get("asks")),
+        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
         "metrics": _extract_metrics(structured_memo),
     }
 
@@ -437,9 +437,9 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
-                "highlights": _join_text_items(structured_memo.get("highlights")),
-                "challenges": _join_text_items(structured_memo.get("lowlights")),
-                "asks": _join_text_items(structured_memo.get("asks")),
+                "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+                "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+                "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
                 "metrics": _extract_metrics(structured_memo),
             }
         )
@@ -467,9 +467,9 @@ def _serialize_email_draft_month(draft):
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
-        "highlights": _join_text_items(structured_memo.get("highlights")),
-        "challenges": _join_text_items(structured_memo.get("lowlights")),
-        "asks": _join_text_items(structured_memo.get("asks")),
+        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
     }
 
 
