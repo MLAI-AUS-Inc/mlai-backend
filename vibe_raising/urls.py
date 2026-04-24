@@ -14,6 +14,7 @@ from .views import (
     VibeRaisingStartupUpdateBootstrapView,
     VibeRaisingStartupUpdateRunView,
     VibeRaisingStartupUpdateStatusView,
+    VibeRaisingVideoUploadView,
 )
 
 
@@ -22,6 +23,7 @@ urlpatterns = [
     path("companies/", VibeRaisingCompanyView.as_view(), name="vibe-raising-companies"),
     path("active-company/", VibeRaisingActiveCompanyView.as_view(), name="vibe-raising-active-company"),
     path("updates/", VibeRaisingMonthlyUpdateView.as_view(), name="vibe-raising-updates"),
+    path("uploads/video/", VibeRaisingVideoUploadView.as_view(), name="vibe-raising-video-upload"),
     path(
         "startup-update/bootstrap/",
         VibeRaisingStartupUpdateBootstrapView.as_view(),

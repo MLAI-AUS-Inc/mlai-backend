@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -197,6 +198,13 @@ class VibeRaisingApiTests(TestCase):
                 "highlights": "Closed two pilots\nHired first AE",
                 "challenges": "Longer sales cycle",
                 "asks": "Intros to health system buyers",
+                "summary": "Strong month with enterprise momentum.",
+                "sourceUrl": "https://example.com/march-update",
+                "videoUrl": "https://storage.example.com/vibe-raising/demo.mp4",
+                "videoStoragePath": "vibe-raising/update-videos/org-1/user-1/demo.mp4",
+                "videoContentType": "video/mp4",
+                "videoFileSizeBytes": 12345,
+                "videoOriginalFilename": "demo.mp4",
                 "metrics": {
                     "revenue": "50000",
                     "activeUsers": "3420",
@@ -212,9 +220,103 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(draft.structured_memo["highlights"], ["Closed two pilots", "Hired first AE"])
         self.assertEqual(draft.structured_memo["lowlights"], ["Longer sales cycle"])
         self.assertEqual(draft.structured_memo["asks"], ["Intros to health system buyers"])
+        self.assertEqual(draft.structured_memo["summary"], "Strong month with enterprise momentum.")
+        self.assertEqual(draft.structured_memo["source_url"], "https://example.com/march-update")
+        self.assertEqual(draft.structured_memo["video_url"], "https://storage.example.com/vibe-raising/demo.mp4")
+        self.assertEqual(draft.structured_memo["video"]["content_type"], "video/mp4")
+        self.assertEqual(draft.structured_memo["video"]["file_size_bytes"], 12345)
         self.assertEqual(response.data["update"]["month"], "March 2026")
+        self.assertEqual(response.data["update"]["summary"], "Strong month with enterprise momentum.")
+        self.assertEqual(response.data["update"]["sourceUrl"], "https://example.com/march-update")
+        self.assertEqual(response.data["update"]["videoUrl"], "https://storage.example.com/vibe-raising/demo.mp4")
+        self.assertEqual(response.data["update"]["videoContentType"], "video/mp4")
+        self.assertEqual(response.data["update"]["videoOriginalFilename"], "demo.mp4")
         self.assertEqual(response.data["update"]["metrics"]["revenue"], "50000")
         self.assertNotIn("ignored", response.data["update"]["metrics"])
+
+    @patch("vibe_raising.views.upload_file_to_storage")
+    def test_founder_can_upload_update_video(self, mock_upload):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_upload.return_value = "https://storage.example.com/vibe-raising/demo.mp4"
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/",
+            {"video": SimpleUploadedFile("demo.mp4", b"video-bytes", content_type="video/mp4")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["videoUrl"], mock_upload.return_value)
+        self.assertEqual(response.data["contentType"], "video/mp4")
+        self.assertEqual(response.data["fileSizeBytes"], len(b"video-bytes"))
+        self.assertEqual(response.data["originalFilename"], "demo.mp4")
+        self.assertTrue(response.data["storagePath"].startswith("vibe-raising/update-videos/org-"))
+        mock_upload.assert_called_once()
+
+    @patch("vibe_raising.views.upload_file_to_storage")
+    def test_founder_video_upload_accepts_common_formats_and_extension_fallbacks(self, mock_upload):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_upload.return_value = "https://storage.example.com/vibe-raising/demo-video"
+
+        cases = [
+            ("demo.mov", "video/quicktime", "video/quicktime"),
+            ("demo.webm", "video/webm", "video/webm"),
+            ("demo.mkv", "application/octet-stream", "video/x-matroska"),
+            ("demo.avi", "", "video/x-msvideo"),
+        ]
+        for filename, content_type, expected_content_type in cases:
+            with self.subTest(filename=filename):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/uploads/video/",
+                    {
+                        "video": SimpleUploadedFile(
+                            filename,
+                            b"video-bytes",
+                            content_type=content_type,
+                        )
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.data["contentType"], expected_content_type)
+
+        self.assertEqual(mock_upload.call_count, len(cases))
+
+    def test_founder_video_upload_rejects_non_video_content(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/",
+            {"video": SimpleUploadedFile("notes.txt", b"plain-text", content_type="text/plain")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Uploaded file must be a supported video.")
+
+    @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
+    def test_founder_video_upload_rejects_oversized_video(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/",
+            {
+                "video": SimpleUploadedFile(
+                    "oversized.mp4",
+                    b"a" * 1025,
+                    content_type="video/mp4",
+                )
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("maximum size", response.data["detail"])
 
     def test_founder_can_list_monthly_updates_for_active_company(self):
         self.client.force_authenticate(user=self.user)
@@ -228,6 +330,16 @@ class VibeRaisingApiTests(TestCase):
                 "highlights": ["Closed a channel partnership", "Shipped onboarding refresh"],
                 "lowlights": ["Sales cycle slipped"],
                 "asks": ["Intros to Series A fintech funds"],
+                "summary": "February summary",
+                "source_url": "https://example.com/feb-update",
+                "video_url": "https://storage.example.com/feb.mp4",
+                "video": {
+                    "url": "https://storage.example.com/feb.mp4",
+                    "content_type": "video/mp4",
+                    "original_filename": "feb.mp4",
+                    "storage_path": "vibe-raising/update-videos/org-1/user-1/feb.mp4",
+                    "file_size_bytes": 45678,
+                },
                 "kpi_snapshot": [
                     {"metric_key": "revenue", "label": "Revenue", "value": "42000"},
                 ],
@@ -239,6 +351,11 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["updates"]), 1)
         self.assertEqual(response.data["updates"][0]["month"], "February 2026")
+        self.assertEqual(response.data["updates"][0]["summary"], "February summary")
+        self.assertEqual(response.data["updates"][0]["sourceUrl"], "https://example.com/feb-update")
+        self.assertEqual(response.data["updates"][0]["videoUrl"], "https://storage.example.com/feb.mp4")
+        self.assertEqual(response.data["updates"][0]["videoContentType"], "video/mp4")
+        self.assertEqual(response.data["updates"][0]["videoOriginalFilename"], "feb.mp4")
         self.assertEqual(
             response.data["updates"][0]["highlights"],
             "Closed a channel partnership\nShipped onboarding refresh",

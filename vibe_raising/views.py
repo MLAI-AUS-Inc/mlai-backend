@@ -1,18 +1,24 @@
 import calendar
 import logging
+import mimetypes
+import os
 import urllib.parse
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.firebase_utils import upload_file_to_storage
 from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
 from integrations.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
 from integrations.services.startup_updates import (
@@ -46,6 +52,20 @@ logger = logging.getLogger(__name__)
 
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 VALLEY_META_KEY = "_valley_meta"
+MAX_VIBE_RAISING_VIDEO_SIZE_BYTES = 250 * 1024 * 1024
+VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".m4v": "video/x-m4v",
+    ".webm": "video/webm",
+    ".avi": "video/x-msvideo",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
+    ".3gp": "video/3gpp",
+    ".3g2": "video/3gpp2",
+    ".ogv": "video/ogg",
+    ".mkv": "video/x-matroska",
+}
 EMAIL_DRAFT_DISPLAY_STAGES = {
     "profile_resolution": "Preparing company context",
     "gmail_backfill": "Scanning recent Gmail messages",
@@ -264,10 +284,18 @@ def _extract_metrics(structured_memo):
 
 def _serialize_draft_for_form(draft):
     structured_memo = draft.structured_memo or {}
+    video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        "summary": _structured_memo_text(structured_memo, "summary", "topline"),
+        "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "videoUrl": _structured_memo_video_url(structured_memo),
+        "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
+        "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
+        "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
+        "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "highlights": _join_text_items(structured_memo.get("highlights")),
         "challenges": _join_text_items(structured_memo.get("lowlights")),
         "asks": _join_text_items(structured_memo.get("asks")),
@@ -281,6 +309,38 @@ def _split_editor_text(value):
         for item in str(value or "").replace("\r\n", "\n").split("\n")
         if item.strip()
     ]
+
+
+def _optional_text(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    return text or None
+
+
+def _structured_memo_text(structured_memo, *keys):
+    for key in keys:
+        value = _optional_text((structured_memo or {}).get(key))
+        if value:
+            return value
+    return None
+
+
+def _structured_memo_video_url(structured_memo):
+    video_url = _structured_memo_text(structured_memo, "videoUrl", "video_url")
+    if video_url:
+        return video_url
+
+    video_payload = (structured_memo or {}).get("video") or {}
+    if isinstance(video_payload, dict):
+        return _structured_memo_text(video_payload, "url", "videoUrl", "video_url")
+    return None
+
+
+def _structured_memo_video_metadata(structured_memo):
+    video_payload = (structured_memo or {}).get("video") or {}
+    return video_payload if isinstance(video_payload, dict) else {}
 
 
 def _build_manual_kpi_snapshot(metrics):
@@ -301,16 +361,48 @@ def _build_manual_kpi_snapshot(metrics):
 
 
 def _build_manual_structured_memo(payload):
-    return {
+    memo = {
         "highlights": _split_editor_text(payload.get("highlights")),
         "lowlights": _split_editor_text(payload.get("challenges")),
         "asks": _split_editor_text(payload.get("asks")),
         "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
     }
 
+    summary = _optional_text(payload.get("summary"))
+    source_url = _optional_text(payload.get("sourceUrl"))
+    video_url = _optional_text(payload.get("videoUrl"))
+    video_storage_path = _optional_text(payload.get("videoStoragePath"))
+    video_content_type = _optional_text(payload.get("videoContentType"))
+    video_original_filename = _optional_text(payload.get("videoOriginalFilename"))
+    video_file_size_bytes = payload.get("videoFileSizeBytes")
+
+    if summary:
+        memo["summary"] = summary
+    if source_url:
+        memo["source_url"] = source_url
+    if video_url:
+        memo["video_url"] = video_url
+
+    video = {}
+    if video_url:
+        video["url"] = video_url
+    if video_storage_path:
+        video["storage_path"] = video_storage_path
+    if video_content_type:
+        video["content_type"] = video_content_type
+    if video_original_filename:
+        video["original_filename"] = video_original_filename
+    if video_file_size_bytes is not None:
+        video["file_size_bytes"] = video_file_size_bytes
+    if video:
+        memo["video"] = video
+
+    return memo
+
 
 def _serialize_monthly_update(draft):
     structured_memo = draft.structured_memo or {}
+    video_metadata = _structured_memo_video_metadata(structured_memo)
     return {
         "id": draft.id,
         "isoMonth": draft.month.isoformat(),
@@ -319,6 +411,13 @@ def _serialize_monthly_update(draft):
         "year": draft.month.year,
         "date": draft.updated_at.isoformat(),
         "status": draft.status,
+        "summary": _structured_memo_text(structured_memo, "summary", "topline"),
+        "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "videoUrl": _structured_memo_video_url(structured_memo),
+        "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
+        "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
+        "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
+        "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
         "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
@@ -353,12 +452,20 @@ def _serialize_draft_bundle(drafts):
 
 def _serialize_email_draft_month(draft):
     structured_memo = draft.structured_memo or {}
+    video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
         "draftId": draft.id,
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        "summary": _structured_memo_text(structured_memo, "summary", "topline"),
+        "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "videoUrl": _structured_memo_video_url(structured_memo),
+        "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
+        "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
+        "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
+        "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
         "highlights": _join_text_items(structured_memo.get("highlights")),
         "challenges": _join_text_items(structured_memo.get("lowlights")),
@@ -438,6 +545,55 @@ def _ensure_binding_for_company(*, user, company):
         is_default_for_gmail=True,
     )
     return organization, startup_profile, binding
+
+
+def _resolve_vibe_raising_video_content_type(uploaded_file):
+    content_type = str(getattr(uploaded_file, "content_type", "") or "").split(";")[0].strip().lower()
+    if content_type.startswith("video/"):
+        return content_type
+
+    filename = str(getattr(uploaded_file, "name", "") or "")
+    guessed_type, _encoding = mimetypes.guess_type(filename)
+    if guessed_type and guessed_type.startswith("video/"):
+        return guessed_type
+
+    extension = Path(filename).suffix.lower()
+    return VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES.get(extension, "")
+
+
+def _store_vibe_raising_update_video(*, user, organization, video_file):
+    content_type = _resolve_vibe_raising_video_content_type(video_file)
+    if not content_type:
+        raise ValueError("Uploaded file must be a supported video.")
+
+    if video_file.size > MAX_VIBE_RAISING_VIDEO_SIZE_BYTES:
+        raise ValueError(
+            f"Video exceeds maximum size of {MAX_VIBE_RAISING_VIDEO_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+
+    filename = video_file.name or "update-video"
+    stem = slugify(Path(filename).stem) or "update-video"
+    extension = Path(filename).suffix.lower()
+    if extension not in VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES:
+        extension = mimetypes.guess_extension(content_type) or ".mp4"
+
+    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
+    storage_path = os.path.join(
+        "vibe-raising",
+        "update-videos",
+        f"org-{organization.id}",
+        f"user-{user.id}",
+        f"{timestamp}-{stem}-{uuid4().hex[:8]}{extension}",
+    )
+    video_url = upload_file_to_storage(video_file, storage_path, content_type=content_type)
+
+    return {
+        "videoUrl": video_url,
+        "storagePath": storage_path,
+        "contentType": content_type,
+        "fileSizeBytes": video_file.size,
+        "originalFilename": filename,
+    }
 
 
 def _get_run_result_payload(run) -> dict:
@@ -871,6 +1027,48 @@ class VibeRaisingActiveCompanyView(APIView):
             profile.save(update_fields=["active_company", "updated_at"])
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VibeRaisingVideoUploadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_founder_company_context_or_response(request.user)
+        if error_response:
+            return error_response
+
+        if not context["domain"]:
+            return Response(
+                {"detail": "Add a company domain before uploading videos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        video_file = request.FILES.get("video")
+        if video_file is None:
+            return Response({"detail": "video is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        company = context["company"]
+        organization, _startup_profile, _binding = _ensure_binding_for_company(
+            user=request.user,
+            company=company,
+        )
+
+        try:
+            payload = _store_vibe_raising_update_video(
+                user=request.user,
+                organization=organization,
+                video_file=video_file,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Failed to upload Vibe Raising update video")
+            return Response(
+                {"detail": f"Failed to upload video: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class VibeRaisingMonthlyUpdateView(APIView):

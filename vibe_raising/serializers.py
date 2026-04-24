@@ -133,9 +133,25 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
     companyId = serializers.UUIDField()
 
 
-class VibeRaisingMonthlyUpdateUpsertSerializer(serializers.Serializer):
+class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
+    input_aliases = {
+        "sourceUrl": ("source_url",),
+        "videoUrl": ("video_url",),
+        "videoStoragePath": ("video_storage_path",),
+        "videoContentType": ("video_content_type",),
+        "videoFileSizeBytes": ("video_file_size_bytes",),
+        "videoOriginalFilename": ("video_original_filename",),
+    }
+
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
+    summary = serializers.CharField(allow_blank=True, allow_null=True, required=False, default="")
+    sourceUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)
+    videoUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)
+    videoStoragePath = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    videoContentType = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    videoFileSizeBytes = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+    videoOriginalFilename = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     highlights = serializers.CharField(allow_blank=True, required=False, default="")
     challenges = serializers.CharField(allow_blank=True, required=False, default="")
     asks = serializers.CharField(allow_blank=True, required=False, default="")
@@ -161,6 +177,17 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(serializers.Serializer):
 
         for field in ("highlights", "challenges", "asks"):
             attrs[field] = str(attrs.get(field) or "").strip()
+
+        for field in (
+            "summary",
+            "sourceUrl",
+            "videoUrl",
+            "videoStoragePath",
+            "videoContentType",
+            "videoOriginalFilename",
+        ):
+            if field in attrs:
+                attrs[field] = _blank_to_none(attrs.get(field))
 
         normalized_metrics = {}
         for key, value in (attrs.get("metrics") or {}).items():
