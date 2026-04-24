@@ -539,8 +539,8 @@ class VibeRaisingApiTests(TestCase):
             status="ready",
             structured_memo={
                 "highlights": ["Closed two new pilots", "Revenue expanded"],
-                "lowlights": ["Hiring is still slow"],
-                "asks": ["Customer intros"],
+                "lowlights": ["Hiring is still slow", "Sales pipeline slipped"],
+                "asks": ["Customer intros", "Hiring referrals"],
                 "kpi_snapshot": [
                     {"label": "Revenue", "value": "$45,000"},
                     {"label": "Active Users", "value": "1250"},
@@ -585,6 +585,9 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["draft"]["metrics"]["revenue"], "$45,000")
         self.assertEqual(response.data["draft"]["metrics"]["activeUsers"], "1250")
         self.assertNotIn("ARR", response.data["draft"]["metrics"])
+        self.assertEqual(response.data["draft"]["highlights"], "Closed two new pilots\nRevenue expanded")
+        self.assertEqual(response.data["draft"]["challenges"], "Hiring is still slow\nSales pipeline slipped")
+        self.assertEqual(response.data["draft"]["asks"], "Customer intros\nHiring referrals")
         self.assertEqual(len(response.data["draft"]["pastMonths"]), 2)
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
 
@@ -850,8 +853,8 @@ class VibeRaisingApiTests(TestCase):
             status="ready",
             structured_memo={
                 "highlights": ["Closed two new pilots", "Revenue expanded"],
-                "lowlights": ["Hiring is still slow"],
-                "asks": ["Customer intros"],
+                "lowlights": ["Hiring is still slow", "Sales pipeline slipped"],
+                "asks": ["Customer intros", "Hiring referrals"],
                 "kpi_snapshot": [
                     {"metric_key": "revenue", "label": "Revenue", "value": "$45,000"},
                     {"metric_key": "activeUsers", "label": "Active Users", "value": "1250"},
@@ -894,8 +897,12 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["currentMonth"]["year"], 2026)
         self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
         self.assertEqual(response.data["currentMonth"]["metrics"]["activeUsers"], "1250")
+        self.assertEqual(response.data["currentMonth"]["highlights"], "Closed two new pilots\nRevenue expanded")
+        self.assertEqual(response.data["currentMonth"]["challenges"], "Hiring is still slow\nSales pipeline slipped")
+        self.assertEqual(response.data["currentMonth"]["asks"], "Customer intros\nHiring referrals")
         self.assertEqual([item["month"] for item in response.data["pastMonths"]], ["January", "February"])
         self.assertEqual(response.data["draft"]["month"], "March")
+        self.assertEqual(response.data["draft"]["highlights"], "Closed two new pilots\nRevenue expanded")
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
 
     def test_email_draft_active_run_returns_null_without_open_run(self):
@@ -1052,9 +1059,9 @@ class VibeRaisingApiTests(TestCase):
             month=date(2026, 3, 1),
             status="ready",
             structured_memo={
-                "highlights": ["March highlight"],
-                "lowlights": ["March challenge"],
-                "asks": ["March ask"],
+                "highlights": ["March highlight", "March second highlight"],
+                "lowlights": ["March challenge", "March second challenge"],
+                "asks": ["March ask", "March second ask"],
                 "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
             },
             rendered_markdown="# March Update",
@@ -1097,13 +1104,21 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(status_response.data["generatedDraftMonths"], ["2026-03-01"])
         self.assertEqual(status_response.data["currentMonth"]["month"], "March")
         self.assertEqual(status_response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(status_response.data["currentMonth"]["highlights"], "March highlight\nMarch second highlight")
+        self.assertEqual(status_response.data["currentMonth"]["challenges"], "March challenge\nMarch second challenge")
+        self.assertEqual(status_response.data["currentMonth"]["asks"], "March ask\nMarch second ask")
 
         self.assertEqual(results_response.status_code, 200)
         self.assertEqual(results_response.data["runId"], older_run.run_id)
         self.assertEqual(results_response.data["currentMonth"]["month"], "March")
+        self.assertEqual(results_response.data["currentMonth"]["highlights"], "March highlight\nMarch second highlight")
         self.assertEqual(results_response.data["draft"]["month"], "March")
         self.assertEqual(results_response.data["draft"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(results_response.data["draft"]["highlights"], "March highlight\nMarch second highlight")
+        self.assertEqual(results_response.data["draft"]["challenges"], "March challenge\nMarch second challenge")
+        self.assertEqual(results_response.data["draft"]["asks"], "March ask\nMarch second ask")
         self.assertEqual(results_response.data["months"][0]["month"], "March")
+        self.assertEqual(results_response.data["months"][0]["highlights"], "March highlight\nMarch second highlight")
 
     def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
         self.client.force_authenticate(user=self.user)

@@ -431,6 +431,11 @@ def _join_text_items(value) -> str:
     return text
 
 
+def _join_text_items_with_newlines(value) -> str:
+    items = _normalize_text_list(value)
+    return "\n".join(item.strip() for item in items if item.strip())
+
+
 def _metric_key_from_label(label) -> Optional[str]:
     normalized = str(label or "").strip().lower()
     if normalized in {"revenue", "monthly revenue"}:
@@ -484,9 +489,9 @@ def _serialize_draft_for_editor(draft) -> dict:
     return {
         "month": month_value.strftime("%B"),
         "year": month_value.year,
-        "highlights": _join_text_items(structured_memo.get("highlights")),
-        "challenges": _join_text_items(structured_memo.get("lowlights")),
-        "asks": _join_text_items(structured_memo.get("asks")),
+        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
         "metrics": _extract_form_metrics(structured_memo),
     }
 
@@ -500,9 +505,9 @@ def _serialize_email_draft_month(draft) -> dict:
         "month": month_value.strftime("%B"),
         "year": month_value.year,
         "metrics": _extract_form_metrics(structured_memo),
-        "highlights": _join_text_items(structured_memo.get("highlights")),
-        "challenges": _join_text_items(structured_memo.get("lowlights")),
-        "asks": _join_text_items(structured_memo.get("asks")),
+        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
+        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
     }
 
 

@@ -228,9 +228,9 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             month=datetime(2026, 3, 1, tzinfo=dt_timezone.utc).date(),
             status="ready",
             structured_memo={
-                "highlights": ["Closed March pilot"],
-                "lowlights": ["March hiring slowed"],
-                "asks": ["March intro"],
+                "highlights": ["Closed March pilot", "Expanded March revenue"],
+                "lowlights": ["March hiring slowed", "March sales cycle lengthened"],
+                "asks": ["March intro", "March hiring referral"],
                 "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
             },
             rendered_markdown="# March Update",
@@ -241,7 +241,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             month=datetime(2026, 2, 1, tzinfo=dt_timezone.utc).date(),
             status="ready",
             structured_memo={
-                "highlights": ["Launched February feature"],
+                "highlights": ["Launched February feature", "Closed February renewal"],
                 "lowlights": ["February challenge"],
                 "asks": ["February intro"],
                 "kpi_snapshot": [{"metric_key": "mrr", "label": "MRR", "value": "$12,000"}],
@@ -271,9 +271,23 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(results_response.data["run_id"], run.run_id)
         self.assertEqual(results_response.data["current_month"]["month"], "March")
         self.assertEqual(results_response.data["current_month"]["metrics"]["revenue"], "$45,000")
+        self.assertEqual(results_response.data["current_month"]["highlights"], "Closed March pilot\nExpanded March revenue")
+        self.assertEqual(results_response.data["current_month"]["challenges"], "March hiring slowed\nMarch sales cycle lengthened")
+        self.assertEqual(results_response.data["current_month"]["asks"], "March intro\nMarch hiring referral")
         self.assertEqual(results_response.data["past_months"][0]["month"], "February")
+        self.assertEqual(
+            results_response.data["past_months"][0]["highlights"],
+            "Launched February feature\nClosed February renewal",
+        )
         self.assertEqual(results_response.data["draft"]["month"], "March")
+        self.assertEqual(results_response.data["draft"]["highlights"], "Closed March pilot\nExpanded March revenue")
+        self.assertEqual(results_response.data["draft"]["challenges"], "March hiring slowed\nMarch sales cycle lengthened")
+        self.assertEqual(results_response.data["draft"]["asks"], "March intro\nMarch hiring referral")
         self.assertEqual(results_response.data["draft"]["pastMonths"][0]["month"], "February 2026")
+        self.assertEqual(
+            results_response.data["draft"]["pastMonths"][0]["highlights"],
+            "Launched February feature\nClosed February renewal",
+        )
 
 
 class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
