@@ -6,8 +6,9 @@ from typing import Optional, Set
 from django.conf import settings
 from django.shortcuts import redirect
 from django.http import HttpResponseBadRequest, HttpResponse
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth import login as auth_login
 from django.utils import timezone
+from hospital.authentication import CustomJWTAuthentication
 from .models import GoogleConnection, UserIntegration
 from integrations.services.github_connections import (
     build_github_installation_url,
@@ -81,11 +82,69 @@ def _default_google_success_url() -> str:
     fallback = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
     return f"{_origin_from_url(fallback) or fallback.rstrip('/')}{GOOGLE_OAUTH_SUCCESS_PATH}"
 
-@login_required
+
+def _vibe_raising_frontend_origin() -> str:
+    for setting_name in ("VIBE_RAISING_URL", "DEFAULT_FRONTEND_URL"):
+        origin = _origin_from_url(getattr(settings, setting_name, None))
+        if origin:
+            return origin
+
+    return "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+
+
+def _path_from_frontend_next(next_url: Optional[str]) -> str:
+    normalized = _normalize_google_next(next_url) or "/vibe-raising/create-update?email_draft=1"
+    parsed = urllib.parse.urlparse(normalized)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _vibe_raising_login_url(next_url: Optional[str]) -> str:
+    params = urllib.parse.urlencode(
+        {
+            "app": "vibe-raising",
+            "next": _path_from_frontend_next(next_url),
+        }
+    )
+    return f"{_vibe_raising_frontend_origin()}/platform/login?{params}"
+
+
+def _resolve_google_oauth_user(request):
+    user = getattr(request, "user", None)
+    if getattr(user, "is_authenticated", False):
+        return user
+
+    auth_result = CustomJWTAuthentication().authenticate(request)
+    if not auth_result:
+        return None
+
+    user, _validated_token = auth_result
+    request.user = user
+    return user
+
+
+def _ensure_django_session_for_user(request, user) -> None:
+    if str(request.session.get("_auth_user_id") or "") == str(user.pk):
+        return
+
+    auth_login(
+        request,
+        user,
+        backend="django.contrib.auth.backends.ModelBackend",
+    )
+
+
 def google_connect(request):
     """
     Initiates the Google OAuth flow.
     """
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(request.GET.get("next")))
+
+    _ensure_django_session_for_user(request, user)
+
     state = secrets.token_urlsafe(32)
     request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
 
@@ -109,11 +168,15 @@ def google_connect(request):
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
     return redirect(url)
 
-@login_required
+
 def google_callback(request):
     """
     Handles the callback from Google.
     """
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(None))
+
     # 1) Validate state
     state = request.GET.get("state")
     if not state or state != request.session.get(GOOGLE_OAUTH_STATE_SESSION_KEY):
@@ -130,7 +193,7 @@ def google_callback(request):
     if not code:
         return HttpResponseBadRequest("Missing code")
 
-    existing_connection = GoogleConnection.objects.filter(user=request.user).first()
+    existing_connection = GoogleConnection.objects.filter(user=user).first()
 
     # 3) Exchange code for tokens
     try:
@@ -148,7 +211,7 @@ def google_callback(request):
         token_resp.raise_for_status()
         token_data = token_resp.json()
     except requests.RequestException:
-        logger.exception("Failed to exchange Google OAuth code for user %s", request.user_id)
+        logger.exception("Failed to exchange Google OAuth code for user %s", user.id)
         return HttpResponseBadRequest("Failed to exchange Google OAuth code.")
 
     access_token = token_data.get("access_token")
@@ -173,7 +236,7 @@ def google_callback(request):
         ui_resp.raise_for_status()
         google_email = ui_resp.json().get("email")
     except requests.RequestException:
-        logger.exception("Failed to fetch Google userinfo for user %s", request.user_id)
+        logger.exception("Failed to fetch Google userinfo for user %s", user.id)
         return HttpResponseBadRequest("Failed to fetch Google account details.")
 
     # Update or create the connection
@@ -184,7 +247,7 @@ def google_callback(request):
     }
 
     GoogleConnection.objects.update_or_create(
-        user=request.user,
+        user=user,
         defaults=defaults,
     )
 
