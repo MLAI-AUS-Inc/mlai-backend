@@ -4,7 +4,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
-from django.urls import reverse
+from django.urls import resolve, reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -22,6 +22,7 @@ from integrations.services.startup_updates import (
     DEFAULT_BACKFILL_MONTHS,
     SUPERSEDED_GMAIL_CONNECTION_ERROR,
     create_startup_update_run,
+    resolve_or_create_profile,
 )
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
@@ -285,6 +286,163 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(mock_upload.call_count, len(cases))
 
+    @patch("vibe_raising.views.create_signed_upload_url")
+    def test_founder_can_create_signed_video_upload_session(self, mock_signed_url):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_signed_url.return_value = "https://storage-upload.example.com/signed-put"
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/session/",
+            {
+                "originalFilename": "demo.mp4",
+                "contentType": "video/mp4",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["uploadUrl"], mock_signed_url.return_value)
+        self.assertEqual(response.data["contentType"], "video/mp4")
+        self.assertEqual(response.data["fileSizeBytes"], 12345)
+        self.assertEqual(response.data["maxUploadBytes"], 250 * 1024 * 1024)
+        self.assertEqual(response.data["requiredHeaders"]["Content-Type"], "video/mp4")
+        self.assertTrue(response.data["storagePath"].startswith("vibe-raising/update-videos/org-"))
+        mock_signed_url.assert_called_once()
+
+    @patch("vibe_raising.views.create_signed_upload_url")
+    def test_signed_video_upload_session_accepts_common_formats_and_extension_fallbacks(self, mock_signed_url):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_signed_url.return_value = "https://storage-upload.example.com/signed-put"
+
+        cases = [
+            ("demo.mov", "video/quicktime", "video/quicktime"),
+            ("demo.webm", "video/webm", "video/webm"),
+            ("demo.mkv", "application/octet-stream", "video/x-matroska"),
+            ("demo.avi", "", "video/x-msvideo"),
+        ]
+        for filename, content_type, expected_content_type in cases:
+            with self.subTest(filename=filename):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/uploads/video/session/",
+                    {
+                        "originalFilename": filename,
+                        "contentType": content_type,
+                        "fileSizeBytes": 12345,
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.data["contentType"], expected_content_type)
+
+        self.assertEqual(mock_signed_url.call_count, len(cases))
+
+    def test_signed_video_upload_session_rejects_non_video_content(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/session/",
+            {
+                "originalFilename": "notes.txt",
+                "contentType": "text/plain",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Uploaded file must be a supported video.")
+
+    def test_signed_video_upload_session_rejects_unsupported_video_format(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/session/",
+            {
+                "originalFilename": "legacy.flv",
+                "contentType": "video/x-flv",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Uploaded file must be a supported video.")
+
+    @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
+    def test_signed_video_upload_session_rejects_oversized_video(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/session/",
+            {
+                "originalFilename": "oversized.mp4",
+                "contentType": "video/mp4",
+                "fileSizeBytes": 1025,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("maximum size", response.data["detail"])
+
+    @patch("vibe_raising.views.finalize_uploaded_storage_object")
+    def test_founder_can_complete_signed_video_upload(self, mock_finalize):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization, _startup_profile = resolve_or_create_profile(domain=company.domain)
+        storage_path = f"vibe-raising/update-videos/org-{organization.id}/user-{self.user.id}/demo.mp4"
+        mock_finalize.return_value = {
+            "url": "https://storage.example.com/vibe-raising/demo.mp4",
+            "contentType": "video/mp4",
+            "fileSizeBytes": 12345,
+        }
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/complete/",
+            {
+                "storagePath": storage_path,
+                "originalFilename": "demo.mp4",
+                "contentType": "video/mp4",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["videoUrl"], mock_finalize.return_value["url"])
+        self.assertEqual(response.data["storagePath"], storage_path)
+        self.assertEqual(response.data["contentType"], "video/mp4")
+        self.assertEqual(response.data["fileSizeBytes"], 12345)
+        self.assertEqual(response.data["originalFilename"], "demo.mp4")
+        mock_finalize.assert_called_once_with(storage_path, content_type="video/mp4")
+
+    @patch("vibe_raising.views.finalize_uploaded_storage_object")
+    def test_complete_signed_video_upload_rejects_wrong_storage_path(self, mock_finalize):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/video/complete/",
+            {
+                "storagePath": "vibe-raising/update-videos/org-999/user-999/demo.mp4",
+                "originalFilename": "demo.mp4",
+                "contentType": "video/mp4",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Invalid upload path.")
+        mock_finalize.assert_not_called()
+
     def test_founder_video_upload_rejects_non_video_content(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
@@ -431,6 +589,18 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(
             reverse("vibe-raising-email-draft-start"),
             "/api/v1/vibe-raising/email-draft/start/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-video-upload-session"),
+            "/api/v1/vibe-raising/uploads/video/session/",
+        )
+        self.assertEqual(
+            reverse("vibe-raising-video-upload-complete"),
+            "/api/v1/vibe-raising/uploads/video/complete/",
+        )
+        self.assertEqual(
+            resolve("/api/v1/vibe-raising/uploads/video/session/").url_name,
+            "vibe-raising-video-upload-session",
         )
         self.assertEqual(
             reverse("vibe-raising-email-draft-status"),

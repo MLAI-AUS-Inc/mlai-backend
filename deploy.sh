@@ -6,8 +6,9 @@ set -euo pipefail
 DROPLET_IP="209.38.85.60"
 USER="root"
 PROJECT_DIR="/root/mlai-backend"
+APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
-echo "🚀 Deploying to $DROPLET_IP..."
+echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
 
 # 1. Sync files to the server
 echo "📦 Syncing files..."
@@ -48,6 +49,7 @@ ssh $USER@$DROPLET_IP << EOF
     sed -i 's/ALLOWED_HOSTS=.*/ALLOWED_HOSTS=api.mlai.au,209.38.85.60,localhost,127.0.0.1,esafety.localhost/' .env
     sed -i 's|CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://mlai.au,https://www.mlai.au|' .env
     sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://mlai.au,https://www.mlai.au,https://api.mlai.au|' .env
+    upsert_env_value APP_RELEASE "$APP_RELEASE"
     if grep -q '^VALLEY_HARNESS_URL=' .env; then
         sed -i 's|^VALLEY_HARNESS_URL=$|VALLEY_HARNESS_URL=http://valley-api:8080|' .env
     else
@@ -130,6 +132,17 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "✅ Verifying migration readiness..."
     docker compose run --rm --no-deps web python manage.py migrate --check --noinput
 
+    echo "🧭 Verifying Vibe Raising video upload routes..."
+    docker compose run --rm --no-deps web python manage.py shell -c "
+from django.urls import resolve
+resolve('/api/v1/vibe-raising/uploads/video/session/')
+resolve('/api/v1/vibe-raising/uploads/video/complete/')
+print('vibe raising video upload routes ok')
+"
+
+    echo "🎞️ Configuring Firebase Storage CORS for direct video uploads..."
+    docker compose run --rm --no-deps web python manage.py configure_firebase_storage_cors
+
     echo "🔒 Verifying coworking booking concurrency guard..."
     docker compose run --rm --no-deps web python manage.py shell -c "
 from django.db import connection
@@ -145,6 +158,48 @@ print(index_name)
 
     echo "🌐 Starting web, scheduler, and bridge-worker services..."
     docker compose up -d web scheduler bridge-worker
+
+    echo "🩺 Verifying external health release..."
+    release_ok=0
+    for attempt in \$(seq 1 12); do
+        health_body=\$(curl -fsS https://api.mlai.au/healthz/ready || true)
+        if printf '%s\n' "\$health_body" | grep -F "\"release\": \"$APP_RELEASE\"" >/dev/null; then
+            release_ok=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "\$release_ok" != "1" ]; then
+        echo "Expected /healthz/ready to report release $APP_RELEASE"
+        echo "\$health_body"
+        exit 1
+    fi
+
+    echo "🌐 Verifying external Vibe Raising video upload CORS preflight..."
+    preflight_headers=\$(mktemp)
+    cors_ok=0
+    for attempt in \$(seq 1 12); do
+        : > "\$preflight_headers"
+        if curl -fsS -X OPTIONS \
+            -H 'Origin: https://mlai.au' \
+            -H 'Access-Control-Request-Method: POST' \
+            -H 'Access-Control-Request-Headers: content-type,x-csrftoken,x-request-id' \
+            -D "\$preflight_headers" \
+            -o /dev/null \
+            https://api.mlai.au/api/v1/vibe-raising/uploads/video/session/ &&
+            grep -i '^access-control-allow-origin: https://mlai.au' "\$preflight_headers" >/dev/null; then
+            cors_ok=1
+            break
+        fi
+        sleep 5
+    done
+    if [ "\$cors_ok" != "1" ]; then
+        echo "Expected video upload session preflight to return CORS headers"
+        cat "\$preflight_headers"
+        rm -f "\$preflight_headers"
+        exit 1
+    fi
+    rm -f "\$preflight_headers"
 EOF
 
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"
