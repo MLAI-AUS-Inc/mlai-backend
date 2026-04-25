@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from django.db import transaction
 
@@ -12,6 +13,30 @@ from .models import VibeRaisingCompany, VibeRaisingProfile
 
 def normalize_company_domain(domain: str | None) -> str:
     return normalize_domain(domain or "") or ""
+
+
+def normalize_company_linkedin_url(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        raise ValueError("Enter a valid LinkedIn company URL.")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if path_parts and path_parts[0].lower() == "in":
+        raise ValueError("Enter a LinkedIn company URL, not a personal profile URL.")
+    if len(path_parts) < 2 or path_parts[0].lower() != "company":
+        raise ValueError("Enter a valid LinkedIn company URL.")
+
+    slug = path_parts[1].strip()
+    if not slug:
+        raise ValueError("Enter a valid LinkedIn company URL.")
+    return f"https://www.linkedin.com/company/{slug}"
 
 
 def founder_actor_id_for_user(user) -> str:
@@ -77,6 +102,12 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
 
     brand_name = str(_first_value(data, "brandName", "brand_name", default="") or "").strip()
     company_context = str(_first_value(data, "companyContext", "company_context", default="") or "").strip()
+    linkedin_url = ""
+    linkedin_url_provided = "companyLinkedInUrl" in data or "company_linkedin_url" in data
+    if linkedin_url_provided:
+        linkedin_url = normalize_company_linkedin_url(
+            _first_value(data, "companyLinkedInUrl", "company_linkedin_url", default="")
+        )
     competitors = string_list_from_value(_first_value(data, "competitors", default=[]))
     seed_keywords = string_list_from_value(_first_value(data, "seedKeywords", "seed_keywords", default=[]))
     founder_names = string_list_from_value(_first_value(data, "founderNames", "founder_names", default=[]))
@@ -96,6 +127,9 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if ("seedKeywords" in data or "seed_keywords" in data) and organization.seed_keywords != seed_keywords:
         organization.seed_keywords = seed_keywords
         organization_update_fields.append("seed_keywords")
+    if linkedin_url_provided and organization.company_linkedin_url != linkedin_url:
+        organization.company_linkedin_url = linkedin_url
+        organization_update_fields.append("company_linkedin_url")
     if organization_update_fields:
         organization.save(update_fields=organization_update_fields)
 

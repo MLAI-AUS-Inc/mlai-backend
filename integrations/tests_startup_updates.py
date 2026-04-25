@@ -14,6 +14,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from content_factory.models import OrganizationContentConfig
+from integrations import http_client
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -23,7 +24,12 @@ from workflow_runs.models import (
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
 )
-from integrations.models import GoogleConnection
+from integrations.models import (
+    ExternalServiceConnection,
+    ExternalServiceConnectionStatus,
+    ExternalServiceProvider,
+    GoogleConnection,
+)
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -33,6 +39,9 @@ from startup_updates.models import (
     GmailThreadArtifact,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
+    SlackChannelSelection,
+    SlackMessageArtifact,
+    SlackThreadArtifact,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -58,6 +67,20 @@ from startup_updates.services import (
 )
 
 User = get_user_model()
+
+
+class FakeSlackResponse:
+    def __init__(self, payload: dict, *, status_code: int = 200, headers: Optional[dict] = None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400 and self.status_code != 429:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
 
 
 class StartupUpdateApiTestCase(TestCase):
@@ -652,6 +675,194 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["reused_existing_count"], 1)
         self.assertEqual(response.data["message_ids"], [artifact.gmail_message_id])
         mock_get_message_metadata.assert_not_called()
+
+
+class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = StartupProfile.objects.create(
+            organization=self.organization,
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+        )
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=self.organization,
+            access_token="xoxp-token",
+            external_account_id="T123",
+            account_label="Acme Slack",
+        )
+        self.selection = SlackChannelSelection.objects.create(
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            channel_id="C123",
+            channel_name="wins",
+            selected=True,
+        )
+        self.run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            input_sources=["gmail", "slack"],
+        )
+
+    def _slack_message(self, ts: str, text: str, *, reply_count: int = 0, thread_ts: Optional[str] = None):
+        payload = {
+            "type": "message",
+            "ts": ts,
+            "user": "U123",
+            "text": text,
+            "user_profile": {"real_name": "Sam"},
+        }
+        if reply_count:
+            payload["reply_count"] = reply_count
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        return payload
+
+    def test_slack_backfill_processes_one_history_page_and_resumes(self):
+        first_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000100", "First win")],
+                "response_metadata": {"next_cursor": "cursor-2"},
+            }
+        )
+        second_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000001.000100", "Second win")],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key, SLACK_SYNC_REPLY_PAGE_BUDGET=0):
+            with patch("integrations.services.external_connectors.requests.get", side_effect=[first_page, second_page]) as mock_get:
+                first_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+                self.selection.refresh_from_db()
+                second_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data["has_more"])
+        self.assertEqual(self.selection.sync_cursor["history_cursor"], "cursor-2")
+        self.assertEqual(mock_get.call_args_list[0].kwargs["params"]["limit"], 100)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_response.data["has_more"])
+        self.selection.refresh_from_db()
+        self.assertTrue(self.selection.sync_cursor["run_backfill_complete"])
+        self.assertEqual(SlackMessageArtifact.objects.filter(organization=self.organization).count(), 2)
+        self.assertEqual(SlackThreadArtifact.objects.filter(organization=self.organization).count(), 2)
+
+    def test_slack_backfill_processes_reply_cursor_across_calls(self):
+        history_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000100", "Root", reply_count=2)],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+        first_replies = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [
+                    self._slack_message("1770000000.000100", "Root", thread_ts="1770000000.000100"),
+                    self._slack_message("1770000000.000200", "Reply 1", thread_ts="1770000000.000100"),
+                ],
+                "response_metadata": {"next_cursor": "reply-cursor-2"},
+            }
+        )
+        second_replies = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000300", "Reply 2", thread_ts="1770000000.000100")],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key, SLACK_SYNC_REPLY_PAGE_BUDGET=1):
+            with patch("integrations.services.external_connectors.requests.get", side_effect=[history_page, first_replies, second_replies]):
+                first_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+                self.selection.refresh_from_db()
+                second_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data["has_more"])
+        self.assertEqual(
+            self.selection.sync_cursor["pending_replies"],
+            [{"thread_ts": "1770000000.000100", "cursor": "reply-cursor-2"}],
+        )
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_response.data["has_more"])
+        thread = SlackThreadArtifact.objects.get(organization=self.organization, thread_ts="1770000000.000100")
+        self.assertEqual(thread.source_message_count, 3)
+
+    def test_slack_backfill_timeout_returns_503_and_records_error(self):
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            with patch(
+                "integrations.services.external_connectors.requests.get",
+                side_effect=http_client.exceptions.Timeout("read timed out"),
+            ):
+                response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.ERROR)
+        self.assertIn("read timed out", self.connection.last_error)
+
+    def test_slack_backfill_rate_limit_returns_retry_after_without_error(self):
+        rate_limited = FakeSlackResponse(
+            {"ok": False, "error": "rate_limited"},
+            status_code=429,
+            headers={"Retry-After": "17"},
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            with patch("integrations.services.external_connectors.requests.get", return_value=rate_limited):
+                response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["has_more"])
+        self.assertEqual(response.data["retry_after_seconds"], 17)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.SYNCING)
+        self.assertEqual(self.connection.last_error, "")
 
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):

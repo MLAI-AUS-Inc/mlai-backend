@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
-from .services import ensure_company_organization, normalize_company_domain
+from .services import ensure_company_organization, normalize_company_domain, normalize_company_linkedin_url
 
 
 def _blank_to_none(value):
@@ -31,6 +31,7 @@ class AliasInputSerializer(serializers.Serializer):
 class FounderCompanySerializer(serializers.ModelSerializer):
     organizationId = serializers.SerializerMethodField()
     organizationDomain = serializers.SerializerMethodField()
+    companyLinkedInUrl = serializers.SerializerMethodField()
 
     class Meta:
         model = VibeRaisingCompany
@@ -43,6 +44,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "registered",
             "organizationId",
             "organizationDomain",
+            "companyLinkedInUrl",
         ]
 
     def get_organizationId(self, obj):
@@ -50,6 +52,9 @@ class FounderCompanySerializer(serializers.ModelSerializer):
 
     def get_organizationDomain(self, obj):
         return obj.organization.domain if obj.organization_id else None
+
+    def get_companyLinkedInUrl(self, obj):
+        return obj.organization.company_linkedin_url if obj.organization_id else ""
 
 
 class FounderProfileSerializer(serializers.ModelSerializer):
@@ -99,6 +104,7 @@ class FounderProfileUpsertSerializer(AliasInputSerializer):
 class FounderCompanyUpsertSerializer(AliasInputSerializer):
     input_aliases = {
         "companyId": ("company_id",),
+        "companyLinkedInUrl": ("company_linkedin_url",),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -108,6 +114,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     location = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     registered = serializers.BooleanField(required=False)
     brandName = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    companyLinkedInUrl = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     companyContext = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     competitors = serializers.JSONField(required=False)
     seedKeywords = serializers.JSONField(required=False)
@@ -131,6 +138,11 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
             attrs["abn"] = _blank_to_none(attrs.get("abn"))
         if "location" in attrs:
             attrs["location"] = attrs.get("location") or ""
+        if "companyLinkedInUrl" in attrs:
+            try:
+                attrs["companyLinkedInUrl"] = normalize_company_linkedin_url(attrs.get("companyLinkedInUrl"))
+            except ValueError as exc:
+                raise serializers.ValidationError({"companyLinkedInUrl": str(exc)}) from exc
         return attrs
 
 
@@ -179,6 +191,7 @@ def serialize_founder_bootstrap(user, profile):
                 "id": active_company.organization_id,
                 "domain": active_company.organization.domain,
                 "name": active_company.organization.name,
+                "companyLinkedInUrl": active_company.organization.company_linkedin_url,
                 "competitors": active_company.organization.competitors,
                 "seedKeywords": active_company.organization.seed_keywords,
                 "startupProfile": linked_startup_profile,

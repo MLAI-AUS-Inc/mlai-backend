@@ -11,6 +11,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from integrations import http_client as requests
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
 from core.permissions import HasRooApiKey
@@ -41,7 +42,9 @@ from startup_updates.models import (
 )
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
-    sync_slack_connection,
+    ConnectorOAuthError,
+    ConnectorRateLimitError,
+    sync_slack_connection_page,
 )
 from integrations.services.gmail import (
     default_backfill_window,
@@ -1520,9 +1523,37 @@ class StartupUpdateSlackBackfillView(APIView):
                 )
             ]
         try:
-            sync_result = sync_slack_connection(connection, channel_ids=channel_ids)
+            sync_result = sync_slack_connection_page(
+                connection,
+                run_id=run.run_id,
+                channel_ids=channel_ids,
+            )
+        except ConnectorRateLimitError as exc:
+            sync_result = {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": "slack",
+                "status": "rate_limited",
+                "messagesSynced": 0,
+                "messages_synced": 0,
+                "threadsTouched": 0,
+                "threads_touched": 0,
+                "channels": [],
+                "has_more": True,
+                "retry_after_seconds": exc.retry_after_seconds,
+            }
         except ConnectorConfigurationError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except requests.RequestException as exc:
+            return Response(
+                {
+                    "error": "Slack backfill timed out or failed while contacting Slack.",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         run_request = dict(run.run_request or {})
         run_request["slack_channel_ids"] = channel_ids
@@ -1539,7 +1570,7 @@ class StartupUpdateSlackBackfillView(APIView):
             {
                 "run": _serialize_run(run, request),
                 **sync_result,
-                "has_more": False,
+                "has_more": bool(sync_result.get("has_more")),
             },
             status=status.HTTP_200_OK,
         )
