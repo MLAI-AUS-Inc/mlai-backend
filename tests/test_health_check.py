@@ -33,6 +33,7 @@ class HealthCheckTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "not_ready")
+        self.assertEqual(response.json()["pending_migration_labels"], ["core.0041"])
 
     @patch("mlai.views.connections")
     def test_health_live_does_not_touch_database(self, mock_connections):
@@ -78,6 +79,7 @@ class HealthCheckTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "not_ready")
         self.assertEqual(response.json()["pending_migrations"], 1)
+        self.assertEqual(response.json()["pending_migration_labels"], ["founder_tools.0002"])
         mock_cursor.execute.assert_called_once_with("SELECT 1")
 
     @patch("mlai.views.connections")

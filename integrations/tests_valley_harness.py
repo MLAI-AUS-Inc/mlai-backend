@@ -20,8 +20,10 @@ class ValleyHarnessServiceTests(SimpleTestCase):
         mock_response.status_code = 202
         mock_post.return_value = mock_response
 
-        self.assertTrue(notify_valley_run_created("run-123"))
+        result = notify_valley_run_created("run-123")
 
+        self.assertTrue(result)
+        self.assertTrue(result.ok)
         self.assertEqual(mock_post.call_args.kwargs["headers"]["X-API-Key"], "valley-key")
 
     @override_settings(
@@ -47,8 +49,10 @@ class ValleyHarnessServiceTests(SimpleTestCase):
         mock_response.status_code = 202
         mock_post.return_value = mock_response
 
-        self.assertTrue(notify_valley_run_created("run-123"))
+        result = notify_valley_run_created("run-123")
 
+        self.assertTrue(result)
+        self.assertTrue(result.ok)
         self.assertEqual(mock_post.call_args.kwargs["headers"]["X-API-Key"], "mlai-key")
 
     @override_settings(
@@ -91,8 +95,28 @@ class ValleyHarnessServiceTests(SimpleTestCase):
         response.text = "forbidden"
         mock_post.side_effect = requests.HTTPError("forbidden", response=response)
 
-        with self.assertLogs("integrations.services.valley_harness", level="ERROR") as captured:
-            self.assertFalse(notify_valley_run_created("run-123"))
+        with self.assertLogs("integrations.services.valley_harness", level="WARNING") as captured:
+            result = notify_valley_run_created("run-123")
 
+        self.assertFalse(result)
+        self.assertEqual(result.failure_kind, "http_status")
         self.assertIn("status=403", captured.output[0])
+        self.assertIn("failure_kind=http_status", captured.output[0])
         self.assertIn("api_key_source=VALLEY_HARNESS_API_KEY", captured.output[0])
+
+    @override_settings(
+        VALLEY_HARNESS_URL="http://valley.local",
+        VALLEY_HARNESS_API_KEY="valley-key",
+        INTERNAL_API_KEY="",
+        ROO_API_KEY="",
+        MLAI_API_KEY="",
+    )
+    @patch("integrations.services.valley_harness.requests.post")
+    def test_notify_returns_dns_failure_kind(self, mock_post):
+        mock_post.side_effect = requests.ConnectionError("Failed to resolve 'valley.local'")
+
+        result = notify_valley_run_created("run-123")
+
+        self.assertFalse(result)
+        self.assertEqual(result.failure_kind, "dns")
+        self.assertIn("Failed to resolve", result.detail)
