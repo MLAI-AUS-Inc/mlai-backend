@@ -7,12 +7,12 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import (
+from content_factory.models import (
     ContentFactoryJob,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
-    User,
 )
+from core.models import User
 from integrations.services.article_generation import ContentFactoryBackendUnavailableError
 from roo.models import Ledger
 

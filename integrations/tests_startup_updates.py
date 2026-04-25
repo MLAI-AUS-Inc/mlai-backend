@@ -13,25 +13,26 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import (
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
+from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
     ContentFactoryRunStatus,
     ContentFactoryRunStep,
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
-    Organization,
-    OrganizationContentConfig,
 )
-from integrations.models import (
+from integrations.models import GoogleConnection
+from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
     GmailMessageArtifact,
     GmailRelevanceLabel,
     GmailSyncCursor,
     GmailThreadArtifact,
-    GoogleConnection,
     MonthlyUpdateDraft,
+    MonthlyUpdateDraftStatus,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -43,7 +44,7 @@ from integrations.services.gmail import (
     clean_email_text,
     default_backfill_window,
 )
-from integrations.services.startup_updates import (
+from startup_updates.services import (
     STARTUP_UPDATE_WORKFLOW,
     build_cancel_backup_for_draft,
     build_cancel_backup_for_event,
@@ -92,7 +93,7 @@ class StartupUpdateApiTestCase(TestCase):
 
 
 class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
-    @patch("integrations.api_views_startup_updates.notify_valley_run_created")
+    @patch("startup_updates.api_views.notify_valley_run_created")
     def test_profile_upsert_and_run_creation(self, mock_notify):
         with self._with_key():
             response = self.client.post(
@@ -149,7 +150,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         )
         mock_notify.assert_called_once_with(run.run_id)
 
-    @patch("integrations.api_views_startup_updates.notify_valley_run_created")
+    @patch("startup_updates.api_views.notify_valley_run_created")
     def test_run_creation_reports_reused_existing_run_and_active_run(self, mock_notify):
         binding = UserStartupBinding.objects.create(
             user=self.user,
@@ -481,7 +482,7 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
             window_months=6,
         )
 
-    @patch("integrations.api_views_startup_updates.sync_message_metadata_page")
+    @patch("startup_updates.api_views.sync_message_metadata_page")
     def test_ingest_next_page_updates_cursor(self, mock_sync):
         artifact = GmailMessageArtifact.objects.create(
             organization=self.organization,
@@ -518,8 +519,8 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["ingested_count"], 1)
         self.assertEqual(response.data["relevance_counts"]["relevant"], 1)
 
-    @patch("integrations.api_views_startup_updates.sync_message_metadata_page")
-    @patch("integrations.api_views_startup_updates.sync_history_metadata_page")
+    @patch("startup_updates.api_views.sync_message_metadata_page")
+    @patch("startup_updates.api_views.sync_history_metadata_page")
     def test_incremental_ingest_falls_back_when_history_cursor_is_stale(self, mock_history_sync, mock_backfill_sync):
         cursor = GmailSyncCursor.objects.get(
             organization=self.organization,
@@ -1040,6 +1041,97 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         )
         return other_user, other_connection
 
+    def test_draft_results_merge_regenerated_bullets_without_duplicates(self):
+        month_bucket = date(2026, 3, 1)
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            month=month_bucket,
+            run=None,
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "title": "Acme March Update",
+                "topline": "Existing topline.",
+                "kpi_snapshot": [
+                    {"metric_key": "mrr", "label": "MRR", "value": "$24,000"},
+                ],
+                "highlights": [
+                    "Converted pilot to paid annual contract",
+                    "Hired first support lead",
+                ],
+                "lowlights": ["Sales cycle slipped"],
+                "asks": [
+                    {"label": "Intro", "text": "Customer intros to seed investors"},
+                ],
+            },
+            evidence_event_ids=[11],
+            evidence_metric_ids=[21],
+            carry_forward_event_ids=[31],
+            groundedness_notes="Existing review notes.",
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                {
+                    "drafts": [
+                        {
+                            "month": month_bucket.isoformat(),
+                            "status": "ready",
+                            "model_name": "gpt-5.4",
+                            "groundedness_status": "passed",
+                            "structured_memo": {
+                                "title": "Acme March Update Refined",
+                                "topline": "",
+                                "kpi_snapshot": [
+                                    {"metric_key": "mrr", "label": "MRR", "value": "$26,000"},
+                                    {"metric_key": "cashCollected", "label": "Cash Collected", "value": "$20,000"},
+                                ],
+                                "highlights": [
+                                    "Converted the pilot into a paid annual contract",
+                                    "Launched onboarding refresh",
+                                ],
+                                "lowlights": ["Sales cycle slipped by two weeks"],
+                                "asks": [
+                                    {"label": "Intro", "text": "Customer introductions to seed investors"},
+                                ],
+                            },
+                            "evidence_event_ids": [11, 12],
+                            "evidence_metric_ids": [22],
+                            "carry_forward_event_ids": [32],
+                            "groundedness_notes": "New review notes.",
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(MonthlyUpdateDraft.objects.filter(organization=self.organization, month=month_bucket).count(), 1)
+        draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=month_bucket)
+        memo = draft.structured_memo
+        self.assertEqual(memo["title"], "Acme March Update Refined")
+        self.assertEqual(memo["topline"], "Existing topline.")
+        self.assertEqual(
+            memo["highlights"],
+            [
+                "Converted the pilot into a paid annual contract",
+                "Hired first support lead",
+                "Launched onboarding refresh",
+            ],
+        )
+        self.assertEqual(memo["lowlights"], ["Sales cycle slipped by two weeks"])
+        self.assertEqual(memo["asks"], [{"label": "Intro", "text": "Customer introductions to seed investors"}])
+        self.assertEqual(
+            {item["metric_key"]: item["value"] for item in memo["kpi_snapshot"]},
+            {"mrr": "$26,000", "cashCollected": "$20,000"},
+        )
+        self.assertEqual(set(draft.evidence_event_ids), {11, 12})
+        self.assertEqual(set(draft.evidence_metric_ids), {21, 22})
+        self.assertEqual(set(draft.carry_forward_event_ids), {31, 32})
+        self.assertIn("3 bullets refreshed", draft.groundedness_notes)
+        self.assertIn("1 added", draft.groundedness_notes)
+
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
 
@@ -1194,7 +1286,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(self.message.relevance_label, GmailRelevanceLabel.RELEVANT)
         self.assertEqual(other_message.relevance_label, GmailRelevanceLabel.AMBIGUOUS)
 
-    @patch("integrations.api_views_startup_updates.hydrate_thread_artifact")
+    @patch("startup_updates.api_views.hydrate_thread_artifact")
     def test_hydrate_threads_message_id_lookup_uses_run_connection(self, mock_hydrate_thread_artifact):
         _other_user, other_connection = self._create_secondary_connection()
         GmailMessageArtifact.objects.create(

@@ -8,7 +8,8 @@ sys.path.append('.')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mlai.settings')
 django.setup()
 
-from core.models import Organization, OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
 from integrations.models import UserIntegration
 from integrations.services.github import scan_github_project
 

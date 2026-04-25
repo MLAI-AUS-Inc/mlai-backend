@@ -4,7 +4,8 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryHealingRecord, Organization
+from content_factory.models import ContentFactoryHealingRecord
+from organizations.models import Organization
 
 
 class ContentFactoryHealingRecordTests(TestCase):

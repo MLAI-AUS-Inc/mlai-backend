@@ -4,17 +4,11 @@ from .models import (
     CommunityBridgeDelivery,
     CommunityBridgeMessageLink,
     CommunityBridgeReceipt,
-    GmailAttachmentArtifact,
-    GmailMessageArtifact,
-    GmailSyncCursor,
-    GmailThreadArtifact,
+    ExternalFinancialRecord,
+    ExternalServiceConnection,
+    FinancialAccount,
     GoogleConnection,
-    MonthlyUpdateDraft,
-    StartupEvent,
-    StartupMetricObservation,
-    StartupProfile,
     UserIntegration,
-    UserStartupBinding,
 )
 
 @admin.register(UserIntegration)
@@ -108,62 +102,25 @@ class GoogleConnectionAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'google_email')
 
 
-@admin.register(StartupProfile)
-class StartupProfileAdmin(admin.ModelAdmin):
-    list_display = ("organization", "default_currency", "updated_at")
-    search_fields = ("organization__name", "organization__domain")
+@admin.register(ExternalServiceConnection)
+class ExternalServiceConnectionAdmin(admin.ModelAdmin):
+    list_display = ("provider", "user", "organization", "account_label", "status", "last_synced_at", "updated_at")
+    search_fields = ("user__email", "organization__domain", "external_account_id", "account_label")
+    list_filter = ("provider", "status", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "last_synced_at")
 
 
-@admin.register(UserStartupBinding)
-class UserStartupBindingAdmin(admin.ModelAdmin):
-    list_display = ("user", "organization", "google_connection", "role", "is_default_for_gmail", "updated_at")
-    search_fields = ("user__email", "organization__domain", "role")
-    list_filter = ("is_default_for_gmail", "updated_at")
+@admin.register(FinancialAccount)
+class FinancialAccountAdmin(admin.ModelAdmin):
+    list_display = ("provider", "account_label", "organization", "currency", "balance", "available_funds", "last_synced_at")
+    search_fields = ("external_account_id", "account_label", "institution_name", "organization__domain", "user__email")
+    list_filter = ("provider", "currency", "status", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "last_synced_at")
 
 
-@admin.register(GmailSyncCursor)
-class GmailSyncCursorAdmin(admin.ModelAdmin):
-    list_display = ("organization", "google_connection", "last_history_id", "last_message_internal_date", "backfill_completed_at")
-    search_fields = ("organization__domain", "google_connection__google_email")
-
-
-@admin.register(GmailMessageArtifact)
-class GmailMessageArtifactAdmin(admin.ModelAdmin):
-    list_display = ("organization", "gmail_message_id", "gmail_thread_id", "internal_date", "relevance_label", "heuristic_score")
-    search_fields = ("organization__domain", "gmail_message_id", "gmail_thread_id", "subject", "from_address")
-    list_filter = ("relevance_label", "has_attachments", "internal_date")
-
-
-@admin.register(GmailThreadArtifact)
-class GmailThreadArtifactAdmin(admin.ModelAdmin):
-    list_display = ("organization", "gmail_thread_id", "source_message_count", "hydration_status", "extraction_status", "updated_at")
-    search_fields = ("organization__domain", "gmail_thread_id")
-    list_filter = ("hydration_status", "extraction_status")
-
-
-@admin.register(GmailAttachmentArtifact)
-class GmailAttachmentArtifactAdmin(admin.ModelAdmin):
-    list_display = ("organization", "filename", "mime_type", "size_bytes", "extraction_status", "updated_at")
-    search_fields = ("organization__domain", "filename", "mime_type", "gmail_attachment_id")
-    list_filter = ("extraction_status", "mime_type")
-
-
-@admin.register(StartupMetricObservation)
-class StartupMetricObservationAdmin(admin.ModelAdmin):
-    list_display = ("organization", "metric_key", "period_month", "value_text", "confidence", "updated_at")
-    search_fields = ("organization__domain", "metric_key", "metric_name", "value_text")
-    list_filter = ("period_month",)
-
-
-@admin.register(StartupEvent)
-class StartupEventAdmin(admin.ModelAdmin):
-    list_display = ("organization", "canonical_key", "event_type", "month_bucket", "investor_importance", "needs_review")
-    search_fields = ("organization__domain", "canonical_key", "title", "summary")
-    list_filter = ("event_type", "month_bucket", "needs_review")
-
-
-@admin.register(MonthlyUpdateDraft)
-class MonthlyUpdateDraftAdmin(admin.ModelAdmin):
-    list_display = ("organization", "month", "status", "groundedness_status", "model_name", "updated_at")
-    search_fields = ("organization__domain", "title", "model_name")
-    list_filter = ("status", "groundedness_status", "month")
+@admin.register(ExternalFinancialRecord)
+class ExternalFinancialRecordAdmin(admin.ModelAdmin):
+    list_display = ("provider", "record_type", "organization", "transaction_date", "amount", "currency", "status")
+    search_fields = ("external_record_id", "external_account_id", "description", "merchant_name", "organization__domain")
+    list_filter = ("provider", "record_type", "status", "transaction_date")
+    readonly_fields = ("created_at", "updated_at")

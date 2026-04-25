@@ -23,9 +23,19 @@ from core.firebase_utils import (
     finalize_uploaded_storage_object,
     upload_file_to_storage,
 )
-from core.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus, Organization
-from integrations.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
-from integrations.services.startup_updates import (
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
+from integrations.models import (
+    ExternalServiceConnection,
+    ExternalServiceConnectionStatus,
+    ExternalServiceProvider,
+)
+from startup_updates.models import (
+    MonthlyUpdateDraft,
+    MonthlyUpdateDraftStatus,
+)
+from integrations.services.external_connectors import mark_sources_sync_requested
+from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
     OPEN_RUN_STATUSES,
     RUN_STEP_ORDER,
@@ -36,12 +46,16 @@ from integrations.services.startup_updates import (
     get_default_binding_for_domain,
     get_latest_startup_update_run,
     get_open_startup_update_run,
+    gmail_required_for_sources,
+    normalize_startup_update_input_sources,
     resolve_or_create_profile,
+    refresh_startup_update_run_source_context,
     sync_startup_profile_from_company,
 )
+from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from founder_tools.services import ensure_company_organization, set_active_company
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
-from .models import VibeRaisingCompany, VibeRaisingProfile
 from .serializers import (
     VibeRaisingActiveCompanySerializer,
     VibeRaisingCompanySerializer,
@@ -78,10 +92,91 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "relevance_classification": "Finding investor-relevant updates",
     "thread_hydration": "Pulling full thread context",
     "event_extraction": "Extracting metrics and highlights",
+    "slack_backfill": "Scanning selected Slack channels",
+    "slack_event_extraction": "Extracting Slack highlights",
     "timeline_merge": "Building timeline",
     "draft_generation": "Drafting monthly updates",
     "groundedness_review": "Final review",
 }
+VIBE_RAISING_INPUT_SOURCE_KEYS = {
+    "gmail",
+    "stripe",
+    "xero",
+    "bank_feed",
+    "notion",
+    "google_drive",
+    "slack",
+}
+XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
+
+
+def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -> dict[str, list[str]]:
+    warnings: dict[str, list[str]] = {}
+    selected = set(input_sources or [])
+    if ExternalServiceProvider.XERO not in selected:
+        return warnings
+
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            user=user,
+            provider=ExternalServiceProvider.XERO,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if not connection:
+        warnings[ExternalServiceProvider.XERO] = ["Xero was selected but no active Xero connection is available."]
+        return warnings
+
+    last_synced_at = connection.last_synced_at
+    should_sync = (
+        connection.status != ExternalServiceConnectionStatus.CONNECTED
+        or last_synced_at is None
+        or timezone.now() - last_synced_at > XERO_DRAFT_SYNC_STALE_AFTER
+    )
+    if not should_sync:
+        return warnings
+
+    try:
+        payload = mark_sources_sync_requested(
+            user,
+            [ExternalServiceProvider.XERO],
+            financial_only=True,
+        )
+    except Exception as exc:
+        logger.exception("Unable to prepare Xero source before monthly update draft", extra={"user_id": user.id})
+        warnings[ExternalServiceProvider.XERO] = [str(exc) or "Xero sync failed before draft generation."]
+        return warnings
+
+    sync_errors = [
+        str(item.get("error") or item.get("warning") or "").strip()
+        for item in payload.get("syncRuns", []) or payload.get("sync_runs", [])
+        if str(item.get("status") or "").lower() == "error"
+    ]
+    if payload.get("status") == "error" or sync_errors:
+        warnings[ExternalServiceProvider.XERO] = [
+            item for item in sync_errors if item
+        ] or ["Xero sync failed before draft generation."]
+    return warnings
+
+
+def _monthly_update_drafts_cover_input_sources(organization: Organization, input_sources: list[str]) -> bool:
+    latest_draft = (
+        organization.monthly_update_drafts.select_related("run")
+        .order_by("-month", "-updated_at")
+        .first()
+    )
+    if latest_draft is None:
+        return False
+
+    requested_sources = set(normalize_startup_update_input_sources(input_sources))
+    if latest_draft.run is None:
+        return requested_sources == {"gmail"}
+
+    run_request = latest_draft.run.run_request or {}
+    draft_sources = set(normalize_startup_update_input_sources(run_request.get("input_sources")))
+    return requested_sources.issubset(draft_sources)
 
 
 def _get_profile_or_404(user):
@@ -102,7 +197,10 @@ def _get_founder_profile_or_response(user):
 
 
 def _get_active_company(profile):
-    return profile.active_company or profile.companies.first()
+    company = profile.active_company or profile.companies.first()
+    if company:
+        ensure_company_organization(company)
+    return company
 
 
 def _serialize_company_summary(company):
@@ -171,8 +269,33 @@ def _frontend_base_url():
     return "http://localhost:5173"
 
 
+def _build_vibe_raising_frontend_next(path_or_url):
+    frontend_base = _frontend_base_url()
+    default_next = f"{frontend_base}/vibe-raising/create-update?email_draft=1"
+    raw_next = str(path_or_url or "").strip()
+    if not raw_next:
+        return default_next
+
+    parsed = urllib.parse.urlparse(raw_next)
+    if parsed.scheme or parsed.netloc:
+        allowed_base = urllib.parse.urlparse(frontend_base)
+        if parsed.scheme != allowed_base.scheme or parsed.netloc != allowed_base.netloc:
+            return default_next
+        candidate = urllib.parse.urlunparse(("", "", parsed.path, "", parsed.query, ""))
+    else:
+        candidate = raw_next
+
+    if not (
+        candidate.startswith("/vibe-raising/connect-data")
+        or candidate.startswith("/vibe-raising/create-update")
+    ):
+        return default_next
+
+    return f"{frontend_base}{candidate}"
+
+
 def _build_google_oauth_url(request):
-    next_url = f"{_frontend_base_url()}/vibe-raising/create-update?email_draft=1"
+    next_url = _build_vibe_raising_frontend_next(request.query_params.get("next"))
     connect_url = request.build_absolute_uri(reverse("google_connect"))
     return f"{connect_url}?{urllib.parse.urlencode({'next': next_url})}"
 
@@ -215,6 +338,33 @@ def _normalize_text_list(value):
     return [text] if text else []
 
 
+def _normalize_input_source_list(value):
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        return []
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        key = str(item or "").strip().lower().replace("-", "_")
+        if key in VIBE_RAISING_INPUT_SOURCE_KEYS and key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    return normalized
+
+
+def _get_requested_input_sources(request):
+    return _normalize_input_source_list(
+        request.data.get("inputSources") or request.data.get("input_sources")
+    )
+
+
 def _join_text_items(value):
     items = _normalize_text_list(value)
     if not items:
@@ -230,6 +380,15 @@ def _join_text_items(value):
 def _join_text_items_with_newlines(value):
     items = _normalize_text_list(value)
     return "\n".join(item.strip() for item in items if item.strip())
+
+
+def _join_named_sections(structured_memo, sections):
+    lines = []
+    for label, key in sections:
+        for item in _normalize_text_list((structured_memo or {}).get(key)):
+            prefix = f"{label}: " if label else ""
+            lines.append(f"{prefix}{item}")
+    return "\n".join(lines)
 
 
 def _normalize_metric_value(value):
@@ -252,6 +411,20 @@ def _metric_key_from_label(label):
         return "burnRate"
     if normalized == "runway":
         return "runway"
+    if normalized in {"invoice revenue", "sales invoice revenue"}:
+        return "invoiceRevenue"
+    if normalized in {"cash collected", "cash received"}:
+        return "cashCollected"
+    if normalized in {"revenue growth", "revenue growth rate", "mrr growth", "mrr growth rate"}:
+        return "revenueGrowthRate"
+    if normalized in {"customer count", "customers"}:
+        return "customerCount"
+    if normalized == "churn":
+        return "churn"
+    if normalized in {"invoice count", "invoices"}:
+        return "invoiceCount"
+    if normalized in {"recurring invoice count", "repeating invoice count"}:
+        return "recurringInvoiceCount"
     return None
 
 
@@ -261,6 +434,13 @@ MANUAL_METRIC_LABELS = {
     "mrr": "MRR",
     "burnRate": "Burn Rate",
     "runway": "Runway",
+    "invoiceRevenue": "Invoice Revenue",
+    "cashCollected": "Cash Collected",
+    "revenueGrowthRate": "Revenue Growth Rate",
+    "customerCount": "Customer Count",
+    "churn": "Churn",
+    "invoiceCount": "Invoice Count",
+    "recurringInvoiceCount": "Recurring Invoice Count",
 }
 
 
@@ -302,9 +482,17 @@ def _serialize_draft_for_form(draft):
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
-        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "highlights": _join_named_sections(structured_memo, [
+            ("Financial performance", "financial_performance"),
+            ("", "highlights"),
+            ("Product / GTM / Team / Fundraising", "operations"),
+            ("Learning", "learnings"),
+        ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
-        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
+        "asks": _join_named_sections(structured_memo, [
+            ("", "asks"),
+            ("Next 30 days", "next_30_days"),
+        ]),
         "metrics": _extract_metrics(structured_memo),
     }
 
@@ -425,9 +613,17 @@ def _serialize_monthly_update(draft):
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
-        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "highlights": _join_named_sections(structured_memo, [
+            ("Financial performance", "financial_performance"),
+            ("", "highlights"),
+            ("Product / GTM / Team / Fundraising", "operations"),
+            ("Learning", "learnings"),
+        ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
-        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
+        "asks": _join_named_sections(structured_memo, [
+            ("", "asks"),
+            ("Next 30 days", "next_30_days"),
+        ]),
     }
 
 
@@ -443,9 +639,17 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
-                "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+                "highlights": _join_named_sections(structured_memo, [
+                    ("Financial performance", "financial_performance"),
+                    ("", "highlights"),
+                    ("Product / GTM / Team / Fundraising", "operations"),
+                    ("Learning", "learnings"),
+                ]),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
-                "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
+                "asks": _join_named_sections(structured_memo, [
+                    ("", "asks"),
+                    ("Next 30 days", "next_30_days"),
+                ]),
                 "metrics": _extract_metrics(structured_memo),
             }
         )
@@ -473,9 +677,17 @@ def _serialize_email_draft_month(draft):
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
-        "highlights": _join_text_items_with_newlines(structured_memo.get("highlights")),
+        "highlights": _join_named_sections(structured_memo, [
+            ("Financial performance", "financial_performance"),
+            ("", "highlights"),
+            ("Product / GTM / Team / Fundraising", "operations"),
+            ("Learning", "learnings"),
+        ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
-        "asks": _join_text_items_with_newlines(structured_memo.get("asks")),
+        "asks": _join_named_sections(structured_memo, [
+            ("", "asks"),
+            ("Next 30 days", "next_30_days"),
+        ]),
     }
 
 
@@ -854,9 +1066,14 @@ def _build_status_payload(*, user, company, domain):
         else []
     )
     draft_payload = _serialize_draft_bundle(drafts)
+    latest_run_requires_gmail = (
+        gmail_required_for_sources((latest_run.run_request or {}).get("input_sources"))
+        if latest_run is not None
+        else True
+    )
 
     error = None
-    if not google_connected:
+    if latest_run_requires_gmail and not google_connected:
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
@@ -937,9 +1154,14 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
     email_draft_payload = _serialize_email_draft_bundle(drafts)
     run_payload = _serialize_run_summary(latest_run)
     progress_payload = _serialize_run_progress(latest_run)
+    latest_run_requires_gmail = (
+        gmail_required_for_sources((latest_run.run_request or {}).get("input_sources"))
+        if latest_run is not None
+        else True
+    )
 
     error = None
-    if not google_connected:
+    if latest_run_requires_gmail and not google_connected:
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
@@ -1119,9 +1341,11 @@ class VibeRaisingCompanyView(APIView):
                         company.registered = serializer.validated_data["registered"]
                     company.save()
 
+                ensure_company_organization(company)
                 if profile.active_company_id is None:
-                    profile.active_company = company
-                    profile.save(update_fields=["active_company", "updated_at"])
+                    set_active_company(profile, company)
+
+            ensure_company_organization(company)
 
         return Response(VibeRaisingCompanySerializer(company).data, status=status.HTTP_200_OK)
 
@@ -1144,8 +1368,7 @@ class VibeRaisingActiveCompanyView(APIView):
         )
 
         if profile.active_company_id != company.id:
-            profile.active_company = company
-            profile.save(update_fields=["active_company", "updated_at"])
+            set_active_company(profile, company)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1409,8 +1632,10 @@ class VibeRaisingStartupUpdateRunView(APIView):
             user=request.user,
             company=company,
         )
+        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
+        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         google_connection = getattr(request.user, "google_connection", None)
-        if google_connection is None:
+        if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
                 _build_status_payload(user=request.user, company=company, domain=domain),
                 status=status.HTTP_200_OK,
@@ -1418,17 +1643,29 @@ class VibeRaisingStartupUpdateRunView(APIView):
 
         existing_run = get_open_startup_update_run(
             organization=organization,
-            google_connection_id=google_connection.id,
+            google_connection_id=google_connection.id if google_connection else None,
         )
         if existing_run is None:
             run = create_startup_update_run(
                 organization=organization,
                 binding=binding,
                 window_months=DEFAULT_BACKFILL_MONTHS,
+                input_sources=input_sources,
+                source_warnings=source_warnings,
             )
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
         else:
             run = existing_run
+            if input_sources:
+                now = timezone.now()
+                refresh_startup_update_run_source_context(
+                    run=run,
+                    organization=organization,
+                    input_sources=input_sources,
+                    start_date=(now - timedelta(days=120)).date(),
+                    end_date=now.date(),
+                    source_warnings=source_warnings,
+                )
             if _should_dispatch_existing_run(run):
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
@@ -1487,8 +1724,10 @@ class VibeRaisingEmailDraftStartView(APIView):
             user=request.user,
             company=company,
         )
+        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
+        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         google_connection = getattr(request.user, "google_connection", None)
-        if google_connection is None:
+        if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
                 _build_email_draft_payload(
                     request=request,
@@ -1499,7 +1738,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if binding.google_connection_id != google_connection.id:
+        if google_connection is not None and binding.google_connection_id != google_connection.id:
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
@@ -1512,12 +1751,15 @@ class VibeRaisingEmailDraftStartView(APIView):
         }
         existing_run = get_open_startup_update_run(
             organization=organization,
-            google_connection_id=google_connection.id,
+            google_connection_id=google_connection.id if google_connection else None,
         )
-        reusable_drafts_exist = organization.monthly_update_drafts.exists()
+        reusable_drafts_cover_input_sources = _monthly_update_drafts_cover_input_sources(
+            organization,
+            input_sources,
+        )
 
         created = False
-        if existing_run is None and reusable_drafts_exist and not force_regenerate:
+        if existing_run is None and reusable_drafts_cover_input_sources and not force_regenerate:
             latest_draft = organization.monthly_update_drafts.order_by("-month", "-updated_at").first()
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
@@ -1525,10 +1767,11 @@ class VibeRaisingEmailDraftStartView(APIView):
                     "user_id": request.user.id,
                     "organization_id": organization.id,
                     "organization_domain": organization.domain,
-                    "google_connection_id": google_connection.id,
+                    "google_connection_id": google_connection.id if google_connection else None,
                     "force_regenerate": force_regenerate,
                     "draft_count": organization.monthly_update_drafts.count(),
                     "latest_draft_month": latest_draft.month.isoformat() if latest_draft else None,
+                    "input_sources": input_sources,
                     "skip_reason": "reusable_drafts_available",
                 },
             )
@@ -1547,23 +1790,45 @@ class VibeRaisingEmailDraftStartView(APIView):
                 organization=organization,
                 binding=binding,
                 window_months=DEFAULT_BACKFILL_MONTHS,
+                input_sources=input_sources,
+                source_warnings=source_warnings,
             )
             created = True
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
         elif _should_dispatch_existing_run(run):
+            if input_sources:
+                now = timezone.now()
+                refresh_startup_update_run_source_context(
+                    run=run,
+                    organization=organization,
+                    input_sources=input_sources,
+                    start_date=(now - timedelta(days=120)).date(),
+                    end_date=now.date(),
+                    source_warnings=source_warnings,
+                )
             logger.info(
                 "Re-dispatching queued email draft run to Valley",
                 extra={"run_id": run.run_id, "organization_id": organization.id},
             )
             transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
         else:
+            if input_sources:
+                now = timezone.now()
+                refresh_startup_update_run_source_context(
+                    run=run,
+                    organization=organization,
+                    input_sources=input_sources,
+                    start_date=(now - timedelta(days=120)).date(),
+                    end_date=now.date(),
+                    source_warnings=source_warnings,
+                )
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because an open run is already active",
                 extra={
                     "user_id": request.user.id,
                     "organization_id": organization.id,
                     "organization_domain": organization.domain,
-                    "google_connection_id": google_connection.id,
+                    "google_connection_id": google_connection.id if google_connection else None,
                     "run_id": run.run_id,
                     "run_status": run.status,
                     "run_updated_at": run.updated_at.isoformat() if run.updated_at else None,

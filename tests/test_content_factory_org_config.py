@@ -4,7 +4,8 @@ from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import Organization, OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
 from integrations.models import UserIntegration
 
 

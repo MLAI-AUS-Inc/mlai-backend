@@ -6,7 +6,7 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryRun
+from workflow_runs.models import ContentFactoryRun
 
 
 class ContentFactoryRunSyncTests(TestCase):
@@ -79,8 +79,8 @@ class ContentFactoryRunSyncTests(TestCase):
                 raise OperationalError("database is locked")
             return original_update_or_create(*args, **kwargs)
 
-        with patch("core.views.ContentFactoryRun.objects.update_or_create", side_effect=flaky_update_or_create):
-            with patch("core.views.time.sleep"):
+        with patch("content_factory.service_views.ContentFactoryRun.objects.update_or_create", side_effect=flaky_update_or_create):
+            with patch("content_factory.service_views.time.sleep"):
                 response = self.client.put(
                     "/api/content-factory/runs/run-sync-lock-1/",
                     payload,

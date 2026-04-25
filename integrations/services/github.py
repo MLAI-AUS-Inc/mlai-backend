@@ -9,14 +9,14 @@ from django.db.models import Q
 
 from integrations import http_client as http_requests
 from integrations.models import UserIntegration
-from integrations.content_factory_contract import (
+from content_factory.contract import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     require_roo_request_source,
 )
 from integrations.utils import normalize_domain
 from integrations.services.github_connections import build_github_oauth_url
-from core.article_system import merge_article_system, resolve_article_system
-from core.models import GeneratedComponent, ComponentMapping
+from content_factory.article_system import merge_article_system, resolve_article_system
+from content_factory.models import GeneratedComponent, ComponentMapping
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +368,8 @@ def scan_github_project(
         raise ScanError(str(exc))
 
     # Resolve credentials via domain-aware resolution (org-level preferred, domain-verified user-level)
-    from core.models import Organization, OrganizationContentConfig, ContentFactoryJob
+    from organizations.models import Organization
+    from content_factory.models import ContentFactoryJob, OrganizationContentConfig
     from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
 
     resolved_domain = normalize_domain(domain)
@@ -848,7 +849,7 @@ def scaffold_articles_directory(
     Raises:
         ScanError: If the API call fails.
     """
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scaffold"
@@ -925,7 +926,7 @@ def decide_scan_scaffold(
     slack_thread_ts: str = None,
 ) -> dict:
     """Approve or deny a scaffold proposal for a repo scan run."""
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     normalized_decision = str(decision or "").strip().lower()
     if normalized_decision not in {"approve", "deny"}:
@@ -1088,7 +1089,8 @@ def trigger_scan_async(
             has_pillars = False
             already_scaffolded = False
             try:
-                from core.models import Organization, OrganizationContentConfig
+                from organizations.models import Organization
+                from content_factory.models import OrganizationContentConfig
                 scaffold_org = Organization.objects.get(domain=scan_domain)
                 scaffold_config = scaffold_org.content_config
                 already_scaffolded = scaffold_config.articles_scaffolded

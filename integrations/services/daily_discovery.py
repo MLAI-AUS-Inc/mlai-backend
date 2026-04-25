@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from core.models import (
+from content_factory.models import (
     ContentFactoryJob,
     OrganizationContentConfig,
     ScheduledDiscoveryDispatch,

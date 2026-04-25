@@ -6,7 +6,8 @@ from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError
 from integrations.services.github import scan_github_project, get_latest_repo_sha
 from integrations.services.github_connections import parse_github_oauth_state
-from core.models import Organization, OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
 
 class SmartScanTests(TestCase):
     def setUp(self):

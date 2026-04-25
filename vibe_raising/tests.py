@@ -8,9 +8,11 @@ from django.urls import resolve, reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from core.models import ContentFactoryRun, ContentFactoryRunStatus, Organization, OrganizationContentConfig
-from integrations.models import (
-    GoogleConnection,
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from integrations.models import GoogleConnection
+from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
     StartupEvent,
@@ -18,7 +20,7 @@ from integrations.models import (
     StartupProfile,
     UserStartupBinding,
 )
-from integrations.services.startup_updates import (
+from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
     SUPERSEDED_GMAIL_CONNECTION_ERROR,
     create_startup_update_run,
@@ -820,6 +822,49 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
         self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
+
+    def test_email_draft_start_regenerates_when_selected_sources_exceed_reusable_drafts(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch("vibe_raising.views.notify_valley_run_created"):
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {},
+                    format="json",
+                )
+
+        self.assertEqual(first.status_code, 201)
+        original_run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
+        organization = Organization.objects.get(id=original_run.run_request["organization_id"])
+        original_run.status = ContentFactoryRunStatus.COMPLETED
+        original_run.save(update_fields=["status", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=original_run,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={"summary": "Existing Gmail-only draft"},
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {"inputSources": ["gmail", "xero"]},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["state"], "queued")
+        self.assertFalse(response.data["reusedExistingRun"])
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
+        regenerated_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(regenerated_run.run_request["input_sources"], ["gmail", "xero"])
+        self.assertNotEqual(regenerated_run.run_id, original_run.run_id)
+        mock_notify.assert_called_once_with(regenerated_run.run_id)
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)

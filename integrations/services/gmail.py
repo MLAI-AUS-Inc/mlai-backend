@@ -17,14 +17,14 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from integrations.models import (
+from integrations.models import GoogleConnection
+from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
     GmailMessageArtifact,
     GmailThreadArtifact,
-    GoogleConnection,
 )
-from integrations.services.startup_updates import (
+from startup_updates.services import (
     DEFAULT_ATTACHMENT_BYTES_LIMIT,
     DEFAULT_BACKFILL_MONTHS,
     apply_profile_scoring,

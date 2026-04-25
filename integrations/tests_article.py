@@ -5,8 +5,11 @@ from django.utils import timezone
 from unittest.mock import MagicMock, patch
 import requests
 
-from core.article_system import resolve_article_system_with_source
-from core.models import ContentFactoryJob, ContentFactoryRun, Organization, OrganizationContentConfig, User
+from content_factory.article_system import resolve_article_system_with_source
+from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from core.models import User
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun
 from integrations.models import UserIntegration
 from integrations.services.article_generation import (
     ArticleGenerationError,
@@ -422,7 +425,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["github_repo"], self.repo_name)
         self.assertTrue(payload["auth_url"])
 
-    @patch("integrations.api_views_content.trigger_article_generation")
+    @patch("content_factory.content_views.trigger_article_generation")
     def test_content_generate_view_returns_structured_auth_required(self, mock_trigger):
         mock_trigger.side_effect = GitHubReconnectRequiredError(
             {
@@ -462,7 +465,7 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(payload["auth_url"], "https://github.example/reconnect")
         self.assertTrue(payload["pending_intent_stored"])
 
-    @patch("integrations.api_views_content.trigger_article_generation")
+    @patch("content_factory.content_views.trigger_article_generation")
     def test_content_generate_view_delegated_auth_required_does_not_store_pending_intent(self, mock_trigger):
         mock_trigger.side_effect = GitHubReconnectRequiredError(
             {

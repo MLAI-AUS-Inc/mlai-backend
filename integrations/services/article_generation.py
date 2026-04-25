@@ -4,16 +4,17 @@ from typing import Optional
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
-from core.content_factory_progress import upsert_live_progress_card
-from core.article_system import (
+from content_factory.article_system import (
     resolve_article_system_with_source,
 )
+from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from content_factory.progress import upsert_live_progress_card
+from organizations.models import Organization
 from integrations.models import UserIntegration
-from core.models import ContentFactoryJob, OrganizationContentConfig, Organization
 from integrations.utils import normalize_domain
 from integrations.services.github import ensure_valid_token, refresh_github_token, TokenRefreshError
 from integrations.services.github_connections import build_github_oauth_url
-from integrations.content_factory_contract import (
+from content_factory.contract import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     require_roo_request_source,
 )
@@ -532,7 +533,7 @@ def _build_content_factory_charge_description(resolved_domain: str, article_requ
 
 
 def _get_existing_billed_source_job(client_request_id: str):
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     return (
         ContentFactoryJob.objects.filter(
@@ -563,7 +564,7 @@ def _serialize_existing_billed_job(job) -> dict:
 
 
 def _charge_content_factory_request(slack_user_id: str, article_request: dict, resolved_domain: str):
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
 
@@ -614,7 +615,7 @@ def _refund_content_factory_request(
     resolved_domain: str,
     reason: str,
 ):
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
     from roo.services import PointsService
 
     client_request_id = _get_client_request_id(article_request)
@@ -1049,7 +1050,7 @@ def _store_job_tracking_record(
     last_progress_updated_at=None,
     still_working_pinged_at=None,
 ):
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     resolved_root_message_ts = slack_root_message_ts or slack_thread_ts or ""
 
@@ -1141,7 +1142,7 @@ def attach_progress_message(
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
 ):
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     progress_ts = str(progress_message_ts or "").strip()
     if not progress_ts:
@@ -1189,7 +1190,7 @@ def attach_progress_message(
 
 
 def augment_status_with_job_tracking(job_id: str, result: Optional[dict]) -> dict:
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     payload = dict(result or {})
     job = ContentFactoryJob.objects.filter(job_id=job_id).first()
@@ -1254,7 +1255,7 @@ def _serialize_local_run_snapshot(run) -> dict:
 
 
 def _load_local_run_snapshot(job_id: str) -> Optional[dict]:
-    from core.models import ContentFactoryRun
+    from workflow_runs.models import ContentFactoryRun
 
     run = ContentFactoryRun.objects.filter(run_id=job_id).first()
     if not run:
@@ -1945,7 +1946,7 @@ def _handle_status_failure(job_id: str, result: dict):
     Handle a failed job detected during status polling.
     Updates the local ContentFactoryJob and sends a Slack notification (once).
     """
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
     from integrations.services.slack import SlackService
 
     try:
@@ -2019,7 +2020,7 @@ def _handle_status_reviewable(job_id: str, result: dict):
     """
     Handle a reviewable terminal outcome detected during status polling.
     """
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     try:
         job = ContentFactoryJob.objects.get(job_id=job_id)
@@ -2070,7 +2071,8 @@ def set_article_delivery_mode(job_id: str, delivery_mode: Optional[str] = None) 
     if delivery_mode:
         selected_mode = _normalize_requested_delivery_mode(delivery_mode)
     else:
-        from core.models import ContentFactoryJob, Organization
+        from content_factory.models import ContentFactoryJob
+        from organizations.models import Organization
 
         selected_mode = get_default_article_delivery_mode()
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
@@ -2264,7 +2266,7 @@ def promote_article_bundle(
     """
     Promote a completed content package or publish bundle into a child publish run.
     """
-    from core.models import ContentFactoryJob
+    from content_factory.models import ContentFactoryJob
 
     content_factory_url = _get_content_factory_base_url()
     promote_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/{job_id}/promote-bundle"
@@ -2403,7 +2405,7 @@ def confirm_topic(
         raise ArticleGenerationError("Content Factory article requests must originate from Roo Slackbot.")
     source_job = None
     if source_run_id:
-        from core.models import ContentFactoryJob
+        from content_factory.models import ContentFactoryJob
 
         source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
     if source_job and not (slack_channel_id or slack_thread_ts or slack_root_message_ts):

@@ -11,14 +11,14 @@ from requests import Response
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import (
+from content_factory.models import (
     ContentFactoryJob,
-    Organization,
     OrganizationContentConfig,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
-    User,
 )
+from core.models import User
+from organizations.models import Organization
 from integrations.services.article_generation import ArticleGenerationError, confirm_topic
 from integrations.services.daily_discovery import (
     DEFAULT_SCHEDULE_TIMEZONE,
