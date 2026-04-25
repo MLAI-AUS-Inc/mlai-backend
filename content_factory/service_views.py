@@ -41,6 +41,7 @@ from content_factory.models import (
     ContentFactoryHealingRecord,
     GeneratedComponent,
     OrganizationContentConfig,
+    WebsiteBaselineSnapshot,
 )
 from content_factory.progress import (
     live_card_summary_for_job,
@@ -1440,6 +1441,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_auth_required(data)
             elif event_type == 'scan_complete':
                 return self._handle_scan_complete(data)
+            elif event_type == 'website_baseline_complete':
+                return self._handle_website_baseline_complete(data)
             elif event_type == 'generation_failed':
                 return self._handle_generation_failed(data)
             elif event_type == 'generation_blocked':
@@ -2973,6 +2976,65 @@ class ContentFactoryCallbackView(APIView):
         except Exception as e:
             logger.error(f"Error constructing/sending Slack notification: {e}")
             raise
+
+    def _handle_website_baseline_complete(self, data):
+        """Persist website_baseline callback results for Vibe Marketing bootstrap."""
+        job_id = str(data.get("run_id") or data.get("job_id") or "").strip()
+        domain = str(data.get("domain") or "").strip().lower().removeprefix("www.")
+        baseline = data.get("baseline") if isinstance(data.get("baseline"), dict) else {}
+        organization = Organization.objects.filter(domain__iexact=domain).first()
+        if not organization and domain:
+            organization = Organization.objects.filter(domain__iendswith=domain).first()
+        if not organization:
+            return Response(
+                {"status": "ignored", "message": "No organization matched website baseline domain."},
+                status=status.HTTP_200_OK,
+            )
+
+        run, _created = ContentFactoryRun.objects.update_or_create(
+            run_id=job_id or f"website-baseline-{organization.id}-{int(time.time())}",
+            defaults={
+                "workflow": "website_baseline",
+                "domain": organization.domain,
+                "github_repo": "",
+                "slack_user_id": data.get("slack_user_id") or "",
+                "status": ContentFactoryRunStatus.COMPLETED,
+                "current_step": "finalize",
+                "run_request": data.get("request") or {},
+                "result": {
+                    "status": "completed",
+                    "workflow": "website_baseline",
+                    "domain": organization.domain,
+                    "baseline": baseline,
+                    "warnings": data.get("warnings") or [],
+                },
+                "error": "",
+            },
+        )
+        collected_at = _parse_optional_datetime(baseline.get("collectedAt") or baseline.get("collected_at")) or timezone.now()
+        summary = baseline.get("summary") or ""
+        if not isinstance(summary, dict):
+            summary = {"text": str(summary or "")}
+        try:
+            overall_score = int(baseline.get("overallScore")) if baseline.get("overallScore") is not None else None
+        except (TypeError, ValueError):
+            overall_score = None
+        WebsiteBaselineSnapshot.objects.update_or_create(
+            organization=organization,
+            run_id=run.run_id,
+            defaults={
+                "domain": organization.domain,
+                "status": "completed",
+                "collected_at": collected_at,
+                "overall_score": overall_score,
+                "summary": summary,
+                "metrics": baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {},
+                "source_status": baseline.get("sourceStatus") if isinstance(baseline.get("sourceStatus"), dict) else {},
+                "recommendations": baseline.get("recommendations") if isinstance(baseline.get("recommendations"), list) else [],
+                "raw_payload": baseline,
+            },
+        )
+        return Response({"status": "success", "message": "Website baseline callback processed"}, status=status.HTTP_200_OK)
 
     def _handle_scan_complete(self, data):
         """Handle scan_complete event from content-factory."""

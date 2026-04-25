@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta, timezone as datetime_timezone
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -12,7 +15,8 @@ from rest_framework.views import APIView
 
 from content_factory.article_system import resolve_article_system
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
-from content_factory.models import OrganizationContentConfig
+from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
+from content_factory.models import OrganizationContentConfig, WebsiteBaselineSnapshot
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     apply_shared_startup_details,
@@ -21,6 +25,7 @@ from founder_tools.services import (
     get_founder_company_context,
     get_or_create_founder_profile,
     normalize_company_domain,
+    normalize_company_linkedin_url,
     resolve_active_company,
     string_list_from_value,
 )
@@ -29,7 +34,9 @@ from integrations.services.github import build_github_auth_url
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
+    ContentFactoryRunStep,
     ContentFactoryRunStatus,
+    ContentFactoryStepStatus,
 )
 
 
@@ -41,15 +48,26 @@ VIBE_MARKETING_WORKFLOWS = {
     "article_generation",
     "content_factory_article",
     "daily_discovery",
+    "startup_autofill",
+    "website_baseline",
     "vibe_marketing_daily_replay",
 }
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article"}
+BASELINE_WORKFLOWS = {"website_baseline"}
+BASELINE_FRESH_DAYS = 30
 
 
 def _camel_list(value):
     return string_list_from_value(value)
+
+
+def _request_value(data, *keys, default=None):
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return default
 
 
 def _bool_from_request(value):
@@ -213,6 +231,122 @@ def _publish_evidence_from_run(run):
     }
 
 
+def _latest_baseline_snapshot(organization):
+    return WebsiteBaselineSnapshot.objects.filter(organization=organization).order_by("-collected_at", "-created_at").first()
+
+
+def _parse_baseline_collected_at(value):
+    parsed = _parse_remote_datetime(value)
+    return parsed or timezone.now()
+
+
+def _baseline_payload_from_result(result):
+    if not isinstance(result, dict):
+        return {}
+    baseline = result.get("baseline")
+    return baseline if isinstance(baseline, dict) else {}
+
+
+def _persist_baseline_snapshot_from_payload(*, organization, run=None, baseline=None, status_value="completed"):
+    baseline = baseline if isinstance(baseline, dict) else _baseline_payload_from_result((run.result if run else {}) or {})
+    if not baseline:
+        return None
+    collected_at = _parse_baseline_collected_at(baseline.get("collectedAt") or baseline.get("collected_at"))
+    source_status = baseline.get("sourceStatus") or baseline.get("source_status") or {}
+    metrics = baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {}
+    recommendations = baseline.get("recommendations") if isinstance(baseline.get("recommendations"), list) else []
+    summary_text = baseline.get("summary") or ""
+    summary = summary_text if isinstance(summary_text, dict) else {"text": str(summary_text or "")}
+    raw_score = baseline.get("overallScore") if baseline.get("overallScore") is not None else baseline.get("overall_score")
+    try:
+        overall_score = int(raw_score) if raw_score is not None else None
+    except (TypeError, ValueError):
+        overall_score = None
+    snapshot, _created = WebsiteBaselineSnapshot.objects.update_or_create(
+        organization=organization,
+        run_id=str((run.run_id if run else baseline.get("runId") or baseline.get("run_id")) or ""),
+        defaults={
+            "domain": normalize_company_domain(baseline.get("domain") or organization.domain),
+            "status": status_value,
+            "collected_at": collected_at,
+            "overall_score": overall_score,
+            "summary": summary,
+            "metrics": metrics,
+            "source_status": source_status if isinstance(source_status, dict) else {},
+            "recommendations": recommendations,
+            "raw_payload": baseline,
+        },
+    )
+    return snapshot
+
+
+def _baseline_is_fresh(snapshot) -> bool:
+    if not snapshot:
+        return False
+    return snapshot.collected_at >= timezone.now() - timedelta(days=BASELINE_FRESH_DAYS)
+
+
+def _baseline_requirement_satisfied(config, snapshot) -> bool:
+    return bool(config.baseline_skipped_at or _baseline_is_fresh(snapshot))
+
+
+def _serialize_baseline_snapshot(snapshot, config=None):
+    if not snapshot:
+        return {
+            "status": "missing",
+            "passed": bool(config and config.baseline_skipped_at),
+            "skipped": bool(config and config.baseline_skipped_at),
+            "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
+            "skipReason": config.baseline_skip_reason if config else "",
+        }
+    return {
+        "id": snapshot.id,
+        "runId": snapshot.run_id,
+        "domain": snapshot.domain,
+        "status": snapshot.status,
+        "passed": _baseline_requirement_satisfied(config, snapshot) if config else _baseline_is_fresh(snapshot),
+        "stale": not _baseline_is_fresh(snapshot),
+        "collectedAt": snapshot.collected_at.isoformat(),
+        "overallScore": snapshot.overall_score,
+        "summary": snapshot.summary,
+        "metrics": snapshot.metrics,
+        "sourceStatus": snapshot.source_status,
+        "recommendations": snapshot.recommendations,
+        "skipped": bool(config and config.baseline_skipped_at),
+        "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
+        "skipReason": config.baseline_skip_reason if config else "",
+    }
+
+
+def _merge_google_metrics_into_baseline(snapshot, google_metrics):
+    if not snapshot:
+        return None
+    payload = dict(snapshot.raw_payload or {})
+    metrics = dict(payload.get("metrics") or snapshot.metrics or {})
+    source_status = dict(payload.get("sourceStatus") or snapshot.source_status or {})
+    traffic = (google_metrics or {}).get("traffic") or {}
+    metrics["traffic"] = traffic
+    source_status["traffic"] = traffic.get("status", "unavailable")
+    for key, value in ((google_metrics or {}).get("sourceStatus") or {}).items():
+        source_status[key] = value
+    payload["metrics"] = metrics
+    payload["sourceStatus"] = source_status
+    payload["googleEnrichedAt"] = timezone.now().isoformat()
+    snapshot.metrics = metrics
+    snapshot.source_status = source_status
+    snapshot.raw_payload = payload
+    snapshot.save(update_fields=["metrics", "source_status", "raw_payload", "updated_at"])
+    return snapshot
+
+
+def _google_baseline_connect_url(request):
+    if request is None:
+        return ""
+    next_url = "/founder-tools/marketing/create?step=baseline"
+    query = urlencode({"scope": "website_baseline", "next": next_url})
+    return request.build_absolute_uri(f"/integrations/connect/google?{query}")
+
+
 def _serialize_startup_profile(organization):
     try:
         profile = organization.startup_profile
@@ -280,11 +414,12 @@ def _serialize_run(run):
     }
 
 
-def _profile_checks(organization, config, latest_runs=None):
+def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=None):
     latest_runs = latest_runs or []
     domain_ok = bool(normalize_company_domain(organization.domain))
     context_ok = bool(str(config.company_context or "").strip()) or bool(str(config.brand_name or "").strip())
     keywords_ok = bool(organization.competitors or organization.seed_keywords)
+    baseline_ready = _baseline_requirement_satisfied(config, baseline_snapshot)
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     article_ready = article_system.get("state") in {
@@ -334,6 +469,7 @@ def _profile_checks(organization, config, latest_runs=None):
         domain_ok
         and context_ok
         and keywords_ok
+        and baseline_ready
         and scan_ready
         and article_ready
         and bool(config.connected_slack_user_id)
@@ -354,6 +490,14 @@ def _profile_checks(organization, config, latest_runs=None):
             "connectionState": config.github_connection_state,
             "repoSet": bool(config.github_repo),
         },
+        "baseline": {
+            "passed": baseline_ready,
+            "runId": baseline_snapshot.run_id if baseline_snapshot else None,
+            "collectedAt": baseline_snapshot.collected_at.isoformat() if baseline_snapshot else None,
+            "overallScore": baseline_snapshot.overall_score if baseline_snapshot else None,
+            "stale": bool(baseline_snapshot and not _baseline_is_fresh(baseline_snapshot)),
+            "skipped": bool(config.baseline_skipped_at),
+        },
         "scan": {"passed": scan_ready},
         "scaffold": {"passed": article_ready, "articleSystem": article_system},
         "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
@@ -363,15 +507,18 @@ def _profile_checks(organization, config, latest_runs=None):
     }
 
 
-def _serialize_bootstrap(context):
+def _serialize_bootstrap(context, request=None):
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    checks = _profile_checks(context.organization, config, latest_runs)
+    baseline_snapshot = _latest_baseline_snapshot(context.organization)
+    checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
     for run in latest_runs:
         latest_runs_by_workflow.setdefault(run.workflow, _serialize_run(run))
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
+    google_status = google_baseline_connection_status(context.profile.user)
+    google_status["connectUrl"] = _google_baseline_connect_url(request)
     return {
         "company": {
             "id": str(context.company.id),
@@ -380,11 +527,13 @@ def _serialize_bootstrap(context):
             "location": context.company.location,
             "abn": context.company.abn,
             "organizationId": context.organization.id,
+            "companyLinkedInUrl": context.organization.company_linkedin_url,
         },
         "organization": {
             "id": context.organization.id,
             "name": context.organization.name,
             "domain": context.organization.domain,
+            "companyLinkedInUrl": context.organization.company_linkedin_url,
             "competitors": context.organization.competitors,
             "seedKeywords": context.organization.seed_keywords,
         },
@@ -400,6 +549,8 @@ def _serialize_bootstrap(context):
             "githubConnectionState": config.github_connection_state,
         },
         "startupProfile": _serialize_startup_profile(context.organization),
+        "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config),
+        "googleBaselineConnection": google_status,
         "checks": checks,
         "latestRuns": [_serialize_run(run) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
@@ -419,6 +570,7 @@ def _serialize_bootstrap_without_domain(company):
             "checks": {"domain": False, "brandOrContext": False, "competitorsOrSeedKeywords": False},
         },
         "github": {"passed": False, "connectionState": "missing_domain", "repoSet": False},
+        "baseline": {"passed": False, "runId": None, "collectedAt": None, "overallScore": None, "stale": False, "skipped": False},
         "scan": {"passed": False},
         "scaffold": {"passed": False},
         "research": {"passed": False},
@@ -435,11 +587,13 @@ def _serialize_bootstrap_without_domain(company):
             "location": company.location,
             "abn": company.abn,
             "organizationId": None,
+            "companyLinkedInUrl": "",
         },
         "organization": {
             "id": None,
             "name": company.name,
             "domain": company.domain or "",
+            "companyLinkedInUrl": "",
             "competitors": [],
             "seedKeywords": [],
         },
@@ -461,6 +615,8 @@ def _serialize_bootstrap_without_domain(company):
             "companyAliases": [company.name] if company.name else [],
             "domainAliases": [],
         },
+        "websiteBaseline": {"status": "missing", "passed": False, "skipped": False},
+        "googleBaselineConnection": {"connected": False, "hasBaselineScopes": False, "status": "needs_connection", "connectUrl": ""},
         "latestRuns": [],
         "latestRunsByWorkflow": {},
         "topicCandidates": [],
@@ -474,6 +630,7 @@ def _serialize_bootstrap_without_domain(company):
 def _recommended_next_action(checks):
     order = [
         ("websiteProfile", "Save website profile"),
+        ("baseline", "Run website baseline"),
         ("github", "Connect GitHub"),
         ("scan", "Scan repository"),
         ("scaffold", "Verify publishing path"),
@@ -491,6 +648,7 @@ def _recommended_next_action(checks):
 def _guided_steps(checks):
     steps = [
         ("startupDetails", "Startup details", "websiteProfile"),
+        ("baseline", "Website baseline", "baseline"),
         ("github", "Connect GitHub", "github"),
         ("scan", "Scan repository", "scan"),
         ("articleSystem", "Prepare article system", "scaffold"),
@@ -529,6 +687,60 @@ def _content_factory_headers():
     return headers
 
 
+def _normalize_remote_run_status(value):
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "processing": ContentFactoryRunStatus.RUNNING,
+        "in_progress": ContentFactoryRunStatus.RUNNING,
+        "blocked_verification": ContentFactoryRunStatus.BLOCKED,
+        "precondition_failed": ContentFactoryRunStatus.BLOCKED,
+        "error": ContentFactoryRunStatus.FAILED,
+    }
+    normalized = mapping.get(normalized, normalized)
+    allowed = {choice[0] for choice in ContentFactoryRunStatus.choices}
+    return normalized if normalized in allowed else ContentFactoryRunStatus.QUEUED
+
+
+def _normalize_remote_step_status(value):
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "processing": ContentFactoryStepStatus.RUNNING,
+        "in_progress": ContentFactoryStepStatus.RUNNING,
+        "blocked_verification": ContentFactoryStepStatus.BLOCKED,
+        "error": ContentFactoryStepStatus.FAILED,
+    }
+    normalized = mapping.get(normalized, normalized)
+    allowed = {choice[0] for choice in ContentFactoryStepStatus.choices}
+    return normalized if normalized in allowed else ContentFactoryStepStatus.PENDING
+
+
+def _parse_remote_datetime(value):
+    if not value:
+        return None
+    parsed = parse_datetime(str(value))
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        return timezone.make_aware(parsed, datetime_timezone.utc)
+    return parsed
+
+
+def _run_result_from_remote(remote_data):
+    if not isinstance(remote_data, dict):
+        return {}
+    result = remote_data.get("result")
+    if isinstance(result, dict):
+        merged = dict(result)
+    else:
+        merged = {}
+    for key in ("warnings", "errors", "error", "message", "preview_url", "pr_url", "route_path"):
+        if remote_data.get(key) is not None and merged.get(key) is None:
+            merged[key] = remote_data.get(key)
+    if not merged and remote_data:
+        merged = dict(remote_data)
+    return merged
+
+
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
     remote_data = remote_data or {}
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
@@ -541,10 +753,10 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
             "domain": domain,
             "github_repo": github_repo or "",
             "slack_user_id": actor_id,
-            "status": remote_data.get("status") or ContentFactoryRunStatus.QUEUED,
-            "current_step": remote_data.get("current_step") or "queued",
+            "status": _normalize_remote_run_status(remote_data.get("status")),
+            "current_step": remote_data.get("current_step") or remote_data.get("step") or "queued",
             "run_request": payload or {},
-            "result": remote_data if isinstance(remote_data, dict) else {},
+            "result": _run_result_from_remote(remote_data),
             "error": str(remote_data.get("error") or ""),
         },
     )
@@ -555,6 +767,133 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
         run.slack_user_id = run.slack_user_id or actor_id
         run.run_request = run.run_request or payload or {}
         run.save(update_fields=["workflow", "domain", "github_repo", "slack_user_id", "run_request", "updated_at"])
+    return run
+
+
+def _call_content_factory_run_status(run_id):
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
+    if not should_call_remote:
+        return {}
+
+    try:
+        response = http_client.get(
+            f"{base_url}/api/runs/{run_id}",
+            headers=_content_factory_headers(),
+            timeout=(3, 15),
+        )
+    except http_client.RequestException as exc:
+        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+
+    if response.status_code == 200:
+        return response.json() if response.content else {}
+    if response.status_code == 404:
+        return {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
+def _sync_steps_from_remote(run, remote_data):
+    raw_steps = remote_data.get("steps") or remote_data.get("step_states")
+    if not raw_steps:
+        return
+
+    if isinstance(raw_steps, dict):
+        items = list(raw_steps.items())
+    elif isinstance(raw_steps, list):
+        items = []
+        for index, raw_step in enumerate(raw_steps):
+            if not isinstance(raw_step, dict):
+                continue
+            key = str(raw_step.get("key") or raw_step.get("step_key") or raw_step.get("name") or f"step_{index}").strip()
+            if key:
+                items.append((key, raw_step))
+    else:
+        return
+
+    seen = []
+    for index, (step_key, raw_step) in enumerate(items):
+        if not isinstance(raw_step, dict):
+            continue
+        step_key = str(step_key or "").strip()
+        if not step_key:
+            continue
+        seen.append(step_key)
+        artifacts = raw_step.get("artifacts") or []
+        if not isinstance(artifacts, list):
+            artifacts = []
+        ContentFactoryRunStep.objects.update_or_create(
+            run=run,
+            step_key=step_key,
+            defaults={
+                "display_order": index,
+                "required": bool(raw_step.get("required", True)),
+                "status": _normalize_remote_step_status(raw_step.get("status")),
+                "attempts": int(raw_step.get("attempts") or len(raw_step.get("attempt_history") or []) or 0),
+                "message": str(raw_step.get("message") or ""),
+                "error": str(raw_step.get("error") or ""),
+                "started_at": _parse_remote_datetime(raw_step.get("started_at") or raw_step.get("startedAt")),
+                "completed_at": _parse_remote_datetime(raw_step.get("completed_at") or raw_step.get("completedAt")),
+                "latest_attempt_path": str(raw_step.get("latest_attempt_path") or ""),
+                "artifacts": artifacts,
+            },
+        )
+    if seen and run.step_order != seen:
+        run.step_order = seen
+
+
+def _sync_local_run_from_remote(run, remote_data):
+    if not isinstance(remote_data, dict) or not remote_data:
+        return run
+
+    result = _run_result_from_remote(remote_data)
+    run.status = _normalize_remote_run_status(remote_data.get("status") or result.get("status") or run.status)
+    run.current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "")
+    run.artifact_root = str(remote_data.get("artifact_root") or run.artifact_root or "")
+    if isinstance(remote_data.get("acceptance_summary"), dict):
+        run.acceptance_summary = remote_data["acceptance_summary"]
+    if isinstance(remote_data.get("verification"), dict):
+        run.verification_summary = remote_data["verification"]
+    if remote_data.get("approval_state"):
+        run.approval_state = str(remote_data.get("approval_state"))
+    if remote_data.get("resume_available") is not None:
+        run.resume_available = bool(remote_data.get("resume_available"))
+    if remote_data.get("workflow") and not run.workflow:
+        run.workflow = str(remote_data.get("workflow"))
+    if remote_data.get("error"):
+        run.error = str(remote_data.get("error"))
+    elif run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED}:
+        run.error = ""
+    if result:
+        run.result = result
+    _sync_steps_from_remote(run, remote_data)
+    run.save(
+        update_fields=[
+            "workflow",
+            "status",
+            "current_step",
+            "artifact_root",
+            "step_order",
+            "acceptance_summary",
+            "verification_summary",
+            "approval_state",
+            "resume_available",
+            "result",
+            "error",
+            "updated_at",
+        ]
+    )
     return run
 
 
@@ -654,7 +993,7 @@ class VibeMarketingBootstrapView(APIView):
         context, error_response = _resolve_context_or_response(request, require_domain=True)
         if error_response:
             return error_response
-        return Response(_serialize_bootstrap(context), status=status.HTTP_200_OK)
+        return Response(_serialize_bootstrap(context, request=request), status=status.HTTP_200_OK)
 
 
 class VibeMarketingSettingsView(APIView):
@@ -687,11 +1026,19 @@ class VibeMarketingSettingsView(APIView):
             organization.name = str(request.data.get("brand_name") or request.data.get("brandName")).strip()
             organization.save(update_fields=["name"])
 
+        if "company_linkedin_url" in request.data or "companyLinkedInUrl" in request.data:
+            try:
+                organization.company_linkedin_url = normalize_company_linkedin_url(
+                    request.data.get("company_linkedin_url", request.data.get("companyLinkedInUrl"))
+                )
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+
         if "competitors" in request.data:
             organization.competitors = _camel_list(request.data.get("competitors"))
         if "seed_keywords" in request.data or "seedKeywords" in request.data:
             organization.seed_keywords = _camel_list(request.data.get("seed_keywords", request.data.get("seedKeywords")))
-        organization.save(update_fields=["competitors", "seed_keywords"])
+        organization.save(update_fields=["competitors", "seed_keywords", "company_linkedin_url"])
 
         config = _get_config(organization)
         config.connected_slack_user_id = founder_actor_id_for_user(request.user)
@@ -709,7 +1056,12 @@ class VibeMarketingSettingsView(APIView):
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
         if config.daily_discovery_enabled:
-            checks = _profile_checks(organization, config, _latest_runs_for_org(organization))
+            checks = _profile_checks(
+                organization,
+                config,
+                _latest_runs_for_org(organization),
+                _latest_baseline_snapshot(organization),
+            )
             if not checks["dailyAutomation"]["passed"]:
                 return Response(
                     {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
@@ -719,7 +1071,173 @@ class VibeMarketingSettingsView(APIView):
         apply_shared_startup_details(user=request.user, company=company, data=request.data)
 
         refreshed_context = get_founder_company_context(request.user, company_id=company.id)
-        return Response(_serialize_bootstrap(refreshed_context), status=status.HTTP_200_OK)
+        return Response(_serialize_bootstrap(refreshed_context, request=request), status=status.HTTP_200_OK)
+
+
+class VibeMarketingAutofillView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        profile = get_or_create_founder_profile(request.user)
+        if profile.role != profile.ROLE_FOUNDER:
+            return Response({"detail": "Only founders can access Vibe Marketing."}, status=status.HTTP_403_FORBIDDEN)
+
+        company_name = str(request.data.get("company_name") or request.data.get("companyName") or "").strip()
+        domain = normalize_company_domain(request.data.get("domain"))
+        if not company_name:
+            return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        if not domain:
+            return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+
+        company_id = _company_id_from_request(request)
+        if company_id:
+            try:
+                company = profile.companies.get(pk=company_id)
+            except VibeRaisingCompany.DoesNotExist:
+                return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            company = resolve_active_company(profile)
+
+        if company is None:
+            company = VibeRaisingCompany.objects.create(
+                profile=profile,
+                name=company_name,
+                domain=domain,
+                location=str(request.data.get("location") or "").strip(),
+                abn=str(request.data.get("abn") or "").strip() or None,
+            )
+            profile.active_company = company
+            profile.save(update_fields=["active_company", "updated_at"])
+        else:
+            company.name = company_name
+            company.domain = domain
+            if "location" in request.data:
+                company.location = str(request.data.get("location") or "").strip()
+            if "abn" in request.data:
+                company.abn = str(request.data.get("abn") or "").strip() or None
+            company.save(update_fields=["name", "domain", "location", "abn", "updated_at"])
+
+        organization = ensure_company_organization(company)
+        if organization is None:
+            return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        if not organization.name:
+            organization.name = company_name
+            organization.save(update_fields=["name"])
+        company_linkedin_url = organization.company_linkedin_url
+        if "company_linkedin_url" in request.data or "companyLinkedInUrl" in request.data:
+            try:
+                company_linkedin_url = normalize_company_linkedin_url(
+                    request.data.get("company_linkedin_url", request.data.get("companyLinkedInUrl"))
+                )
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+            if organization.company_linkedin_url != company_linkedin_url:
+                organization.company_linkedin_url = company_linkedin_url
+                organization.save(update_fields=["company_linkedin_url"])
+
+        config = _get_config(organization)
+        actor_id = founder_actor_id_for_user(request.user)
+        config.connected_slack_user_id = actor_id
+        brand_name = str(request.data.get("brand_name") or request.data.get("brandName") or "").strip()
+        if brand_name:
+            config.brand_name = brand_name
+        config.save(update_fields=["connected_slack_user_id", "brand_name", "updated_at"])
+
+        context = get_founder_company_context(request.user, company_id=company.id)
+        existing_fields = {
+            "brandName": brand_name or config.brand_name or organization.name,
+            "companyContext": _request_value(
+                request.data,
+                "company_context",
+                "companyContext",
+                default=config.company_context,
+            ),
+            "competitors": _camel_list(_request_value(request.data, "competitors", default=organization.competitors)),
+            "seedKeywords": _camel_list(
+                _request_value(request.data, "seed_keywords", "seedKeywords", default=organization.seed_keywords)
+            ),
+            "companyLinkedInUrl": company_linkedin_url,
+        }
+        payload = {
+            "domain": organization.domain,
+            "company_name": company.name,
+            "brand_name": brand_name or config.brand_name or organization.name,
+            "company_linkedin_url": company_linkedin_url,
+            "location": company.location,
+            "abn": company.abn,
+            "existing_fields": existing_fields,
+            "persist": False,
+            "slack_user_id": actor_id,
+            "requested_by_slack_user_id": actor_id,
+            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+        }
+        run = _queue_content_factory_run(
+            endpoint="autofill",
+            workflow="startup_autofill",
+            context=context,
+            config=config,
+            payload=payload,
+        )
+        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+
+
+class VibeMarketingBaselineView(APIView):
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+        config.baseline_skipped_at = None
+        config.baseline_skip_reason = ""
+        config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
+        payload = {
+            "domain": context.organization.domain,
+            "company_name": context.company.name,
+            "brand_name": config.brand_name or context.organization.name,
+            "seed_keywords": list(context.organization.seed_keywords or []),
+            "competitors": list(context.organization.competitors or []),
+            "slack_user_id": founder_actor_id_for_user(request.user),
+            "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
+            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+        }
+        run = _queue_content_factory_run(
+            endpoint="baseline",
+            workflow="website_baseline",
+            context=context,
+            config=config,
+            payload=payload,
+        )
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
+        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+
+
+class VibeMarketingBaselineSkipView(APIView):
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+        config.baseline_skipped_at = timezone.now()
+        config.baseline_skip_reason = str(request.data.get("reason") or request.data.get("skipReason") or "Skipped during onboarding").strip()
+        config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
+        return Response(_serialize_bootstrap(context, request=request), status=status.HTTP_200_OK)
+
+
+class VibeMarketingBaselineGoogleRefreshView(APIView):
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        snapshot = _latest_baseline_snapshot(context.organization)
+        if not snapshot:
+            return Response({"detail": "Run a website baseline before enriching it with Google data."}, status=status.HTTP_400_BAD_REQUEST)
+        google_metrics = collect_verified_google_metrics(
+            user=request.user,
+            domain=context.organization.domain,
+            ga4_property_id=request.data.get("ga4_property_id") or request.data.get("ga4PropertyId"),
+        )
+        snapshot = _merge_google_metrics_into_baseline(snapshot, google_metrics)
+        return Response({"websiteBaseline": _serialize_baseline_snapshot(snapshot, _get_config(context.organization))}, status=status.HTTP_200_OK)
 
 
 class VibeMarketingGitHubConnectView(APIView):
@@ -792,6 +1310,15 @@ class VibeMarketingArticleView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        baseline_snapshot = _latest_baseline_snapshot(context.organization)
+        if not _baseline_requirement_satisfied(config, baseline_snapshot):
+            return Response(
+                {
+                    "detail": "Run the website baseline or skip it before generating an article.",
+                    "check": _serialize_baseline_snapshot(baseline_snapshot, config),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         topic = str(request.data.get("topic") or request.data.get("keyword") or request.data.get("target_keyword") or "").strip()
         payload = {
             "domain": context.organization.domain,
@@ -824,6 +1351,12 @@ class VibeMarketingRunView(APIView):
         run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        remote_data = _call_content_factory_run_status(run.run_id)
+        if remote_data:
+            run = _sync_local_run_from_remote(run, remote_data)
+            if run.workflow in BASELINE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
+                _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run), status=status.HTTP_200_OK)
 
 
@@ -936,7 +1469,11 @@ class VibeMarketingDailyReplayView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
-        checks = _profile_checks(context.organization, config)
+        checks = _profile_checks(
+            context.organization,
+            config,
+            baseline_snapshot=_latest_baseline_snapshot(context.organization),
+        )
         if not checks["dailyAutomation"]["passed"]:
             return Response(
                 {"detail": "Daily generation prerequisites are not complete.", "checks": checks},

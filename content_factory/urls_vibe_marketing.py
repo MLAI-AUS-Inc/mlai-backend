@@ -1,7 +1,11 @@
 from django.urls import path
 
 from .vibe_marketing_views import (
+    VibeMarketingAutofillView,
     VibeMarketingArticleView,
+    VibeMarketingBaselineGoogleRefreshView,
+    VibeMarketingBaselineSkipView,
+    VibeMarketingBaselineView,
     VibeMarketingBootstrapView,
     VibeMarketingDailyReplayView,
     VibeMarketingDiscoveryView,
@@ -18,6 +22,14 @@ urlpatterns = [
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
     path("settings", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings-no-slash"),
     path("settings/", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings"),
+    path("autofill", VibeMarketingAutofillView.as_view(), name="vibe-marketing-autofill-no-slash"),
+    path("autofill/", VibeMarketingAutofillView.as_view(), name="vibe-marketing-autofill"),
+    path("baseline", VibeMarketingBaselineView.as_view(), name="vibe-marketing-baseline-no-slash"),
+    path("baseline/", VibeMarketingBaselineView.as_view(), name="vibe-marketing-baseline"),
+    path("baseline/skip", VibeMarketingBaselineSkipView.as_view(), name="vibe-marketing-baseline-skip-no-slash"),
+    path("baseline/skip/", VibeMarketingBaselineSkipView.as_view(), name="vibe-marketing-baseline-skip"),
+    path("baseline/google-refresh", VibeMarketingBaselineGoogleRefreshView.as_view(), name="vibe-marketing-baseline-google-refresh-no-slash"),
+    path("baseline/google-refresh/", VibeMarketingBaselineGoogleRefreshView.as_view(), name="vibe-marketing-baseline-google-refresh"),
     path("github/connect", VibeMarketingGitHubConnectView.as_view(), name="vibe-marketing-github-connect-no-slash"),
     path("github/connect/", VibeMarketingGitHubConnectView.as_view(), name="vibe-marketing-github-connect"),
     path("scan", VibeMarketingScanView.as_view(), name="vibe-marketing-scan-no-slash"),
