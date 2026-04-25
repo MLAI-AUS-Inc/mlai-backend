@@ -43,17 +43,41 @@ class HealthCheckTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
 
+    @patch("mlai.views.MigrationExecutor")
     @patch("mlai.views.connections")
-    def test_health_ready_returns_ok_when_database_ping_succeeds(self, mock_connections):
+    def test_health_ready_returns_ok_when_database_ping_succeeds(self, mock_connections, mock_executor_cls):
         mock_connection = MagicMock()
         mock_cursor = MagicMock()
         mock_connection.cursor.return_value.__enter__.return_value = mock_cursor
         mock_connections.__getitem__.return_value = mock_connection
+        mock_executor = MagicMock()
+        mock_executor.loader.graph.leaf_nodes.return_value = [("core", "0041")]
+        mock_executor.migration_plan.return_value = []
+        mock_executor_cls.return_value = mock_executor
 
         response = self.client.get("/healthz/ready")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+        mock_cursor.execute.assert_called_once_with("SELECT 1")
+
+    @patch("mlai.views.MigrationExecutor")
+    @patch("mlai.views.connections")
+    def test_health_ready_returns_503_when_migrations_pending(self, mock_connections, mock_executor_cls):
+        mock_connection = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connection.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_connections.__getitem__.return_value = mock_connection
+        mock_executor = MagicMock()
+        mock_executor.loader.graph.leaf_nodes.return_value = [("founder_tools", "0002")]
+        mock_executor.migration_plan.return_value = [("founder_tools", "0002")]
+        mock_executor_cls.return_value = mock_executor
+
+        response = self.client.get("/healthz/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "not_ready")
+        self.assertEqual(response.json()["pending_migrations"], 1)
         mock_cursor.execute.assert_called_once_with("SELECT 1")
 
     @patch("mlai.views.connections")
@@ -103,10 +127,15 @@ class RequestLoggingMiddlewareTests(SimpleTestCase):
         self.assertEqual(mock_logger.info.call_count, 2)
         start_log = mock_logger.info.call_args_list[0]
         finish_log = mock_logger.info.call_args_list[1]
-        self.assertEqual(start_log.args[0], "request_started request_id=%s method=%s path=%s")
+        self.assertEqual(start_log.args[0], "request_started request_id=%s worker_pid=%s method=%s path=%s")
         self.assertEqual(start_log.args[1], "mlai-test-request")
-        self.assertEqual(finish_log.args[0], "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%.2f")
+        self.assertIsInstance(start_log.args[2], int)
+        self.assertEqual(
+            finish_log.args[0],
+            "request_complete request_id=%s worker_pid=%s method=%s path=%s status=%s duration_ms=%.2f",
+        )
         self.assertEqual(finish_log.args[1], "mlai-test-request")
+        self.assertIsInstance(finish_log.args[2], int)
 
 
 class PointsEndpointTimeoutMiddlewareTests(SimpleTestCase):

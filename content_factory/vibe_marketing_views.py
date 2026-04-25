@@ -15,12 +15,14 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.models import OrganizationContentConfig
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
+    apply_shared_startup_details,
     ensure_company_organization,
     founder_actor_id_for_user,
     get_founder_company_context,
     get_or_create_founder_profile,
     normalize_company_domain,
     resolve_active_company,
+    string_list_from_value,
 )
 from integrations import http_client
 from integrations.services.github import build_github_auth_url
@@ -41,16 +43,13 @@ VIBE_MARKETING_WORKFLOWS = {
     "daily_discovery",
     "vibe_marketing_daily_replay",
 }
+SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
+DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
+ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article"}
 
 
 def _camel_list(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
-    if isinstance(value, (list, tuple)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []
+    return string_list_from_value(value)
 
 
 def _bool_from_request(value):
@@ -109,6 +108,133 @@ def _latest_runs_for_org(organization, limit=6):
     )
 
 
+def _latest_run_matching(runs, workflows):
+    return next((run for run in runs if run.workflow in workflows), None)
+
+
+def _first_non_empty_mapping_value(mapping, *keys):
+    for key in keys:
+        value = mapping.get(key)
+        if value:
+            return value
+    return None
+
+
+def _extract_topic_candidates_from_result(result):
+    if not isinstance(result, dict):
+        return []
+    raw_candidates = _first_non_empty_mapping_value(
+        result,
+        "topic_options",
+        "topics",
+        "topic_candidates",
+        "candidates",
+        "keywords",
+        "keyword_options",
+    )
+    if not raw_candidates and isinstance(result.get("selection_data"), dict):
+        raw_candidates = _first_non_empty_mapping_value(
+            result["selection_data"],
+            "topic_options",
+            "topics",
+            "candidates",
+            "keywords",
+        )
+    if not isinstance(raw_candidates, list):
+        return []
+
+    candidates = []
+    for index, raw in enumerate(raw_candidates):
+        if isinstance(raw, str):
+            candidates.append(
+                {
+                    "id": str(index),
+                    "keyword": raw,
+                    "title": raw,
+                    "reason": "",
+                    "source": "discovery",
+                }
+            )
+            continue
+        if not isinstance(raw, dict):
+            continue
+        keyword = str(
+            raw.get("keyword")
+            or raw.get("target_keyword")
+            or raw.get("query")
+            or raw.get("title")
+            or ""
+        ).strip()
+        title = str(raw.get("title") or raw.get("angle") or raw.get("headline") or keyword).strip()
+        if not keyword and not title:
+            continue
+        candidates.append(
+            {
+                "id": str(raw.get("id") or raw.get("keyword_id") or index),
+                "keyword": keyword or title,
+                "title": title or keyword,
+                "reason": str(raw.get("reason") or raw.get("selection_reason") or raw.get("rationale") or ""),
+                "source": str(raw.get("source") or "discovery"),
+                "intent": raw.get("intent"),
+                "difficulty": raw.get("difficulty"),
+                "opportunityScore": raw.get("opportunity_score") or raw.get("opportunityIndex"),
+                "volume": raw.get("volume"),
+            }
+        )
+    return candidates
+
+
+def _topic_candidates_from_runs(runs):
+    for run in runs:
+        if run.workflow not in DISCOVERY_WORKFLOWS:
+            continue
+        candidates = _extract_topic_candidates_from_result(run.result or {})
+        if candidates:
+            return candidates
+    return []
+
+
+def _publish_evidence_from_run(run):
+    if not run:
+        return {}
+    result = run.result or {}
+    diagnostics = result.get("diagnostics") or run.verification_summary or {}
+    return {
+        "runId": run.run_id,
+        "status": run.status,
+        "approvalState": run.approval_state,
+        "previewUrl": result.get("preview_url") or result.get("article_url") or result.get("url"),
+        "prUrl": result.get("pr_url") or result.get("pull_request_url"),
+        "routePath": result.get("route_path") or result.get("path"),
+        "screenshots": result.get("screenshots") or diagnostics.get("screenshots") or [],
+        "changedFiles": result.get("changed_files") or result.get("files") or diagnostics.get("changed_files") or [],
+        "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
+        "diagnostics": diagnostics,
+    }
+
+
+def _serialize_startup_profile(organization):
+    try:
+        profile = organization.startup_profile
+    except Exception:
+        return {
+            "founderNames": [],
+            "stage": "",
+            "notes": "",
+            "companyAliases": [],
+            "domainAliases": [],
+        }
+    return {
+        "founderNames": list(profile.founder_names or []),
+        "stage": profile.stage,
+        "notes": profile.notes,
+        "companyAliases": list(profile.company_aliases or []),
+        "domainAliases": list(profile.domain_aliases or []),
+        "competitorDomains": list(profile.competitor_domains or []),
+        "positiveKeywords": list(profile.positive_keywords or []),
+    }
+
+
 def _serialize_run(run):
     step_states = []
     for step in run.steps.order_by("display_order", "id"):
@@ -154,7 +280,8 @@ def _serialize_run(run):
     }
 
 
-def _profile_checks(organization, config):
+def _profile_checks(organization, config, latest_runs=None):
+    latest_runs = latest_runs or []
     domain_ok = bool(normalize_company_domain(organization.domain))
     context_ok = bool(str(config.company_context or "").strip()) or bool(str(config.brand_name or "").strip())
     keywords_ok = bool(organization.competitors or organization.seed_keywords)
@@ -167,6 +294,41 @@ def _profile_checks(organization, config):
         "article_system_ready",
     } or bool(config.publish_targets)
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
+    discovery_run = _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
+    article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
+    topic_candidates = _topic_candidates_from_runs(latest_runs)
+    research_ready = bool(topic_candidates) or bool(
+        discovery_run and discovery_run.status in {
+            ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            ContentFactoryRunStatus.COMPLETED,
+        }
+    )
+    article_result = (article_run.result if article_run else {}) or {}
+    write_ready = bool(
+        article_run
+        and (
+            article_run.status
+            in {
+                ContentFactoryRunStatus.COMPLETED,
+                ContentFactoryRunStatus.AWAITING_APPROVAL,
+                ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            }
+            or article_result.get("article")
+            or article_result.get("content")
+            or article_result.get("markdown")
+            or article_result.get("preview_url")
+            or article_result.get("pr_url")
+        )
+    )
+    publish_evidence = _publish_evidence_from_run(article_run)
+    publish_ready = bool(
+        article_run
+        and (
+            article_run.approval_state == ContentFactoryApprovalState.APPROVED
+            or article_run.status == ContentFactoryRunStatus.COMPLETED
+        )
+        and (publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
+    )
     delivery_mode = config.article_delivery_mode or getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "publish_code")
     daily_ready = (
         domain_ok
@@ -194,9 +356,9 @@ def _profile_checks(organization, config):
         },
         "scan": {"passed": scan_ready},
         "scaffold": {"passed": article_ready, "articleSystem": article_system},
-        "research": {"passed": False},
-        "write": {"passed": False},
-        "publish": {"passed": False},
+        "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
+        "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
+        "publish": {"passed": publish_ready, "runId": article_run.run_id if article_run else None},
         "dailyAutomation": {"passed": daily_ready},
     }
 
@@ -204,12 +366,19 @@ def _profile_checks(organization, config):
 def _serialize_bootstrap(context):
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    checks = _profile_checks(context.organization, config)
+    checks = _profile_checks(context.organization, config, latest_runs)
+    guided_steps, current_guided_step = _guided_steps(checks)
+    latest_runs_by_workflow = {}
+    for run in latest_runs:
+        latest_runs_by_workflow.setdefault(run.workflow, _serialize_run(run))
+    latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     return {
         "company": {
             "id": str(context.company.id),
             "name": context.company.name,
             "domain": context.company.domain,
+            "location": context.company.location,
+            "abn": context.company.abn,
             "organizationId": context.organization.id,
         },
         "organization": {
@@ -230,18 +399,41 @@ def _serialize_bootstrap(context):
             "defaultTimezone": config.default_timezone,
             "githubConnectionState": config.github_connection_state,
         },
+        "startupProfile": _serialize_startup_profile(context.organization),
         "checks": checks,
         "latestRuns": [_serialize_run(run) for run in latest_runs],
+        "latestRunsByWorkflow": latest_runs_by_workflow,
+        "topicCandidates": _topic_candidates_from_runs(latest_runs),
+        "publishEvidence": _publish_evidence_from_run(latest_article_run),
+        "guidedSteps": guided_steps,
+        "currentGuidedStep": current_guided_step,
         "recommendedNextAction": _recommended_next_action(checks),
     }
 
 
 def _serialize_bootstrap_without_domain(company):
+    checks = {
+        "account": {"passed": True},
+        "websiteProfile": {
+            "passed": False,
+            "checks": {"domain": False, "brandOrContext": False, "competitorsOrSeedKeywords": False},
+        },
+        "github": {"passed": False, "connectionState": "missing_domain", "repoSet": False},
+        "scan": {"passed": False},
+        "scaffold": {"passed": False},
+        "research": {"passed": False},
+        "write": {"passed": False},
+        "publish": {"passed": False},
+        "dailyAutomation": {"passed": False},
+    }
+    guided_steps, current_guided_step = _guided_steps(checks)
     return {
         "company": {
             "id": str(company.id),
             "name": company.name,
             "domain": company.domain,
+            "location": company.location,
+            "abn": company.abn,
             "organizationId": None,
         },
         "organization": {
@@ -261,21 +453,20 @@ def _serialize_bootstrap_without_domain(company):
             "defaultTimezone": "",
             "githubConnectionState": "missing_domain",
         },
-        "checks": {
-            "account": {"passed": True},
-            "websiteProfile": {
-                "passed": False,
-                "checks": {"domain": False, "brandOrContext": False, "competitorsOrSeedKeywords": False},
-            },
-            "github": {"passed": False, "connectionState": "missing_domain", "repoSet": False},
-            "scan": {"passed": False},
-            "scaffold": {"passed": False},
-            "research": {"passed": False},
-            "write": {"passed": False},
-            "publish": {"passed": False},
-            "dailyAutomation": {"passed": False},
+        "checks": checks,
+        "startupProfile": {
+            "founderNames": [],
+            "stage": "",
+            "notes": "",
+            "companyAliases": [company.name] if company.name else [],
+            "domainAliases": [],
         },
         "latestRuns": [],
+        "latestRunsByWorkflow": {},
+        "topicCandidates": [],
+        "publishEvidence": {},
+        "guidedSteps": guided_steps,
+        "currentGuidedStep": current_guided_step,
         "recommendedNextAction": {"key": "websiteProfile", "label": "Save website profile"},
     }
 
@@ -295,6 +486,39 @@ def _recommended_next_action(checks):
         if not checks.get(key, {}).get("passed"):
             return {"key": key, "label": label}
     return {"key": "ready", "label": "Daily generation is ready"}
+
+
+def _guided_steps(checks):
+    steps = [
+        ("startupDetails", "Startup details", "websiteProfile"),
+        ("github", "Connect GitHub", "github"),
+        ("scan", "Scan repository", "scan"),
+        ("articleSystem", "Prepare article system", "scaffold"),
+        ("research", "Research topics", "research"),
+        ("chooseArticle", "Choose article", "research"),
+        ("writeCheck", "Write + check", "write"),
+        ("editArticle", "Edit article", "write"),
+        ("reviewPublish", "Review publish", "publish"),
+        ("dailyAutomation", "Daily automation", "dailyAutomation"),
+    ]
+    first_incomplete = None
+    payload = []
+    for key, label, check_key in steps:
+        passed = bool(checks.get(check_key, {}).get("passed"))
+        status_label = "complete" if passed else "pending"
+        if not passed and first_incomplete is None:
+            first_incomplete = key
+            status_label = "active"
+        payload.append(
+            {
+                "key": key,
+                "label": label,
+                "status": status_label,
+                "passed": passed,
+                "href": f"/founder-tools/marketing/create?step={key}",
+            }
+        )
+    return payload, first_incomplete or "dailyAutomation"
 
 
 def _content_factory_headers():
@@ -383,6 +607,39 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     )
 
 
+def _call_content_factory_run_action(*, run_id, action, payload):
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
+    if not should_call_remote:
+        return {}
+
+    try:
+        response = http_client.post(
+            f"{base_url}/api/runs/{run_id}/{action}",
+            json=payload or {},
+            headers=_content_factory_headers(),
+            timeout=(3, 15),
+        )
+    except http_client.RequestException as exc:
+        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
@@ -412,9 +669,16 @@ class VibeMarketingSettingsView(APIView):
             )
 
         domain = normalize_company_domain(request.data.get("domain") or company.domain)
+        company_name = str(request.data.get("company_name") or request.data.get("companyName") or company.name).strip()
+        if company_name and company.name != company_name:
+            company.name = company_name
+        if "location" in request.data:
+            company.location = str(request.data.get("location") or "").strip()
+        if "abn" in request.data:
+            company.abn = str(request.data.get("abn") or "").strip() or None
         if domain:
             company.domain = domain
-            company.save(update_fields=["domain", "updated_at"])
+            company.save()
             organization = ensure_company_organization(company)
         else:
             return Response({"detail": "Domain is required before saving Vibe Marketing settings."}, status=status.HTTP_400_BAD_REQUEST)
@@ -444,7 +708,15 @@ class VibeMarketingSettingsView(APIView):
             )
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
+        if config.daily_discovery_enabled:
+            checks = _profile_checks(organization, config, _latest_runs_for_org(organization))
+            if not checks["dailyAutomation"]["passed"]:
+                return Response(
+                    {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         config.save()
+        apply_shared_startup_details(user=request.user, company=company, data=request.data)
 
         refreshed_context = get_founder_company_context(request.user, company_id=company.id)
         return Response(_serialize_bootstrap(refreshed_context), status=status.HTTP_200_OK)
@@ -530,6 +802,8 @@ class VibeMarketingArticleView(APIView):
             "github_repo": config.github_repo,
             "delivery_mode": request.data.get("delivery_mode") or request.data.get("deliveryMode") or config.article_delivery_mode,
             "delivery_mode_confirmed": bool(request.data.get("delivery_mode_confirmed", request.data.get("deliveryModeConfirmed", True))),
+            "source_discovery_run_id": request.data.get("source_discovery_run_id") or request.data.get("sourceDiscoveryRunId"),
+            "title": request.data.get("title") or request.data.get("titleAngle"),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
         run = _queue_content_factory_run(
@@ -584,6 +858,45 @@ class VibeMarketingRunControlView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        payload = dict(request.data or {})
+        payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
+        payload.setdefault("slack_user_id", founder_actor_id_for_user(request.user))
+        remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload)
+
+        if action == "revise":
+            new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
+            if new_run_id and new_run_id != run.run_id:
+                config = _get_config(context.organization)
+                revised_run = _create_local_run(
+                    workflow="article_generation",
+                    domain=context.organization.domain,
+                    github_repo=config.github_repo or run.github_repo or "",
+                    actor_id=founder_actor_id_for_user(request.user),
+                    payload=payload,
+                    remote_data=remote_data,
+                )
+                return Response(_serialize_run(revised_run), status=status.HTTP_202_ACCEPTED)
+
+            result = run.result or {}
+            revisions = list(result.get("revisions") or [])
+            revisions.append(
+                {
+                    "submitted_at": timezone.now().isoformat(),
+                    "instructions": payload.get("revision_instructions") or payload.get("revisionInstructions") or "",
+                    "edited_content": payload.get("edited_content") or payload.get("editedContent") or "",
+                    "remote": remote_data,
+                }
+            )
+            result["revisions"] = revisions
+            if remote_data:
+                result["latest_revision_response"] = remote_data
+            run.result = result
+            if run.status in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = "revision_requested"
+            run.save(update_fields=["status", "current_step", "result", "updated_at"])
+            return Response(_serialize_run(run), status=status.HTTP_202_ACCEPTED)
+
         if action == "approve":
             run.approval_state = ContentFactoryApprovalState.APPROVED
             run.status = ContentFactoryRunStatus.RUNNING
@@ -605,7 +918,15 @@ class VibeMarketingRunControlView(APIView):
         else:
             return Response({"detail": "Unsupported run action."}, status=status.HTTP_400_BAD_REQUEST)
 
-        run.save(update_fields=["approval_state", "status", "resume_available", "result", "updated_at"])
+        if remote_data:
+            result = run.result or {}
+            result["latest_control_response"] = remote_data
+            if remote_data.get("status"):
+                run.status = remote_data["status"]
+            if remote_data.get("current_step"):
+                run.current_step = remote_data["current_step"]
+            run.result = result
+        run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "updated_at"])
         return Response(_serialize_run(run), status=status.HTTP_200_OK)
 
 

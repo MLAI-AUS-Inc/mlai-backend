@@ -15,7 +15,12 @@ from .serializers import (
     FounderProfileUpsertSerializer,
     serialize_founder_bootstrap,
 )
-from .services import ensure_company_organization, get_or_create_founder_profile, set_active_company
+from .services import (
+    apply_shared_startup_details,
+    ensure_company_organization,
+    get_or_create_founder_profile,
+    set_active_company,
+)
 
 
 def _connector_summaries(user):
@@ -88,17 +93,22 @@ class FounderToolsCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
+        company_fields = {
+            key: data[key]
+            for key in ("name", "domain", "abn", "location", "registered")
+            if key in data
+        }
 
         if company_id:
             company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-            for field in ("name", "domain", "abn", "registered"):
-                if field in data:
-                    setattr(company, field, data[field])
+            for field, value in company_fields.items():
+                setattr(company, field, value)
             company.save()
         else:
-            company = VibeRaisingCompany.objects.create(profile=profile, **data)
+            company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
 
         ensure_company_organization(company)
+        apply_shared_startup_details(user=request.user, company=company, data=data)
         if profile.active_company_id is None:
             set_active_company(profile, company)
 

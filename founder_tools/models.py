@@ -54,6 +54,7 @@ class VibeRaisingCompany(models.Model):
     name = models.CharField(max_length=255)
     domain = models.CharField(max_length=255, blank=True, null=True)
     abn = models.CharField(max_length=64, blank=True, null=True)
+    location = models.CharField(max_length=255, blank=True, default="")
     registered = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
