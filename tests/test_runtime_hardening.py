@@ -90,4 +90,6 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
 
         self.assertNotIn("docker compose run --rm", deploy)
         self.assertNotIn("docker compose run --no-TTY", deploy)
-        self.assertIn("docker compose run -T --rm --no-deps web python manage.py migrate --noinput", deploy)
+        self.assertEqual(deploy.count("docker compose run -T --rm --no-deps web"), 1)
+        self.assertIn('docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy)
+        self.assertIn("compose_run_web python manage.py migrate --noinput", deploy)
