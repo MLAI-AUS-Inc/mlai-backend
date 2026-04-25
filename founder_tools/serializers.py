@@ -39,6 +39,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "name",
             "domain",
             "abn",
+            "location",
             "registered",
             "organizationId",
             "organizationDomain",
@@ -104,7 +105,19 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    location = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     registered = serializers.BooleanField(required=False)
+    brandName = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    companyContext = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    competitors = serializers.JSONField(required=False)
+    seedKeywords = serializers.JSONField(required=False)
+    founderNames = serializers.JSONField(required=False)
+    stage = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    notes = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    githubRepo = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    articleDeliveryMode = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    dailyDiscoveryEnabled = serializers.BooleanField(required=False)
+    defaultTimezone = serializers.CharField(allow_blank=True, allow_null=True, required=False)
 
     def validate(self, attrs):
         attrs["name"] = attrs["name"].strip()
@@ -116,6 +129,8 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
             attrs["domain"] = normalize_company_domain(domain) if domain else None
         if "abn" in attrs:
             attrs["abn"] = _blank_to_none(attrs.get("abn"))
+        if "location" in attrs:
+            attrs["location"] = attrs.get("location") or ""
         return attrs
 
 
@@ -140,6 +155,12 @@ def serialize_founder_bootstrap(user, profile):
     elif not companies.exists():
         redirect_hint = {"to": "/founder-tools/company-setup", "reason": "company_required"}
 
+    linked_startup_profile = None
+    linked_marketing_settings = None
+    if active_company and active_company.organization_id:
+        linked_startup_profile = _serialize_startup_profile(active_company.organization)
+        linked_marketing_settings = _serialize_marketing_settings(active_company.organization)
+
     return {
         "user": {
             "id": user.id,
@@ -160,6 +181,8 @@ def serialize_founder_bootstrap(user, profile):
                 "name": active_company.organization.name,
                 "competitors": active_company.organization.competitors,
                 "seedKeywords": active_company.organization.seed_keywords,
+                "startupProfile": linked_startup_profile,
+                "marketingSettings": linked_marketing_settings,
             }
             if active_company and active_company.organization_id
             else None
@@ -173,4 +196,36 @@ def serialize_founder_bootstrap(user, profile):
         "connectors": [],
         "redirectHint": redirect_hint,
         "unsupported": not supported,
+    }
+
+
+def _serialize_startup_profile(organization):
+    try:
+        profile = organization.startup_profile
+    except Exception:
+        return None
+    return {
+        "founderNames": list(profile.founder_names or []),
+        "stage": profile.stage,
+        "notes": profile.notes,
+        "companyAliases": list(profile.company_aliases or []),
+        "domainAliases": list(profile.domain_aliases or []),
+        "competitorDomains": list(profile.competitor_domains or []),
+        "positiveKeywords": list(profile.positive_keywords or []),
+    }
+
+
+def _serialize_marketing_settings(organization):
+    try:
+        config = organization.content_config
+    except Exception:
+        return None
+    return {
+        "brandName": config.brand_name,
+        "companyContext": config.company_context,
+        "githubRepo": config.github_repo,
+        "articleDeliveryMode": config.article_delivery_mode,
+        "dailyDiscoveryEnabled": config.daily_discovery_enabled,
+        "defaultTimezone": config.default_timezone,
+        "githubConnectionState": config.github_connection_state,
     }

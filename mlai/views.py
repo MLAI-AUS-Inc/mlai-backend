@@ -6,56 +6,62 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 
 
-def health_check(request):
+def _health_payload(**values):
+    payload = {
+        "service": "mlai-backend",
+        "app_env": getattr(settings, "APP_ENV", "unknown"),
+        "release": getattr(settings, "APP_RELEASE", "unknown"),
+    }
+    payload.update(values)
+    return payload
+
+
+def _migration_readiness_response():
     try:
         executor = MigrationExecutor(connections["default"])
         targets = executor.loader.graph.leaf_nodes()
         pending_migrations = executor.migration_plan(targets)
     except Exception as exc:
         return JsonResponse(
-            {
-                "status": "error",
-                "message": "Database migration readiness check failed",
-                "service": "mlai-backend",
-                "app_env": getattr(settings, "APP_ENV", "unknown"),
-                "release": getattr(settings, "APP_RELEASE", "unknown"),
-                "error": str(exc),
-            },
+            _health_payload(
+                status="error",
+                message="Database migration readiness check failed",
+                error=str(exc),
+            ),
             status=503,
         )
 
     if pending_migrations:
         return JsonResponse(
-            {
-                "status": "not_ready",
-                "message": "Unapplied migrations detected",
-                "service": "mlai-backend",
-                "app_env": getattr(settings, "APP_ENV", "unknown"),
-                "release": getattr(settings, "APP_RELEASE", "unknown"),
-                "pending_migrations": len(pending_migrations),
-            },
+            _health_payload(
+                status="not_ready",
+                message="Unapplied migrations detected",
+                pending_migrations=len(pending_migrations),
+            ),
             status=503,
         )
 
+    return None
+
+
+def health_check(request):
+    migration_response = _migration_readiness_response()
+    if migration_response is not None:
+        return migration_response
+
     return JsonResponse(
-        {
-            "status": "ok",
-            "message": "MLAI Backend is running",
-            "service": "mlai-backend",
-            "app_env": getattr(settings, "APP_ENV", "unknown"),
-            "release": getattr(settings, "APP_RELEASE", "unknown"),
-        }
+        _health_payload(
+            status="ok",
+            message="MLAI Backend is running",
+        )
     )
 
 
 def health_live(request):
     return JsonResponse(
-        {
-            "status": "ok",
-            "service": "mlai-backend",
-            "app_env": getattr(settings, "APP_ENV", "unknown"),
-            "release": getattr(settings, "APP_RELEASE", "unknown"),
-        }
+        _health_payload(
+            status="ok",
+        )
     )
 
 
@@ -63,13 +69,10 @@ def health_ready(request):
     database_config = getattr(settings, "DATABASES", {}).get("default") or {}
     if not database_config:
         return JsonResponse(
-            {
-                "status": "error",
-                "message": "Database configuration missing",
-                "service": "mlai-backend",
-                "app_env": getattr(settings, "APP_ENV", "unknown"),
-                "release": getattr(settings, "APP_RELEASE", "unknown"),
-            },
+            _health_payload(
+                status="error",
+                message="Database configuration missing",
+            ),
             status=503,
         )
 
@@ -79,24 +82,22 @@ def health_ready(request):
             cursor.fetchone()
     except Exception as exc:
         return JsonResponse(
-            {
-                "status": "error",
-                "message": "Database readiness check failed",
-                "service": "mlai-backend",
-                "app_env": getattr(settings, "APP_ENV", "unknown"),
-                "release": getattr(settings, "APP_RELEASE", "unknown"),
-                "error": str(exc),
-            },
+            _health_payload(
+                status="error",
+                message="Database readiness check failed",
+                error=str(exc),
+            ),
             status=503,
         )
 
+    migration_response = _migration_readiness_response()
+    if migration_response is not None:
+        return migration_response
+
     return JsonResponse(
-        {
-            "status": "ok",
-            "service": "mlai-backend",
-            "app_env": getattr(settings, "APP_ENV", "unknown"),
-            "release": getattr(settings, "APP_RELEASE", "unknown"),
-        }
+        _health_payload(
+            status="ok",
+        )
     )
 
 
@@ -125,24 +126,18 @@ def health_points(request):
         ).only("id").first()
     except Exception as exc:
         return JsonResponse(
-            {
-                "status": "error",
-                "service": "mlai-backend",
-                "subsystem": "points",
-                "app_env": getattr(settings, "APP_ENV", "unknown"),
-                "release": getattr(settings, "APP_RELEASE", "unknown"),
-                "message": "Points subsystem health check failed",
-                "error": str(exc),
-            },
+            _health_payload(
+                status="error",
+                subsystem="points",
+                message="Points subsystem health check failed",
+                error=str(exc),
+            ),
             status=503,
         )
 
     return JsonResponse(
-        {
-            "status": "ok",
-            "service": "mlai-backend",
-            "subsystem": "points",
-            "app_env": getattr(settings, "APP_ENV", "unknown"),
-            "release": getattr(settings, "APP_RELEASE", "unknown"),
-        }
+        _health_payload(
+            status="ok",
+            subsystem="points",
+        )
     )

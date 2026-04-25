@@ -18,6 +18,31 @@ def founder_actor_id_for_user(user) -> str:
     return f"mlai_user:{user.id}"
 
 
+def string_list_from_value(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _first_value(data, *keys, default=None):
+    for key in keys:
+        if key in data and data.get(key) not in (None, ""):
+            return data.get(key)
+    return default
+
+
+def _bool_from_value(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
     normalized_domain = normalize_company_domain(company.domain)
@@ -41,6 +66,109 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
     elif company.domain == normalized_domain:
         company.save(update_fields=["domain", "updated_at"])
 
+    return organization
+
+
+@transaction.atomic
+def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dict) -> Organization | None:
+    organization = ensure_company_organization(company)
+    if organization is None:
+        return None
+
+    brand_name = str(_first_value(data, "brandName", "brand_name", default="") or "").strip()
+    company_context = str(_first_value(data, "companyContext", "company_context", default="") or "").strip()
+    competitors = string_list_from_value(_first_value(data, "competitors", default=[]))
+    seed_keywords = string_list_from_value(_first_value(data, "seedKeywords", "seed_keywords", default=[]))
+    founder_names = string_list_from_value(_first_value(data, "founderNames", "founder_names", default=[]))
+    stage = str(_first_value(data, "stage", default="") or "").strip()
+    notes = str(_first_value(data, "notes", default="") or "").strip()
+
+    organization_update_fields = []
+    if brand_name and organization.name != brand_name:
+        organization.name = brand_name
+        organization_update_fields.append("name")
+    elif company.name and not organization.name:
+        organization.name = company.name
+        organization_update_fields.append("name")
+    if "competitors" in data and organization.competitors != competitors:
+        organization.competitors = competitors
+        organization_update_fields.append("competitors")
+    if ("seedKeywords" in data or "seed_keywords" in data) and organization.seed_keywords != seed_keywords:
+        organization.seed_keywords = seed_keywords
+        organization_update_fields.append("seed_keywords")
+    if organization_update_fields:
+        organization.save(update_fields=organization_update_fields)
+
+    from content_factory.models import OrganizationContentConfig
+    from startup_updates.services import bind_user_to_startup, resolve_or_create_profile
+
+    config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+    config_update_fields = []
+    actor_id = founder_actor_id_for_user(user)
+    if config.connected_slack_user_id != actor_id:
+        config.connected_slack_user_id = actor_id
+        config_update_fields.append("connected_slack_user_id")
+    if brand_name and config.brand_name != brand_name:
+        config.brand_name = brand_name
+        config_update_fields.append("brand_name")
+    if company_context and config.company_context != company_context:
+        config.company_context = company_context
+        config_update_fields.append("company_context")
+
+    github_repo = str(_first_value(data, "githubRepo", "github_repo", default="") or "").strip()
+    if github_repo and config.github_repo != github_repo:
+        config.github_repo = github_repo
+        config_update_fields.append("github_repo")
+    article_delivery_mode = str(
+        _first_value(data, "articleDeliveryMode", "article_delivery_mode", default="") or ""
+    ).strip()
+    if article_delivery_mode and config.article_delivery_mode != article_delivery_mode:
+        config.article_delivery_mode = article_delivery_mode
+        config_update_fields.append("article_delivery_mode")
+    default_timezone = str(_first_value(data, "defaultTimezone", "default_timezone", default="") or "").strip()
+    if default_timezone and config.default_timezone != default_timezone:
+        config.default_timezone = default_timezone
+        config_update_fields.append("default_timezone")
+    if "dailyDiscoveryEnabled" in data or "daily_discovery_enabled" in data:
+        daily_enabled = _bool_from_value(
+            _first_value(data, "dailyDiscoveryEnabled", "daily_discovery_enabled", default=False)
+        )
+        if config.daily_discovery_enabled != daily_enabled:
+            config.daily_discovery_enabled = daily_enabled
+            config_update_fields.append("daily_discovery_enabled")
+
+    if config_update_fields:
+        config_update_fields.append("updated_at")
+        config.save(update_fields=config_update_fields)
+
+    _, startup_profile = resolve_or_create_profile(domain=organization.domain)
+    startup_update_fields = []
+    if founder_names and startup_profile.founder_names != founder_names:
+        startup_profile.founder_names = founder_names
+        startup_update_fields.append("founder_names")
+    if competitors and startup_profile.competitor_domains != competitors:
+        startup_profile.competitor_domains = competitors
+        startup_update_fields.append("competitor_domains")
+    if seed_keywords and startup_profile.positive_keywords != seed_keywords:
+        startup_profile.positive_keywords = seed_keywords
+        startup_update_fields.append("positive_keywords")
+    if stage and startup_profile.stage != stage:
+        startup_profile.stage = stage
+        startup_update_fields.append("stage")
+    if notes and startup_profile.notes != notes:
+        startup_profile.notes = notes
+        startup_update_fields.append("notes")
+    if company.name and company.name not in startup_profile.company_aliases:
+        startup_profile.company_aliases = [*startup_profile.company_aliases, company.name]
+        startup_update_fields.append("company_aliases")
+    if organization.domain and organization.domain not in startup_profile.domain_aliases:
+        startup_profile.domain_aliases = [*startup_profile.domain_aliases, organization.domain]
+        startup_update_fields.append("domain_aliases")
+    if startup_update_fields:
+        startup_update_fields.append("updated_at")
+        startup_profile.save(update_fields=startup_update_fields)
+
+    bind_user_to_startup(user=user, organization=organization, role="founder", is_default_for_gmail=True)
     return organization
 
 
