@@ -431,6 +431,7 @@ class GmailAttachmentArtifact(models.Model):
     metadata = models.JSONField(default=dict, blank=True)
     sha256 = models.CharField(max_length=64, blank=True, default="")
     parse_notes = models.TextField(blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
     hydrated_at = models.DateTimeField(null=True, blank=True)
     extracted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

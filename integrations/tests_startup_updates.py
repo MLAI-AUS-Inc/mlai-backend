@@ -1637,6 +1637,86 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         )
 
     @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_records_failed_attachment_hydration_without_failing(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        attachment_payload = response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+        self.assertEqual(attachment_payload["parse_notes"], "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", attachment_payload["last_error"])
+
+        failed_attachment = GmailAttachmentArtifact.objects.get(
+            organization=self.organization,
+            message_artifact=self.message,
+            gmail_attachment_id="att-reset",
+        )
+        self.assertEqual(failed_attachment.raw_content_base64, "")
+        self.assertEqual(failed_attachment.extraction_status, ArtifactProcessingStatus.ERROR)
+        self.assertEqual(failed_attachment.parse_notes, "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", failed_attachment.last_error)
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.attachment_ids, [failed_attachment.id])
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_reuses_failed_attachment_without_refetching(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            first_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+            second_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_get_attachment_payload.call_count, 1)
+        attachment_payload = second_response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+
+    @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):
         long_attachment_id = "att-" + ("x" * 400)
         self.message.attachment_manifest = [

@@ -182,6 +182,7 @@ def _serialize_attachment(attachment) -> dict:
         "extracted_text": attachment.extracted_text,
         "extraction_status": attachment.extraction_status,
         "parse_notes": attachment.parse_notes,
+        "last_error": attachment.last_error,
         "metadata": attachment.metadata or {},
     }
 
