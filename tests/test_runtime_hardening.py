@@ -84,3 +84,12 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
             deploy.index("docker compose stop web"),
             deploy.index("docker compose up -d web scheduler bridge-worker"),
         )
+
+    def test_deploy_compose_run_does_not_consume_ssh_stdin(self):
+        deploy = (ROOT / "deploy.sh").read_text()
+
+        self.assertNotIn("docker compose run --rm", deploy)
+        self.assertNotIn("docker compose run --no-TTY", deploy)
+        self.assertEqual(deploy.count("docker compose run -T --rm --no-deps web"), 1)
+        self.assertIn('docker compose run -T --rm --no-deps web "\\$@" </dev/null', deploy)
+        self.assertIn("compose_run_web python manage.py migrate --noinput", deploy)
