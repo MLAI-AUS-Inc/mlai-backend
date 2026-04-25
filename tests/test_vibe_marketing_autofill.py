@@ -56,6 +56,10 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["domain"], "acme.com")
             self.assertEqual(json["company_linkedin_url"], "https://www.linkedin.com/company/acme")
             self.assertFalse(json["persist"])
+            self.assertEqual(json["research_depth"], "deep")
+            self.assertTrue(json["strict_deep_research"])
+            self.assertEqual(json["min_direct_competitors"], 5)
+            self.assertEqual(json["min_seed_keywords"], 20)
             return _Response(status_code=202, payload={"run_id": "autofill-run-1", "status": "queued"})
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
@@ -92,6 +96,87 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.run_request["company_linkedin_url"], "https://www.linkedin.com/company/acme")
         self.assertEqual(run.run_request["existing_fields"]["companyContext"], "")
         self.assertEqual(run.run_request["existing_fields"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_persists_submitted_startup_details_before_queueing(self):
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertEqual(url, "https://content-factory.test/api/runs/autofill")
+            self.assertFalse(json["persist"])
+            self.assertEqual(json["company_name"], "MLAI")
+            self.assertEqual(json["domain"], "mlai.au")
+            self.assertEqual(json["brand_name"], "MLAI")
+            self.assertEqual(json["company_linkedin_url"], "https://www.linkedin.com/company/mlai-aus-inc")
+            self.assertEqual(json["location"], "Melbourne, Australia")
+            self.assertEqual(json["abn"], "94 807 394 137")
+            self.assertEqual(json["existing_fields"]["companyContext"], "AI workflow automation for founders.")
+            self.assertEqual(json["existing_fields"]["competitors"], ["buildclub.ai", "aussiefoundersclub.com"])
+            self.assertEqual(json["existing_fields"]["seedKeywords"], ["ai events melbourne", "founder automation"])
+            self.assertEqual(json["research_depth"], "deep")
+            self.assertTrue(json["strict_deep_research"])
+            self.assertEqual(json["min_direct_competitors"], 5)
+            self.assertEqual(json["min_seed_keywords"], 20)
+            self.assertEqual(json["min_public_sources"], 3)
+            return _Response(status_code=202, payload={"run_id": "autofill-run-persist", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/autofill/",
+                {
+                    "companyName": "MLAI",
+                    "domain": "https://mlai.au",
+                    "companyLinkedInUrl": "https://www.linkedin.com/company/mlai-aus-inc/",
+                    "location": "Melbourne, Australia",
+                    "abn": "94 807 394 137",
+                    "brandName": "MLAI",
+                    "companyContext": "AI workflow automation for founders.",
+                    "competitors": ["buildclub.ai", "aussiefoundersclub.com"],
+                    "seedKeywords": ["ai events melbourne", "founder automation"],
+                    "founderNames": ["Sam Donegan"],
+                    "stage": "Seed",
+                    "notes": "Founder tools for marketing and monthly updates.",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["run_id"], "autofill-run-persist")
+
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.name, "MLAI")
+        self.assertEqual(self.company.domain, "mlai.au")
+        self.assertEqual(self.company.location, "Melbourne, Australia")
+        self.assertEqual(self.company.abn, "94 807 394 137")
+
+        organization = Organization.objects.get(domain="mlai.au")
+        self.assertEqual(organization.name, "MLAI")
+        self.assertEqual(organization.company_linkedin_url, "https://www.linkedin.com/company/mlai-aus-inc")
+        self.assertEqual(organization.competitors, ["buildclub.ai", "aussiefoundersclub.com"])
+        self.assertEqual(organization.seed_keywords, ["ai events melbourne", "founder automation"])
+
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        self.assertEqual(config.brand_name, "MLAI")
+        self.assertEqual(config.company_context, "AI workflow automation for founders.")
+        self.assertEqual(config.connected_slack_user_id, f"mlai_user:{self.user.id}")
+
+        startup_profile = organization.startup_profile
+        self.assertEqual(startup_profile.founder_names, ["Sam Donegan"])
+        self.assertEqual(startup_profile.competitor_domains, ["buildclub.ai", "aussiefoundersclub.com"])
+        self.assertEqual(startup_profile.positive_keywords, ["ai events melbourne", "founder automation"])
+        self.assertEqual(startup_profile.stage, "Seed")
+        self.assertEqual(startup_profile.notes, "Founder tools for marketing and monthly updates.")
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        self.assertEqual(bootstrap.status_code, 200)
+        self.assertEqual(bootstrap.data["company"]["name"], "MLAI")
+        self.assertEqual(bootstrap.data["company"]["domain"], "mlai.au")
+        self.assertEqual(bootstrap.data["company"]["companyLinkedInUrl"], "https://www.linkedin.com/company/mlai-aus-inc")
+        self.assertEqual(bootstrap.data["settings"]["brandName"], "MLAI")
+        self.assertEqual(bootstrap.data["settings"]["companyContext"], "AI workflow automation for founders.")
+        self.assertEqual(bootstrap.data["organization"]["competitors"], ["buildclub.ai", "aussiefoundersclub.com"])
+        self.assertEqual(bootstrap.data["organization"]["seedKeywords"], ["ai events melbourne", "founder automation"])
+        self.assertEqual(bootstrap.data["startupProfile"]["founderNames"], ["Sam Donegan"])
+        self.assertEqual(bootstrap.data["startupProfile"]["stage"], "Seed")
+        self.assertEqual(bootstrap.data["startupProfile"]["notes"], "Founder tools for marketing and monthly updates.")
 
     def test_autofill_rejects_personal_linkedin_profile_url(self):
         response = self.client.post(
