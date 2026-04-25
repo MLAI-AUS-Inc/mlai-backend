@@ -73,6 +73,32 @@ class ClassificationResultsSerializer(serializers.Serializer):
     results = ClassificationResultItemSerializer(many=True)
 
 
+class SlackClassificationResultItemSerializer(serializers.Serializer):
+    slack_thread_id = serializers.CharField()
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    extraction_hints = serializers.DictField(required=False, default=dict)
+
+
+class SlackClassificationResultsSerializer(serializers.Serializer):
+    results = SlackClassificationResultItemSerializer(many=True)
+
+
+class LinearClassificationResultItemSerializer(serializers.Serializer):
+    linear_project_id = serializers.CharField()
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    extraction_hints = serializers.DictField(required=False, default=dict)
+
+
+class LinearClassificationResultsSerializer(serializers.Serializer):
+    results = LinearClassificationResultItemSerializer(many=True)
+
+
 class AttachmentUpdateSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     extracted_text = serializers.CharField(required=False, allow_blank=True, default="")
@@ -151,6 +177,21 @@ class SlackExtractionResultItemSerializer(serializers.Serializer):
 
 class SlackExtractionResultsSerializer(serializers.Serializer):
     results = SlackExtractionResultItemSerializer(many=True)
+
+
+class LinearExtractionResultItemSerializer(serializers.Serializer):
+    linear_project_id = serializers.CharField()
+    extraction_status = serializers.ChoiceField(
+        choices=ArtifactProcessingStatus.choices,
+        required=False,
+        default=ArtifactProcessingStatus.PROCESSED,
+    )
+    events = EventResultSerializer(many=True, required=False, default=list)
+    metrics = MetricResultSerializer(many=True, required=False, default=list)
+
+
+class LinearExtractionResultsSerializer(serializers.Serializer):
+    results = LinearExtractionResultItemSerializer(many=True)
 
 
 class DraftResultSerializer(serializers.Serializer):

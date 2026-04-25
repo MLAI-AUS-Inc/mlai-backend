@@ -54,6 +54,9 @@ def _json_response(payload):
     SLACK_CLIENT_ID="slack-client-id",
     SLACK_CLIENT_SECRET="slack-client-secret",
     SLACK_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/slack",
+    LINEAR_CLIENT_ID="linear-client-id",
+    LINEAR_CLIENT_SECRET="linear-client-secret",
+    LINEAR_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/linear",
     BASIQ_API_KEY="YXBwLWtleS1mb3ItYmFzaXEtc2FuZGJveA==",
     BASIQ_API_BASE_URL="https://au-api.basiq.io",
     BASIQ_CONSENT_UI_URL="https://consent.basiq.io/home",
@@ -88,7 +91,7 @@ class ConnectorEndpointTests(TestCase):
         sources = {source["key"]: source for source in response.data["sources"]}
         self.assertEqual(
             set(sources),
-            {"gmail", "stripe", "xero", "bank_feed", "notion", "google_drive", "slack"},
+            {"gmail", "stripe", "xero", "bank_feed", "notion", "google_drive", "slack", "linear"},
         )
         self.assertEqual(sources["gmail"]["status"], "connected")
         self.assertEqual(sources["gmail"]["accountLabel"], "founder@gmail.com")
@@ -103,6 +106,7 @@ class ConnectorEndpointTests(TestCase):
             "notion": ("https://api.notion.com/v1/oauth/authorize", "notion"),
             "google-drive": ("https://accounts.google.com/o/oauth2/v2/auth", "google_drive"),
             "slack": ("https://slack.com/oauth/v2/authorize", "slack"),
+            "linear": ("https://linear.app/oauth/authorize", "linear"),
         }
 
         for slug, (expected_base, provider) in cases.items():
@@ -128,6 +132,11 @@ class ConnectorEndpointTests(TestCase):
                 self.assertIn("offline_access", params["scope"][0])
                 self.assertIn("accounting.invoices.read", params["scope"][0])
                 self.assertIn("accounting.payments.read", params["scope"][0])
+            if slug == "linear":
+                self.assertEqual(params["response_type"], ["code"])
+                self.assertEqual(params["client_id"], ["linear-client-id"])
+                self.assertEqual(params["redirect_uri"], ["http://localhost:8000/integrations/callback/linear"])
+                self.assertEqual(params["scope"], ["read"])
             self.assertEqual(
                 session_state["next"],
                 "http://localhost:5173/vibe-raising/connect-data?next=/vibe-raising/create-update",

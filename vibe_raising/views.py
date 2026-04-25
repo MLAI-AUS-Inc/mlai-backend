@@ -93,6 +93,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "thread_hydration": "Pulling full thread context",
     "event_extraction": "Extracting metrics and highlights",
     "slack_backfill": "Scanning selected Slack channels",
+    "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
     "timeline_merge": "Building timeline",
     "draft_generation": "Drafting monthly updates",

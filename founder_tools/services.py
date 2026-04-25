@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from django.db import transaction
 
@@ -12,6 +13,30 @@ from .models import VibeRaisingCompany, VibeRaisingProfile
 
 def normalize_company_domain(domain: str | None) -> str:
     return normalize_domain(domain or "") or ""
+
+
+def normalize_company_linkedin_url(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        raise ValueError("Enter a valid LinkedIn company URL.")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if path_parts and path_parts[0].lower() == "in":
+        raise ValueError("Enter a LinkedIn company URL, not a personal profile URL.")
+    if len(path_parts) < 2 or path_parts[0].lower() != "company":
+        raise ValueError("Enter a valid LinkedIn company URL.")
+
+    slug = path_parts[1].strip()
+    if not slug:
+        raise ValueError("Enter a valid LinkedIn company URL.")
+    return f"https://www.linkedin.com/company/{slug}"
 
 
 def founder_actor_id_for_user(user) -> str:
@@ -31,6 +56,17 @@ def string_list_from_value(value) -> list[str]:
 def _first_value(data, *keys, default=None):
     for key in keys:
         if key in data and data.get(key) not in (None, ""):
+            return data.get(key)
+    return default
+
+
+def _has_any_key(data, *keys) -> bool:
+    return any(key in data for key in keys)
+
+
+def _submitted_value(data, *keys, default=""):
+    for key in keys:
+        if key in data:
             return data.get(key)
     return default
 
@@ -75,13 +111,27 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if organization is None:
         return None
 
-    brand_name = str(_first_value(data, "brandName", "brand_name", default="") or "").strip()
-    company_context = str(_first_value(data, "companyContext", "company_context", default="") or "").strip()
-    competitors = string_list_from_value(_first_value(data, "competitors", default=[]))
-    seed_keywords = string_list_from_value(_first_value(data, "seedKeywords", "seed_keywords", default=[]))
-    founder_names = string_list_from_value(_first_value(data, "founderNames", "founder_names", default=[]))
-    stage = str(_first_value(data, "stage", default="") or "").strip()
-    notes = str(_first_value(data, "notes", default="") or "").strip()
+    brand_name_provided = _has_any_key(data, "brandName", "brand_name")
+    company_context_provided = _has_any_key(data, "companyContext", "company_context")
+    competitors_provided = "competitors" in data
+    seed_keywords_provided = _has_any_key(data, "seedKeywords", "seed_keywords")
+    founder_names_provided = _has_any_key(data, "founderNames", "founder_names")
+    stage_provided = "stage" in data
+    notes_provided = "notes" in data
+
+    brand_name = str(_submitted_value(data, "brandName", "brand_name", default="") or "").strip()
+    company_context = str(_submitted_value(data, "companyContext", "company_context", default="") or "").strip()
+    linkedin_url = ""
+    linkedin_url_provided = "companyLinkedInUrl" in data or "company_linkedin_url" in data
+    if linkedin_url_provided:
+        linkedin_url = normalize_company_linkedin_url(
+            _submitted_value(data, "companyLinkedInUrl", "company_linkedin_url", default="")
+        )
+    competitors = string_list_from_value(_submitted_value(data, "competitors", default=[]))
+    seed_keywords = string_list_from_value(_submitted_value(data, "seedKeywords", "seed_keywords", default=[]))
+    founder_names = string_list_from_value(_submitted_value(data, "founderNames", "founder_names", default=[]))
+    stage = str(_submitted_value(data, "stage", default="") or "").strip()
+    notes = str(_submitted_value(data, "notes", default="") or "").strip()
 
     organization_update_fields = []
     if brand_name and organization.name != brand_name:
@@ -90,12 +140,15 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     elif company.name and not organization.name:
         organization.name = company.name
         organization_update_fields.append("name")
-    if "competitors" in data and organization.competitors != competitors:
+    if competitors_provided and organization.competitors != competitors:
         organization.competitors = competitors
         organization_update_fields.append("competitors")
-    if ("seedKeywords" in data or "seed_keywords" in data) and organization.seed_keywords != seed_keywords:
+    if seed_keywords_provided and organization.seed_keywords != seed_keywords:
         organization.seed_keywords = seed_keywords
         organization_update_fields.append("seed_keywords")
+    if linkedin_url_provided and organization.company_linkedin_url != linkedin_url:
+        organization.company_linkedin_url = linkedin_url
+        organization_update_fields.append("company_linkedin_url")
     if organization_update_fields:
         organization.save(update_fields=organization_update_fields)
 
@@ -108,10 +161,10 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if config.connected_slack_user_id != actor_id:
         config.connected_slack_user_id = actor_id
         config_update_fields.append("connected_slack_user_id")
-    if brand_name and config.brand_name != brand_name:
+    if brand_name_provided and config.brand_name != brand_name:
         config.brand_name = brand_name
         config_update_fields.append("brand_name")
-    if company_context and config.company_context != company_context:
+    if company_context_provided and config.company_context != company_context:
         config.company_context = company_context
         config_update_fields.append("company_context")
 
@@ -143,19 +196,19 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
 
     _, startup_profile = resolve_or_create_profile(domain=organization.domain)
     startup_update_fields = []
-    if founder_names and startup_profile.founder_names != founder_names:
+    if founder_names_provided and startup_profile.founder_names != founder_names:
         startup_profile.founder_names = founder_names
         startup_update_fields.append("founder_names")
-    if competitors and startup_profile.competitor_domains != competitors:
+    if competitors_provided and startup_profile.competitor_domains != competitors:
         startup_profile.competitor_domains = competitors
         startup_update_fields.append("competitor_domains")
-    if seed_keywords and startup_profile.positive_keywords != seed_keywords:
+    if seed_keywords_provided and startup_profile.positive_keywords != seed_keywords:
         startup_profile.positive_keywords = seed_keywords
         startup_update_fields.append("positive_keywords")
-    if stage and startup_profile.stage != stage:
+    if stage_provided and startup_profile.stage != stage:
         startup_profile.stage = stage
         startup_update_fields.append("stage")
-    if notes and startup_profile.notes != notes:
+    if notes_provided and startup_profile.notes != notes:
         startup_profile.notes = notes
         startup_update_fields.append("notes")
     if company.name and company.name not in startup_profile.company_aliases:

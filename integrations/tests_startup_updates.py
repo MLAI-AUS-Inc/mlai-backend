@@ -14,6 +14,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from content_factory.models import OrganizationContentConfig
+from integrations import http_client
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -23,7 +24,12 @@ from workflow_runs.models import (
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
 )
-from integrations.models import GoogleConnection
+from integrations.models import (
+    ExternalServiceConnection,
+    ExternalServiceConnectionStatus,
+    ExternalServiceProvider,
+    GoogleConnection,
+)
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -33,6 +39,9 @@ from startup_updates.models import (
     GmailThreadArtifact,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
+    SlackChannelSelection,
+    SlackMessageArtifact,
+    SlackThreadArtifact,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -58,6 +67,20 @@ from startup_updates.services import (
 )
 
 User = get_user_model()
+
+
+class FakeSlackResponse:
+    def __init__(self, payload: dict, *, status_code: int = 200, headers: Optional[dict] = None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400 and self.status_code != 429:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
 
 
 class StartupUpdateApiTestCase(TestCase):
@@ -652,6 +675,342 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertEqual(response.data["reused_existing_count"], 1)
         self.assertEqual(response.data["message_ids"], [artifact.gmail_message_id])
         mock_get_message_metadata.assert_not_called()
+
+
+class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = StartupProfile.objects.create(
+            organization=self.organization,
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+        )
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=self.organization,
+            access_token="xoxp-token",
+            external_account_id="T123",
+            account_label="Acme Slack",
+        )
+        self.selection = SlackChannelSelection.objects.create(
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            channel_id="C123",
+            channel_name="wins",
+            selected=True,
+        )
+        self.run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            input_sources=["gmail", "slack"],
+        )
+
+    def _slack_message(self, ts: str, text: str, *, reply_count: int = 0, thread_ts: Optional[str] = None):
+        payload = {
+            "type": "message",
+            "ts": ts,
+            "user": "U123",
+            "text": text,
+            "user_profile": {"real_name": "Sam"},
+        }
+        if reply_count:
+            payload["reply_count"] = reply_count
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        return payload
+
+    def test_slack_backfill_processes_one_history_page_and_resumes(self):
+        first_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000100", "First win")],
+                "response_metadata": {"next_cursor": "cursor-2"},
+            }
+        )
+        second_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000001.000100", "Second win")],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key, SLACK_SYNC_REPLY_PAGE_BUDGET=0):
+            with patch("integrations.services.external_connectors.requests.get", side_effect=[first_page, second_page]) as mock_get:
+                first_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+                self.selection.refresh_from_db()
+                second_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data["has_more"])
+        self.assertEqual(self.selection.sync_cursor["history_cursor"], "cursor-2")
+        self.assertEqual(mock_get.call_args_list[0].kwargs["params"]["limit"], 100)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_response.data["has_more"])
+        self.selection.refresh_from_db()
+        self.assertTrue(self.selection.sync_cursor["run_backfill_complete"])
+        self.assertEqual(SlackMessageArtifact.objects.filter(organization=self.organization).count(), 2)
+        self.assertEqual(SlackThreadArtifact.objects.filter(organization=self.organization).count(), 2)
+
+    def test_slack_backfill_processes_reply_cursor_across_calls(self):
+        history_page = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000100", "Root", reply_count=2)],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+        first_replies = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [
+                    self._slack_message("1770000000.000100", "Root", thread_ts="1770000000.000100"),
+                    self._slack_message("1770000000.000200", "Reply 1", thread_ts="1770000000.000100"),
+                ],
+                "response_metadata": {"next_cursor": "reply-cursor-2"},
+            }
+        )
+        second_replies = FakeSlackResponse(
+            {
+                "ok": True,
+                "messages": [self._slack_message("1770000000.000300", "Reply 2", thread_ts="1770000000.000100")],
+                "response_metadata": {"next_cursor": ""},
+            }
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key, SLACK_SYNC_REPLY_PAGE_BUDGET=1):
+            with patch("integrations.services.external_connectors.requests.get", side_effect=[history_page, first_replies, second_replies]):
+                first_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+                self.selection.refresh_from_db()
+                second_response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data["has_more"])
+        self.assertEqual(
+            self.selection.sync_cursor["pending_replies"],
+            [{"thread_ts": "1770000000.000100", "cursor": "reply-cursor-2"}],
+        )
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(second_response.data["has_more"])
+        thread = SlackThreadArtifact.objects.get(organization=self.organization, thread_ts="1770000000.000100")
+        self.assertEqual(thread.source_message_count, 3)
+
+    def test_slack_backfill_timeout_returns_503_and_records_error(self):
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            with patch(
+                "integrations.services.external_connectors.requests.get",
+                side_effect=http_client.exceptions.Timeout("read timed out"),
+            ):
+                response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.ERROR)
+        self.assertIn("read timed out", self.connection.last_error)
+
+    def test_slack_backfill_rate_limit_returns_retry_after_without_error(self):
+        rate_limited = FakeSlackResponse(
+            {"ok": False, "error": "rate_limited"},
+            status_code=429,
+            headers={"Retry-After": "17"},
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            with patch("integrations.services.external_connectors.requests.get", return_value=rate_limited):
+                response = self.client.post(
+                    reverse("startup_updates_slack_backfill", args=[self.run.run_id]),
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["has_more"])
+        self.assertEqual(response.data["retry_after_seconds"], 17)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.SYNCING)
+        self.assertEqual(self.connection.last_error, "")
+
+    def test_slack_classification_batch_hard_filters_noise_and_returns_candidates(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        noisy_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000000.000100",
+            source_message_ids=["slack:C123:1770000000.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:00:00+00:00] Standup Bot: daily standup reminder",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000000.000100",
+                    "author_name": "Standup Bot",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "daily standup reminder",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        candidate_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000001.000100",
+            source_message_ids=["slack:C123:1770000001.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:01:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000001.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            response = self.client.get(
+                reverse("startup_updates_slack_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["slack_thread_id"], f"slack:C123:{candidate_thread.thread_ts}")
+        noisy_thread.refresh_from_db()
+        self.assertEqual(noisy_thread.relevance_label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertFalse(noisy_thread.needs_extraction)
+
+    def test_slack_classification_results_gate_extraction_batch(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        relevant_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000002.000100",
+            source_message_ids=["slack:C123:1770000002.000100", "slack:C123:1770000002.000200"],
+            source_message_count=2,
+            cleaned_text="\n".join(
+                [
+                    "[2026-03-15T12:00:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+                    "[2026-03-15T12:01:00+00:00] Alex: thanks",
+                ]
+            ),
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000002.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                },
+                {
+                    "message_id": "slack:C123:1770000002.000200",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                },
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000003.000100",
+            source_message_ids=["slack:C123:1770000003.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:03:00+00:00] Alex: thanks",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000003.000100",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+            relevance_label=GmailRelevanceLabel.IRRELEVANT,
+            classified_at=timezone.now(),
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            results_response = self.client.post(
+                reverse("startup_updates_slack_classification_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "slack_thread_id": f"slack:C123:{relevant_thread.thread_ts}",
+                            "relevance_label": GmailRelevanceLabel.RELEVANT,
+                            "relevance_score": 0.97,
+                            "relevance_reason": "Customer and MRR update.",
+                            "needs_extraction": True,
+                            "extraction_hints": {
+                                "important_message_ids": ["slack:C123:1770000002.000100"],
+                                "extraction_hint": "Extract pilot conversion.",
+                            },
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+            batch_response = self.client.get(
+                reverse("startup_updates_slack_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(results_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        bundle = batch_response.data["threads"][0]
+        self.assertEqual(bundle["slack_thread_id"], f"slack:C123:{relevant_thread.thread_ts}")
+        self.assertEqual(bundle["relevance_score"], 0.97)
+        self.assertIn("compression", bundle["participant_summary"])
 
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
@@ -1424,6 +1783,132 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             self.message.gmail_message_id,
             "att-lazy",
         )
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_records_failed_attachment_hydration_without_failing(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        attachment_payload = response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+        self.assertEqual(attachment_payload["parse_notes"], "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", attachment_payload["last_error"])
+
+        failed_attachment = GmailAttachmentArtifact.objects.get(
+            organization=self.organization,
+            message_artifact=self.message,
+            gmail_attachment_id="att-reset",
+        )
+        self.assertEqual(failed_attachment.raw_content_base64, "")
+        self.assertEqual(failed_attachment.extraction_status, ArtifactProcessingStatus.ERROR)
+        self.assertEqual(failed_attachment.parse_notes, "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", failed_attachment.last_error)
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.attachment_ids, [failed_attachment.id])
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_reuses_failed_attachment_without_refetching(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            first_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+            second_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_get_attachment_payload.call_count, 1)
+        attachment_payload = second_response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+
+    def test_extraction_batch_compacts_quoted_gmail_history(self):
+        self.thread.message_payloads = [
+            {
+                "message_id": "msg-123",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "ACME pilot converted",
+                "from_address": "ceo@acme.com",
+                "cleaned_text": (
+                    "We closed the pilot and now have $24000 ARR.\n\n"
+                    "On Monday, someone wrote:\n> old quoted reply\n> repeated old thread"
+                ),
+            },
+            {
+                "message_id": "msg-noise",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "FYI",
+                "from_address": "ops@acme.com",
+                "cleaned_text": "unsubscribe\nview in browser",
+            },
+        ]
+        self.thread.source_message_ids = ["msg-123", "msg-noise"]
+        self.thread.source_message_count = 2
+        self.thread.cleaned_text = "\n\n".join(item["cleaned_text"] for item in self.thread.message_payloads)
+        self.thread.save(
+            update_fields=[
+                "message_payloads",
+                "source_message_ids",
+                "source_message_count",
+                "cleaned_text",
+                "updated_at",
+            ]
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bundle = response.data["threads"][0]
+        self.assertIn("We closed the pilot", bundle["cleaned_text"])
+        self.assertNotIn("old quoted reply", bundle["cleaned_text"])
+        self.assertIn("compression", bundle["participant_summary"])
 
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):

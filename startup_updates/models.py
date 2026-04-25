@@ -366,6 +366,19 @@ class SlackThreadArtifact(models.Model):
     participant_summary = models.JSONField(default=dict, blank=True)
     message_payloads = models.JSONField(default=list, blank=True)
     latest_message_at = models.DateTimeField(null=True, blank=True)
+    heuristic_score = models.IntegerField(default=0)
+    heuristic_reasons = models.JSONField(default=list, blank=True)
+    relevance_label = models.CharField(
+        max_length=20,
+        choices=GmailRelevanceLabel.choices,
+        default=GmailRelevanceLabel.PENDING,
+        db_index=True,
+    )
+    relevance_score = models.FloatField(default=0.0)
+    relevance_reason = models.TextField(blank=True, default="")
+    needs_extraction = models.BooleanField(default=False)
+    extraction_hints = models.JSONField(default=dict, blank=True)
+    classified_at = models.DateTimeField(null=True, blank=True)
     extraction_status = models.CharField(
         max_length=20,
         choices=ArtifactProcessingStatus.choices,
@@ -388,11 +401,245 @@ class SlackThreadArtifact(models.Model):
         indexes = [
             models.Index(fields=["organization", "extraction_status"], name="slack_thread_org_extract_idx"),
             models.Index(fields=["organization", "latest_message_at"], name="slack_thread_org_latest_idx"),
+            models.Index(fields=["organization", "relevance_label", "latest_message_at"], name="slack_thr_org_rel_latest_idx"),
         ]
         ordering = ["-latest_message_at", "-id"]
 
     def __str__(self):
         return f"{self.organization.domain}:{self.channel_id}:{self.thread_ts}"
+
+
+class LinearProjectSelection(models.Model):
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="linear_project_selections",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="linear_project_selections",
+    )
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="linear_project_selections",
+        null=True,
+        blank=True,
+    )
+    linear_project_id = models.CharField(max_length=100)
+    project_name = models.CharField(max_length=255, blank=True, default="")
+    project_status = models.CharField(max_length=100, blank=True, default="")
+    project_health = models.CharField(max_length=100, blank=True, default="")
+    selected = models.BooleanField(default=False, db_index=True)
+    sync_cursor = models.JSONField(default=dict, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_linearprojectselection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "linear_project_id"],
+                name="linear_project_sel_conn_project_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "selected"], name="linear_sel_user_selected_idx"),
+            models.Index(fields=["organization", "selected"], name="linear_sel_org_selected_idx"),
+        ]
+        ordering = ["project_name", "linear_project_id"]
+
+    def __str__(self):
+        return f"{self.connection_id}:{self.project_name or self.linear_project_id}"
+
+
+class LinearProjectArtifact(models.Model):
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="linear_project_artifacts",
+    )
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="linear_project_artifacts",
+    )
+    linear_project_id = models.CharField(max_length=100)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    status_name = models.CharField(max_length=100, blank=True, default="")
+    status_type = models.CharField(max_length=100, blank=True, default="")
+    health = models.CharField(max_length=100, blank=True, default="")
+    progress = models.FloatField(null=True, blank=True)
+    scope = models.FloatField(null=True, blank=True)
+    priority = models.IntegerField(default=0)
+    lead_name = models.CharField(max_length=255, blank=True, default="")
+    lead_email = models.CharField(max_length=255, blank=True, default="")
+    team_names = models.JSONField(default=list, blank=True)
+    start_date = models.DateField(null=True, blank=True)
+    target_date = models.DateField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    canceled_at = models.DateTimeField(null=True, blank=True)
+    url = models.URLField(max_length=1024, blank=True, default="")
+    source_record_ids = models.JSONField(default=list, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    heuristic_score = models.IntegerField(default=0)
+    heuristic_reasons = models.JSONField(default=list, blank=True)
+    relevance_label = models.CharField(
+        max_length=20,
+        choices=GmailRelevanceLabel.choices,
+        default=GmailRelevanceLabel.PENDING,
+        db_index=True,
+    )
+    relevance_score = models.FloatField(default=0.0)
+    relevance_reason = models.TextField(blank=True, default="")
+    needs_extraction = models.BooleanField(default=False)
+    extraction_hints = models.JSONField(default=dict, blank=True)
+    classified_at = models.DateTimeField(null=True, blank=True)
+    extraction_status = models.CharField(
+        max_length=20,
+        choices=ArtifactProcessingStatus.choices,
+        default=ArtifactProcessingStatus.PENDING,
+        db_index=True,
+    )
+    extracted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_linearprojectartifact"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "connection", "linear_project_id"],
+                name="linear_project_org_conn_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "extraction_status"], name="linear_proj_org_extract_idx"),
+            models.Index(fields=["organization", "status_type", "health"], name="linear_proj_org_state_idx"),
+            models.Index(fields=["organization", "relevance_label", "updated_at"], name="linear_proj_org_rel_upd_idx"),
+        ]
+        ordering = ["name", "linear_project_id"]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.name or self.linear_project_id}"
+
+
+class LinearIssueArtifact(models.Model):
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="linear_issue_artifacts",
+    )
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="linear_issue_artifacts",
+    )
+    project = models.ForeignKey(
+        LinearProjectArtifact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="issues",
+    )
+    linear_issue_id = models.CharField(max_length=100)
+    identifier = models.CharField(max_length=100, blank=True, default="")
+    title = models.TextField(blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    state_name = models.CharField(max_length=100, blank=True, default="")
+    state_type = models.CharField(max_length=100, blank=True, default="")
+    priority = models.FloatField(null=True, blank=True)
+    priority_label = models.CharField(max_length=100, blank=True, default="")
+    assignee_name = models.CharField(max_length=255, blank=True, default="")
+    assignee_email = models.CharField(max_length=255, blank=True, default="")
+    team_key = models.CharField(max_length=50, blank=True, default="")
+    team_name = models.CharField(max_length=255, blank=True, default="")
+    label_names = models.JSONField(default=list, blank=True)
+    estimate = models.FloatField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    created_at_linear = models.DateTimeField(null=True, blank=True)
+    updated_at_linear = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    canceled_at = models.DateTimeField(null=True, blank=True)
+    url = models.URLField(max_length=1024, blank=True, default="")
+    source_record_id = models.CharField(max_length=255, blank=True, default="")
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_linearissueartifact"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "connection", "linear_issue_id"],
+                name="linear_issue_org_conn_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "updated_at_linear"], name="linear_issue_org_updated_idx"),
+            models.Index(fields=["project", "updated_at_linear"], name="linear_issue_proj_updated_idx"),
+            models.Index(fields=["organization", "state_type"], name="linear_issue_org_state_idx"),
+        ]
+        ordering = ["-updated_at_linear", "-id"]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.identifier or self.linear_issue_id}"
+
+
+class LinearProjectUpdateArtifact(models.Model):
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="linear_project_update_artifacts",
+    )
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="linear_project_update_artifacts",
+    )
+    project = models.ForeignKey(
+        LinearProjectArtifact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="project_updates",
+    )
+    linear_project_update_id = models.CharField(max_length=100)
+    body = models.TextField(blank=True, default="")
+    health = models.CharField(max_length=100, blank=True, default="")
+    author_name = models.CharField(max_length=255, blank=True, default="")
+    author_email = models.CharField(max_length=255, blank=True, default="")
+    url = models.URLField(max_length=1024, blank=True, default="")
+    created_at_linear = models.DateTimeField(null=True, blank=True)
+    updated_at_linear = models.DateTimeField(null=True, blank=True)
+    source_record_id = models.CharField(max_length=255, blank=True, default="")
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_linearprojectupdateartifact"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "connection", "linear_project_update_id"],
+                name="linear_update_org_conn_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "updated_at_linear"], name="linear_update_org_updated_idx"),
+            models.Index(fields=["project", "updated_at_linear"], name="linear_update_proj_updated_idx"),
+        ]
+        ordering = ["-updated_at_linear", "-id"]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.linear_project_update_id}"
 
 
 class GmailAttachmentArtifact(models.Model):
@@ -431,6 +678,7 @@ class GmailAttachmentArtifact(models.Model):
     metadata = models.JSONField(default=dict, blank=True)
     sha256 = models.CharField(max_length=64, blank=True, default="")
     parse_notes = models.TextField(blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
     hydrated_at = models.DateTimeField(null=True, blank=True)
     extracted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

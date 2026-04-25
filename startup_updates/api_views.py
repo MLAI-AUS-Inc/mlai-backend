@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional, Tuple
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
 from django.urls import reverse
@@ -11,6 +12,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from integrations import http_client as requests
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
 from core.permissions import HasRooApiKey
@@ -18,6 +20,9 @@ from startup_updates.serializers import (
     ClassificationResultsSerializer,
     DraftResultsSerializer,
     ExtractionResultsSerializer,
+    LinearClassificationResultsSerializer,
+    LinearExtractionResultsSerializer,
+    SlackClassificationResultsSerializer,
     SlackExtractionResultsSerializer,
     StartupProfileUpsertSerializer,
     StartupUpdateBatchQuerySerializer,
@@ -25,7 +30,7 @@ from startup_updates.serializers import (
     StartupUpdateRunCreateSerializer,
     StartupUpdateThreadHydrationSerializer,
 )
-from integrations.models import GoogleConnection
+from integrations.models import ExternalServiceProvider, GoogleConnection
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -33,6 +38,8 @@ from startup_updates.models import (
     GmailRelevanceLabel,
     GmailSyncCursor,
     GmailThreadArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
     SlackChannelSelection,
     SlackThreadArtifact,
     MonthlyUpdateDraft,
@@ -41,7 +48,10 @@ from startup_updates.models import (
 )
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
-    sync_slack_connection,
+    ConnectorOAuthError,
+    ConnectorRateLimitError,
+    sync_linear_connection_page,
+    sync_slack_connection_page,
 )
 from integrations.services.gmail import (
     default_backfill_window,
@@ -55,6 +65,7 @@ from integrations.services.gmail import (
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
     OPEN_RUN_STATUSES,
+    RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
     build_cancel_backup_for_draft,
@@ -62,6 +73,10 @@ from startup_updates.services import (
     build_cancel_backup_for_metric,
     build_timeline_payload,
     cancel_startup_update_run,
+    apply_slack_profile_scoring,
+    compact_gmail_thread_bundle,
+    compact_linear_project_bundle,
+    compact_slack_thread_bundle,
     create_startup_update_run,
     DEFAULT_MAX_SOURCE_THREADS,
     get_default_binding_for_domain,
@@ -88,12 +103,26 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "thread_hydration": "Pulling full thread context",
     "event_extraction": "Extracting metrics and highlights",
     "slack_backfill": "Scanning selected Slack channels",
+    "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
+    "linear_backfill": "Scanning selected Linear projects",
+    "linear_relevance_classification": "Filtering Linear project context",
+    "linear_event_extraction": "Extracting Linear project highlights",
     "timeline_merge": "Building timeline",
     "draft_generation": "Drafting monthly updates",
     "groundedness_review": "Final review",
 }
 VALLEY_META_KEY = "_valley_meta"
+TRANSIENT_SQLITE_LOCK_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "database schema is locked",
+)
+
+
+def _is_transient_sqlite_lock(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSIENT_SQLITE_LOCK_MARKERS)
 
 
 def _serialize_profile(profile) -> dict:
@@ -179,6 +208,7 @@ def _serialize_attachment(attachment) -> dict:
         "extracted_text": attachment.extracted_text,
         "extraction_status": attachment.extraction_status,
         "parse_notes": attachment.parse_notes,
+        "last_error": attachment.last_error,
         "metadata": attachment.metadata or {},
     }
 
@@ -1304,15 +1334,11 @@ class StartupUpdateExtractionBatchView(APIView):
                 thread_artifact=thread_artifact,
             )
             bundles.append(
-                {
-                    "gmail_thread_id": thread_artifact.gmail_thread_id,
-                    "source_message_ids": thread_artifact.source_message_ids or [],
-                    "source_message_count": thread_artifact.source_message_count,
-                    "cleaned_text": thread_artifact.cleaned_text,
-                    "participant_summary": thread_artifact.participant_summary or {},
-                    "message_payloads": thread_artifact.message_payloads or [],
-                    "attachments": [_serialize_attachment(attachment) for attachment in attachments],
-                }
+                compact_gmail_thread_bundle(
+                    thread_artifact,
+                    profile=profile,
+                    attachments=[_serialize_attachment(attachment) for attachment in attachments],
+                )
             )
 
         return Response(
@@ -1520,9 +1546,37 @@ class StartupUpdateSlackBackfillView(APIView):
                 )
             ]
         try:
-            sync_result = sync_slack_connection(connection, channel_ids=channel_ids)
+            sync_result = sync_slack_connection_page(
+                connection,
+                run_id=run.run_id,
+                channel_ids=channel_ids,
+            )
+        except ConnectorRateLimitError as exc:
+            sync_result = {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": "slack",
+                "status": "rate_limited",
+                "messagesSynced": 0,
+                "messages_synced": 0,
+                "threadsTouched": 0,
+                "threads_touched": 0,
+                "channels": [],
+                "has_more": True,
+                "retry_after_seconds": exc.retry_after_seconds,
+            }
         except ConnectorConfigurationError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except requests.RequestException as exc:
+            return Response(
+                {
+                    "error": "Slack backfill timed out or failed while contacting Slack.",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         run_request = dict(run.run_request or {})
         run_request["slack_channel_ids"] = channel_ids
@@ -1539,7 +1593,190 @@ class StartupUpdateSlackBackfillView(APIView):
             {
                 "run": _serialize_run(run, request),
                 **sync_result,
-                "has_more": False,
+                "has_more": bool(sync_result.get("has_more")),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _slack_thread_from_public_id(slack_thread_id: str) -> Optional[Tuple[str, str]]:
+    parts = str(slack_thread_id or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != "slack":
+        return None
+    return parts[1], parts[2]
+
+
+def _update_slack_filtering_summary(
+    *,
+    run: ContentFactoryRun,
+    organization: Organization,
+    channel_ids: list[str],
+    batch_context: Optional[dict] = None,
+) -> None:
+    queryset = SlackThreadArtifact.objects.filter(organization=organization)
+    if channel_ids:
+        queryset = queryset.filter(channel_id__in=channel_ids)
+    queryset = _apply_run_window(queryset, run, "latest_message_at")
+    summary = {
+        "threads_scanned": queryset.count(),
+        "classified": queryset.exclude(classified_at__isnull=True).count(),
+        "relevant": queryset.filter(relevance_label=GmailRelevanceLabel.RELEVANT).count(),
+        "ambiguous": queryset.filter(relevance_label=GmailRelevanceLabel.AMBIGUOUS).count(),
+        "irrelevant": queryset.filter(relevance_label=GmailRelevanceLabel.IRRELEVANT).count(),
+        "needs_extraction": queryset.filter(needs_extraction=True).count(),
+        "extracted": queryset.filter(extraction_status=ArtifactProcessingStatus.PROCESSED).count(),
+    }
+    if batch_context:
+        summary["last_batch"] = batch_context
+
+    run_request = dict(run.run_request or {})
+    external_context = dict(run_request.get("external_context") or {})
+    slack_context = dict(external_context.get("slack") or {})
+    slack_context["filtering_summary"] = summary
+    external_context["slack"] = slack_context
+    run_request["external_context"] = external_context
+    run.run_request = run_request
+    run.save(update_fields=["run_request", "updated_at"])
+
+
+class StartupUpdateSlackClassificationBatchView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        limit = serializer.validated_data["limit"]
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="slack_relevance_classification")
+
+        channel_ids = _run_slack_channel_ids(run)
+        queryset = SlackThreadArtifact.objects.filter(
+            organization=organization,
+            extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
+            relevance_label__in=[GmailRelevanceLabel.PENDING, GmailRelevanceLabel.AMBIGUOUS],
+            classified_at__isnull=True,
+        )
+        if channel_ids:
+            queryset = queryset.filter(channel_id__in=channel_ids)
+        queryset = _apply_run_window(
+            queryset.order_by("-heuristic_score", "-latest_message_at", "-updated_at"),
+            run,
+            "latest_message_at",
+        )
+
+        bundles = []
+        hard_filtered_count = 0
+        for thread in queryset.iterator(chunk_size=200):
+            _score, _reasons, _label, hard_filtered = apply_slack_profile_scoring(profile, thread)
+            if hard_filtered:
+                hard_filtered_count += 1
+                continue
+            bundles.append(compact_slack_thread_bundle(thread))
+            if len(bundles) >= limit:
+                break
+
+        _update_slack_filtering_summary(
+            run=run,
+            organization=organization,
+            channel_ids=channel_ids,
+            batch_context={
+                "stage": "classification_batch",
+                "returned": len(bundles),
+                "hard_filtered": hard_filtered_count,
+            },
+        )
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "count": len(bundles),
+                "threads": bundles,
+                "hard_filtered_count": hard_filtered_count,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateSlackClassificationResultsView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        serializer = SlackClassificationResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="slack_relevance_classification")
+
+        updated = 0
+        for item in serializer.validated_data["results"]:
+            parsed = _slack_thread_from_public_id(item["slack_thread_id"])
+            if parsed is None:
+                return Response(
+                    {"error": f"Invalid Slack thread id: {item['slack_thread_id']}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            channel_id, thread_ts = parsed
+            thread = get_object_or_404(
+                SlackThreadArtifact,
+                organization=organization,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+            label = item["relevance_label"]
+            thread.relevance_label = label
+            thread.relevance_score = item.get("relevance_score", 0.0)
+            thread.relevance_reason = item.get("relevance_reason", "")
+            requested_extraction = item.get("needs_extraction")
+            if requested_extraction is None:
+                requested_extraction = label in {
+                    GmailRelevanceLabel.RELEVANT,
+                    GmailRelevanceLabel.AMBIGUOUS,
+                }
+            thread.needs_extraction = bool(requested_extraction) and label in {
+                GmailRelevanceLabel.RELEVANT,
+                GmailRelevanceLabel.AMBIGUOUS,
+            }
+            thread.extraction_hints = item.get("extraction_hints") or {}
+            thread.classified_at = timezone.now()
+            if label == GmailRelevanceLabel.IRRELEVANT:
+                thread.needs_extraction = False
+                thread.extraction_status = ArtifactProcessingStatus.UNSUPPORTED
+            elif thread.extraction_status == ArtifactProcessingStatus.UNSUPPORTED:
+                thread.extraction_status = ArtifactProcessingStatus.HYDRATED
+            thread.save(
+                update_fields=[
+                    "relevance_label",
+                    "relevance_score",
+                    "relevance_reason",
+                    "needs_extraction",
+                    "extraction_hints",
+                    "classified_at",
+                    "extraction_status",
+                    "updated_at",
+                ]
+            )
+            updated += 1
+
+        _update_slack_filtering_summary(
+            run=run,
+            organization=organization,
+            channel_ids=_run_slack_channel_ids(run),
+            batch_context={"stage": "classification_results", "updated": updated},
+        )
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "updated_count": updated,
             },
             status=status.HTTP_200_OK,
         )
@@ -1565,25 +1802,24 @@ class StartupUpdateSlackExtractionBatchView(APIView):
         queryset = SlackThreadArtifact.objects.filter(
             organization=organization,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
+            relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
+            needs_extraction=True,
         )
         if channel_ids:
             queryset = queryset.filter(channel_id__in=channel_ids)
-        queryset = _apply_run_window(queryset.order_by("-latest_message_at", "-updated_at"), run, "latest_message_at")[:limit]
+        queryset = _apply_run_window(
+            queryset.order_by("-relevance_score", "-heuristic_score", "-latest_message_at", "-updated_at"),
+            run,
+            "latest_message_at",
+        )[:limit]
 
-        bundles = [
-            {
-                "slack_thread_id": _slack_thread_public_id(thread),
-                "channel_id": thread.channel_id,
-                "channel_name": thread.channel_name,
-                "thread_ts": thread.thread_ts,
-                "source_message_ids": thread.source_message_ids or [],
-                "source_message_count": thread.source_message_count,
-                "cleaned_text": thread.cleaned_text,
-                "participant_summary": thread.participant_summary or {},
-                "message_payloads": thread.message_payloads or [],
-            }
-            for thread in queryset
-        ]
+        bundles = [compact_slack_thread_bundle(thread) for thread in queryset]
+        _update_slack_filtering_summary(
+            run=run,
+            organization=organization,
+            channel_ids=channel_ids,
+            batch_context={"stage": "extraction_batch", "returned": len(bundles)},
+        )
         return Response(
             {
                 "run": _serialize_run(run, request),
@@ -1721,6 +1957,441 @@ class StartupUpdateSlackExtractionResultsView(APIView):
         )
 
 
+def _linear_project_public_id(project: LinearProjectArtifact) -> str:
+    return f"linear:project:{project.linear_project_id}"
+
+
+def _linear_project_from_public_id(linear_project_id: str) -> str:
+    raw = str(linear_project_id or "").strip()
+    prefix = "linear:project:"
+    if raw.startswith(prefix):
+        return raw[len(prefix):]
+    return raw
+
+
+def _run_linear_project_ids(run: ContentFactoryRun) -> list[str]:
+    raw_project_ids = (run.run_request or {}).get("linear_project_ids") or []
+    if not isinstance(raw_project_ids, (list, tuple)):
+        return []
+    return [str(item or "").strip() for item in raw_project_ids if str(item or "").strip()]
+
+
+def _update_linear_filtering_summary(
+    *,
+    run: ContentFactoryRun,
+    organization: Organization,
+    project_ids: list[str],
+    batch_context: Optional[dict] = None,
+) -> None:
+    queryset = LinearProjectArtifact.objects.filter(organization=organization)
+    if project_ids:
+        queryset = queryset.filter(linear_project_id__in=project_ids)
+    summary = {
+        "projects_scanned": queryset.count(),
+        "classified": queryset.exclude(classified_at__isnull=True).count(),
+        "relevant": queryset.filter(relevance_label=GmailRelevanceLabel.RELEVANT).count(),
+        "ambiguous": queryset.filter(relevance_label=GmailRelevanceLabel.AMBIGUOUS).count(),
+        "irrelevant": queryset.filter(relevance_label=GmailRelevanceLabel.IRRELEVANT).count(),
+        "needs_extraction": queryset.filter(needs_extraction=True).count(),
+        "extracted": queryset.filter(extraction_status=ArtifactProcessingStatus.PROCESSED).count(),
+    }
+    if batch_context:
+        summary["last_batch"] = batch_context
+
+    run_request = dict(run.run_request or {})
+    external_context = dict(run_request.get("external_context") or {})
+    linear_context = dict(external_context.get("linear") or {})
+    linear_context["filtering_summary"] = summary
+    external_context["linear"] = linear_context
+    run_request["external_context"] = external_context
+    run.run_request = run_request
+    run.save(update_fields=["run_request", "updated_at"])
+
+
+class StartupUpdateLinearBackfillView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="linear_backfill")
+
+        project_ids = _run_linear_project_ids(run)
+        connection = (
+            binding.user.external_service_connections.filter(
+                provider=ExternalServiceProvider.LINEAR,
+                organization=organization,
+            )
+            .exclude(status="disconnected")
+            .order_by("-updated_at", "-id")
+            .first()
+        )
+        if connection is None:
+            connection = (
+                binding.user.external_service_connections.filter(provider=ExternalServiceProvider.LINEAR)
+                .exclude(status="disconnected")
+                .order_by("-updated_at", "-id")
+                .first()
+            )
+        if connection is None:
+            return Response({"error": "Linear is not connected."}, status=status.HTTP_400_BAD_REQUEST)
+        if connection.organization_id != organization.id:
+            connection.organization = organization
+            connection.save(update_fields=["organization", "updated_at"])
+
+        if not project_ids:
+            project_ids = [
+                selection.linear_project_id
+                for selection in LinearProjectSelection.objects.filter(
+                    connection=connection,
+                    selected=True,
+                )
+            ]
+        try:
+            sync_result = sync_linear_connection_page(
+                connection,
+                run_id=run.run_id,
+                project_ids=project_ids,
+            )
+        except ConnectorRateLimitError as exc:
+            sync_result = {
+                "connectionId": connection.id,
+                "connection_id": connection.id,
+                "provider": "linear",
+                "status": "rate_limited",
+                "projectsSynced": 0,
+                "projects_synced": 0,
+                "issuesSynced": 0,
+                "issues_synced": 0,
+                "updatesSynced": 0,
+                "updates_synced": 0,
+                "projects": [],
+                "has_more": True,
+                "retry_after_seconds": exc.retry_after_seconds,
+            }
+        except ConnectorConfigurationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ConnectorOAuthError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except requests.RequestException as exc:
+            return Response(
+                {
+                    "error": "Linear backfill timed out or failed while contacting Linear.",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        run_request = dict(run.run_request or {})
+        run_request["linear_project_ids"] = project_ids
+        external_context = dict(run_request.get("external_context") or {})
+        linear_context = dict(external_context.get("linear") or {})
+        linear_context["selected_project_ids"] = project_ids
+        linear_context["last_sync"] = sync_result
+        external_context["linear"] = linear_context
+        run_request["external_context"] = external_context
+        run.run_request = run_request
+        run.save(update_fields=["run_request", "updated_at"])
+
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                **sync_result,
+                "has_more": bool(sync_result.get("has_more")),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateLinearClassificationBatchView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        limit = serializer.validated_data["limit"]
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="linear_relevance_classification")
+
+        project_ids = _run_linear_project_ids(run)
+        queryset = LinearProjectArtifact.objects.filter(
+            organization=organization,
+            extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
+            relevance_label__in=[GmailRelevanceLabel.PENDING, GmailRelevanceLabel.AMBIGUOUS],
+            classified_at__isnull=True,
+        )
+        if project_ids:
+            queryset = queryset.filter(linear_project_id__in=project_ids)
+        queryset = queryset.order_by("-updated_at", "name")
+
+        bundles = [compact_linear_project_bundle(project) for project in queryset[:limit]]
+        _update_linear_filtering_summary(
+            run=run,
+            organization=organization,
+            project_ids=project_ids,
+            batch_context={"stage": "classification_batch", "returned": len(bundles)},
+        )
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "count": len(bundles),
+                "projects": bundles,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateLinearClassificationResultsView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        serializer = LinearClassificationResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="linear_relevance_classification")
+
+        updated = 0
+        for item in serializer.validated_data["results"]:
+            project_id = _linear_project_from_public_id(item["linear_project_id"])
+            project = get_object_or_404(
+                LinearProjectArtifact,
+                organization=organization,
+                linear_project_id=project_id,
+            )
+            label = item["relevance_label"]
+            project.relevance_label = label
+            project.relevance_score = item.get("relevance_score", 0.0)
+            project.relevance_reason = item.get("relevance_reason", "")
+            requested_extraction = item.get("needs_extraction")
+            if requested_extraction is None:
+                requested_extraction = label in {
+                    GmailRelevanceLabel.RELEVANT,
+                    GmailRelevanceLabel.AMBIGUOUS,
+                }
+            project.needs_extraction = bool(requested_extraction) and label in {
+                GmailRelevanceLabel.RELEVANT,
+                GmailRelevanceLabel.AMBIGUOUS,
+            }
+            project.extraction_hints = item.get("extraction_hints") or {}
+            project.classified_at = timezone.now()
+            if label == GmailRelevanceLabel.IRRELEVANT:
+                project.needs_extraction = False
+                project.extraction_status = ArtifactProcessingStatus.UNSUPPORTED
+            elif project.extraction_status == ArtifactProcessingStatus.UNSUPPORTED:
+                project.extraction_status = ArtifactProcessingStatus.HYDRATED
+            project.save(
+                update_fields=[
+                    "relevance_label",
+                    "relevance_score",
+                    "relevance_reason",
+                    "needs_extraction",
+                    "extraction_hints",
+                    "classified_at",
+                    "extraction_status",
+                    "updated_at",
+                ]
+            )
+            updated += 1
+
+        _update_linear_filtering_summary(
+            run=run,
+            organization=organization,
+            project_ids=_run_linear_project_ids(run),
+            batch_context={"stage": "classification_results", "updated": updated},
+        )
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "updated_count": updated,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateLinearExtractionBatchView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        limit = serializer.validated_data["limit"]
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="linear_event_extraction")
+
+        project_ids = _run_linear_project_ids(run)
+        queryset = LinearProjectArtifact.objects.filter(
+            organization=organization,
+            extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
+            relevance_label__in=[GmailRelevanceLabel.RELEVANT, GmailRelevanceLabel.AMBIGUOUS],
+            needs_extraction=True,
+        )
+        if project_ids:
+            queryset = queryset.filter(linear_project_id__in=project_ids)
+        queryset = queryset.order_by("-relevance_score", "-updated_at", "name")[:limit]
+
+        bundles = [compact_linear_project_bundle(project) for project in queryset]
+        _update_linear_filtering_summary(
+            run=run,
+            organization=organization,
+            project_ids=project_ids,
+            batch_context={"stage": "extraction_batch", "returned": len(bundles)},
+        )
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "count": len(bundles),
+                "projects": bundles,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateLinearExtractionResultsView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        serializer = LinearExtractionResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="linear_event_extraction")
+
+        backups = get_startup_update_run_cancel_backups(run)
+        backups_changed = False
+        event_count = 0
+        metric_count = 0
+        for item in serializer.validated_data["results"]:
+            project_id = _linear_project_from_public_id(item["linear_project_id"])
+            project_artifact = get_object_or_404(
+                LinearProjectArtifact,
+                organization=organization,
+                linear_project_id=project_id,
+            )
+            project_public_id = _linear_project_public_id(project_artifact)
+            project_artifact.extraction_status = item.get(
+                "extraction_status",
+                ArtifactProcessingStatus.PROCESSED,
+            )
+            project_artifact.extracted_at = timezone.now()
+            project_artifact.last_error = ""
+            project_artifact.save(update_fields=["extraction_status", "extracted_at", "last_error", "updated_at"])
+
+            source_record_ids = list(project_artifact.source_record_ids or []) or [project_public_id]
+            source_metadata = {
+                "source": "linear_project_extraction",
+                "linear_project_id": project_public_id,
+                "project_id": project_artifact.linear_project_id,
+                "project_name": project_artifact.name,
+            }
+
+            for event_data in item.get("events", []):
+                existing_event = StartupEvent.objects.filter(
+                    organization=organization,
+                    canonical_key=event_data["canonical_key"],
+                ).first()
+                if existing_event is not None:
+                    backups_changed = _backup_event_if_needed(run, existing_event, backups) or backups_changed
+                evidence_ids = event_data.get("evidence_message_ids", []) or source_record_ids
+                StartupEvent.objects.update_or_create(
+                    organization=organization,
+                    canonical_key=event_data["canonical_key"],
+                    defaults={
+                        "run": run,
+                        "event_type": event_data["event_type"],
+                        "title": event_data["title"],
+                        "summary": event_data.get("summary", ""),
+                        "event_date": event_data.get("event_date"),
+                        "month_bucket": event_data["month_bucket"],
+                        "date_precision": event_data.get("date_precision"),
+                        "sentiment": event_data.get("sentiment", ""),
+                        "investor_importance": event_data.get("investor_importance", 3),
+                        "quantitative_facts": event_data.get("quantitative_facts", []),
+                        "evidence_message_ids": evidence_ids,
+                        "evidence_attachment_ids": event_data.get("evidence_attachment_ids", []),
+                        "source_thread_ids": event_data.get("source_thread_ids", []) or [project_public_id],
+                        "confidence": event_data.get("confidence", 0.0),
+                        "status": event_data.get("status", "open"),
+                        "needs_review": bool(event_data.get("needs_review", False)),
+                        "merge_notes": event_data.get("merge_notes", ""),
+                    },
+                )
+                event_count += 1
+
+            for metric_data in item.get("metrics", []):
+                existing_metric = StartupMetricObservation.objects.filter(
+                    organization=organization,
+                    source_provider=ExternalServiceProvider.LINEAR,
+                    metric_key=metric_data["metric_key"],
+                    period_month=metric_data["period_month"],
+                    value_text=metric_data["value_text"],
+                ).first()
+                if existing_metric is not None:
+                    backups_changed = _backup_metric_if_needed(run, existing_metric, backups) or backups_changed
+                evidence_ids = metric_data.get("evidence_message_ids", []) or source_record_ids
+                StartupMetricObservation.objects.update_or_create(
+                    organization=organization,
+                    source_thread=None,
+                    source_provider=ExternalServiceProvider.LINEAR,
+                    metric_key=metric_data["metric_key"],
+                    period_month=metric_data["period_month"],
+                    value_text=metric_data["value_text"],
+                    defaults={
+                        "run": run,
+                        "metric_name": metric_data["metric_name"],
+                        "value_number": metric_data.get("value_number"),
+                        "unit": metric_data.get("unit", ""),
+                        "observed_at": metric_data.get("observed_at"),
+                        "confidence": metric_data.get("confidence", 0.0),
+                        "evidence_message_ids": evidence_ids,
+                        "evidence_attachment_ids": metric_data.get("evidence_attachment_ids", []),
+                        "source_record_ids": source_record_ids,
+                        "source_metadata": source_metadata,
+                        "summary": metric_data.get("summary", ""),
+                    },
+                )
+                metric_count += 1
+
+        if backups_changed:
+            set_startup_update_run_cancel_backups(run, backups)
+            run.save(update_fields=["result", "updated_at"])
+
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "event_count": event_count,
+                "metric_count": metric_count,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class StartupUpdateTimelineView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -1777,31 +2448,45 @@ class StartupUpdateDraftResultsView(APIView):
         backups = get_startup_update_run_cancel_backups(run)
         backups_changed = False
         saved = []
-        for item in serializer.validated_data["drafts"]:
-            existing_draft = MonthlyUpdateDraft.objects.filter(
-                organization=organization,
-                month=item["month"],
-            ).first()
-            if existing_draft is not None:
-                backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
-            draft = upsert_monthly_update_draft(
-                organization=organization,
-                month=item["month"],
-                run=run,
-                structured_memo=item["structured_memo"],
-                model_name=item.get("model_name", ""),
-                status=item.get("status"),
-                groundedness_status=item.get("groundedness_status"),
-                evidence_event_ids=item.get("evidence_event_ids", []),
-                evidence_metric_ids=item.get("evidence_metric_ids", []),
-                carry_forward_event_ids=item.get("carry_forward_event_ids", []),
-                groundedness_notes=item.get("groundedness_notes", ""),
-            )
-            saved.append(_serialize_draft(draft))
+        try:
+            for item in serializer.validated_data["drafts"]:
+                existing_draft = MonthlyUpdateDraft.objects.filter(
+                    organization=organization,
+                    month=item["month"],
+                ).first()
+                if existing_draft is not None:
+                    backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
+                draft = upsert_monthly_update_draft(
+                    organization=organization,
+                    month=item["month"],
+                    run=run,
+                    structured_memo=item["structured_memo"],
+                    model_name=item.get("model_name", ""),
+                    status=item.get("status"),
+                    groundedness_status=item.get("groundedness_status"),
+                    evidence_event_ids=item.get("evidence_event_ids", []),
+                    evidence_metric_ids=item.get("evidence_metric_ids", []),
+                    carry_forward_event_ids=item.get("carry_forward_event_ids", []),
+                    groundedness_notes=item.get("groundedness_notes", ""),
+                )
+                saved.append(_serialize_draft(draft))
 
-        if backups_changed:
-            set_startup_update_run_cancel_backups(run, backups)
-            run.save(update_fields=["result", "updated_at"])
+            if backups_changed:
+                set_startup_update_run_cancel_backups(run, backups)
+                run.save(update_fields=["result", "updated_at"])
+        except OperationalError as exc:
+            if not _is_transient_sqlite_lock(exc):
+                raise
+            return Response(
+                {
+                    "error": "transient_database_lock",
+                    "detail": "Draft results could not be saved because the database is temporarily locked.",
+                    "retryable": True,
+                    "retry_after_seconds": settings.SQLITE_LOCK_RETRY_AFTER_SECONDS,
+                    "run_id": run.run_id,
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response(
             {

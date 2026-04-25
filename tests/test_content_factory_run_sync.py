@@ -1,12 +1,17 @@
 import os
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.db import OperationalError
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from organizations.models import Organization
+from startup_updates.models import UserStartupBinding
 from workflow_runs.models import ContentFactoryRun
+
+User = get_user_model()
 
 
 class ContentFactoryRunSyncTests(TestCase):
@@ -21,6 +26,7 @@ class ContentFactoryRunSyncTests(TestCase):
         settings.ROO_API_KEY = self.api_key
         settings.INTERNAL_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
+        self.user = User.objects.create_user(email="test@example.com", password="password")
 
     def test_run_sync_accepts_reduced_or_extended_payload(self):
         payload = {
@@ -89,3 +95,49 @@ class ContentFactoryRunSyncTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(ContentFactoryRun.objects.filter(run_id="run-sync-lock-1").exists())
+
+    def test_draft_results_returns_retryable_response_for_transient_sqlite_lock(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            is_default_for_gmail=True,
+        )
+        ContentFactoryRun.objects.create(
+            run_id="startup-update-lock-1",
+            workflow="startup_monthly_update",
+            domain="acme.com",
+            status="running",
+            current_step="draft_generation",
+            step_order=["profile_resolution", "draft_generation", "groundedness_review"],
+            run_request={
+                "organization_id": organization.id,
+                "binding_id": binding.id,
+                "draft_months": ["2026-03-01"],
+                "current_month": "2026-03-01",
+            },
+            result={},
+        )
+
+        with patch(
+            "startup_updates.api_views.upsert_monthly_update_draft",
+            side_effect=OperationalError("database is locked"),
+        ):
+            response = self.client.post(
+                "/api/v1/integrations/startup-updates/runs/startup-update-lock-1/draft-results",
+                {
+                    "drafts": [
+                        {
+                            "month": "2026-03-01",
+                            "status": "ready",
+                            "structured_memo": {"title": "Acme Investor Update"},
+                        }
+                    ]
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["error"], "transient_database_lock")
+        self.assertTrue(response.data["retryable"])
+        self.assertGreaterEqual(response.data["retry_after_seconds"], 1)

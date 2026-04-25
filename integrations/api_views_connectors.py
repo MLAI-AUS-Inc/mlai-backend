@@ -10,11 +10,14 @@ from integrations.services.external_connectors import (
     serialize_bank_feed_accounts,
     serialize_bank_feed_transactions,
     serialize_gmail_preview,
+    serialize_linear_preview,
+    serialize_linear_projects,
     serialize_slack_channels,
     serialize_slack_preview,
     serialize_source_status,
     serialize_xero_invoices,
     serialize_xero_preview,
+    update_linear_project_selections,
     update_slack_channel_selections,
 )
 
@@ -228,6 +231,75 @@ class SlackPreviewView(APIView):
             limit = 5
         try:
             payload = serialize_slack_preview(request.user, limit=limit)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 100
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            payload = serialize_linear_projects(
+                request.user,
+                cursor=request.query_params.get("cursor") or None,
+                limit=limit,
+            )
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSelectionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        raw_project_ids = (
+            request.data.get("projectIds")
+            or request.data.get("project_ids")
+            or request.data.get("projects")
+            or []
+        )
+        if isinstance(raw_project_ids, str):
+            project_ids = [item.strip() for item in raw_project_ids.split(",") if item.strip()]
+        elif isinstance(raw_project_ids, (list, tuple)):
+            project_ids = [
+                str(
+                    item.get("projectId") or item.get("project_id") or item.get("linearProjectId") or item.get("id")
+                    if isinstance(item, dict)
+                    else item
+                ).strip()
+                for item in raw_project_ids
+            ]
+            project_ids = [item for item in project_ids if item]
+        else:
+            project_ids = []
+        try:
+            payload = update_linear_project_selections(request.user, project_ids)
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearPreviewView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 5
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            payload = serialize_linear_preview(request.user, limit=limit)
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)

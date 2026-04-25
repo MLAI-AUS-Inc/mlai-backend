@@ -1119,52 +1119,37 @@ class VibeMarketingAutofillView(APIView):
         organization = ensure_company_organization(company)
         if organization is None:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-        if not organization.name:
-            organization.name = company_name
-            organization.save(update_fields=["name"])
-        company_linkedin_url = organization.company_linkedin_url
-        if "company_linkedin_url" in request.data or "companyLinkedInUrl" in request.data:
-            try:
-                company_linkedin_url = normalize_company_linkedin_url(
-                    request.data.get("company_linkedin_url", request.data.get("companyLinkedInUrl"))
-                )
-            except ValueError as exc:
-                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
-            if organization.company_linkedin_url != company_linkedin_url:
-                organization.company_linkedin_url = company_linkedin_url
-                organization.save(update_fields=["company_linkedin_url"])
 
-        config = _get_config(organization)
-        actor_id = founder_actor_id_for_user(request.user)
-        config.connected_slack_user_id = actor_id
-        brand_name = str(request.data.get("brand_name") or request.data.get("brandName") or "").strip()
-        if brand_name:
-            config.brand_name = brand_name
-        config.save(update_fields=["connected_slack_user_id", "brand_name", "updated_at"])
+        try:
+            apply_shared_startup_details(user=request.user, company=company, data=request.data)
+        except ValueError as exc:
+            return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         context = get_founder_company_context(request.user, company_id=company.id)
+        company = context.company
+        organization = context.organization
+        config = _get_config(organization)
+        actor_id = founder_actor_id_for_user(request.user)
         existing_fields = {
-            "brandName": brand_name or config.brand_name or organization.name,
-            "companyContext": _request_value(
-                request.data,
-                "company_context",
-                "companyContext",
-                default=config.company_context,
-            ),
-            "competitors": _camel_list(_request_value(request.data, "competitors", default=organization.competitors)),
-            "seedKeywords": _camel_list(
-                _request_value(request.data, "seed_keywords", "seedKeywords", default=organization.seed_keywords)
-            ),
-            "companyLinkedInUrl": company_linkedin_url,
+            "brandName": config.brand_name or organization.name,
+            "companyContext": config.company_context or "",
+            "competitors": _camel_list(organization.competitors),
+            "seedKeywords": _camel_list(organization.seed_keywords),
+            "companyLinkedInUrl": organization.company_linkedin_url,
         }
         payload = {
             "domain": organization.domain,
             "company_name": company.name,
-            "brand_name": brand_name or config.brand_name or organization.name,
-            "company_linkedin_url": company_linkedin_url,
+            "brand_name": config.brand_name or organization.name,
+            "company_linkedin_url": organization.company_linkedin_url,
             "location": company.location,
             "abn": company.abn,
             "existing_fields": existing_fields,
+            "research_depth": "deep",
+            "strict_deep_research": True,
+            "min_direct_competitors": 5,
+            "min_seed_keywords": 20,
+            "min_public_sources": 3,
             "persist": False,
             "slack_user_id": actor_id,
             "requested_by_slack_user_id": actor_id,
