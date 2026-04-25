@@ -29,8 +29,8 @@ VALID_PROD_URL_SETTINGS = {
     "NOTION_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/notion",
     "GOOGLE_DRIVE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/google-drive",
     "SLACK_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/slack",
-    "CONTENT_FACTORY_URL": "http://content-factory-web:8000",
-    "VALLEY_HARNESS_URL": "http://valley-api:8080",
+    "CONTENT_FACTORY_URL": "http://10.126.0.4:8000",
+    "VALLEY_HARNESS_URL": "http://10.126.0.6:8080",
     "VALLEY_HARNESS_API_KEY": "valley-key",
     "CORS_ALLOWED_ORIGINS": ["https://mlai.au", "https://www.mlai.au"],
     "CSRF_TRUSTED_ORIGINS": ["https://mlai.au", "https://www.mlai.au", "https://api.mlai.au"],
@@ -45,6 +45,32 @@ class ValidateProdUrlsTests(SimpleTestCase):
 
     def test_valid_prod_urls_allow_http_internal_service_hosts(self):
         self.assertEqual(self._validation_errors(), [])
+
+    def test_content_factory_docker_alias_is_rejected_by_default(self):
+        errors = self._validation_errors(CONTENT_FACTORY_URL="http://content-factory-web:8000")
+
+        self.assertTrue(
+            any(
+                "CONTENT_FACTORY_URL uses Docker-only service host 'content-factory-web'" in error
+                for error in errors
+            )
+        )
+
+    def test_valley_docker_alias_is_rejected_by_default(self):
+        errors = self._validation_errors(VALLEY_HARNESS_URL="http://valley-api:8080")
+
+        self.assertTrue(
+            any("VALLEY_HARNESS_URL uses Docker-only service host 'valley-api'" in error for error in errors)
+        )
+
+    def test_valley_docker_alias_can_be_allowed_for_same_host_deployments(self):
+        errors = self._validation_errors(
+            VALLEY_HARNESS_URL="http://valley-api:8080",
+            CONTENT_FACTORY_URL="http://content-factory-web:8000",
+            ALLOW_DOCKER_SERVICE_ALIASES=True,
+        )
+
+        self.assertEqual(errors, [])
 
     def test_public_url_must_use_https_in_production(self):
         errors = self._validation_errors(DEFAULT_BACKEND_URL="http://api.mlai.au")
@@ -99,7 +125,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
 
         self.assertEqual(errors, [])
         valley_request = mock_urlopen.call_args_list[1].args[0]
-        self.assertEqual(valley_request.full_url, "http://valley-api:8080/internal/healthz")
+        self.assertEqual(valley_request.full_url, "http://10.126.0.6:8080/internal/healthz")
         self.assertEqual(valley_request.headers["X-api-key"], "valley-key")
 
     def test_valley_connectivity_requires_service_key(self):
@@ -115,7 +141,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
         mock_urlopen.side_effect = [
             MagicMock(),
             urllib.error.HTTPError(
-                url="http://valley-api:8080/internal/healthz",
+                url="http://10.126.0.6:8080/internal/healthz",
                 code=401,
                 msg="Unauthorized",
                 hdrs=None,

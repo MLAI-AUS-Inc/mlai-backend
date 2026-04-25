@@ -29,6 +29,16 @@ ssh $USER@$DROPLET_IP << EOF
         fi
     }
 
+    require_env_value() {
+        local key="\$1"
+        local message="\$2"
+        if ! grep -Eq "^\${key}=.+" .env; then
+            echo "❌ Missing required \${key} in $PROJECT_DIR/.env"
+            echo "   \${message}"
+            exit 1
+        fi
+    }
+
     # Install Docker if not exists
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -68,9 +78,9 @@ ssh $USER@$DROPLET_IP << EOF
     upsert_env_value GOOGLE_DRIVE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-drive"
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
-    upsert_env_value CONTENT_FACTORY_URL "http://content-factory-web:8000"
-    upsert_env_value VALLEY_HARNESS_URL "http://valley-api:8080"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
+    require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
+    require_env_value VALLEY_HARNESS_URL "Set VALLEY_HARNESS_URL to http://<valley-private-ip>:8080 for the cross-droplet Valley deployment."
     if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
