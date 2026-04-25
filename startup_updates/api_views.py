@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import OperationalError, transaction
+from django.db import OperationalError
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
 from django.urls import reverse
@@ -86,6 +86,7 @@ from startup_updates.services import (
     gmail_required_for_sources,
     normalize_startup_update_input_sources,
     pin_startup_update_run_connection,
+    record_valley_dispatch_result,
     resolve_or_create_profile,
     seed_startup_profile,
     set_startup_update_run_cancel_backups,
@@ -118,11 +119,43 @@ TRANSIENT_SQLITE_LOCK_MARKERS = (
     "database table is locked",
     "database schema is locked",
 )
+QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 
 
 def _is_transient_sqlite_lock(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in TRANSIENT_SQLITE_LOCK_MARKERS)
+
+
+def _should_dispatch_existing_run(run) -> bool:
+    if not bool(run) or run.status != ContentFactoryRunStatus.QUEUED:
+        return False
+    result_payload = run.result if isinstance(run.result, dict) else {}
+    meta = result_payload.get(VALLEY_META_KEY) if isinstance(result_payload, dict) else {}
+    if isinstance(meta, dict) and meta.get("dispatch_status") == "failed":
+        return True
+    return bool(run.updated_at) and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
+
+
+def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
+    return {
+        "run_id": run.run_id,
+        "error": "valley_dispatch_failed",
+        "retryable": True,
+        "message": "The startup update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "valley_dispatch": {
+            "status": "failed",
+            "failure_kind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
+            "status_code": getattr(dispatch_result, "status_code", None),
+            "detail": str(getattr(dispatch_result, "detail", "") or "")[:300],
+        },
+    }
+
+
+def _dispatch_run_to_valley(run):
+    dispatch_result = notify_valley_run_created(run.run_id)
+    record_valley_dispatch_result(run, dispatch_result)
+    return dispatch_result
 
 
 def _serialize_profile(profile) -> dict:
@@ -829,6 +862,7 @@ class StartupUpdateRunView(APIView):
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
         )
+        dispatch_required = existing_run is None or _should_dispatch_existing_run(existing_run)
         run = create_startup_update_run(
             organization=organization,
             binding=binding,
@@ -841,19 +875,21 @@ class StartupUpdateRunView(APIView):
                 google_connection=google_connection,
             )
 
-        transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
-        return Response(
-            {
-                "run": _serialize_run(run, request),
-                "run_id": run.run_id,
-                "status": run.status,
-                "current_step": run.current_step,
-                "reused_existing_run": existing_run is not None,
-                "profile": _serialize_profile(profile),
-                "binding": _serialize_binding(binding),
-            },
-            status=status.HTTP_200_OK if existing_run else status.HTTP_201_CREATED,
-        )
+        payload = {
+            "run": _serialize_run(run, request),
+            "run_id": run.run_id,
+            "status": run.status,
+            "current_step": run.current_step,
+            "reused_existing_run": existing_run is not None,
+            "profile": _serialize_profile(profile),
+            "binding": _serialize_binding(binding),
+        }
+        if dispatch_required:
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK if existing_run else status.HTTP_201_CREATED)
 
 
 class StartupUpdateActiveRunView(APIView):

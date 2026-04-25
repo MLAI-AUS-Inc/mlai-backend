@@ -36,6 +36,13 @@ SERVICE_URL_SETTINGS = (
     "VALLEY_HARNESS_URL",
 )
 
+SERVICE_API_KEY_SETTINGS = (
+    "VALLEY_HARNESS_API_KEY",
+    "INTERNAL_API_KEY",
+    "ROO_API_KEY",
+    "MLAI_API_KEY",
+)
+
 REQUIRED_CORS_ORIGINS = {
     "https://mlai.au",
     "https://www.mlai.au",
@@ -117,6 +124,14 @@ def _validate_required_origins(setting_name: str, required_origins: set[str], er
         errors.append(f"{setting_name} is missing required origin(s): {', '.join(missing)}.")
 
 
+def _service_api_key_with_source() -> tuple[str, str]:
+    for setting_name in SERVICE_API_KEY_SETTINGS:
+        value = _as_clean_string(getattr(settings, setting_name, ""))
+        if value:
+            return value, setting_name
+    return "", ""
+
+
 def validate_prod_url_settings() -> list[str]:
     errors: list[str] = []
     if not _is_production_settings():
@@ -137,25 +152,42 @@ def validate_prod_url_settings() -> list[str]:
     return errors
 
 
+def _connectivity_url_for_service(setting_name: str, value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if setting_name == "VALLEY_HARNESS_URL":
+        base_path = (parsed.path or "").rstrip("/")
+        health_path = f"{base_path}/internal/healthz" if base_path else "/internal/healthz"
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, health_path, "", "", ""))
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
+
+
 def _service_url_connectivity_error(setting_name: str, *, timeout: float) -> str | None:
     value = _as_clean_string(getattr(settings, setting_name, ""))
-    parsed = urllib.parse.urlparse(value)
-    url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
+    url = _connectivity_url_for_service(setting_name, value)
+    headers = {
+        "Connection": "close",
+        "User-Agent": "mlai-prod-url-check/1.0",
+    }
+    if setting_name == "VALLEY_HARNESS_URL":
+        api_key, api_key_source = _service_api_key_with_source()
+        if not api_key:
+            return "VALLEY_HARNESS_URL connectivity check requires VALLEY_HARNESS_API_KEY or another service API key."
+        headers["X-API-Key"] = api_key
+        headers["X-API-Key-Source"] = api_key_source
     request = urllib.request.Request(
         url,
         method="GET",
-        headers={
-            "Connection": "close",
-            "User-Agent": "mlai-prod-url-check/1.0",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response.read(1)
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
+        if setting_name == "VALLEY_HARNESS_URL":
+            return f"{setting_name} health check failed at {url}: HTTP {exc.code}"
         return None
     except (TimeoutError, socket.timeout, OSError, urllib.error.URLError) as exc:
-        return f"{setting_name} is not reachable at {value}: {exc}"
+        return f"{setting_name} is not reachable at {url}: {exc}"
     return None
 
 

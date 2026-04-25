@@ -1,10 +1,15 @@
 from io import StringIO
+from unittest.mock import MagicMock, patch
+import urllib.error
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import SimpleTestCase, override_settings
 
-from core.management.commands.validate_prod_urls import validate_prod_url_settings
+from core.management.commands.validate_prod_urls import (
+    validate_prod_url_settings,
+    validate_service_url_connectivity,
+)
 
 
 VALID_PROD_URL_SETTINGS = {
@@ -26,6 +31,7 @@ VALID_PROD_URL_SETTINGS = {
     "SLACK_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/slack",
     "CONTENT_FACTORY_URL": "http://content-factory-web:8000",
     "VALLEY_HARNESS_URL": "http://valley-api:8080",
+    "VALLEY_HARNESS_API_KEY": "valley-key",
     "CORS_ALLOWED_ORIGINS": ["https://mlai.au", "https://www.mlai.au"],
     "CSRF_TRUSTED_ORIGINS": ["https://mlai.au", "https://www.mlai.au", "https://api.mlai.au"],
 }
@@ -80,3 +86,45 @@ class ValidateProdUrlsTests(SimpleTestCase):
         with override_settings(**settings):
             with self.assertRaises(CommandError):
                 call_command("validate_prod_urls", stdout=StringIO(), stderr=StringIO())
+
+    @patch("core.management.commands.validate_prod_urls.urllib.request.urlopen")
+    def test_connectivity_checks_valley_internal_health_with_service_key(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.__enter__.return_value = mock_response
+        mock_response.read.return_value = b"{"
+        mock_urlopen.return_value = mock_response
+
+        with override_settings(**VALID_PROD_URL_SETTINGS):
+            errors = validate_service_url_connectivity(timeout=8)
+
+        self.assertEqual(errors, [])
+        valley_request = mock_urlopen.call_args_list[1].args[0]
+        self.assertEqual(valley_request.full_url, "http://valley-api:8080/internal/healthz")
+        self.assertEqual(valley_request.headers["X-api-key"], "valley-key")
+
+    def test_valley_connectivity_requires_service_key(self):
+        settings = {**VALID_PROD_URL_SETTINGS, "VALLEY_HARNESS_API_KEY": "", "INTERNAL_API_KEY": "", "ROO_API_KEY": "", "MLAI_API_KEY": ""}
+
+        with override_settings(**settings):
+            errors = validate_service_url_connectivity(timeout=8)
+
+        self.assertTrue(any("VALLEY_HARNESS_URL connectivity check requires" in error for error in errors))
+
+    @patch("core.management.commands.validate_prod_urls.urllib.request.urlopen")
+    def test_valley_connectivity_fails_on_http_error(self, mock_urlopen):
+        mock_urlopen.side_effect = [
+            MagicMock(),
+            urllib.error.HTTPError(
+                url="http://valley-api:8080/internal/healthz",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,
+                fp=None,
+            ),
+        ]
+
+        with override_settings(**VALID_PROD_URL_SETTINGS):
+            errors = validate_service_url_connectivity(timeout=8)
+
+        self.assertTrue(any("VALLEY_HARNESS_URL health check failed" in error for error in errors))
+        self.assertTrue(any("HTTP 401" in error for error in errors))

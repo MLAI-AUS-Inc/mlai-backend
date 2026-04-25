@@ -16,6 +16,7 @@ from rest_framework.test import APIClient
 from content_factory.models import OrganizationContentConfig
 from integrations import http_client
 from organizations.models import Organization
+from integrations.services.valley_harness import ValleyHarnessResult
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -226,6 +227,38 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(active.data["status"], ContentFactoryRunStatus.QUEUED)
         self.assertEqual(active.data["display_stage"], "Preparing company context")
         mock_notify.assert_called_once()
+
+    @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_run_creation_returns_503_when_valley_dispatch_fails(self, mock_notify):
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        mock_notify.return_value = ValleyHarnessResult(
+            ok=False,
+            failure_kind="dns",
+            detail="Failed to resolve 'valley-api'",
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_run"),
+                {
+                    "user_id": self.user.id,
+                    "domain": self.organization.domain,
+                    "window_months": 6,
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["error"], "valley_dispatch_failed")
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "failed")
+        self.assertEqual(run.result["_valley_meta"]["last_dispatch_error_kind"], "dns")
 
     def test_run_status_and_draft_results_getters(self):
         binding = UserStartupBinding.objects.create(

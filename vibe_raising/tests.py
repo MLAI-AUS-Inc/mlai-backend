@@ -12,6 +12,7 @@ from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
 from integrations.models import ExternalServiceConnection, ExternalServiceProvider, GoogleConnection
+from integrations.services.valley_harness import ValleyHarnessResult
 from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
@@ -729,6 +730,34 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(first.data["run"]["runId"], second.data["run"]["runId"])
         mock_notify.assert_called_once()
 
+    def test_startup_update_run_returns_retryable_503_when_valley_dispatch_fails(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="refresh-token",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            mock_notify.return_value = ValleyHarnessResult(
+                ok=False,
+                failure_kind="dns",
+                detail="Failed to resolve 'valley-api'",
+            )
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["error"], "valley_dispatch_failed")
+        self.assertEqual(response.data["run"]["runId"], response.data["runId"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "failed")
+
     def test_startup_update_run_reconciles_active_run_when_slack_is_added(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
@@ -889,6 +918,50 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
         self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
+
+    def test_email_draft_start_returns_retryable_503_when_valley_dispatch_fails(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            mock_notify.return_value = ValleyHarnessResult(
+                ok=False,
+                failure_kind="dns",
+                detail="Failed to resolve 'valley-api'",
+            )
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["error"], "valley_dispatch_failed")
+        self.assertTrue(response.data["retryable"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        valley_meta = run.result["_valley_meta"]
+        self.assertEqual(valley_meta["dispatch_status"], "failed")
+        self.assertEqual(valley_meta["last_dispatch_error_kind"], "dns")
+        self.assertIn("Failed to resolve", valley_meta["last_dispatch_error"])
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_retry_notify:
+            mock_retry_notify.return_value = ValleyHarnessResult(
+                ok=True,
+                payload={"job_id": "job-123", "status": "queued"},
+            )
+            retry = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.data["reusedExistingRun"])
+        self.assertEqual(retry.data["runId"], run.run_id)
+        run.refresh_from_db()
+        self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "queued")
+        mock_retry_notify.assert_called_once_with(run.run_id)
 
     def test_email_draft_start_regenerates_when_selected_sources_exceed_reusable_drafts(self):
         self.client.force_authenticate(user=self.user)

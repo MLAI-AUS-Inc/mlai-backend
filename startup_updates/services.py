@@ -42,7 +42,7 @@ from startup_updates.models import (
     StartupProfile,
     UserStartupBinding,
 )
-from integrations.services.valley_harness import notify_valley_run_created
+from integrations.services.valley_harness import ValleyHarnessResult, notify_valley_run_created
 from integrations.utils import normalize_domain
 
 
@@ -1050,6 +1050,28 @@ def _set_run_meta(run: ContentFactoryRun, meta: dict) -> None:
     _set_run_result_payload(run, payload)
 
 
+def record_valley_dispatch_result(run: ContentFactoryRun, dispatch_result: ValleyHarnessResult | object) -> None:
+    meta = _get_run_meta(run)
+    meta["last_dispatch_attempt_at"] = timezone.now().isoformat()
+    raw_status_code = getattr(dispatch_result, "status_code", None)
+    status_code = raw_status_code if isinstance(raw_status_code, int) else None
+    if bool(dispatch_result):
+        payload = getattr(dispatch_result, "payload", None)
+        response_payload = payload if isinstance(payload, dict) else {}
+        meta["dispatch_status"] = "queued"
+        meta["last_dispatch_job_id"] = response_payload.get("job_id") or ""
+        meta["last_dispatch_error"] = ""
+        meta["last_dispatch_error_kind"] = ""
+        meta["last_dispatch_status_code"] = status_code
+    else:
+        meta["dispatch_status"] = "failed"
+        meta["last_dispatch_error"] = str(getattr(dispatch_result, "detail", "") or "Valley dispatch failed.")[:300]
+        meta["last_dispatch_error_kind"] = str(getattr(dispatch_result, "failure_kind", "") or "unknown")
+        meta["last_dispatch_status_code"] = status_code
+    _set_run_meta(run, meta)
+    run.save(update_fields=["result", "updated_at"])
+
+
 def get_startup_update_run_cancel_backups(run: ContentFactoryRun) -> dict:
     backups = _get_run_result_payload(run).get(RUN_CANCEL_BACKUPS_KEY) or {}
     if not isinstance(backups, dict):
@@ -1989,7 +2011,10 @@ def maybe_start_startup_update_for_google_connection(
         },
     )
     if existing_run is None:
-        transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+        def _dispatch_to_valley() -> None:
+            record_valley_dispatch_result(run, notify_valley_run_created(run.run_id))
+
+        transaction.on_commit(_dispatch_to_valley)
     return run
 
 

@@ -48,6 +48,7 @@ from startup_updates.services import (
     get_open_startup_update_run,
     gmail_required_for_sources,
     normalize_startup_update_input_sources,
+    record_valley_dispatch_result,
     resolve_or_create_profile,
     refresh_startup_update_run_source_context,
     sync_startup_profile_from_company,
@@ -302,12 +303,33 @@ def _build_google_oauth_url(request):
 
 
 def _should_dispatch_existing_run(run) -> bool:
-    return (
-        bool(run)
-        and run.status == ContentFactoryRunStatus.QUEUED
-        and bool(run.updated_at)
-        and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
-    )
+    if not bool(run) or run.status != ContentFactoryRunStatus.QUEUED:
+        return False
+    if _get_run_meta(run).get("dispatch_status") == "failed":
+        return True
+    return bool(run.updated_at) and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
+
+
+def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
+    return {
+        "run_id": run.run_id,
+        "runId": run.run_id,
+        "error": "valley_dispatch_failed",
+        "retryable": True,
+        "message": "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "valleyDispatch": {
+            "status": "failed",
+            "failureKind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
+            "statusCode": getattr(dispatch_result, "status_code", None),
+            "detail": str(getattr(dispatch_result, "detail", "") or "")[:300],
+        },
+    }
+
+
+def _dispatch_run_to_valley(run):
+    dispatch_result = notify_valley_run_created(run.run_id)
+    record_valley_dispatch_result(run, dispatch_result)
+    return dispatch_result
 
 
 def _normalize_text_list(value):
@@ -1654,7 +1676,12 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 input_sources=input_sources,
                 source_warnings=source_warnings,
             )
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_status_payload(user=request.user, company=company, domain=domain)
+                payload["run"] = _serialize_run_summary(run)
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
             if input_sources:
@@ -1672,7 +1699,12 @@ class VibeRaisingStartupUpdateRunView(APIView):
                     "Re-dispatching queued startup update run to Valley",
                     extra={"run_id": run.run_id, "organization_id": organization.id},
                 )
-                transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+                dispatch_result = _dispatch_run_to_valley(run)
+                if not dispatch_result:
+                    payload = _build_status_payload(user=request.user, company=company, domain=domain)
+                    payload["run"] = _serialize_run_summary(run)
+                    payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                    return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         payload = _build_status_payload(user=request.user, company=company, domain=domain)
         payload["run"] = _serialize_run_summary(run)
@@ -1795,7 +1827,18 @@ class VibeRaisingEmailDraftStartView(APIView):
                 source_warnings=source_warnings,
             )
             created = True
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                    run_id=run.run_id,
+                )
+                payload["reusedExistingRun"] = False
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         elif _should_dispatch_existing_run(run):
             if input_sources:
                 now = timezone.now()
@@ -1811,7 +1854,18 @@ class VibeRaisingEmailDraftStartView(APIView):
                 "Re-dispatching queued email draft run to Valley",
                 extra={"run_id": run.run_id, "organization_id": organization.id},
             )
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                    run_id=run.run_id,
+                )
+                payload["reusedExistingRun"] = True
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             if input_sources:
                 now = timezone.now()
