@@ -10,11 +10,12 @@ from rest_framework.test import APIClient
 
 from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
-from integrations.models import GoogleConnection
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryStepStatus
+from integrations.models import ExternalServiceConnection, ExternalServiceProvider, GoogleConnection
 from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
+    SlackChannelSelection,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -62,6 +63,46 @@ class VibeRaisingApiTests(TestCase):
             refresh_token=refresh_token,
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
+
+    def _create_active_gmail_run_with_slack_selection(self):
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization, _profile = resolve_or_create_profile(domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        slack_connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.SLACK,
+            account_label="Acme Slack",
+        )
+        SlackChannelSelection.objects.create(
+            connection=slack_connection,
+            user=self.user,
+            organization=organization,
+            channel_id="C123",
+            channel_name="wins",
+            selected=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+            input_sources=["gmail"],
+        )
+        run.steps.update(
+            status=ContentFactoryStepStatus.COMPLETED,
+            attempts=2,
+            completed_at=timezone.now(),
+        )
+        run.status = ContentFactoryRunStatus.RUNNING
+        run.current_step = "timeline_merge"
+        run.save(update_fields=["status", "current_step", "updated_at"])
+        return organization, binding, run
 
     def test_profile_requires_authentication(self):
         response = self.client.get("/api/v1/vibe-raising/profile/")
@@ -688,6 +729,31 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(first.data["run"]["runId"], second.data["run"]["runId"])
         mock_notify.assert_called_once()
 
+    def test_startup_update_run_reconciles_active_run_when_slack_is_added(self):
+        self.client.force_authenticate(user=self.user)
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            response = self.client.post(
+                "/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["run"]["runId"], run.run_id)
+        mock_notify.assert_not_called()
+
+        run.refresh_from_db()
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
+        self.assertIn("slack_backfill", run.step_order)
+        self.assertLess(run.step_order.index("slack_event_extraction"), run.step_order.index("timeline_merge"))
+        self.assertNotIn("xero", run.step_order)
+        self.assertEqual(run.current_step, "slack_backfill")
+        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
+        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
+        self.assertIn("xero", run.run_request["external_context"])
+
     def test_startup_update_status_returns_ready_with_form_shaped_draft(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company()
@@ -866,6 +932,50 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotEqual(regenerated_run.run_id, original_run.run_id)
         mock_notify.assert_called_once_with(regenerated_run.run_id)
 
+    def test_email_draft_start_reconciles_active_run_when_slack_is_added(self):
+        self.client.force_authenticate(user=self.user)
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["reusedExistingRun"])
+        self.assertEqual(response.data["runId"], run.run_id)
+        mock_notify.assert_not_called()
+
+        run.refresh_from_db()
+        expected_step_order = [
+            "profile_resolution",
+            "gmail_backfill",
+            "relevance_classification",
+            "thread_hydration",
+            "event_extraction",
+            "slack_backfill",
+            "slack_event_extraction",
+            "timeline_merge",
+            "draft_generation",
+            "groundedness_review",
+        ]
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
+        self.assertEqual(run.step_order, expected_step_order)
+        self.assertNotIn("xero", run.step_order)
+        self.assertEqual(run.current_step, "slack_backfill")
+        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
+        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
+        self.assertIn("xero", run.run_request["external_context"])
+
+        steps_by_key = {step.step_key: step for step in run.steps.all()}
+        self.assertEqual(steps_by_key["slack_backfill"].status, ContentFactoryStepStatus.PENDING)
+        self.assertEqual(steps_by_key["slack_event_extraction"].status, ContentFactoryStepStatus.PENDING)
+        for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
+            self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)
+            self.assertEqual(steps_by_key[step_key].attempts, 0)
+
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
@@ -987,7 +1097,10 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(queued_response.data["state"], "queued")
         self.assertEqual(queued_response.data["runId"], run.run_id)
         self.assertEqual(queued_response.data["status"], ContentFactoryRunStatus.QUEUED)
-        self.assertEqual(queued_response.data["stepStates"], {})
+        self.assertEqual(
+            list(queued_response.data["stepStates"].keys()),
+            run.step_order,
+        )
 
         run.status = ContentFactoryRunStatus.RUNNING
         run.current_step = "event_extraction"
