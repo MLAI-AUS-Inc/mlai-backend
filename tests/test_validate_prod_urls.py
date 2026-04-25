@@ -32,6 +32,7 @@ VALID_PROD_URL_SETTINGS = {
     "CONTENT_FACTORY_URL": "http://10.126.0.4:8000",
     "VALLEY_HARNESS_URL": "http://10.126.0.6:8080",
     "VALLEY_HARNESS_API_KEY": "valley-key",
+    "ALLOWED_HOSTS": ["api.mlai.au", "10.126.0.2"],
     "CORS_ALLOWED_ORIGINS": ["https://mlai.au", "https://www.mlai.au"],
     "CSRF_TRUSTED_ORIGINS": ["https://mlai.au", "https://www.mlai.au", "https://api.mlai.au"],
 }
@@ -99,6 +100,11 @@ class ValidateProdUrlsTests(SimpleTestCase):
 
         self.assertIn("CORS_ALLOWED_ORIGINS is missing required origin(s): https://www.mlai.au.", errors)
         self.assertIn("CSRF_TRUSTED_ORIGINS is missing required origin(s): https://api.mlai.au.", errors)
+
+    def test_private_backend_ip_must_be_allowed_host(self):
+        errors = self._validation_errors(ALLOWED_HOSTS=["api.mlai.au"])
+
+        self.assertIn("ALLOWED_HOSTS is missing required host(s): 10.126.0.2.", errors)
 
     def test_command_succeeds_for_valid_prod_urls(self):
         out = StringIO()

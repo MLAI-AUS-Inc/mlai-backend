@@ -60,7 +60,7 @@ ssh $USER@$DROPLET_IP << EOF
 
     # Update .env with production values (Run on every deploy)
     upsert_env_value DEBUG "False"
-    upsert_env_value ALLOWED_HOSTS "api.mlai.au,209.38.85.60,localhost,127.0.0.1,esafety.localhost"
+    upsert_env_value ALLOWED_HOSTS "api.mlai.au,209.38.85.60,10.126.0.2,localhost,127.0.0.1,esafety.localhost"
     upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au"
     upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au"
     upsert_env_value DEFAULT_BACKEND_URL "https://api.mlai.au"
