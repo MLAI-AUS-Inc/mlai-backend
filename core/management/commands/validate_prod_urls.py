@@ -43,6 +43,11 @@ SERVICE_API_KEY_SETTINGS = (
     "MLAI_API_KEY",
 )
 
+DOCKER_ONLY_SERVICE_HOSTS = {
+    "CONTENT_FACTORY_URL": {"content-factory-web"},
+    "VALLEY_HARNESS_URL": {"valley-api"},
+}
+
 REQUIRED_CORS_ORIGINS = {
     "https://mlai.au",
     "https://www.mlai.au",
@@ -67,6 +72,12 @@ def _as_list(value) -> list[str]:
     if isinstance(value, Iterable):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_production_settings() -> bool:
@@ -110,10 +121,21 @@ def _validate_https_url(setting_name: str, errors: list[str]) -> None:
 def _validate_service_url(setting_name: str, errors: list[str]) -> None:
     value = _as_clean_string(getattr(settings, setting_name, ""))
     parsed = _parse_http_url(setting_name, value, errors)
-    if parsed and parsed.scheme == "https" and _is_raw_ip(parsed.hostname):
+    if not parsed:
+        return
+    if parsed.scheme == "https" and _is_raw_ip(parsed.hostname):
         errors.append(
             f"{setting_name} uses https with a raw IP address. Use http for the current service endpoint "
             "or put the service behind DNS with a valid TLS certificate."
+        )
+    blocked_hosts = DOCKER_ONLY_SERVICE_HOSTS.get(setting_name, set())
+    allow_docker_aliases = _as_bool(getattr(settings, "ALLOW_DOCKER_SERVICE_ALIASES", False))
+    hostname = (parsed.hostname or "").lower()
+    if hostname in blocked_hosts and not allow_docker_aliases:
+        errors.append(
+            f"{setting_name} uses Docker-only service host '{hostname}', which only works on the same host. "
+            "Set it to the Valley private/VPC URL for cross-droplet production deploys, or set "
+            "ALLOW_DOCKER_SERVICE_ALIASES=true for same-host deployments."
         )
 
 
