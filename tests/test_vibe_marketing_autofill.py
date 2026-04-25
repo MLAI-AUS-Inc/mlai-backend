@@ -54,6 +54,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(url, "https://content-factory.test/api/runs/autofill")
             self.assertEqual(headers["X-API-KEY"], "secret-key")
             self.assertEqual(json["domain"], "acme.com")
+            self.assertEqual(json["company_linkedin_url"], "https://www.linkedin.com/company/acme")
             self.assertFalse(json["persist"])
             return _Response(status_code=202, payload={"run_id": "autofill-run-1", "status": "queued"})
 
@@ -63,6 +64,7 @@ class VibeMarketingAutofillTests(TestCase):
                 {
                     "companyName": "Acme",
                     "domain": "https://www.acme.com",
+                    "companyLinkedInUrl": "https://linkedin.com/company/acme/",
                     "brandName": "Acme",
                     "companyContext": "",
                     "competitors": "",
@@ -76,6 +78,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertNotIn("secret-key", str(response.data))
 
         organization = Organization.objects.get(domain="acme.com")
+        self.assertEqual(organization.company_linkedin_url, "https://www.linkedin.com/company/acme")
         self.assertEqual(organization.competitors, [])
         self.assertEqual(organization.seed_keywords, [])
 
@@ -86,7 +89,23 @@ class VibeMarketingAutofillTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id="autofill-run-1")
         self.assertEqual(run.workflow, "startup_autofill")
         self.assertEqual(run.run_request["persist"], False)
+        self.assertEqual(run.run_request["company_linkedin_url"], "https://www.linkedin.com/company/acme")
         self.assertEqual(run.run_request["existing_fields"]["companyContext"], "")
+        self.assertEqual(run.run_request["existing_fields"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
+
+    def test_autofill_rejects_personal_linkedin_profile_url(self):
+        response = self.client.post(
+            "/api/v1/vibe-marketing/autofill/",
+            {
+                "companyName": "Acme",
+                "domain": "acme.com",
+                "companyLinkedInUrl": "https://www.linkedin.com/in/founder",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["field"], "companyLinkedInUrl")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_run_polling_syncs_result_and_steps(self):
@@ -107,6 +126,7 @@ class VibeMarketingAutofillTests(TestCase):
             "result": {
                 "autofill": {
                     "brandName": "Acme",
+                    "companyLinkedInUrl": "https://www.linkedin.com/company/acme",
                     "companyContext": "## Positioning\nAcme builds workflow automation for founders.\n\n## Audience\nStartup founders and operators.\n\n## Product\nWorkflow automation for startup operations.",
                     "directCompetitors": [
                         {
@@ -179,6 +199,20 @@ class VibeMarketingAutofillTests(TestCase):
                             "query": "Acme LinkedIn",
                         },
                     ],
+                    "linkedinProfile": {
+                        "url": "https://www.linkedin.com/company/acme",
+                        "title": "Acme LinkedIn",
+                        "vanityName": "acme",
+                        "description": "Public LinkedIn profile evidence.",
+                    },
+                    "linkedinSimilarSignals": [
+                        {
+                            "url": "https://www.linkedin.com/company/build-club-ai",
+                            "title": "Build Club",
+                            "type": "linkedin_similar",
+                            "description": "Visible public similar-company signal.",
+                        }
+                    ],
                     "sourceCount": 2,
                     "competitorCount": 1,
                     "seedKeywordCount": 20,
@@ -187,6 +221,7 @@ class VibeMarketingAutofillTests(TestCase):
                         "ownedPagesCrawled": 2,
                         "publicSourcesReviewed": 8,
                         "linkedinPublicSignals": 1,
+                        "linkedinSimilarSignals": 1,
                         "competitorCandidatesEvaluated": 7,
                         "competitorsReturned": 1,
                         "seedKeywordsGenerated": 20,
@@ -219,6 +254,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertIn("## Positioning", response.data["result"]["autofill"]["companyContext"])
         self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
         self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
+        self.assertEqual(response.data["result"]["autofill"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
+        self.assertEqual(response.data["result"]["autofill"]["researchDepth"]["linkedinSimilarSignals"], 1)
 
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
