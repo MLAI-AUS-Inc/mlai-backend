@@ -31,6 +31,7 @@ jobs:
       env:
         APP_ENV: production
         DEBUG: "False"
+        ALLOWED_HOSTS: api.mlai.au,10.126.0.2
         DEFAULT_BACKEND_URL: https://api.mlai.au
         DEFAULT_FRONTEND_URL: https://mlai.au
         MEDHACK_URL: https://mlai.au

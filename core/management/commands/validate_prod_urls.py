@@ -59,6 +59,11 @@ REQUIRED_CSRF_ORIGINS = {
     "https://www.mlai.au",
 }
 
+REQUIRED_ALLOWED_HOSTS = {
+    "api.mlai.au",
+    "10.126.0.2",
+}
+
 
 def _as_clean_string(value) -> str:
     return str(value or "").strip()
@@ -139,11 +144,17 @@ def _validate_service_url(setting_name: str, errors: list[str]) -> None:
         )
 
 
-def _validate_required_origins(setting_name: str, required_origins: set[str], errors: list[str]) -> None:
+def _validate_required_values(
+    setting_name: str,
+    required_values: set[str],
+    errors: list[str],
+    *,
+    value_label: str,
+) -> None:
     configured = set(_as_list(getattr(settings, setting_name, [])))
-    missing = sorted(required_origins - configured)
+    missing = sorted(required_values - configured)
     if missing:
-        errors.append(f"{setting_name} is missing required origin(s): {', '.join(missing)}.")
+        errors.append(f"{setting_name} is missing required {value_label}(s): {', '.join(missing)}.")
 
 
 def _service_api_key_with_source() -> tuple[str, str]:
@@ -168,8 +179,9 @@ def validate_prod_url_settings() -> list[str]:
     for setting_name in SERVICE_URL_SETTINGS:
         _validate_service_url(setting_name, errors)
 
-    _validate_required_origins("CORS_ALLOWED_ORIGINS", REQUIRED_CORS_ORIGINS, errors)
-    _validate_required_origins("CSRF_TRUSTED_ORIGINS", REQUIRED_CSRF_ORIGINS, errors)
+    _validate_required_values("CORS_ALLOWED_ORIGINS", REQUIRED_CORS_ORIGINS, errors, value_label="origin")
+    _validate_required_values("CSRF_TRUSTED_ORIGINS", REQUIRED_CSRF_ORIGINS, errors, value_label="origin")
+    _validate_required_values("ALLOWED_HOSTS", REQUIRED_ALLOWED_HOSTS, errors, value_label="host")
 
     return errors
 
