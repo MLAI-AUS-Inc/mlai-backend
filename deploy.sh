@@ -65,7 +65,7 @@ ssh $USER@$DROPLET_IP << EOF
     migration_applied() {
         local app_label="\$1"
         local migration_name="\$2"
-        docker compose run --rm --no-deps web python manage.py shell -c "
+        docker compose run -T --rm --no-deps web python manage.py shell -c "
 from django.db.migrations.recorder import MigrationRecorder
 from django.db import connections
 recorder = MigrationRecorder(connections['default'])
@@ -115,7 +115,7 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
         roo/migrations/0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more.py
 
     echo "🗺️ Migration plan..."
-    docker compose run --rm --no-deps web python manage.py migrate --plan
+    docker compose run -T --rm --no-deps web python manage.py migrate --plan
 
     restore_web_on_error() {
         echo "⚠️ Deployment failed after web traffic was paused; restoring existing web service."
@@ -127,13 +127,13 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     trap restore_web_on_error ERR
 
     echo "🗄️ Running migrations..."
-    docker compose run --rm --no-deps web python manage.py migrate --noinput
+    docker compose run -T --rm --no-deps web python manage.py migrate --noinput
 
     echo "✅ Verifying migration readiness..."
-    docker compose run --rm --no-deps web python manage.py migrate --check --noinput
+    docker compose run -T --rm --no-deps web python manage.py migrate --check --noinput
 
     echo "🧭 Verifying Vibe Raising video upload routes..."
-    docker compose run --rm --no-deps web python manage.py shell -c "
+    docker compose run -T --rm --no-deps web python manage.py shell -c "
 from django.urls import resolve
 resolve('/api/v1/vibe-raising/uploads/video/session/')
 resolve('/api/v1/vibe-raising/uploads/video/complete/')
@@ -141,10 +141,10 @@ print('vibe raising video upload routes ok')
 "
 
     echo "🎞️ Configuring Firebase Storage CORS for direct video uploads..."
-    docker compose run --rm --no-deps web python manage.py configure_firebase_storage_cors
+    docker compose run -T --rm --no-deps web python manage.py configure_firebase_storage_cors
 
     echo "🔒 Verifying coworking booking concurrency guard..."
-    docker compose run --rm --no-deps web python manage.py shell -c "
+    docker compose run -T --rm --no-deps web python manage.py shell -c "
 from django.db import connection
 with connection.cursor() as cursor:
     cursor.execute(\"SELECT to_regclass('public.unique_active_booking_per_user_date')\")
