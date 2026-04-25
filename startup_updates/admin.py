@@ -76,6 +76,7 @@ class GmailAttachmentArtifactAdmin(admin.ModelAdmin):
     list_display = ("organization", "filename", "mime_type", "size_bytes", "extraction_status", "updated_at")
     search_fields = ("organization__domain", "filename", "mime_type", "gmail_attachment_id")
     list_filter = ("extraction_status", "mime_type")
+    readonly_fields = ("last_error",)
 
 
 @admin.register(SlackChannelSelection)
