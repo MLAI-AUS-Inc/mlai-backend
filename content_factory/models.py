@@ -34,6 +34,12 @@ class OrganizationContentConfig(models.Model):
         default=0,
         help_text="Lower numbers run earlier in the shared daily discovery queue.",
     )
+    baseline_skipped_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When the founder explicitly skipped the website baseline prerequisite.",
+    )
+    baseline_skip_reason = models.TextField(blank=True, default="")
     article_template = models.TextField(blank=True, null=True)
     design_guide = models.TextField(blank=True, null=True)
     resource_prompt = models.TextField(blank=True, null=True)
@@ -120,6 +126,47 @@ class OrganizationContentConfig(models.Model):
     @property
     def github_connection_state(self) -> str:
         return content_factory_github_connection_state(self)
+
+
+class WebsiteBaselineSnapshot(models.Model):
+    """Historical website performance baseline for a Vibe Marketing organization."""
+
+    STATUS_CHOICES = [
+        ("completed", "Completed"),
+        ("partial", "Partial"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="website_baseline_snapshots",
+    )
+    domain = models.CharField(max_length=255, db_index=True)
+    run_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="completed", db_index=True)
+    collected_at = models.DateTimeField(default=timezone.now, db_index=True)
+    overall_score = models.PositiveSmallIntegerField(null=True, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    metrics = models.JSONField(default=dict, blank=True)
+    source_status = models.JSONField(default=dict, blank=True)
+    recommendations = models.JSONField(default=list, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_website_baseline_snapshot"
+        ordering = ["-collected_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "-collected_at"], name="website_base_org_collected_idx"),
+            models.Index(fields=["domain", "-collected_at"], name="website_base_domain_idx"),
+        ]
+
+    def __str__(self):
+        score = self.overall_score if self.overall_score is not None else "n/a"
+        return f"{self.domain} baseline {score} ({self.status})"
 
 
 class GeneratedComponent(models.Model):

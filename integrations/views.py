@@ -161,11 +161,17 @@ def google_connect(request):
     else:
         request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
+    scopes = list(settings.GOOGLE_OAUTH_SCOPES)
+    if request.GET.get("scope") in {"website_baseline", "vibe_marketing_baseline"}:
+        for scope in getattr(settings, "GOOGLE_WEBSITE_BASELINE_SCOPES", []):
+            if scope not in scopes:
+                scopes.append(scope)
+
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
         "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URI,
         "response_type": "code",
-        "scope": " ".join(settings.GOOGLE_OAUTH_SCOPES),
+        "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",  # helps ensure refresh_token is returned
         "include_granted_scopes": "true",
