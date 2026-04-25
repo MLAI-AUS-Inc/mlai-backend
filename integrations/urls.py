@@ -7,4 +7,6 @@ urlpatterns = [
     path('connect/github', views.github_connect, name='github_connect'),
     path('callback/github', views.github_callback, name='github_callback'),
     path('connect/github/select', views.github_select_repo, name='github_select_repo'),
+    path('connect/<str:provider>', views.connector_connect, name='connector_connect'),
+    path('callback/<str:provider>', views.connector_callback, name='connector_callback'),
 ]

@@ -1,0 +1,37 @@
+from django.urls import path
+
+from .vibe_marketing_views import (
+    VibeMarketingArticleView,
+    VibeMarketingBootstrapView,
+    VibeMarketingDailyReplayView,
+    VibeMarketingDiscoveryView,
+    VibeMarketingGitHubConnectView,
+    VibeMarketingRunArtifactsView,
+    VibeMarketingRunControlView,
+    VibeMarketingRunView,
+    VibeMarketingScanView,
+    VibeMarketingSettingsView,
+)
+
+
+urlpatterns = [
+    path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
+    path("settings", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings-no-slash"),
+    path("settings/", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings"),
+    path("github/connect", VibeMarketingGitHubConnectView.as_view(), name="vibe-marketing-github-connect-no-slash"),
+    path("github/connect/", VibeMarketingGitHubConnectView.as_view(), name="vibe-marketing-github-connect"),
+    path("scan", VibeMarketingScanView.as_view(), name="vibe-marketing-scan-no-slash"),
+    path("scan/", VibeMarketingScanView.as_view(), name="vibe-marketing-scan"),
+    path("discovery", VibeMarketingDiscoveryView.as_view(), name="vibe-marketing-discovery-no-slash"),
+    path("discovery/", VibeMarketingDiscoveryView.as_view(), name="vibe-marketing-discovery"),
+    path("article", VibeMarketingArticleView.as_view(), name="vibe-marketing-article-no-slash"),
+    path("article/", VibeMarketingArticleView.as_view(), name="vibe-marketing-article"),
+    path("runs/<str:run_id>", VibeMarketingRunView.as_view(), name="vibe-marketing-run-no-slash"),
+    path("runs/<str:run_id>/", VibeMarketingRunView.as_view(), name="vibe-marketing-run"),
+    path("runs/<str:run_id>/artifacts", VibeMarketingRunArtifactsView.as_view(), name="vibe-marketing-run-artifacts-no-slash"),
+    path("runs/<str:run_id>/artifacts/", VibeMarketingRunArtifactsView.as_view(), name="vibe-marketing-run-artifacts"),
+    path("runs/<str:run_id>/<str:action>", VibeMarketingRunControlView.as_view(), name="vibe-marketing-run-control-no-slash"),
+    path("runs/<str:run_id>/<str:action>/", VibeMarketingRunControlView.as_view(), name="vibe-marketing-run-control"),
+    path("daily/replay", VibeMarketingDailyReplayView.as_view(), name="vibe-marketing-daily-replay-no-slash"),
+    path("daily/replay/", VibeMarketingDailyReplayView.as_view(), name="vibe-marketing-daily-replay"),
+]

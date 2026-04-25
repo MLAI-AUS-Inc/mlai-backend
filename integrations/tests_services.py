@@ -4,8 +4,9 @@ from django.test import TestCase
 from django.utils import timezone
 from unittest.mock import patch, MagicMock
 from integrations.models import UserIntegration
-from integrations.content_factory_contract import CONTENT_FACTORY_REQUEST_SOURCE
-from core.models import Organization, OrganizationContentConfig
+from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
 from integrations.services.github import scan_github_project, scaffold_articles_directory, ScanError
 
 class GithubServiceTest(TestCase):

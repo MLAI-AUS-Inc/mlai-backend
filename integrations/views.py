@@ -16,6 +16,13 @@ from integrations.services.github_connections import (
     store_github_oauth_state,
     validate_github_oauth_state,
 )
+from integrations.services.external_connectors import (
+    ConnectorConfigurationError,
+    ConnectorOAuthError,
+    build_authorization_url,
+    complete_oauth_callback,
+    normalize_provider,
+)
 from integrations import http_client as requests
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -254,6 +261,59 @@ def google_callback(request):
     # Redirect to frontend
     return redirect(success_url or _default_google_success_url())
 
+
+def connector_connect(request, provider):
+    """
+    Initiates OAuth/consent flows for Vibe Raising data-source connectors.
+    Gmail delegates to the existing Google OAuth flow.
+    """
+    try:
+        normalized_provider = normalize_provider(provider)
+    except ConnectorConfigurationError as exc:
+        return HttpResponseBadRequest(str(exc))
+
+    if normalized_provider == "gmail":
+        return google_connect(request)
+
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(request.GET.get("next")))
+
+    _ensure_django_session_for_user(request, user)
+
+    try:
+        return redirect(build_authorization_url(request, normalized_provider))
+    except ConnectorConfigurationError as exc:
+        return HttpResponse(str(exc), status=503)
+    except ConnectorOAuthError as exc:
+        return HttpResponseBadRequest(str(exc))
+
+
+def connector_callback(request, provider):
+    """
+    Handles OAuth/consent callbacks for Vibe Raising data-source connectors.
+    Gmail delegates to the existing Google callback.
+    """
+    try:
+        normalized_provider = normalize_provider(provider)
+    except ConnectorConfigurationError as exc:
+        return HttpResponseBadRequest(str(exc))
+
+    if normalized_provider == "gmail":
+        return google_callback(request)
+
+    user = _resolve_google_oauth_user(request)
+    if user is None:
+        return redirect(_vibe_raising_login_url(None))
+
+    request.user = user
+
+    try:
+        return redirect(complete_oauth_callback(request, normalized_provider))
+    except ConnectorOAuthError as exc:
+        return HttpResponseBadRequest(str(exc))
+
+
 def github_connect(request):
     """
     Initiates GitHub App installation flow.
@@ -379,7 +439,8 @@ def github_callback(request):
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
         # Store credentials in OrganizationContentConfig for the domain
-        from core.models import Organization, OrganizationContentConfig
+        from organizations.models import Organization
+        from content_factory.models import OrganizationContentConfig
 
         if not normalized_domain:
             return HttpResponseBadRequest("Missing domain in state")
@@ -491,7 +552,7 @@ def github_callback(request):
         # Trigger RETRY if job_id was present
         if job_id and selected_repo:
             try:
-                from core.models import ContentFactoryJob
+                from content_factory.models import ContentFactoryJob
                 from integrations.services.article_generation import trigger_article_generation
 
                 job = ContentFactoryJob.objects.get(job_id=job_id)

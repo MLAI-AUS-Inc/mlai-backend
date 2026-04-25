@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase
 from django.utils import timezone
 
-from core.models import Organization, OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
+from organizations.models import Organization
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError
 from integrations.services.github import (

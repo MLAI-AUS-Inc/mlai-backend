@@ -66,6 +66,21 @@ def _resolve_app_release(base_dir: str) -> str:
     return "unknown"
 
 
+def _env_list(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return [item.strip() for item in raw.replace(",", " ").split() if item.strip()]
+
+
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return default
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -107,6 +122,11 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'hospital',
     'innovate_connect_alliance',
+    'organizations',
+    'workflow_runs',
+    'startup_updates',
+    'content_factory',
+    'founder_tools',
     'core',
     'esafety',
     'vibe_raising',
@@ -301,10 +321,14 @@ except ImportError:
 DEFAULT_FRONTEND_URL = os.getenv('DEFAULT_FRONTEND_URL') or (
     'http://localhost:5173' if IS_LOCAL_ENV else 'https://mlai.au'
 )
+DEFAULT_BACKEND_URL = os.getenv('DEFAULT_BACKEND_URL') or (
+    'http://localhost:8000' if IS_LOCAL_ENV else 'https://api.mlai.au'
+)
 MEDHACK_URL = os.getenv('MEDHACK_URL') or DEFAULT_FRONTEND_URL
 ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 INNOVATE_CONNECT_ALLIANCE_URL = os.getenv('INNOVATE_CONNECT_ALLIANCE_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
+FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
@@ -344,6 +368,91 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+
+# Founder-authorized connector OAuth settings
+STRIPE_CONNECT_CLIENT_ID = _env_first(
+    "STRIPE_CONNECT_CLIENT_ID",
+    "STRIPE_CONNECT_OAUTH_CLIENT_ID",
+    "STRIPE_CLIENT_ID",
+)
+STRIPE_SECRET_KEY = _env_first(
+    "STRIPE_SECRET_KEY",
+    "STRIPE_API_SECRET_KEY",
+    "STRIPE_API_KEY",
+)
+STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
+    "STRIPE_OAUTH_REDIRECT_URI",
+    f"{DEFAULT_BACKEND_URL}/integrations/callback/stripe",
+)
+STRIPE_OAUTH_SCOPES = _env_list("STRIPE_OAUTH_SCOPES", ["read_only"])
+
+XERO_CLIENT_ID = os.environ.get("XERO_CLIENT_ID", "")
+XERO_CLIENT_SECRET = os.environ.get("XERO_CLIENT_SECRET", "")
+XERO_OAUTH_REDIRECT_URI = os.environ.get(
+    "XERO_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/xero",
+)
+XERO_OAUTH_SCOPES = _env_list(
+    "XERO_OAUTH_SCOPES",
+    [
+        "offline_access",
+        "accounting.invoices.read",
+        "accounting.payments.read",
+        "accounting.settings.read",
+        "accounting.contacts.read",
+    ],
+)
+
+NOTION_CLIENT_ID = os.environ.get("NOTION_CLIENT_ID", "")
+NOTION_CLIENT_SECRET = os.environ.get("NOTION_CLIENT_SECRET", "")
+NOTION_OAUTH_REDIRECT_URI = os.environ.get(
+    "NOTION_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/notion",
+)
+
+GOOGLE_DRIVE_OAUTH_REDIRECT_URI = os.environ.get(
+    "GOOGLE_DRIVE_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/google-drive",
+)
+GOOGLE_DRIVE_OAUTH_SCOPES = _env_list(
+    "GOOGLE_DRIVE_OAUTH_SCOPES",
+    [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    ],
+)
+
+SLACK_CLIENT_ID = _env_first("FT_SLACK_CLIENT_ID", "SLACK_CLIENT_ID")
+SLACK_CLIENT_SECRET = _env_first("FT_SLACK_CLIENT_SECRET", "SLACK_CLIENT_SECRET")
+SLACK_OAUTH_REDIRECT_URI = _env_first(
+    "FT_SLACK_OAUTH_REDIRECT_URI",
+    "SLACK_OAUTH_REDIRECT_URI",
+    default="http://localhost:8000/integrations/callback/slack",
+)
+SLACK_OAUTH_SCOPES = _env_list(
+    "SLACK_OAUTH_SCOPES",
+    [
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
+        "team:read",
+        "users:read",
+    ],
+)
+SLACK_OAUTH_USER_SCOPES = _env_list("SLACK_OAUTH_USER_SCOPES", SLACK_OAUTH_SCOPES)
+SLACK_OAUTH_BOT_SCOPES = _env_list("SLACK_OAUTH_BOT_SCOPES", [])
+SLACK_SYNC_HISTORY_DAYS = int(os.environ.get("SLACK_SYNC_HISTORY_DAYS", "120") or 120)
+SLACK_SYNC_HISTORY_PAGE_LIMIT = int(os.environ.get("SLACK_SYNC_HISTORY_PAGE_LIMIT", "100") or 100)
+SLACK_SYNC_HISTORY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_HISTORY_MAX_PAGES", "5") or 5)
+SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3") or 3)
+
+BASIQ_API_KEY = os.environ.get("BASIQ_API_KEY", "")
+BASIQ_API_BASE_URL = os.environ.get("BASIQ_API_BASE_URL", "https://au-api.basiq.io")
+BASIQ_CONSENT_UI_URL = os.environ.get("BASIQ_CONSENT_UI_URL", "https://consent.basiq.io/home")
+BASIQ_API_VERSION = os.environ.get("BASIQ_API_VERSION", "3.0")
 
 # GitHub App Settings (for GitHub App installation flow)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID")

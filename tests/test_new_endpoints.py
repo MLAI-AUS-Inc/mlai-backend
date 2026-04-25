@@ -12,17 +12,17 @@ from rest_framework import status
 from django.urls import reverse
 from requests import Response
 
-from core.content_factory_delivery import build_content_factory_preview_signature
-from core.models import (
+from content_factory.delivery import build_content_factory_preview_signature
+from content_factory.models import (
     ContentFactoryJob,
-    ContentFactoryRun,
-    Organization,
     OrganizationContentConfig,
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
     WrittenArticle,
 )
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
@@ -463,7 +463,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertFalse(payload.get('delivery_mode_confirmed'))
         self.assertIsNone(payload.get('github_repo'))
 
-    @patch('integrations.api_views_content.trigger_article_generation')
+    @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
         mock_trigger.return_value = {"job_id": "job-thread", "status": "queued"}
 
@@ -593,7 +593,7 @@ class ArticleSystemDecisionTests(TestCase):
             },
         )
 
-    @patch('integrations.api_views_content.trigger_article_generation')
+    @patch('content_factory.content_views.trigger_article_generation')
     def test_article_system_decision_use_detected_resumes_pending_intent(self, mock_trigger):
         mock_trigger.return_value = {"job_id": "job-123", "status": "queued"}
         url = reverse('content_article_system_decision')
@@ -1961,7 +1961,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_root_message_ts="123.456",
         )
 
-    @patch('integrations.api_views_content.publish_article_as_pr')
+    @patch('content_factory.content_views.publish_article_as_pr')
     def test_publish_pr_endpoint_proxies_to_child_publish_run(self, mock_publish_article_as_pr):
         mock_publish_article_as_pr.return_value = {
             "status": "queued",
@@ -1995,7 +1995,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_root_message_ts="123.456",
         )
 
-    @patch('integrations.api_views_content.publish_article_as_pr')
+    @patch('content_factory.content_views.publish_article_as_pr')
     def test_publish_pr_endpoint_forwards_requested_by_for_delegated_job(self, mock_publish_article_as_pr):
         mock_publish_article_as_pr.return_value = {
             "status": "queued",
@@ -2029,7 +2029,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_root_message_ts="123.456",
         )
 
-    @patch('integrations.api_views_content.publish_article_as_pr')
+    @patch('content_factory.content_views.publish_article_as_pr')
     def test_publish_pr_endpoint_omits_requested_by_when_same_as_effective_user(self, mock_publish_article_as_pr):
         mock_publish_article_as_pr.return_value = {
             "status": "queued",
@@ -2930,7 +2930,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertContains(response, "preview link is invalid", status_code=status.HTTP_403_FORBIDDEN)
 
-    @patch("core.views.validate_content_factory_preview_signature", side_effect=signing.SignatureExpired("expired"))
+    @patch("content_factory.service_views.validate_content_factory_preview_signature", side_effect=signing.SignatureExpired("expired"))
     def test_content_preview_route_rejects_expired_signature(self, _mock_validate):
         self._create_content_factory_run("run-preview-expired")
 
@@ -3210,7 +3210,7 @@ class TopicConfirmTests(TestCase):
             "request_source": "roo_slackbot",
         }
         
-        with patch('integrations.api_views_content.confirm_topic') as mock_confirm_topic:
+        with patch('content_factory.content_views.confirm_topic') as mock_confirm_topic:
             mock_confirm_topic.return_value = {"job_id": "job-new", "status": "queued"}
             
             response = self.client.post(url, data, format='json')
@@ -3280,7 +3280,7 @@ class TopicConfirmTests(TestCase):
         call_args = mock_confirm_topic.call_args
         self.assertEqual(call_args.kwargs['confirmed_keyword'], "keyword 1")
 
-    @patch('integrations.api_views_content.set_article_delivery_mode')
+    @patch('content_factory.content_views.set_article_delivery_mode')
     def test_set_delivery_mode_endpoint_updates_job_request_meta(self, mock_set_delivery_mode):
         job = ContentFactoryJob.objects.create(
             job_id="job-delivery-mode-set",

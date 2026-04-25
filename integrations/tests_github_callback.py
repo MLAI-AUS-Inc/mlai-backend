@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from core.models import OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.github_connections import build_github_oauth_state, store_github_oauth_state
 

@@ -6,14 +6,14 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from core.models import (
+from workflow_runs.models import (
     ContentFactoryRun,
     ContentFactoryRunStatus,
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
 )
-from integrations.models import UserStartupBinding
-from integrations.services.startup_updates import (
+from startup_updates.models import UserStartupBinding
+from startup_updates.services import (
     OPEN_RUN_STATUSES,
     STARTUP_UPDATE_CANCELLABLE_STATUSES,
     STARTUP_UPDATE_WORKFLOW,

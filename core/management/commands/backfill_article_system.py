@@ -1,11 +1,11 @@
 from django.core.management.base import BaseCommand
 
-from core.article_system import (
+from content_factory.article_system import (
     default_article_system,
     normalize_article_system,
     resolve_article_system_with_source,
 )
-from core.models import OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
 
 
 class Command(BaseCommand):

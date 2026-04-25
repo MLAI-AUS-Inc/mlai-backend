@@ -7,9 +7,10 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from core.models import ContentFactoryRun, Organization
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun
 from integrations.models import GoogleConnection
-from integrations.models import UserStartupBinding
+from startup_updates.models import UserStartupBinding
 from vibe_raising.models import VibeRaisingCompany, VibeRaisingProfile
 
 

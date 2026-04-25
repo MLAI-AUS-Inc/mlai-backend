@@ -6,7 +6,7 @@ from typing import Optional
 from django.core import signing
 from django.core.cache import cache
 
-from core.models import OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig
 from integrations.utils import normalize_domain
 
 GITHUB_APP_SLUG = "mlai-tools"

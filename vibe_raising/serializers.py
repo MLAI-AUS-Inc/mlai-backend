@@ -2,7 +2,7 @@ import calendar
 
 from rest_framework import serializers
 
-from .models import VibeRaisingCompany, VibeRaisingProfile
+from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 
 
 VIBE_RAISING_UPDATE_METRIC_KEYS = {
@@ -11,6 +11,13 @@ VIBE_RAISING_UPDATE_METRIC_KEYS = {
     "mrr",
     "burnRate",
     "runway",
+    "invoiceRevenue",
+    "cashCollected",
+    "revenueGrowthRate",
+    "customerCount",
+    "churn",
+    "invoiceCount",
+    "recurringInvoiceCount",
 }
 
 
@@ -44,9 +51,18 @@ class AliasInputSerializer(serializers.Serializer):
 
 
 class VibeRaisingCompanySerializer(serializers.ModelSerializer):
+    organizationId = serializers.SerializerMethodField()
+    organizationDomain = serializers.SerializerMethodField()
+
     class Meta:
         model = VibeRaisingCompany
-        fields = ["id", "name", "domain", "abn", "registered"]
+        fields = ["id", "name", "domain", "abn", "registered", "organizationId", "organizationDomain"]
+
+    def get_organizationId(self, obj):
+        return obj.organization_id
+
+    def get_organizationDomain(self, obj):
+        return obj.organization.domain if obj.organization_id else None
 
 
 class VibeRaisingProfileSerializer(serializers.ModelSerializer):

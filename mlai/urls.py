@@ -28,14 +28,16 @@ urlpatterns = [
     path('api/v1/hackathons/innovate-connect-alliance/', include('innovate_connect_alliance.urls')),
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
+    path('api/v1/founder-tools/', include('founder_tools.urls')),
     path('api/v1/vibe-raising/', include('vibe_raising.urls')),
+    path('api/v1/vibe-marketing/', include('content_factory.urls_vibe_marketing')),
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API
-    path('api/content-factory/', include('core.urls_content_factory')),
-    path('api/v1/content/', include('core.urls_content_generation')),
+    path('api/content-factory/', include('content_factory.urls_service')),
+    path('api/v1/content/', include('content_factory.urls_content')),
     # SEO Research API
-    path('api/seo/', include('core.urls_seo')),
+    path('api/seo/', include('content_factory.urls_seo')),
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),

@@ -8,9 +8,9 @@ from rest_framework import status
 from django.db.models import Q
 from django.urls import reverse
 
-from core.content_factory_auth import content_factory_github_connection_state
+from content_factory.auth import content_factory_github_connection_state
 from .models import UserIntegration
-from core.article_system import (
+from content_factory.article_system import (
     article_system_ready,
     best_registry_driven_publish_target,
     recommended_next_action as derive_recommended_next_action,
@@ -18,7 +18,7 @@ from core.article_system import (
     resolve_article_system,
 )
 from core.permissions import HasRooApiKey
-from integrations.content_factory_contract import require_roo_request_source
+from content_factory.contract import require_roo_request_source
 from integrations.services.github_connections import build_github_oauth_url, get_owned_org_configs
 from integrations.utils import normalize_domain
 
@@ -140,7 +140,7 @@ class GithubTokenIdentityView(APIView):
                     break
             if active_config is None:
                 try:
-                    from core.models import Organization
+                    from organizations.models import Organization
                     org = Organization.objects.filter(domain=requested_domain).first()
                     fallback_config = getattr(org, "content_config", None) if org else None
                     if fallback_config and not fallback_config.connected_slack_user_id:
@@ -315,7 +315,8 @@ class GithubTokenIdentityView(APIView):
         registry_driven_seo_ready = False
 
         try:
-            from core.models import GeneratedComponent, Organization
+            from content_factory.models import GeneratedComponent
+            from organizations.models import Organization
 
             if active_domain:
                 org = Organization.objects.filter(domain=active_domain).first()
@@ -647,7 +648,8 @@ class GithubScanView(APIView):
                     }, status=status.HTTP_404_NOT_FOUND)
                 
                 if integration and integration.github_access_token and integration.github_repo:
-                    from core.models import Organization, OrganizationContentConfig
+                    from organizations.models import Organization
+                    from content_factory.models import OrganizationContentConfig
                     org, org_created = Organization.objects.get_or_create(
                         domain=normalized_domain,
                         defaults={"name": normalized_domain}
@@ -715,7 +717,7 @@ class GithubScanView(APIView):
         # Resolve domain from config if not provided in request
         if not normalized_domain and github_repo:
             try:
-                from core.models import OrganizationContentConfig
+                from content_factory.models import OrganizationContentConfig
                 config = (
                     OrganizationContentConfig.objects
                     .select_related('organization')
@@ -741,7 +743,8 @@ class GithubScanView(APIView):
 
         # Ensure org/config exist (but don't overwrite existing github_repo)
         try:
-            from core.models import Organization, OrganizationContentConfig
+            from organizations.models import Organization
+            from content_factory.models import OrganizationContentConfig
             org, _ = Organization.objects.get_or_create(
                 domain=normalized_domain,
                 defaults={"name": normalized_domain}
@@ -792,7 +795,8 @@ class GithubScaffoldView(APIView):
         from integrations.services.github import scaffold_articles_directory, ScanError
         from integrations.services.article_generation import get_github_credentials_for_domain, ArticleGenerationError
         from integrations.services.slack import SlackService
-        from core.models import Organization, OrganizationContentConfig
+        from organizations.models import Organization
+        from content_factory.models import OrganizationContentConfig
 
         domain = request.data.get('domain')
         slack_user_id = request.data.get('slack_user_id')
@@ -820,7 +824,7 @@ class GithubScaffoldView(APIView):
             )
 
         # Check scan prerequisite — scan must have completed before scaffolding
-        from core.models import GeneratedComponent
+        from content_factory.models import GeneratedComponent
         has_components = GeneratedComponent.objects.filter(organization=org).exists()
         if not has_components and not config.scan_summary:
             return Response({

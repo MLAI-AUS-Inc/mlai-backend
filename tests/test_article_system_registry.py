@@ -1,6 +1,6 @@
 from django.test import SimpleTestCase
 
-from core.article_system import (
+from content_factory.article_system import (
     best_registry_driven_publish_target,
     is_registry_driven_publish_target,
     normalize_article_system,

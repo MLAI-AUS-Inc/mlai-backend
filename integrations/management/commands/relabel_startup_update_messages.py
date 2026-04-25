@@ -4,8 +4,8 @@ from collections import Counter
 
 from django.core.management.base import BaseCommand, CommandError
 
-from integrations.models import GmailMessageArtifact, GmailRelevanceLabel, StartupProfile
-from integrations.services.startup_updates import apply_profile_scoring
+from startup_updates.models import GmailMessageArtifact, GmailRelevanceLabel, StartupProfile
+from startup_updates.services import apply_profile_scoring
 
 
 LABEL_ORDER = (

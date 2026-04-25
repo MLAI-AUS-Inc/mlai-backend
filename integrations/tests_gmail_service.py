@@ -7,8 +7,9 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from googleapiclient.errors import HttpError
 
-from core.models import Organization
-from integrations.models import GmailMessageArtifact, GoogleConnection
+from organizations.models import Organization
+from integrations.models import GoogleConnection
+from startup_updates.models import GmailMessageArtifact
 from integrations.services.gmail import METADATA_HEADERS, _execute_gmail_request, get_message_metadata
 from integrations.services.gmail import sync_message_metadata_page
 
