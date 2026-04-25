@@ -15,6 +15,7 @@ from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
     ContentFactoryRunStatus,
+    ContentFactoryRunStep,
     ContentFactoryRunStepAttempt,
     ContentFactoryStepStatus,
 )
@@ -146,6 +147,15 @@ RUN_STEP_ORDER = [
     "draft_generation",
     "groundedness_review",
 ]
+SOURCE_REPROCESS_STEPS = {
+    "timeline_merge",
+    "draft_generation",
+    "groundedness_review",
+}
+SLACK_STEP_KEYS = {
+    "slack_backfill",
+    "slack_event_extraction",
+}
 
 
 def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -> list[str]:
@@ -189,6 +199,71 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
         steps.extend(["slack_backfill", "slack_event_extraction"])
     steps.extend(["timeline_merge", "draft_generation", "groundedness_review"])
     return steps
+
+
+def reconcile_startup_update_run_source_steps(
+    *,
+    run: ContentFactoryRun,
+    input_sources: Optional[list[str]],
+) -> ContentFactoryRun:
+    selected_input_sources = normalize_startup_update_input_sources(input_sources)
+    desired_step_order = build_startup_update_step_order(selected_input_sources)
+    previous_step_order = list(run.step_order or [])
+    previous_steps = set(previous_step_order)
+    added_steps = [step for step in desired_step_order if step not in previous_steps]
+    slack_was_added = any(step in SLACK_STEP_KEYS for step in added_steps)
+
+    update_fields: list[str] = []
+    if previous_step_order != desired_step_order:
+        run.step_order = desired_step_order
+        update_fields.append("step_order")
+
+    if not run.current_step or run.current_step not in desired_step_order:
+        run.current_step = desired_step_order[0]
+        update_fields.append("current_step")
+    elif slack_was_added and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "slack_backfill"
+        update_fields.append("current_step")
+
+    if update_fields:
+        run.save(update_fields=[*dict.fromkeys(update_fields), "updated_at"])
+
+    existing_steps = {
+        step.step_key: step
+        for step in ContentFactoryRunStep.objects.filter(run=run)
+    }
+    for index, step_key in enumerate(desired_step_order):
+        step = existing_steps.get(step_key)
+        if step is None:
+            ContentFactoryRunStep.objects.create(
+                run=run,
+                step_key=step_key,
+                display_order=index,
+                required=True,
+                status=ContentFactoryStepStatus.PENDING,
+            )
+            continue
+        if step.display_order != index:
+            step.display_order = index
+            step.save(update_fields=["display_order"])
+
+    if slack_was_added:
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=SOURCE_REPROCESS_STEPS,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    return run
 
 
 def _uniq(values: Iterable[str]) -> list[str]:
@@ -738,6 +813,7 @@ def refresh_startup_update_run_source_context(
 ) -> ContentFactoryRun:
     run_request = dict(run.run_request or {})
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
+    reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
     if selected_input_sources:
         run_request["input_sources"] = list(selected_input_sources)
     if ExternalServiceProvider.SLACK in set(selected_input_sources):
@@ -1313,9 +1389,6 @@ def create_startup_update_run(
         pin_startup_update_run_connection(existing, google_connection_id)
         now = timezone.now()
         months = iter_recent_month_starts(3, reference=now)
-        existing.step_order = step_order
-        existing.current_step = existing.current_step or step_order[0]
-        existing.save(update_fields=["step_order", "current_step", "updated_at"])
         refresh_startup_update_run_source_context(
             run=existing,
             organization=organization,
@@ -1398,6 +1471,7 @@ def create_startup_update_run(
         acceptance_summary={},
         verification_summary={},
     )
+    reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
     if google_connection is not None and "gmail" in selected_source_set:
         GmailSyncCursor.objects.get_or_create(
             organization=organization,
