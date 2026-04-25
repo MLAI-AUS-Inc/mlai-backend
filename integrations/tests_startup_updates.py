@@ -864,6 +864,154 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.SYNCING)
         self.assertEqual(self.connection.last_error, "")
 
+    def test_slack_classification_batch_hard_filters_noise_and_returns_candidates(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        noisy_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000000.000100",
+            source_message_ids=["slack:C123:1770000000.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:00:00+00:00] Standup Bot: daily standup reminder",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000000.000100",
+                    "author_name": "Standup Bot",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "daily standup reminder",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        candidate_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000001.000100",
+            source_message_ids=["slack:C123:1770000001.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:01:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000001.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            response = self.client.get(
+                reverse("startup_updates_slack_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["slack_thread_id"], f"slack:C123:{candidate_thread.thread_ts}")
+        noisy_thread.refresh_from_db()
+        self.assertEqual(noisy_thread.relevance_label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertFalse(noisy_thread.needs_extraction)
+
+    def test_slack_classification_results_gate_extraction_batch(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        relevant_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000002.000100",
+            source_message_ids=["slack:C123:1770000002.000100", "slack:C123:1770000002.000200"],
+            source_message_count=2,
+            cleaned_text="\n".join(
+                [
+                    "[2026-03-15T12:00:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+                    "[2026-03-15T12:01:00+00:00] Alex: thanks",
+                ]
+            ),
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000002.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                },
+                {
+                    "message_id": "slack:C123:1770000002.000200",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                },
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000003.000100",
+            source_message_ids=["slack:C123:1770000003.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:03:00+00:00] Alex: thanks",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000003.000100",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+            relevance_label=GmailRelevanceLabel.IRRELEVANT,
+            classified_at=timezone.now(),
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            results_response = self.client.post(
+                reverse("startup_updates_slack_classification_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "slack_thread_id": f"slack:C123:{relevant_thread.thread_ts}",
+                            "relevance_label": GmailRelevanceLabel.RELEVANT,
+                            "relevance_score": 0.97,
+                            "relevance_reason": "Customer and MRR update.",
+                            "needs_extraction": True,
+                            "extraction_hints": {
+                                "important_message_ids": ["slack:C123:1770000002.000100"],
+                                "extraction_hint": "Extract pilot conversion.",
+                            },
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+            batch_response = self.client.get(
+                reverse("startup_updates_slack_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(results_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        bundle = batch_response.data["threads"][0]
+        self.assertEqual(bundle["slack_thread_id"], f"slack:C123:{relevant_thread.thread_ts}")
+        self.assertEqual(bundle["relevance_score"], 0.97)
+        self.assertIn("compression", bundle["participant_summary"])
+
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
     def setUp(self):
@@ -1715,6 +1863,52 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(mock_get_attachment_payload.call_count, 1)
         attachment_payload = second_response.data["threads"][0]["attachments"][0]
         self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+
+    def test_extraction_batch_compacts_quoted_gmail_history(self):
+        self.thread.message_payloads = [
+            {
+                "message_id": "msg-123",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "ACME pilot converted",
+                "from_address": "ceo@acme.com",
+                "cleaned_text": (
+                    "We closed the pilot and now have $24000 ARR.\n\n"
+                    "On Monday, someone wrote:\n> old quoted reply\n> repeated old thread"
+                ),
+            },
+            {
+                "message_id": "msg-noise",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "FYI",
+                "from_address": "ops@acme.com",
+                "cleaned_text": "unsubscribe\nview in browser",
+            },
+        ]
+        self.thread.source_message_ids = ["msg-123", "msg-noise"]
+        self.thread.source_message_count = 2
+        self.thread.cleaned_text = "\n\n".join(item["cleaned_text"] for item in self.thread.message_payloads)
+        self.thread.save(
+            update_fields=[
+                "message_payloads",
+                "source_message_ids",
+                "source_message_count",
+                "cleaned_text",
+                "updated_at",
+            ]
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bundle = response.data["threads"][0]
+        self.assertIn("We closed the pilot", bundle["cleaned_text"])
+        self.assertNotIn("old quoted reply", bundle["cleaned_text"])
+        self.assertIn("compression", bundle["participant_summary"])
 
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):

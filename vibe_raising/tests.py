@@ -747,6 +747,7 @@ class VibeRaisingApiTests(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
         self.assertIn("slack_backfill", run.step_order)
+        self.assertLess(run.step_order.index("slack_relevance_classification"), run.step_order.index("slack_event_extraction"))
         self.assertLess(run.step_order.index("slack_event_extraction"), run.step_order.index("timeline_merge"))
         self.assertNotIn("xero", run.step_order)
         self.assertEqual(run.current_step, "slack_backfill")
@@ -956,6 +957,7 @@ class VibeRaisingApiTests(TestCase):
             "thread_hydration",
             "event_extraction",
             "slack_backfill",
+            "slack_relevance_classification",
             "slack_event_extraction",
             "timeline_merge",
             "draft_generation",
@@ -971,6 +973,7 @@ class VibeRaisingApiTests(TestCase):
 
         steps_by_key = {step.step_key: step for step in run.steps.all()}
         self.assertEqual(steps_by_key["slack_backfill"].status, ContentFactoryStepStatus.PENDING)
+        self.assertEqual(steps_by_key["slack_relevance_classification"].status, ContentFactoryStepStatus.PENDING)
         self.assertEqual(steps_by_key["slack_event_extraction"].status, ContentFactoryStepStatus.PENDING)
         for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
             self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)

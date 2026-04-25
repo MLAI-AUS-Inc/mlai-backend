@@ -5,6 +5,10 @@ from .models import (
     GmailMessageArtifact,
     GmailSyncCursor,
     GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
     SlackChannelSelection,
     SlackMessageArtifact,
@@ -95,9 +99,56 @@ class SlackMessageArtifactAdmin(admin.ModelAdmin):
 
 @admin.register(SlackThreadArtifact)
 class SlackThreadArtifactAdmin(admin.ModelAdmin):
-    list_display = ("organization", "channel_name", "thread_ts", "source_message_count", "extraction_status", "latest_message_at")
-    search_fields = ("organization__domain", "channel_name", "channel_id", "thread_ts")
-    list_filter = ("extraction_status", "channel_name", "latest_message_at")
+    list_display = (
+        "organization",
+        "channel_name",
+        "thread_ts",
+        "source_message_count",
+        "relevance_label",
+        "heuristic_score",
+        "relevance_score",
+        "extraction_status",
+        "latest_message_at",
+    )
+    search_fields = ("organization__domain", "channel_name", "channel_id", "thread_ts", "cleaned_text")
+    list_filter = ("relevance_label", "needs_extraction", "extraction_status", "channel_name", "latest_message_at")
+
+
+@admin.register(LinearProjectSelection)
+class LinearProjectSelectionAdmin(admin.ModelAdmin):
+    list_display = ("organization", "connection", "project_name", "linear_project_id", "selected", "last_synced_at")
+    search_fields = ("organization__domain", "project_name", "linear_project_id", "connection__account_label")
+    list_filter = ("selected", "project_status", "project_health", "last_synced_at", "updated_at")
+
+
+@admin.register(LinearProjectArtifact)
+class LinearProjectArtifactAdmin(admin.ModelAdmin):
+    list_display = (
+        "organization",
+        "name",
+        "status_name",
+        "health",
+        "relevance_label",
+        "relevance_score",
+        "extraction_status",
+        "target_date",
+    )
+    search_fields = ("organization__domain", "name", "linear_project_id", "description")
+    list_filter = ("status_type", "health", "relevance_label", "needs_extraction", "extraction_status")
+
+
+@admin.register(LinearIssueArtifact)
+class LinearIssueArtifactAdmin(admin.ModelAdmin):
+    list_display = ("organization", "identifier", "title", "state_name", "priority_label", "updated_at_linear")
+    search_fields = ("organization__domain", "identifier", "linear_issue_id", "title", "description")
+    list_filter = ("state_type", "priority_label", "team_name", "updated_at_linear")
+
+
+@admin.register(LinearProjectUpdateArtifact)
+class LinearProjectUpdateArtifactAdmin(admin.ModelAdmin):
+    list_display = ("organization", "project", "health", "author_name", "updated_at_linear")
+    search_fields = ("organization__domain", "linear_project_update_id", "body", "author_name")
+    list_filter = ("health", "updated_at_linear")
 
 
 @admin.register(StartupMetricObservation)

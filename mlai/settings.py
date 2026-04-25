@@ -18,6 +18,7 @@ from datetime import timedelta
 from corsheaders.defaults import default_headers
 
 import dj_database_url
+from django.db.backends.signals import connection_created
 load_dotenv()
 
 
@@ -180,6 +181,10 @@ CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 database_url = os.getenv('DATABASE_URL')
 is_sqlite_database = (database_url or '').startswith('sqlite:')
 database_conn_max_age = 0 if is_sqlite_database else 600
+SQLITE_TIMEOUT_SECONDS = int(os.getenv('SQLITE_TIMEOUT_SECONDS', '30'))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv('SQLITE_BUSY_TIMEOUT_MS', str(SQLITE_TIMEOUT_SECONDS * 1000)))
+SQLITE_ENABLE_WAL = _env_is_true('SQLITE_ENABLE_WAL', True)
+SQLITE_LOCK_RETRY_AFTER_SECONDS = int(os.getenv('SQLITE_LOCK_RETRY_AFTER_SECONDS', '2'))
 
 # Parse database configuration from $DATABASE_URL
 default_config = dj_database_url.config(
@@ -190,11 +195,28 @@ default_config = dj_database_url.config(
 
 if default_config.get('ENGINE') == 'django.db.backends.sqlite3':
     sqlite_options = default_config.setdefault('OPTIONS', {})
-    sqlite_options.setdefault('timeout', int(os.getenv('SQLITE_TIMEOUT_SECONDS', '30')))
+    sqlite_options.setdefault('timeout', SQLITE_TIMEOUT_SECONDS)
 
 DATABASES = {
     'default': default_config
 }
+
+
+def _configure_sqlite_connection(sender, connection, **kwargs):
+    if connection.vendor != 'sqlite':
+        return
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f'PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}')
+            if SQLITE_ENABLE_WAL and connection.settings_dict.get('NAME') != ':memory:':
+                cursor.execute('PRAGMA journal_mode=WAL')
+            cursor.execute('PRAGMA synchronous=NORMAL')
+    except Exception:
+        # SQLite pragmas are local-development hardening only; never block app boot.
+        return
+
+
+connection_created.connect(_configure_sqlite_connection)
 
 POINTS_STATEMENT_TIMEOUT_MS = int(os.getenv('POINTS_STATEMENT_TIMEOUT_MS', '12000'))
 POINTS_LOCK_TIMEOUT_MS = int(os.getenv('POINTS_LOCK_TIMEOUT_MS', '5000'))
@@ -455,6 +477,19 @@ SLACK_SYNC_REPLY_MAX_PAGES = int(os.environ.get("SLACK_SYNC_REPLY_MAX_PAGES", "3
 SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET", "2") or 2)
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
+
+LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
+LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
+LINEAR_OAUTH_REDIRECT_URI = os.environ.get(
+    "LINEAR_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/linear",
+)
+LINEAR_OAUTH_SCOPES = _env_list("LINEAR_OAUTH_SCOPES", ["read"])
+LINEAR_SYNC_PROJECT_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_PROJECT_PAGE_LIMIT", "100") or 100)
+LINEAR_SYNC_ISSUE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_ISSUE_PAGE_LIMIT", "50") or 50)
+LINEAR_SYNC_UPDATE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_UPDATE_PAGE_LIMIT", "20") or 20)
+LINEAR_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
+LINEAR_API_READ_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_READ_TIMEOUT_SECONDS", "20") or 20)
 
 BASIQ_API_KEY = os.environ.get("BASIQ_API_KEY", "")
 BASIQ_API_BASE_URL = os.environ.get("BASIQ_API_BASE_URL", "https://au-api.basiq.io")

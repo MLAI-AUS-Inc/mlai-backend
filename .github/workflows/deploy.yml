@@ -24,9 +24,37 @@ jobs:
     - name: Check migrations are committed
       run: python manage.py makemigrations --check --dry-run
 
+    - name: Run Django system checks
+      run: python manage.py check
+
+    - name: Validate production URL settings
+      env:
+        APP_ENV: production
+        DEBUG: "False"
+        DEFAULT_BACKEND_URL: https://api.mlai.au
+        DEFAULT_FRONTEND_URL: https://mlai.au
+        MEDHACK_URL: https://mlai.au
+        ESAFETY_URL: https://mlai.au
+        INNOVATE_CONNECT_ALLIANCE_URL: https://mlai.au
+        VIBE_RAISING_URL: https://mlai.au
+        FOUNDER_TOOLS_URL: https://mlai.au
+        GOOGLE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google
+        GITHUB_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/github
+        STRIPE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/stripe
+        XERO_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/xero
+        NOTION_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/notion
+        GOOGLE_DRIVE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google-drive
+        FT_SLACK_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/slack
+        CONTENT_FACTORY_URL: http://content-factory-web:8000
+        VALLEY_HARNESS_URL: http://valley-api:8080
+        CORS_ALLOWED_ORIGINS: https://mlai.au,https://www.mlai.au
+        CSRF_TRUSTED_ORIGINS: https://mlai.au,https://www.mlai.au,https://api.mlai.au
+      run: python manage.py validate_prod_urls
+
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          tests.test_validate_prod_urls \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \

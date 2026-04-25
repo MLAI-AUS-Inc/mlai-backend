@@ -27,7 +27,13 @@ from integrations.models import (
 from startup_updates.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
+    GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     SlackChannelSelection,
+    SlackThreadArtifact,
     StartupEvent,
     StartupMetricObservation,
     MonthlyUpdateDraft,
@@ -78,7 +84,69 @@ HIGH_SIGNAL_TERMS = [
     "partnership",
     "outage",
     "incident",
+    "revenue",
+    "customer",
+    "signed",
+    "deal",
+    "mrr",
+    "arr",
+    "cash",
+    "kpi",
+    "risk",
+    "compliance",
+    "security",
+    "run rate",
+    "invoice",
+    "runway",
+    "beta",
+    "shipped",
+    "release",
 ]
+SLACK_HARD_IRRELEVANT_PATTERNS = [
+    "has joined the channel",
+    "has left the channel",
+    "set the channel topic",
+    "set the channel purpose",
+    "archived the channel",
+    "unpinned a message",
+    "pinned a message",
+    "daily standup",
+    "standup reminder",
+    "reminder:",
+    "calendar reminder",
+    "build passed",
+    "build failed",
+    "workflow run",
+    "pull request opened",
+    "pull request closed",
+]
+SLACK_LOW_SIGNAL_PATTERNS = [
+    "thanks",
+    "thank you",
+    "sounds good",
+    "nice",
+    "ok",
+    "okay",
+    "done",
+    "cool",
+    "+1",
+    "approved",
+    "merged",
+]
+SLACK_AUTOMATION_AUTHOR_PATTERNS = [
+    "bot",
+    "github",
+    "linear",
+    "jira",
+    "notion",
+    "calendar",
+    "standup",
+    "zapier",
+]
+SLACK_COMPACT_MAX_MESSAGES = 40
+SLACK_COMPACT_MAX_CHARS = 6000
+GMAIL_COMPACT_MAX_MESSAGES = 24
+GMAIL_COMPACT_MAX_CHARS = 12000
 LOW_SIGNAL_PATTERNS = [
     "unsubscribe",
     "receipt",
@@ -152,10 +220,27 @@ SOURCE_REPROCESS_STEPS = {
     "draft_generation",
     "groundedness_review",
 }
+SLACK_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "slack_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
 SLACK_STEP_KEYS = {
     "slack_backfill",
+    "slack_relevance_classification",
     "slack_event_extraction",
 }
+LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "linear_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
+LINEAR_STEP_KEYS = {
+    "linear_backfill",
+    "linear_relevance_classification",
+    "linear_event_extraction",
+}
+LINEAR_COMPACT_MAX_ISSUES = 35
+LINEAR_COMPACT_MAX_UPDATES = 8
+LINEAR_COMPACT_MAX_CHARS = 9000
 
 
 def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -> list[str]:
@@ -167,6 +252,7 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.NOTION,
         ExternalServiceProvider.GOOGLE_DRIVE,
         ExternalServiceProvider.SLACK,
+        ExternalServiceProvider.LINEAR,
     }
     if not input_sources:
         return ["gmail"]
@@ -196,7 +282,9 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
             "event_extraction",
         ])
     if ExternalServiceProvider.SLACK in selected:
-        steps.extend(["slack_backfill", "slack_event_extraction"])
+        steps.extend(["slack_backfill", "slack_relevance_classification", "slack_event_extraction"])
+    if ExternalServiceProvider.LINEAR in selected:
+        steps.extend(["linear_backfill", "linear_relevance_classification", "linear_event_extraction"])
     steps.extend(["timeline_merge", "draft_generation", "groundedness_review"])
     return steps
 
@@ -212,6 +300,9 @@ def reconcile_startup_update_run_source_steps(
     previous_steps = set(previous_step_order)
     added_steps = [step for step in desired_step_order if step not in previous_steps]
     slack_was_added = any(step in SLACK_STEP_KEYS for step in added_steps)
+    slack_classification_was_added = "slack_relevance_classification" in added_steps
+    linear_was_added = any(step in LINEAR_STEP_KEYS for step in added_steps)
+    linear_classification_was_added = "linear_relevance_classification" in added_steps
 
     update_fields: list[str] = []
     if previous_step_order != desired_step_order:
@@ -221,8 +312,17 @@ def reconcile_startup_update_run_source_steps(
     if not run.current_step or run.current_step not in desired_step_order:
         run.current_step = desired_step_order[0]
         update_fields.append("current_step")
-    elif slack_was_added and run.current_step in SOURCE_REPROCESS_STEPS:
+    elif "slack_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
         run.current_step = "slack_backfill"
+        update_fields.append("current_step")
+    elif slack_classification_was_added and run.current_step in SLACK_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "slack_relevance_classification"
+        update_fields.append("current_step")
+    elif "linear_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "linear_backfill"
+        update_fields.append("current_step")
+    elif linear_classification_was_added and run.current_step in LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "linear_relevance_classification"
         update_fields.append("current_step")
 
     if update_fields:
@@ -248,9 +348,31 @@ def reconcile_startup_update_run_source_steps(
             step.save(update_fields=["display_order"])
 
     if slack_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if slack_classification_was_added:
+            reset_steps.update(SLACK_CLASSIFICATION_DOWNSTREAM_STEPS)
         downstream_steps = ContentFactoryRunStep.objects.filter(
             run=run,
-            step_key__in=SOURCE_REPROCESS_STEPS,
+            step_key__in=reset_steps,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    if linear_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if linear_classification_was_added:
+            reset_steps.update(LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS)
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=reset_steps,
         )
         ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
         downstream_steps.update(
@@ -767,6 +889,44 @@ def build_slack_run_context(*, organization: Organization, selected_channel_ids:
     }
 
 
+def build_linear_run_context(*, organization: Organization, selected_project_ids: Optional[list[str]] = None) -> dict:
+    queryset = LinearProjectSelection.objects.filter(
+        organization=organization,
+        selected=True,
+    ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if selected_project_ids:
+        queryset = queryset.filter(linear_project_id__in=selected_project_ids)
+    projects = [
+        {
+            "project_id": selection.linear_project_id,
+            "project_name": selection.project_name,
+            "status": selection.project_status,
+            "health": selection.project_health,
+            "last_synced_at": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+        }
+        for selection in queryset.order_by("project_name", "linear_project_id")
+    ]
+    project_ids = [project["project_id"] for project in projects]
+    artifacts = LinearProjectArtifact.objects.filter(
+        organization=organization,
+        linear_project_id__in=project_ids,
+    )
+    issue_count = LinearIssueArtifact.objects.filter(organization=organization, project__in=artifacts).count()
+    update_count = LinearProjectUpdateArtifact.objects.filter(organization=organization, project__in=artifacts).count()
+    return {
+        "source": "linear",
+        "purpose": "selected_project_management_context",
+        "warning": "Linear is project-management context only and is not financial truth.",
+        "selected_project_ids": project_ids,
+        "selected_project_count": len(projects),
+        "selected_projects": projects,
+        "cached_project_count": artifacts.count(),
+        "cached_issue_count": issue_count,
+        "cached_update_count": update_count,
+        "warnings": [] if projects else ["Linear was selected but no projects are selected."],
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -799,6 +959,11 @@ def build_external_context_for_sources(
             organization=organization,
             selected_channel_ids=None,
         )
+    if ExternalServiceProvider.LINEAR in selected:
+        context["linear"] = build_linear_run_context(
+            organization=organization,
+            selected_project_ids=None,
+        )
     return context
 
 
@@ -820,6 +985,14 @@ def refresh_startup_update_run_source_context(
         run_request["slack_channel_ids"] = [
             selection.channel_id
             for selection in SlackChannelSelection.objects.filter(
+                organization=organization,
+                selected=True,
+            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+        ]
+    if ExternalServiceProvider.LINEAR in set(selected_input_sources):
+        run_request["linear_project_ids"] = [
+            selection.linear_project_id
+            for selection in LinearProjectSelection.objects.filter(
                 organization=organization,
                 selected=True,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
@@ -1445,6 +1618,16 @@ def create_startup_update_run(
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
         run_request["slack_channel_ids"] = selected_slack_channels
+    selected_linear_projects = []
+    if ExternalServiceProvider.LINEAR in selected_source_set:
+        selected_linear_projects = [
+            selection.linear_project_id
+            for selection in LinearProjectSelection.objects.filter(
+                organization=organization,
+                selected=True,
+            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+        ]
+        run_request["linear_project_ids"] = selected_linear_projects
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
@@ -1455,6 +1638,8 @@ def create_startup_update_run(
     if external_context:
         if ExternalServiceProvider.SLACK in external_context:
             external_context[ExternalServiceProvider.SLACK]["selected_channel_ids"] = selected_slack_channels
+        if ExternalServiceProvider.LINEAR in external_context:
+            external_context[ExternalServiceProvider.LINEAR]["selected_project_ids"] = selected_linear_projects
         run_request["external_context"] = external_context
 
     run = ContentFactoryRun.objects.create(
@@ -1919,6 +2104,477 @@ def apply_profile_scoring(
         artifact.save(update_fields=update_fields)
 
     return artifact.heuristic_score, artifact.heuristic_reasons, artifact.relevance_label
+
+
+def _slack_thread_haystack(thread: SlackThreadArtifact) -> str:
+    participant_summary = thread.participant_summary or {}
+    participants = participant_summary.get("participants") if isinstance(participant_summary, dict) else []
+    payload_text = " ".join(
+        str(item.get("cleaned_text") or item.get("text") or "")
+        for item in (thread.message_payloads or [])
+        if isinstance(item, dict)
+    )
+    return " ".join(
+        [
+            thread.channel_name or "",
+            thread.channel_id or "",
+            thread.cleaned_text or "",
+            payload_text,
+            " ".join(str(item or "") for item in (participants or [])),
+        ]
+    ).lower()
+
+
+def _slack_message_payload_text(payload: dict[str, Any]) -> str:
+    return str(payload.get("cleaned_text") or payload.get("text") or "").strip()
+
+
+def _is_short_slack_acknowledgement(text: str) -> bool:
+    normalized = re.sub(r"[\W_]+", " ", str(text or "").lower()).strip()
+    if not normalized:
+        return True
+    if normalized in {item.replace("+", "").strip() for item in SLACK_LOW_SIGNAL_PATTERNS}:
+        return True
+    words = normalized.split()
+    return len(words) <= 3 and normalized in {"ok", "okay", "yes", "yep", "done", "nice", "cool", "thanks", "thank you"}
+
+
+def score_slack_thread_for_profile(profile: StartupProfile, thread: SlackThreadArtifact) -> tuple[int, list[str], str, bool]:
+    haystack = _slack_thread_haystack(thread)
+    profile_signals = _profile_signal_lists(profile)
+    allowlist_terms = (
+        profile_signals["company_aliases"]
+        + profile_signals["positive_keywords"]
+        + profile_signals["founder_names"]
+        + profile_signals["team_names"]
+        + profile_signals["investor_names"]
+        + profile_signals["customer_names"]
+        + profile_signals["prospect_names"]
+        + profile_signals["competitor_names"]
+        + HIGH_SIGNAL_TERMS
+    )
+    allowlist_reasons = []
+    if _match_any(allowlist_terms, haystack):
+        allowlist_reasons.append("allowlist_profile_or_high_signal_term")
+
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    texts = [_slack_message_payload_text(item) for item in payloads]
+    non_empty_texts = [text for text in texts if text]
+    hard_reasons = []
+    if not str(thread.cleaned_text or "").strip() and not non_empty_texts:
+        hard_reasons.append("hard_filtered_empty_thread")
+    if non_empty_texts and all(_is_short_slack_acknowledgement(text) for text in non_empty_texts):
+        hard_reasons.append("hard_filtered_acknowledgement_only")
+    if any(pattern in haystack for pattern in SLACK_HARD_IRRELEVANT_PATTERNS):
+        hard_reasons.append("hard_filtered_slack_system_or_routine_automation")
+
+    author_names = [
+        str(item.get("author_name") or item.get("author_id") or "").lower()
+        for item in payloads
+    ]
+    automation_authors = [
+        name for name in author_names
+        if any(pattern in name for pattern in SLACK_AUTOMATION_AUTHOR_PATTERNS)
+    ]
+    if automation_authors and len(automation_authors) >= max(len(author_names), 1):
+        hard_reasons.append("hard_filtered_automation_author")
+
+    if hard_reasons and not allowlist_reasons:
+        return 0, _uniq(hard_reasons), GmailRelevanceLabel.IRRELEVANT, True
+
+    score = 45
+    reasons = []
+    if hard_reasons and allowlist_reasons:
+        reasons.append("allowlist_override_hard_filter")
+    if any(pattern in haystack for pattern in SLACK_LOW_SIGNAL_PATTERNS):
+        score -= 15
+        reasons.append("matched_low_signal_slack_pattern")
+    if _match_any(profile_signals["company_aliases"] + profile_signals["positive_keywords"], haystack):
+        score += 15
+        reasons.append("matched_company_alias_or_positive_keyword")
+    if _match_any(profile_signals["founder_names"] + profile_signals["team_names"], haystack):
+        score += 10
+        reasons.append("matched_founder_or_team_name")
+    if _match_any(profile_signals["investor_names"], haystack):
+        score += 20
+        reasons.append("matched_investor_name")
+    if _match_any(profile_signals["customer_names"] + profile_signals["prospect_names"], haystack):
+        score += 20
+        reasons.append("matched_customer_or_prospect_name")
+    if _match_any(profile_signals["competitor_names"], haystack):
+        score += 10
+        reasons.append("matched_competitor_name")
+    if _match_any(HIGH_SIGNAL_TERMS, haystack):
+        score += 20
+        reasons.append("matched_high_signal_term")
+    if _match_any(profile_signals["negative_keywords"], haystack):
+        score -= 20
+        reasons.append("matched_negative_keyword")
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        label = GmailRelevanceLabel.RELEVANT
+    elif score <= 20:
+        label = GmailRelevanceLabel.IRRELEVANT
+    else:
+        label = GmailRelevanceLabel.AMBIGUOUS
+    return score, _uniq([*reasons, *allowlist_reasons]), label, False
+
+
+def apply_slack_profile_scoring(
+    profile: StartupProfile,
+    thread: SlackThreadArtifact,
+    *,
+    persist: bool = True,
+) -> tuple[int, list[str], str, bool]:
+    score, reasons, label, hard_filtered = score_slack_thread_for_profile(profile, thread)
+    thread.heuristic_score = score
+    thread.heuristic_reasons = reasons
+    if hard_filtered and thread.classified_at is None:
+        thread.relevance_label = GmailRelevanceLabel.IRRELEVANT
+        thread.relevance_score = 0.0
+        thread.relevance_reason = ", ".join(reasons)
+        thread.needs_extraction = False
+        thread.classified_at = timezone.now()
+    if persist:
+        update_fields = [
+            "heuristic_score",
+            "heuristic_reasons",
+            "updated_at",
+        ]
+        if hard_filtered:
+            update_fields.extend([
+                "relevance_label",
+                "relevance_score",
+                "relevance_reason",
+                "needs_extraction",
+                "classified_at",
+            ])
+        thread.save(update_fields=[*dict.fromkeys(update_fields)])
+    return thread.heuristic_score, thread.heuristic_reasons, thread.relevance_label, hard_filtered
+
+
+def _compact_text(value: str, *, max_chars: int) -> tuple[str, bool]:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    quote_markers = [
+        "\nOn ",
+        "\nFrom:",
+        "\nSent:",
+        "\n-----Original Message-----",
+    ]
+    cut_at = len(text)
+    for marker in quote_markers:
+        index = text.find(marker)
+        if index > 0:
+            cut_at = min(cut_at, index)
+    lines = []
+    for line in text[:cut_at].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(">"):
+            continue
+        if stripped.lower() in {"unsubscribe", "view in browser"}:
+            continue
+        lines.append(stripped)
+    compacted = "\n".join(lines).strip()
+    truncated = False
+    if len(compacted) > max_chars:
+        compacted = compacted[:max_chars].rstrip()
+        truncated = True
+    return compacted, truncated or cut_at < len(text)
+
+
+def _payload_is_high_signal(payload: dict[str, Any], profile: StartupProfile) -> bool:
+    haystack = " ".join(
+        [
+            str(payload.get("subject") or ""),
+            str(payload.get("from_address") or ""),
+            str(payload.get("author_name") or ""),
+            _slack_message_payload_text(payload),
+        ]
+    ).lower()
+    profile_signals = _profile_signal_lists(profile)
+    terms = (
+        profile_signals["company_aliases"]
+        + profile_signals["positive_keywords"]
+        + profile_signals["founder_names"]
+        + profile_signals["team_names"]
+        + profile_signals["investor_names"]
+        + profile_signals["customer_names"]
+        + profile_signals["prospect_names"]
+        + HIGH_SIGNAL_TERMS
+    )
+    return _match_any(terms, haystack)
+
+
+def compact_gmail_thread_bundle(
+    thread: GmailThreadArtifact,
+    *,
+    profile: StartupProfile,
+    attachments: list[Any],
+) -> dict[str, Any]:
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    important_ids = {
+        str(item.get("message_id") or "")
+        for item in payloads
+        if _payload_is_high_signal(item, profile)
+    }
+    if not important_ids and payloads:
+        important_ids.add(str(payloads[-1].get("message_id") or ""))
+
+    kept_payloads = []
+    omitted_count = 0
+    used_chars = 0
+    for index, payload in enumerate(payloads):
+        message_id = str(payload.get("message_id") or "")
+        keep = (
+            message_id in important_ids
+            or index == 0
+            or index >= len(payloads) - 3
+            or len(kept_payloads) < 4
+        )
+        if not keep:
+            omitted_count += 1
+            continue
+        compacted_text, truncated = _compact_text(
+            str(payload.get("cleaned_text") or ""),
+            max_chars=2500,
+        )
+        if used_chars + len(compacted_text) > GMAIL_COMPACT_MAX_CHARS and kept_payloads:
+            omitted_count += 1
+            continue
+        compacted_payload = {**payload, "cleaned_text": compacted_text}
+        if truncated:
+            compacted_payload["compression_note"] = "quoted_or_long_text_trimmed"
+        kept_payloads.append(compacted_payload)
+        used_chars += len(compacted_text)
+        if len(kept_payloads) >= GMAIL_COMPACT_MAX_MESSAGES:
+            omitted_count += max(len(payloads) - index - 1, 0)
+            break
+
+    cleaned_text = "\n\n".join(
+        str(item.get("cleaned_text") or "").strip()
+        for item in kept_payloads
+        if str(item.get("cleaned_text") or "").strip()
+    )
+    compression_notes = []
+    if omitted_count:
+        compression_notes.append(f"omitted_{omitted_count}_low_signal_or_over_budget_messages")
+    return {
+        "gmail_thread_id": thread.gmail_thread_id,
+        "source_message_ids": thread.source_message_ids or [],
+        "source_message_count": thread.source_message_count,
+        "cleaned_text": cleaned_text or thread.cleaned_text[:GMAIL_COMPACT_MAX_CHARS],
+        "participant_summary": {
+            **(thread.participant_summary or {}),
+            "compression": {
+                "original_message_count": len(payloads),
+                "kept_message_count": len(kept_payloads),
+                "omitted_message_count": omitted_count,
+            },
+        },
+        "message_payloads": kept_payloads,
+        "attachments": attachments,
+        "omitted_message_count": omitted_count,
+        "compression_notes": compression_notes,
+    }
+
+
+def compact_slack_thread_bundle(thread: SlackThreadArtifact) -> dict[str, Any]:
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    hint_ids = set()
+    extraction_hints = thread.extraction_hints or {}
+    if isinstance(extraction_hints, dict):
+        hint_ids = {str(item or "") for item in extraction_hints.get("important_message_ids") or []}
+
+    kept_payloads = []
+    omitted_count = 0
+    used_chars = 0
+    for index, payload in enumerate(payloads):
+        message_id = str(payload.get("message_id") or "")
+        text = _slack_message_payload_text(payload)
+        high_signal = any(term in text.lower() for term in HIGH_SIGNAL_TERMS)
+        keep = (
+            message_id in hint_ids
+            or high_signal
+            or index == 0
+            or index >= len(payloads) - 5
+            or len(kept_payloads) < 6
+        )
+        if not keep:
+            omitted_count += 1
+            continue
+        compacted_text, truncated = _compact_text(text, max_chars=1000)
+        if used_chars + len(compacted_text) > SLACK_COMPACT_MAX_CHARS and kept_payloads:
+            omitted_count += 1
+            continue
+        compacted_payload = {**payload, "cleaned_text": compacted_text}
+        if truncated:
+            compacted_payload["compression_note"] = "long_text_trimmed"
+        kept_payloads.append(compacted_payload)
+        used_chars += len(compacted_text)
+        if len(kept_payloads) >= SLACK_COMPACT_MAX_MESSAGES:
+            omitted_count += max(len(payloads) - index - 1, 0)
+            break
+
+    lines = []
+    for item in kept_payloads:
+        posted = item.get("posted_at") or item.get("message_ts") or ""
+        author = item.get("author_name") or item.get("author_id") or "Slack user"
+        text = item.get("cleaned_text") or ""
+        if text:
+            lines.append(f"[{posted}] {author}: {text}")
+
+    compression_notes = []
+    if omitted_count:
+        compression_notes.append(f"omitted_{omitted_count}_low_signal_or_over_budget_messages")
+    return {
+        "slack_thread_id": f"slack:{thread.channel_id}:{thread.thread_ts}",
+        "channel_id": thread.channel_id,
+        "channel_name": thread.channel_name,
+        "thread_ts": thread.thread_ts,
+        "source_message_ids": thread.source_message_ids or [],
+        "source_message_count": thread.source_message_count,
+        "cleaned_text": "\n".join(lines) or thread.cleaned_text[:SLACK_COMPACT_MAX_CHARS],
+        "participant_summary": {
+            **(thread.participant_summary or {}),
+            "compression": {
+                "original_message_count": len(payloads),
+                "kept_message_count": len(kept_payloads),
+                "omitted_message_count": omitted_count,
+            },
+        },
+        "message_payloads": kept_payloads,
+        "heuristic_score": thread.heuristic_score,
+        "heuristic_reasons": thread.heuristic_reasons or [],
+        "relevance_score": thread.relevance_score,
+        "relevance_reason": thread.relevance_reason,
+        "extraction_hints": extraction_hints if isinstance(extraction_hints, dict) else {},
+        "omitted_message_count": omitted_count,
+        "compression_notes": compression_notes,
+    }
+
+
+def _linear_project_public_id(project: LinearProjectArtifact) -> str:
+    return f"linear:project:{project.linear_project_id}"
+
+
+def _linear_issue_public_id(issue: LinearIssueArtifact) -> str:
+    return f"linear:issue:{issue.identifier or issue.linear_issue_id}"
+
+
+def _linear_update_public_id(update: LinearProjectUpdateArtifact) -> str:
+    return f"linear:update:{update.linear_project_update_id}"
+
+
+def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, Any]:
+    extraction_hints = project.extraction_hints if isinstance(project.extraction_hints, dict) else {}
+    important_issue_ids = {str(item or "") for item in extraction_hints.get("important_issue_ids") or []}
+    important_update_ids = {str(item or "") for item in extraction_hints.get("important_update_ids") or []}
+
+    issue_queryset = project.issues.order_by("-updated_at_linear", "-id")
+    update_queryset = project.project_updates.order_by("-updated_at_linear", "-id")
+    issues = []
+    omitted_issue_count = 0
+    for index, issue in enumerate(issue_queryset):
+        public_id = _linear_issue_public_id(issue)
+        high_signal = any(term in " ".join([issue.title or "", issue.description or ""]).lower() for term in HIGH_SIGNAL_TERMS)
+        keep = (
+            public_id in important_issue_ids
+            or issue.identifier in important_issue_ids
+            or high_signal
+            or index < LINEAR_COMPACT_MAX_ISSUES
+        )
+        if not keep:
+            omitted_issue_count += 1
+            continue
+        description, truncated = _compact_text(issue.description or "", max_chars=1000)
+        issues.append(
+            {
+                "issue_id": public_id,
+                "identifier": issue.identifier,
+                "title": issue.title,
+                "description": description,
+                "state_name": issue.state_name,
+                "state_type": issue.state_type,
+                "priority": issue.priority,
+                "priority_label": issue.priority_label,
+                "assignee_name": issue.assignee_name,
+                "labels": issue.label_names or [],
+                "due_date": issue.due_date.isoformat() if issue.due_date else None,
+                "updated_at": issue.updated_at_linear.isoformat() if issue.updated_at_linear else None,
+                "url": issue.url,
+                "compression_note": "long_description_trimmed" if truncated else "",
+            }
+        )
+        if len(issues) >= LINEAR_COMPACT_MAX_ISSUES:
+            omitted_issue_count += max(issue_queryset.count() - index - 1, 0)
+            break
+
+    updates = []
+    omitted_update_count = 0
+    used_chars = 0
+    for index, update in enumerate(update_queryset):
+        public_id = _linear_update_public_id(update)
+        body, truncated = _compact_text(update.body or "", max_chars=1800)
+        keep = public_id in important_update_ids or index < LINEAR_COMPACT_MAX_UPDATES
+        if not keep:
+            omitted_update_count += 1
+            continue
+        if used_chars + len(body) > LINEAR_COMPACT_MAX_CHARS and updates:
+            omitted_update_count += 1
+            continue
+        updates.append(
+            {
+                "update_id": public_id,
+                "body": body,
+                "health": update.health,
+                "author_name": update.author_name,
+                "updated_at": update.updated_at_linear.isoformat() if update.updated_at_linear else None,
+                "url": update.url,
+                "compression_note": "long_body_trimmed" if truncated else "",
+            }
+        )
+        used_chars += len(body)
+
+    source_record_ids = [_linear_project_public_id(project)]
+    source_record_ids.extend(item["update_id"] for item in updates)
+    source_record_ids.extend(item["issue_id"] for item in issues)
+    compression_notes = []
+    if omitted_issue_count:
+        compression_notes.append(f"omitted_{omitted_issue_count}_low_signal_or_over_budget_issues")
+    if omitted_update_count:
+        compression_notes.append(f"omitted_{omitted_update_count}_over_budget_updates")
+
+    return {
+        "linear_project_id": _linear_project_public_id(project),
+        "project_id": project.linear_project_id,
+        "project_name": project.name,
+        "description": project.description[:1500],
+        "status_name": project.status_name,
+        "status_type": project.status_type,
+        "health": project.health,
+        "progress": project.progress,
+        "scope": project.scope,
+        "priority": project.priority,
+        "lead_name": project.lead_name,
+        "team_names": project.team_names or [],
+        "start_date": project.start_date.isoformat() if project.start_date else None,
+        "target_date": project.target_date.isoformat() if project.target_date else None,
+        "url": project.url,
+        "source_record_ids": source_record_ids,
+        "issues": issues,
+        "updates": updates,
+        "issue_count": project.issues.count(),
+        "update_count": project.project_updates.count(),
+        "heuristic_score": project.heuristic_score,
+        "heuristic_reasons": project.heuristic_reasons or [],
+        "relevance_score": project.relevance_score,
+        "relevance_reason": project.relevance_reason,
+        "extraction_hints": extraction_hints,
+        "omitted_issue_count": omitted_issue_count,
+        "omitted_update_count": omitted_update_count,
+        "compression_notes": compression_notes,
+    }
 
 
 def build_timeline_payload(*, organization: Organization) -> dict:
