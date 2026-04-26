@@ -34,6 +34,11 @@ from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
 )
+from startup_updates.metric_catalog import (
+    STARTUP_UPDATE_METRIC_LABELS,
+    startup_update_metric_key,
+    startup_update_metric_label,
+)
 from integrations.services.external_connectors import mark_sources_sync_requested
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
@@ -472,48 +477,10 @@ def _normalize_metric_value(value):
 
 
 def _metric_key_from_label(label):
-    normalized = str(label or "").strip().lower()
-    if normalized in {"revenue", "monthly revenue"}:
-        return "revenue"
-    if normalized in {"active users", "users", "monthly active users"}:
-        return "activeUsers"
-    if normalized in {"mrr", "monthly recurring revenue"}:
-        return "mrr"
-    if normalized in {"burn rate", "burn"}:
-        return "burnRate"
-    if normalized == "runway":
-        return "runway"
-    if normalized in {"invoice revenue", "sales invoice revenue"}:
-        return "invoiceRevenue"
-    if normalized in {"cash collected", "cash received"}:
-        return "cashCollected"
-    if normalized in {"revenue growth", "revenue growth rate", "mrr growth", "mrr growth rate"}:
-        return "revenueGrowthRate"
-    if normalized in {"customer count", "customers"}:
-        return "customerCount"
-    if normalized == "churn":
-        return "churn"
-    if normalized in {"invoice count", "invoices"}:
-        return "invoiceCount"
-    if normalized in {"recurring invoice count", "repeating invoice count"}:
-        return "recurringInvoiceCount"
-    return None
+    return startup_update_metric_key(label)
 
 
-MANUAL_METRIC_LABELS = {
-    "revenue": "Revenue",
-    "activeUsers": "Active Users",
-    "mrr": "MRR",
-    "burnRate": "Burn Rate",
-    "runway": "Runway",
-    "invoiceRevenue": "Invoice Revenue",
-    "cashCollected": "Cash Collected",
-    "revenueGrowthRate": "Revenue Growth Rate",
-    "customerCount": "Customer Count",
-    "churn": "Churn",
-    "invoiceCount": "Invoice Count",
-    "recurringInvoiceCount": "Recurring Invoice Count",
-}
+MANUAL_METRIC_LABELS = STARTUP_UPDATE_METRIC_LABELS
 
 
 def _extract_metrics(structured_memo):
@@ -523,7 +490,7 @@ def _extract_metrics(structured_memo):
         if not isinstance(item, dict):
             continue
 
-        metric_key = str(item.get("metric_key") or "").strip() or _metric_key_from_label(
+        metric_key = startup_update_metric_key(item.get("metric_key")) or _metric_key_from_label(
             item.get("label") or item.get("name") or item.get("metric_name")
         )
         if not metric_key:
@@ -538,6 +505,32 @@ def _extract_metrics(structured_memo):
             metrics[metric_key] = metric_value
 
     return metrics
+
+
+def _extract_metric_suggestions(structured_memo):
+    suggestions = []
+    raw_suggestions = (
+        (structured_memo or {}).get("metric_suggestions")
+        or (structured_memo or {}).get("metricSuggestions")
+        or []
+    )
+    for item in raw_suggestions:
+        if not isinstance(item, dict):
+            continue
+        metric_key = startup_update_metric_key(item.get("metric_key") or item.get("metricKey")) or _metric_key_from_label(
+            item.get("label") or item.get("name") or item.get("metric_name")
+        )
+        if not metric_key:
+            continue
+        suggestions.append(
+            {
+                "metricKey": metric_key,
+                "label": str(item.get("label") or startup_update_metric_label(metric_key)).strip()
+                or startup_update_metric_label(metric_key),
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+    return suggestions
 
 
 def _structured_memo_with_xero_metrics(draft):
@@ -580,6 +573,7 @@ def _serialize_draft_for_form(draft):
             ("Next 30 days", "next_30_days"),
         ]),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
     }
 
 
@@ -646,6 +640,7 @@ def _build_manual_structured_memo(payload):
         "lowlights": _split_editor_text(payload.get("challenges")),
         "asks": _split_editor_text(payload.get("asks")),
         "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
+        "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
 
     summary = _optional_text(payload.get("summary"))
@@ -699,6 +694,7 @@ def _serialize_monthly_update(draft):
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "highlights": _join_named_sections(structured_memo, [
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
@@ -737,6 +733,7 @@ def _serialize_draft_bundle(drafts):
                     ("Next 30 days", "next_30_days"),
                 ]),
                 "metrics": _extract_metrics(structured_memo),
+                "metricSuggestions": _extract_metric_suggestions(structured_memo),
             }
         )
 
@@ -763,6 +760,7 @@ def _serialize_email_draft_month(draft):
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "highlights": _join_named_sections(structured_memo, [
             ("Financial performance", "financial_performance"),
             ("", "highlights"),

@@ -1478,6 +1478,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                                     {"metric_key": "mrr", "label": "MRR", "value": "$26,000"},
                                     {"metric_key": "cashCollected", "label": "Cash Collected", "value": "$20,000"},
                                 ],
+                                "metric_suggestions": [
+                                    {
+                                        "metric_key": "customerInterviews",
+                                        "label": "Customer Interviews",
+                                        "reason": "Useful before revenue is consistent.",
+                                    }
+                                ],
                                 "highlights": [
                                     "Converted the pilot into a paid annual contract",
                                     "Launched onboarding refresh",
@@ -1517,6 +1524,16 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(
             {item["metric_key"]: item["value"] for item in memo["kpi_snapshot"]},
             {"mrr": "$26,000", "cashCollected": "$20,000"},
+        )
+        self.assertEqual(
+            memo["metric_suggestions"],
+            [
+                {
+                    "metric_key": "customerInterviews",
+                    "label": "Customer Interviews",
+                    "reason": "Useful before revenue is consistent.",
+                }
+            ],
         )
         self.assertEqual(set(draft.evidence_event_ids), {11, 12})
         self.assertEqual(set(draft.evidence_metric_ids), {21, 22})
