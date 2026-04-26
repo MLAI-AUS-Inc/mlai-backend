@@ -4,7 +4,7 @@ import logging
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional, Union
 
 from django.db import transaction
@@ -494,6 +494,105 @@ def _month_start(value: Optional[Union[date, datetime]] = None) -> date:
     if isinstance(value, datetime):
         value = value.date()
     return date(value.year, value.month, 1)
+
+
+def parse_startup_update_target_month(
+    value: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[Union[date, datetime]] = None,
+) -> date:
+    current_month = _month_start(reference)
+    if value is None or value == "":
+        return current_month
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("target_month must use YYYY-MM-01 format.") from exc
+    if parsed.day != 1:
+        raise ValueError("target_month must be the first day of a month.")
+    target_month = date(parsed.year, parsed.month, 1)
+    if target_month > current_month:
+        raise ValueError("target_month cannot be in the future.")
+    return target_month
+
+
+def _aware_utc_datetime(day: date, boundary: time) -> datetime:
+    return datetime.combine(day, boundary, tzinfo=dt_timezone.utc)
+
+
+def build_startup_update_target_windows(
+    target_month: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[datetime] = None,
+) -> dict[str, Any]:
+    now = reference or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now, timezone=dt_timezone.utc)
+    month = parse_startup_update_target_month(target_month, reference=now)
+    month_end = _month_end(month)
+    narrative_start = _aware_utc_datetime(month, time.min)
+    narrative_month_end = _aware_utc_datetime(month_end, time.max)
+    narrative_end = min(now, narrative_month_end)
+    financial_start = _previous_month_start(month)
+    return {
+        "target_month": month,
+        "narrative_start": narrative_start,
+        "narrative_end": narrative_end,
+        "narrative_start_date": narrative_start.date(),
+        "narrative_end_date": narrative_end.date(),
+        "financial_start_date": financial_start,
+        "financial_end_date": narrative_end.date(),
+    }
+
+
+def get_startup_update_run_target_month(run: ContentFactoryRun) -> Optional[date]:
+    run_request = run.run_request or {}
+    raw_value = run_request.get("target_month") or run_request.get("current_month")
+    if not raw_value:
+        draft_months = run_request.get("draft_months") or []
+        if isinstance(draft_months, (list, tuple)) and draft_months:
+            raw_value = draft_months[-1]
+    if not raw_value:
+        return None
+    try:
+        parsed = date.fromisoformat(str(raw_value))
+    except ValueError:
+        return None
+    if parsed.day != 1:
+        return None
+    return date(parsed.year, parsed.month, 1)
+
+
+def startup_update_run_matches_target_month(run: ContentFactoryRun, target_month: date) -> bool:
+    return get_startup_update_run_target_month(run) == _month_start(target_month)
+
+
+def set_startup_update_run_target_month(
+    run: ContentFactoryRun,
+    target_month: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[datetime] = None,
+    window_months: Optional[int] = None,
+) -> ContentFactoryRun:
+    windows = build_startup_update_target_windows(target_month, reference=reference)
+    month = windows["target_month"]
+    run_request = dict(run.run_request or {})
+    if window_months is not None:
+        run_request["window_months"] = int(window_months)
+    run_request["target_month"] = month.isoformat()
+    run_request["current_month"] = month.isoformat()
+    run_request["draft_months"] = [month.isoformat()]
+    run_request["backfill_window_start"] = windows["narrative_start"].isoformat()
+    run_request["backfill_window_end"] = windows["narrative_end"].isoformat()
+    run.run_request = run_request
+    run.save(update_fields=["run_request", "updated_at"])
+    return run
 
 
 def iter_recent_month_starts(count: int, *, reference: Optional[Union[date, datetime]] = None) -> list[date]:
@@ -2094,20 +2193,31 @@ def get_open_startup_update_run(
     *,
     organization: Organization,
     google_connection_id: Optional[int] = None,
+    target_month: Optional[date] = None,
 ) -> Optional[ContentFactoryRun]:
     runs = _iter_startup_update_runs(
         organization=organization,
         statuses=OPEN_RUN_STATUSES,
     )
+    target = _month_start(target_month) if target_month is not None else None
+
+    def matches_target(run: ContentFactoryRun) -> bool:
+        return target is None or startup_update_run_matches_target_month(run, target)
+
     if google_connection_id is None:
-        return runs[0] if runs else None
+        for run in runs:
+            if matches_target(run):
+                return run
+        return None
 
     legacy_candidate = None
     for run in runs:
         run_google_connection_id = get_startup_update_run_google_connection_id(run)
         if run_google_connection_id == google_connection_id:
-            return run
-        if run_google_connection_id is None and legacy_candidate is None:
+            if matches_target(run):
+                return run
+            continue
+        if run_google_connection_id is None and legacy_candidate is None and matches_target(run):
             legacy_candidate = run
     return legacy_candidate
 
@@ -2166,7 +2276,11 @@ def create_startup_update_run(
     window_months: int = DEFAULT_BACKFILL_MONTHS,
     input_sources: Optional[list[str]] = None,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    target_month: Optional[Union[str, date, datetime]] = None,
 ) -> ContentFactoryRun:
+    now = timezone.now()
+    windows = build_startup_update_target_windows(target_month, reference=now)
+    selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     selected_source_set = set(selected_input_sources)
     google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
@@ -2178,17 +2292,22 @@ def create_startup_update_run(
     existing = get_open_startup_update_run(
         organization=organization,
         google_connection_id=google_connection_id,
+        target_month=selected_target_month,
     )
     if existing:
         pin_startup_update_run_connection(existing, google_connection_id)
-        now = timezone.now()
-        months = iter_recent_month_starts(3, reference=now)
+        set_startup_update_run_target_month(
+            existing,
+            selected_target_month,
+            reference=now,
+            window_months=window_months,
+        )
         refresh_startup_update_run_source_context(
             run=existing,
             organization=organization,
             input_sources=selected_input_sources,
-            start_date=_previous_month_start(months[0]),
-            end_date=now.date(),
+            start_date=windows["financial_start_date"],
+            end_date=windows["financial_end_date"],
             source_warnings=source_warnings,
         )
         supersede_conflicting_startup_update_runs(
@@ -2198,11 +2317,11 @@ def create_startup_update_run(
         )
         return existing
 
-    now = timezone.now()
-    backfill_start = now - timedelta(days=30 * int(window_months))
-    current_month = _month_start(now)
-    months = iter_recent_month_starts(3, reference=now)
-    financial_start_date = min(backfill_start.date(), _previous_month_start(months[0]))
+    backfill_start = windows["narrative_start"]
+    backfill_end = windows["narrative_end"]
+    current_month = selected_target_month
+    months = [selected_target_month]
+    financial_start_date = windows["financial_start_date"]
     profile = getattr(organization, "startup_profile", None)
     startup_context = (
         build_startup_context_snapshot(organization=organization, profile=profile)
@@ -2222,10 +2341,11 @@ def create_startup_update_run(
         "classification_batch_size": DEFAULT_CLASSIFICATION_BATCH_SIZE,
         "attachment_bytes_limit": DEFAULT_ATTACHMENT_BYTES_LIMIT,
         "max_source_threads": DEFAULT_MAX_SOURCE_THREADS,
+        "target_month": current_month.isoformat(),
         "draft_months": [item.isoformat() for item in months],
         "current_month": current_month.isoformat(),
         "backfill_window_start": backfill_start.isoformat(),
-        "backfill_window_end": now.isoformat(),
+        "backfill_window_end": backfill_end.isoformat(),
         "startup_context": startup_context,
     }
     run_request["input_sources"] = list(selected_input_sources)
@@ -2253,7 +2373,7 @@ def create_startup_update_run(
         organization=organization,
         input_sources=selected_input_sources,
         start_date=financial_start_date,
-        end_date=now.date(),
+        end_date=windows["financial_end_date"],
         source_warnings=source_warnings,
     )
     if external_context:
@@ -2284,7 +2404,7 @@ def create_startup_update_run(
             google_connection=google_connection,
             defaults={
                 "backfill_window_start": backfill_start,
-                "backfill_window_end": now,
+                "backfill_window_end": backfill_end,
             },
         )
     if ExternalServiceProvider.XERO in selected_source_set:
@@ -2293,7 +2413,7 @@ def create_startup_update_run(
             organization=organization,
             input_sources=selected_input_sources,
             start_date=financial_start_date,
-            end_date=now.date(),
+            end_date=windows["financial_end_date"],
             source_warnings=source_warnings,
         )
     return run

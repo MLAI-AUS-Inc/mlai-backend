@@ -152,6 +152,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
                         "user_id": self.user.id,
                         "domain": self.organization.domain,
                         "window_months": 6,
+                        "target_month": "2026-03-01",
                     },
                     format="json",
                     **self.headers,
@@ -163,7 +164,9 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(run.workflow, "startup_monthly_update")
         self.assertEqual(run.run_request["google_connection_id"], self.google_connection.id)
         self.assertEqual(run.run_request["window_months"], 6)
-        self.assertEqual(len(run.run_request["draft_months"]), 3)
+        self.assertEqual(run.run_request["target_month"], "2026-03-01")
+        self.assertEqual(run.run_request["current_month"], "2026-03-01")
+        self.assertEqual(run.run_request["draft_months"], ["2026-03-01"])
         self.assertEqual(run.run_request["startup_context"]["stage"], "seed")
         self.assertEqual(run.run_request["startup_context"]["company_aliases"], ["Acme", "Acme AI"])
         self.assertTrue(
@@ -227,6 +230,42 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(active.data["status"], ContentFactoryRunStatus.QUEUED)
         self.assertEqual(active.data["display_stage"], "Preparing company context")
         mock_notify.assert_called_once()
+
+    @patch("startup_updates.services.timezone.now")
+    @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_run_creation_returns_conflict_for_open_run_in_different_month(self, mock_notify, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        active_run = create_startup_update_run(
+            organization=self.organization,
+            binding=binding,
+            target_month=date(2026, 4, 1),
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_run"),
+                {
+                    "user_id": self.user.id,
+                    "domain": self.organization.domain,
+                    "target_month": "2026-03-01",
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["target_month_conflict"])
+        self.assertEqual(response.data["requested_target_month"], "2026-03-01")
+        self.assertEqual(response.data["active_target_month"], "2026-04-01")
+        self.assertEqual(response.data["run_id"], active_run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        mock_notify.assert_not_called()
 
     @patch("startup_updates.api_views.notify_valley_run_created")
     def test_run_creation_returns_503_when_valley_dispatch_fails(self, mock_notify):

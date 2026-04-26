@@ -87,14 +87,17 @@ from startup_updates.services import (
     get_open_startup_update_run,
     get_startup_update_run_cancel_backups,
     get_startup_update_run_google_connection_id,
+    get_startup_update_run_target_month,
     gmail_required_for_sources,
     merge_xero_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
+    parse_startup_update_target_month,
     pin_startup_update_run_connection,
     record_valley_dispatch_result,
     resolve_or_create_profile,
     seed_startup_profile,
     set_startup_update_run_cancel_backups,
+    startup_update_run_matches_target_month,
     upsert_monthly_update_draft,
 )
 from integrations.services.valley_harness import notify_valley_run_created
@@ -447,6 +450,7 @@ def _count_completed_run_steps(run: ContentFactoryRun) -> Tuple[int, int]:
 
 def _serialize_run_progress(run: ContentFactoryRun) -> dict:
     completed_steps, total_steps = _count_completed_run_steps(run)
+    target_month = get_startup_update_run_target_month(run)
     return {
         "run_id": run.run_id,
         "status": run.status,
@@ -470,6 +474,7 @@ def _serialize_run_progress(run: ContentFactoryRun) -> dict:
             else None
         ),
         "generated_draft_months": _get_run_generated_draft_months(run),
+        "target_month": target_month.isoformat() if target_month else None,
     }
 
 
@@ -874,6 +879,11 @@ class StartupUpdateRunView(APIView):
         input_sources = normalize_startup_update_input_sources(
             data.get("input_sources") or data.get("inputSources") or []
         )
+        raw_target_month = data.get("target_month") or data.get("targetMonth")
+        try:
+            target_month = parse_startup_update_target_month(raw_target_month)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = binding.google_connection or getattr(user, "google_connection", None)
         if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
@@ -890,13 +900,41 @@ class StartupUpdateRunView(APIView):
         existing_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            target_month=target_month,
         )
+        conflicting_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id if google_connection else None,
+        )
+        if (
+            existing_run is None
+            and conflicting_run is not None
+            and not startup_update_run_matches_target_month(conflicting_run, target_month)
+        ):
+            active_target_month = get_startup_update_run_target_month(conflicting_run)
+            return Response(
+                {
+                    "run": _serialize_run(conflicting_run, request),
+                    "run_id": conflicting_run.run_id,
+                    "status": conflicting_run.status,
+                    "current_step": conflicting_run.current_step,
+                    "reused_existing_run": True,
+                    "target_month_conflict": True,
+                    "requested_target_month": target_month.isoformat(),
+                    "active_target_month": active_target_month.isoformat() if active_target_month else None,
+                    "error": "Another monthly update generation is already active for this startup.",
+                    "profile": _serialize_profile(profile),
+                    "binding": _serialize_binding(binding),
+                },
+                status=status.HTTP_200_OK,
+            )
         dispatch_required = existing_run is None or _should_dispatch_existing_run(existing_run)
         run = create_startup_update_run(
             organization=organization,
             binding=binding,
             window_months=data.get("window_months", DEFAULT_BACKFILL_MONTHS),
             input_sources=input_sources,
+            target_month=target_month,
         )
         if google_connection is not None and gmail_required_for_sources(input_sources):
             GmailSyncCursor.objects.get_or_create(

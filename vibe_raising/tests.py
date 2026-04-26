@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -890,7 +890,7 @@ class VibeRaisingApiTests(TestCase):
 
         response = self.client.post(
             "/api/v1/vibe-raising/email-draft/start/",
-            {},
+            {"targetMonth": "2026-03-01"},
             format="json",
         )
 
@@ -943,6 +943,119 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=first.data["runId"])
         self.assertEqual(run.run_request["window_months"], DEFAULT_BACKFILL_MONTHS)
         self.assertEqual(run.run_request["google_connection_id"], google_connection.id)
+
+    @patch("startup_updates.services.timezone.now")
+    def test_email_draft_start_creates_single_target_month_run_with_partial_current_window(self, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {"targetMonth": "2026-04-01"},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["targetMonth"], "2026-04-01")
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["target_month"], "2026-04-01")
+        self.assertEqual(run.run_request["current_month"], "2026-04-01")
+        self.assertEqual(run.run_request["draft_months"], ["2026-04-01"])
+        self.assertEqual(run.run_request["backfill_window_start"], "2026-04-01T00:00:00+00:00")
+        self.assertEqual(run.run_request["backfill_window_end"], "2026-04-26T05:30:00+00:00")
+        mock_notify.assert_called_once_with(run.run_id)
+
+    @patch("startup_updates.services.timezone.now")
+    def test_email_draft_start_rejects_future_target_month(self, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        self._create_google_connection()
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {"targetMonth": "2026-05-01"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("future", response.data["error"])
+
+    @patch("startup_updates.services.timezone.now")
+    def test_email_draft_start_newer_draft_does_not_block_older_selected_month(self, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 4, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={"highlights": ["April already exists"]},
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {"targetMonth": "2026-03-01"},
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["targetMonth"], "2026-03-01")
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["target_month"], "2026-03-01")
+        self.assertEqual(run.run_request["draft_months"], ["2026-03-01"])
+        mock_notify.assert_called_once_with(run.run_id)
+
+    @patch("startup_updates.services.timezone.now")
+    def test_email_draft_start_returns_conflict_for_open_run_in_different_month(self, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        active_run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+            target_month=date(2026, 4, 1),
+        )
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"targetMonth": "2026-03-01"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["targetMonthConflict"])
+        self.assertEqual(response.data["requestedTargetMonth"], "2026-03-01")
+        self.assertEqual(response.data["activeTargetMonth"], "2026-04-01")
+        self.assertEqual(response.data["runId"], active_run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        mock_notify.assert_not_called()
 
     def test_email_draft_start_returns_retryable_503_when_valley_dispatch_fails(self):
         self.client.force_authenticate(user=self.user)
@@ -1674,14 +1787,30 @@ class VibeRaisingApiTests(TestCase):
 
         response = self.client.post(
             "/api/v1/vibe-raising/email-draft/start/",
-            {},
+            {"targetMonth": "2026-03-01"},
             format="json",
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["state"], "completed")
+        self.assertEqual(response.data["targetMonth"], "2026-03-01")
         self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
         self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+
+        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                forced_response = self.client.post(
+                    "/api/v1/vibe-raising/email-draft/start/",
+                    {"targetMonth": "2026-03-01", "forceRegenerate": True},
+                    format="json",
+                )
+
+        self.assertEqual(forced_response.status_code, 201)
+        self.assertEqual(forced_response.data["state"], "queued")
+        self.assertEqual(forced_response.data["targetMonth"], "2026-03-01")
+        forced_run = ContentFactoryRun.objects.get(run_id=forced_response.data["runId"])
+        self.assertEqual(forced_run.run_request["target_month"], "2026-03-01")
+        mock_notify.assert_called_once_with(forced_run.run_id)
 
     def test_email_draft_start_refreshes_xero_metrics_when_reusing_completed_draft(self):
         self.client.force_authenticate(user=self.user)
@@ -1729,7 +1858,7 @@ class VibeRaisingApiTests(TestCase):
             mock_publish.return_value = {"warnings": [], "published_metric_count": 0}
             response = self.client.post(
                 "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero"]},
+                {"inputSources": ["gmail", "xero"], "targetMonth": "2026-03-01"},
                 format="json",
             )
 
