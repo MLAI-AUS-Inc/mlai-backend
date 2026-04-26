@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+import time
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import urlencode
 
 from django.conf import settings
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
@@ -16,7 +19,14 @@ from rest_framework.views import APIView
 from content_factory.article_system import resolve_article_system
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
-from content_factory.models import OrganizationContentConfig, WebsiteBaselineSnapshot
+from content_factory.models import (
+    ContentFactoryHealingPromotionState,
+    ContentFactoryHealingRecord,
+    OrganizationContentConfig,
+    VibeMarketingComponentComment,
+    VibeMarketingComponentCommentStatus,
+    WebsiteBaselineSnapshot,
+)
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     apply_shared_startup_details,
@@ -56,7 +66,7 @@ VIBE_MARKETING_WORKFLOWS = {
 }
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
-ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article"}
+ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "article_revision"}
 BASELINE_WORKFLOWS = {"website_baseline"}
 BASELINE_FRESH_DAYS = 30
 
@@ -215,27 +225,37 @@ def _first_non_empty_mapping_value(mapping, *keys):
     return None
 
 
+def _append_candidate_source(target, value):
+    if isinstance(value, list):
+        target.extend(value)
+    elif isinstance(value, dict):
+        target.append(value)
+    elif isinstance(value, str):
+        target.append(value)
+
+
 def _extract_topic_candidates_from_result(result):
     if not isinstance(result, dict):
         return []
-    raw_candidates = _first_non_empty_mapping_value(
-        result,
-        "topic_options",
-        "topics",
-        "topic_candidates",
-        "candidates",
-        "keywords",
-        "keyword_options",
-    )
-    if not raw_candidates and isinstance(result.get("selection_data"), dict):
-        raw_candidates = _first_non_empty_mapping_value(
-            result["selection_data"],
-            "topic_options",
-            "topics",
-            "candidates",
-            "keywords",
+    raw_candidates = []
+    for mapping in (result, result.get("selection_data"), result.get("selection")):
+        if not isinstance(mapping, dict):
+            continue
+        _append_candidate_source(
+            raw_candidates,
+            _first_non_empty_mapping_value(
+                mapping,
+                "options",
+                "topic_options",
+                "topics",
+                "topic_candidates",
+                "candidates",
+                "keywords",
+                "keyword_options",
+            ),
         )
-    if not isinstance(raw_candidates, list):
+        _append_candidate_source(raw_candidates, mapping.get("selected"))
+    if not raw_candidates:
         return []
 
     candidates = []
@@ -256,24 +276,44 @@ def _extract_topic_candidates_from_result(result):
         keyword = str(
             raw.get("keyword")
             or raw.get("target_keyword")
+            or raw.get("targetKeyword")
             or raw.get("query")
+            or raw.get("topic")
             or raw.get("title")
             or ""
         ).strip()
-        title = str(raw.get("title") or raw.get("angle") or raw.get("headline") or keyword).strip()
+        title = str(
+            raw.get("title")
+            or raw.get("suggested_title")
+            or raw.get("suggestedTitle")
+            or raw.get("custom_title")
+            or raw.get("customTitle")
+            or raw.get("angle")
+            or raw.get("headline")
+            or keyword
+        ).strip()
         if not keyword and not title:
             continue
+        reason = raw.get("reason") or raw.get("selection_reason") or raw.get("rationale") or raw.get("explanation") or ""
+        opportunity_score = (
+            raw.get("opportunity_score")
+            if raw.get("opportunity_score") is not None
+            else raw.get("opportunityScore")
+            if raw.get("opportunityScore") is not None
+            else raw.get("opportunityIndex")
+        )
         candidates.append(
             {
                 "id": str(raw.get("id") or raw.get("keyword_id") or index),
                 "keyword": keyword or title,
                 "title": title or keyword,
-                "reason": str(raw.get("reason") or raw.get("selection_reason") or raw.get("rationale") or ""),
+                "reason": str(reason),
                 "source": str(raw.get("source") or "discovery"),
                 "intent": raw.get("intent"),
                 "difficulty": raw.get("difficulty"),
-                "opportunityScore": raw.get("opportunity_score") or raw.get("opportunityIndex"),
+                "opportunityScore": opportunity_score,
                 "volume": raw.get("volume"),
+                "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
             }
         )
     return candidates
@@ -285,8 +325,487 @@ def _topic_candidates_from_runs(runs):
             continue
         candidates = _extract_topic_candidates_from_result(run.result or {})
         if candidates:
+            for candidate in candidates:
+                candidate["sourceRunId"] = candidate.get("sourceRunId") or run.run_id
             return candidates
     return []
+
+
+def _artifact_paths_from_run(run):
+    artifact_paths = {}
+    for step in run.steps.all():
+        artifacts = step.artifacts or []
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if isinstance(artifact, str):
+                name = artifact.rsplit("/", 1)[-1]
+                artifact_paths.setdefault(name, artifact)
+                continue
+            if not isinstance(artifact, dict):
+                continue
+            path = artifact.get("path") or artifact.get("url") or artifact.get("href")
+            if not path:
+                continue
+            name = artifact.get("name") or artifact.get("filename") or artifact.get("key") or str(path).rsplit("/", 1)[-1]
+            artifact_paths[str(name)] = str(path)
+    return artifact_paths
+
+
+def _content_package_from_run(run):
+    if not run:
+        return None
+    result = run.result or {}
+    acceptance_summary = run.acceptance_summary or {}
+    evidence_summary = acceptance_summary.get("evidence_summary") if isinstance(acceptance_summary.get("evidence_summary"), dict) else {}
+    delivery_package = (
+        result.get("delivery_package")
+        or result.get("deliveryPackage")
+        or result.get("content_package")
+        or result.get("contentPackage")
+        or {}
+    )
+    if not isinstance(delivery_package, dict):
+        delivery_package = {}
+    article_meta = result.get("article_meta") or result.get("articleMeta") or delivery_package.get("article_meta") or {}
+    if not isinstance(article_meta, dict):
+        article_meta = {}
+    image_manifest = (
+        result.get("image_manifest")
+        or result.get("imageManifest")
+        or delivery_package.get("image_manifest")
+        or {}
+    )
+    if not isinstance(image_manifest, dict):
+        image_manifest = {}
+
+    artifact_paths = {}
+    for source in (
+        delivery_package.get("artifacts"),
+        delivery_package.get("artifact_paths"),
+        delivery_package,
+        evidence_summary,
+        _artifact_paths_from_run(run),
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if not value:
+                continue
+            normalized_key = {
+                "delivery_package": "delivery_package.json",
+                "delivery_package_path": "delivery_package.json",
+                "content_package_path": "delivery_package.json",
+                "article_markdown": "article.md",
+                "article_markdown_path": "article.md",
+                "article_html": "article.html",
+                "article_html_path": "article.html",
+                "article_json": "article.json",
+                "article_json_path": "article.json",
+                "article_meta": "article_meta.json",
+                "article_meta_path": "article_meta.json",
+                "article_component_manifest": "article_component_manifest.json",
+                "article_component_manifest_path": "article_component_manifest.json",
+                "image_manifest": "image_manifest.json",
+                "image_manifest_path": "image_manifest.json",
+                "references": "references.json",
+            }.get(key, key)
+            if str(normalized_key).endswith((".json", ".md", ".html")) or str(key).endswith("_path"):
+                artifact_paths[str(normalized_key)] = str(value)
+
+    title = (
+        delivery_package.get("title")
+        or article_meta.get("title")
+        or evidence_summary.get("content_package_title")
+        or result.get("title")
+    )
+    slug = delivery_package.get("slug") or article_meta.get("slug") or evidence_summary.get("content_package_slug") or result.get("slug")
+    target_keyword = (
+        delivery_package.get("target_keyword")
+        or delivery_package.get("targetKeyword")
+        or article_meta.get("target_keyword")
+        or article_meta.get("targetKeyword")
+        or evidence_summary.get("content_package_target_keyword")
+        or result.get("target_keyword")
+        or result.get("targetKeyword")
+    )
+    content_packaged = bool(
+        acceptance_summary.get("content_packaged")
+        or delivery_package
+        or artifact_paths
+        or evidence_summary.get("content_package_path")
+    )
+    if not content_packaged:
+        return None
+
+    return {
+        "title": title,
+        "slug": slug,
+        "targetKeyword": target_keyword,
+        "artifactPaths": artifact_paths,
+        "imageManifestStatus": image_manifest.get("status") or evidence_summary.get("image_manifest_status"),
+        "heroImagePresent": bool(
+            image_manifest.get("hero")
+            or image_manifest.get("hero_image")
+            or evidence_summary.get("hero_image_present")
+            or evidence_summary.get("generated_hero_image")
+            or evidence_summary.get("hero_image_url")
+        ),
+        "generatedInlineImageCount": (
+            image_manifest.get("inline_count")
+            if image_manifest.get("inline_count") is not None
+            else evidence_summary.get("generated_inline_image_count")
+        ),
+        "imageErrorCount": (
+            image_manifest.get("error_count")
+            if image_manifest.get("error_count") is not None
+            else evidence_summary.get("image_error_count")
+            if evidence_summary.get("image_error_count") is not None
+            else len(evidence_summary.get("image_errors") or [])
+        ),
+        "contentPackaged": content_packaged,
+    }
+
+
+def _component_manifest_from_run(run):
+    if not run:
+        return None
+    result = run.result or {}
+    delivery_package = (
+        result.get("delivery_package")
+        or result.get("deliveryPackage")
+        or result.get("content_package")
+        or result.get("contentPackage")
+        or {}
+    )
+    if not isinstance(delivery_package, dict):
+        delivery_package = {}
+    manifest = (
+        result.get("componentManifest")
+        or result.get("component_manifest")
+        or delivery_package.get("component_manifest")
+        or delivery_package.get("componentManifest")
+        or {}
+    )
+    if not isinstance(manifest, dict):
+        manifest = {}
+    artifact_paths = _artifact_paths_from_run(run)
+    artifact_path = (
+        manifest.get("artifactPath")
+        or manifest.get("artifact_path")
+        or artifact_paths.get("article_component_manifest.json")
+        or artifact_paths.get("article_component_manifest")
+        or artifact_paths.get("component_manifest")
+    )
+    components = manifest.get("components")
+    if not isinstance(components, list):
+        components = []
+    if not components and not artifact_path:
+        return None
+    return {
+        **manifest,
+        "components": components,
+        "artifactPath": artifact_path,
+    }
+
+
+def _live_preview_from_run(run):
+    result = (run.result or {}) if run else {}
+    payload = result.get("livePreview") or result.get("live_preview") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "available": bool(payload.get("available")),
+        "status": payload.get("status") or "not_started",
+        "previewUrl": payload.get("previewUrl") or payload.get("preview_url") or "",
+        "routePath": payload.get("routePath") or payload.get("route_path") or "",
+        "exactRender": bool(payload.get("exactRender") or payload.get("exact_render")),
+        "inspectorProtocolVersion": payload.get("inspectorProtocolVersion") or payload.get("inspector_protocol_version"),
+        "inspectorMode": payload.get("inspectorMode") or payload.get("inspector_mode") or "",
+        "error": payload.get("error") or "",
+        "workspacePath": payload.get("workspacePath") or payload.get("workspace_path") or "",
+        "logPath": payload.get("logPath") or payload.get("log_path") or "",
+    }
+
+
+def _serialize_component_comment(comment):
+    return {
+        "id": str(comment.id),
+        "componentId": comment.component_id,
+        "componentType": comment.component_type,
+        "componentLabel": comment.component_label,
+        "sourceSectionId": comment.source_section_id,
+        "selector": comment.selector,
+        "anchor": comment.anchor or None,
+        "body": comment.body,
+        "status": comment.status,
+        "batchId": comment.batch_id or None,
+        "createdAt": comment.created_at.isoformat() if comment.created_at else None,
+        "updatedAt": comment.updated_at.isoformat() if comment.updated_at else None,
+    }
+
+
+def _component_feedback_from_run(run):
+    run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    result = run.result or {}
+    source_run_id = (
+        run_request.get("source_run_id")
+        or run_request.get("sourceRunId")
+        or result.get("source_run_id")
+        or result.get("sourceRunId")
+    )
+    batch_source_run = run
+    if run.workflow == "article_revision" and source_run_id:
+        batch_source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
+    comments = list(
+        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")
+    )
+    latest_batch = result.get("component_feedback_latest_batch")
+    if not isinstance(latest_batch, dict):
+        source_result = batch_source_run.result if isinstance(batch_source_run.result, dict) else {}
+        latest_batch = source_result.get("component_feedback_latest_batch")
+    if not isinstance(latest_batch, dict) and run.workflow == "article_revision":
+        feedback_batch_id = str(result.get("feedback_batch_id") or result.get("feedbackBatchId") or "").strip()
+        if feedback_batch_id:
+            latest_batch = {
+                "id": feedback_batch_id,
+                "sourceRunId": source_run_id or batch_source_run.run_id,
+                "revisionRunId": run.run_id,
+                "status": "running",
+            }
+    if not isinstance(latest_batch, dict):
+        submitted_comments = list(
+            VibeMarketingComponentComment.objects.filter(run=batch_source_run)
+            .exclude(batch_id="")
+            .order_by("created_at", "id")
+        )
+        submitted = [comment for comment in submitted_comments if comment.batch_id]
+        latest_comment = submitted[-1] if submitted else None
+        latest_batch = (
+            {
+                "id": latest_comment.batch_id,
+                "sourceRunId": batch_source_run.run_id,
+                "revisionRunId": result.get("component_feedback_revision_run_id")
+                or (run.run_id if run.workflow == "article_revision" else None),
+                "status": "submitted",
+            }
+            if latest_comment
+            else None
+        )
+    if run.workflow == "article_revision" and isinstance(latest_batch, dict):
+        if latest_batch.get("status") == "accepted":
+            batch_status = "accepted"
+        elif run.status == ContentFactoryRunStatus.COMPLETED:
+            batch_status = "completed"
+        elif run.status == ContentFactoryRunStatus.FAILED:
+            batch_status = "failed"
+        else:
+            batch_status = latest_batch.get("status", "running")
+        latest_batch = {
+            **latest_batch,
+            "revisionRunId": latest_batch.get("revisionRunId") or run.run_id,
+            "status": batch_status,
+        }
+    return {
+        "comments": [_serialize_component_comment(comment) for comment in comments],
+        "latestBatch": latest_batch,
+    }
+
+
+def _selector_for_component(component_id):
+    escaped = str(component_id or "").replace("\\", "\\\\").replace('"', '\\"')
+    return f'[data-cf-component-id="{escaped}"]' if escaped else ""
+
+
+def _component_revision_requested_run_id(source_run_id, batch_id):
+    digest = hashlib.sha256(f"{source_run_id}:{batch_id}".encode("utf-8")).hexdigest()[:16]
+    return f"component-revision-{digest}"
+
+
+def _clamp_comment_anchor_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return 0.0
+    if number > 1:
+        return 1.0
+    return number
+
+
+def _comment_anchor_from_request(data):
+    getter = data.get if hasattr(data, "get") else (lambda _key, default=None: default)
+    anchor = getter("anchor")
+    if isinstance(anchor, str):
+        try:
+            anchor = json.loads(anchor)
+        except json.JSONDecodeError:
+            anchor = None
+    if not isinstance(anchor, dict):
+        x_value = getter("anchorX") or getter("anchor_x")
+        y_value = getter("anchorY") or getter("anchor_y")
+        if x_value is None and y_value is None:
+            return {}
+        anchor = {"x": x_value, "y": y_value}
+    x = _clamp_comment_anchor_number(anchor.get("x"))
+    y = _clamp_comment_anchor_number(anchor.get("y"))
+    if x is None or y is None:
+        return {}
+    created_from = str(anchor.get("createdFrom") or anchor.get("created_from") or "").strip()
+    normalized = {"x": x, "y": y}
+    if created_from:
+        normalized["createdFrom"] = created_from[:80]
+    return normalized
+
+
+def _request_includes_comment_anchor(data):
+    getter = data.get if hasattr(data, "get") else (lambda _key, default=None: default)
+    return getter("anchor") not in (None, "") or getter("anchorX") not in (None, "") or getter("anchor_x") not in (None, "")
+
+
+def _comment_payload_from_request(data):
+    component_id = str(data.get("componentId") or data.get("component_id") or "").strip()
+    body = str(data.get("body") or data.get("comment") or "").strip()
+    return {
+        "component_id": component_id,
+        "component_type": str(data.get("componentType") or data.get("component_type") or "").strip(),
+        "component_label": str(data.get("componentLabel") or data.get("component_label") or "").strip(),
+        "source_section_id": str(data.get("sourceSectionId") or data.get("source_section_id") or "").strip(),
+        "selector": str(data.get("selector") or "").strip() or _selector_for_component(component_id),
+        "anchor": _comment_anchor_from_request(data),
+        "body": body,
+    }
+
+
+def _remote_comment_payload(comment):
+    return {
+        "comment_id": str(comment.id),
+        "component_id": comment.component_id,
+        "component_type": comment.component_type,
+        "component_label": comment.component_label,
+        "source_section_id": comment.source_section_id,
+        "selector": comment.selector or _selector_for_component(comment.component_id),
+        "anchor": comment.anchor or {},
+        "body": comment.body,
+    }
+
+
+def _normalized_component_feedback_rule(comment):
+    label = comment.component_label or comment.component_id
+    component_type = comment.component_type or "component"
+    body = " ".join(str(comment.body or "").split())
+    if not body:
+        return ""
+    return f"For {component_type} components like {label}, apply this reviewer guidance: {body}"
+
+
+def _feedback_family_key(*, domain, github_repo, comment):
+    seed = json.dumps(
+        {
+            "domain": normalize_company_domain(domain),
+            "repo": github_repo or "",
+            "component_type": comment.component_type or "",
+            "component_id": comment.component_id or "",
+            "body": " ".join(str(comment.body or "").lower().split()),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+
+def _create_editorial_feedback_candidates(*, organization, run, comments, batch_id):
+    for comment in comments:
+        rule = _normalized_component_feedback_rule(comment)
+        if not rule:
+            continue
+        family_key = _feedback_family_key(
+            domain=run.domain,
+            github_repo=run.github_repo,
+            comment=comment,
+        )
+        exact_signature = hashlib.sha256(str(comment.body or "").encode("utf-8")).hexdigest()[:32]
+        summary = f"{comment.component_label or comment.component_id}: {comment.body[:180]}"
+        ContentFactoryHealingRecord.objects.update_or_create(
+            domain=normalize_company_domain(run.domain),
+            github_repo=run.github_repo or "",
+            failure_kind="article_component_feedback",
+            failure_family_key=family_key,
+            defaults={
+                "organization": organization,
+                "exact_signature": exact_signature,
+                "summary": summary[:500],
+                "normalized_failure": {
+                    "feedback_batch_id": batch_id,
+                    "comment_id": str(comment.id),
+                    "source_run_id": run.run_id,
+                    "component_id": comment.component_id,
+                    "component_type": comment.component_type,
+                    "component_label": comment.component_label,
+                    "comment": comment.body,
+                    "normalized_rule": rule,
+                },
+                "changed_files": [],
+                "patch_manifest": {},
+                "validation_results": {},
+                "evidence_artifacts": {
+                    "feedback_batch_id": batch_id,
+                    "source_run_id": run.run_id,
+                    "comment_id": str(comment.id),
+                },
+                "snippet_or_rule": rule,
+                "applies_to": [
+                    item
+                    for item in [
+                        f"component:{comment.component_id}" if comment.component_id else "",
+                        f"component_type:{comment.component_type}" if comment.component_type else "",
+                        "article_copy",
+                    ]
+                    if item
+                ],
+                "promoted_payload": {
+                    "feedback_batch_id": batch_id,
+                    "source_run_id": run.run_id,
+                    "comment_id": str(comment.id),
+                    "article_component_feedback_hint": {
+                        "component_id": comment.component_id,
+                        "component_type": comment.component_type,
+                        "component_label": comment.component_label,
+                        "rule": rule,
+                    },
+                },
+                "promotion_state": ContentFactoryHealingPromotionState.CANDIDATE,
+                "latest_run_id": run.run_id,
+            },
+        )
+
+
+def _promote_editorial_feedback_batch(*, run, batch_id, revision_run_id=""):
+    if not batch_id:
+        return 0
+    records = ContentFactoryHealingRecord.objects.filter(
+        domain=normalize_company_domain(run.domain),
+        github_repo=run.github_repo or "",
+        failure_kind="article_component_feedback",
+    )
+    promoted_count = 0
+    now_iso = timezone.now().isoformat()
+    for record in records:
+        evidence = record.evidence_artifacts if isinstance(record.evidence_artifacts, dict) else {}
+        promoted_payload = record.promoted_payload if isinstance(record.promoted_payload, dict) else {}
+        if evidence.get("feedback_batch_id") != batch_id and promoted_payload.get("feedback_batch_id") != batch_id:
+            continue
+        promoted_payload = {
+            **promoted_payload,
+            "accepted_at": now_iso,
+            "revision_run_id": revision_run_id,
+        }
+        record.promoted_payload = promoted_payload
+        record.promotion_state = ContentFactoryHealingPromotionState.PROMOTED
+        record.latest_run_id = revision_run_id or run.run_id
+        record.save(update_fields=["promoted_payload", "promotion_state", "latest_run_id", "updated_at"])
+        promoted_count += 1
+    return promoted_count
 
 
 def _publish_evidence_from_run(run):
@@ -305,6 +824,7 @@ def _publish_evidence_from_run(run):
         "changedFiles": result.get("changed_files") or result.get("files") or diagnostics.get("changed_files") or [],
         "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
         "diagnostics": diagnostics,
+        "contentPackage": _content_package_from_run(run),
     }
 
 
@@ -467,6 +987,9 @@ def _serialize_run(run):
     result = run.result or {}
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url")
+    content_package = _content_package_from_run(run)
+    component_manifest = _component_manifest_from_run(run)
+    live_preview = _live_preview_from_run(run)
     return {
         "runId": run.run_id,
         "workflow": run.workflow,
@@ -487,6 +1010,10 @@ def _serialize_run(run):
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
         "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "contentPackage": content_package,
+        "componentManifest": component_manifest,
+        "livePreview": live_preview,
+        "componentFeedback": _component_feedback_from_run(run),
         "result": result,
     }
 
@@ -516,6 +1043,8 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         }
     )
     article_result = (article_run.result if article_run else {}) or {}
+    article_acceptance_summary = (article_run.acceptance_summary if article_run else {}) or {}
+    article_content_packaged = bool(article_acceptance_summary.get("content_packaged"))
     write_ready = bool(
         article_run
         and (
@@ -530,9 +1059,12 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             or article_result.get("markdown")
             or article_result.get("preview_url")
             or article_result.get("pr_url")
+            or article_content_packaged
         )
     )
     publish_evidence = _publish_evidence_from_run(article_run)
+    content_package = publish_evidence.get("contentPackage") or {}
+    content_package_ready = bool(content_package.get("contentPackaged") or article_content_packaged)
     publish_ready = bool(
         article_run
         and (
@@ -579,6 +1111,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         "scaffold": {"passed": article_ready, "articleSystem": article_system},
         "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
         "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
+        "contentPackage": {"passed": content_package_ready, "runId": article_run.run_id if article_run else None},
         "publish": {"passed": publish_ready, "runId": article_run.run_id if article_run else None},
         "dailyAutomation": {"passed": daily_ready},
     }
@@ -652,6 +1185,7 @@ def _serialize_bootstrap_without_domain(company):
         "scaffold": {"passed": False},
         "research": {"passed": False},
         "write": {"passed": False},
+        "contentPackage": {"passed": False},
         "publish": {"passed": False},
         "dailyAutomation": {"passed": False},
     }
@@ -791,6 +1325,10 @@ def _normalize_remote_step_status(value):
     return normalized if normalized in allowed else ContentFactoryStepStatus.PENDING
 
 
+def _is_retryable_sqlite_lock(exc):
+    return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
+
+
 def _parse_remote_datetime(value):
     if not value:
         return None
@@ -810,7 +1348,19 @@ def _run_result_from_remote(remote_data):
         merged = dict(result)
     else:
         merged = {}
-    for key in ("warnings", "errors", "error", "message", "preview_url", "pr_url", "route_path"):
+    for key in (
+        "warnings",
+        "errors",
+        "error",
+        "message",
+        "preview_url",
+        "pr_url",
+        "route_path",
+        "livePreview",
+        "live_preview",
+        "componentManifest",
+        "component_manifest",
+    ):
         if remote_data.get(key) is not None and merged.get(key) is None:
             merged[key] = remote_data.get(key)
     if not merged and remote_data:
@@ -1048,6 +1598,75 @@ def _call_content_factory_run_action(*, run_id, action, payload):
         response_payload = {}
     detail = response_payload.get("detail") or response_payload.get("error") or response.text
     return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
+def _call_content_factory_component_revision(*, run_id, payload):
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
+    if not should_call_remote:
+        return {}
+
+    try:
+        response = http_client.post(
+            f"{base_url}/api/runs/{run_id}/component-revisions",
+            json=payload or {},
+            headers=_content_factory_headers(),
+            timeout=(5, 90),
+        )
+    except http_client.RequestException as exc:
+        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
+def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
+    if not should_call_remote:
+        return {}
+
+    url = f"{base_url}/api/runs/{run_id}/live-preview"
+    try:
+        if method == "POST":
+            response = http_client.post(url, json=payload or {}, headers=_content_factory_headers(), timeout=(3, 75))
+        elif method == "DELETE":
+            response = http_client.delete(url, headers=_content_factory_headers(), timeout=(3, 15))
+        else:
+            response = http_client.get(url, headers=_content_factory_headers(), timeout=(3, 15))
+    except http_client.RequestException as exc:
+        return {"available": False, "status": "failed", "error": str(exc), "errors": [str(exc)], "retryable": True}
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "available": False,
+        "status": "failed",
         "error": str(detail or f"Content Factory returned {response.status_code}."),
         "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
         "content_factory_status_code": response.status_code,
@@ -1390,6 +2009,37 @@ class VibeMarketingArticleView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        selected_title = str(
+            _request_value(request.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
+            or ""
+        ).strip()
+        custom_title = str(
+            _request_value(request.data, "custom_title", "customTitle", "title", "titleAngle", default="") or ""
+        ).strip()
+        topic_value = str(_request_value(request.data, "topic", default="") or "").strip()
+        target_keyword = str(
+            _request_value(
+                request.data,
+                "target_keyword",
+                "targetKeyword",
+                "custom_keyword",
+                "customKeyword",
+                "keyword",
+                "candidate_keyword",
+                "candidateKeyword",
+                default="",
+            )
+            or ""
+        ).strip()
+        topic = selected_title or custom_title or topic_value or target_keyword
+        if not (selected_title or custom_title or topic_value or target_keyword):
+            return Response(
+                {
+                    "detail": "Choose a discovered topic or enter a custom title or keyword before generating an article.",
+                    "field": "topicCandidateId",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         baseline_snapshot = _latest_baseline_snapshot(context.organization)
         if not _baseline_requirement_satisfied(config, baseline_snapshot):
             return Response(
@@ -1399,18 +2049,27 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        topic = str(request.data.get("topic") or request.data.get("keyword") or request.data.get("target_keyword") or "").strip()
+        source_run_id = _request_value(
+            request.data,
+            "source_run_id",
+            "sourceRunId",
+            "source_discovery_run_id",
+            "sourceDiscoveryRunId",
+            default=None,
+        )
         payload = {
             "domain": context.organization.domain,
             "slack_user_id": founder_actor_id_for_user(request.user),
             "topic": topic,
-            "target_keyword": str(request.data.get("target_keyword") or request.data.get("targetKeyword") or topic),
+            "target_keyword": target_keyword or topic,
             "context": str(request.data.get("context") or ""),
             "github_repo": config.github_repo,
             "delivery_mode": request.data.get("delivery_mode") or request.data.get("deliveryMode") or config.article_delivery_mode,
-            "delivery_mode_confirmed": bool(request.data.get("delivery_mode_confirmed", request.data.get("deliveryModeConfirmed", True))),
-            "source_discovery_run_id": request.data.get("source_discovery_run_id") or request.data.get("sourceDiscoveryRunId"),
-            "title": request.data.get("title") or request.data.get("titleAngle"),
+            "delivery_mode_confirmed": _bool_from_request(
+                request.data.get("delivery_mode_confirmed", request.data.get("deliveryModeConfirmed", True))
+            ),
+            "source_run_id": source_run_id,
+            "custom_title": selected_title or custom_title or None,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
         run = _queue_content_factory_run(
@@ -1433,7 +2092,15 @@ class VibeMarketingRunView(APIView):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
         remote_data = _call_content_factory_run_status(run.run_id)
         if remote_data:
-            run = _sync_local_run_from_remote(run, remote_data)
+            max_attempts = 3 if connection.vendor == "sqlite" else 1
+            for attempt in range(max_attempts):
+                try:
+                    run = _sync_local_run_from_remote(run, remote_data)
+                    break
+                except OperationalError as exc:
+                    if not _is_retryable_sqlite_lock(exc) or attempt == max_attempts - 1:
+                        raise
+                    time.sleep(0.15 * (attempt + 1))
             if run.workflow in BASELINE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
                 _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
@@ -1460,6 +2127,314 @@ class VibeMarketingRunArtifactsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class VibeMarketingRunCommentsMixin:
+    def _resolve_run(self, request, run_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=False)
+        if error_response:
+            return None, None, error_response
+        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        if not _run_belongs_to_context(run, context):
+            return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return context, run, None
+
+
+class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
+    def get(self, request, run_id):
+        _context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        return Response(_component_feedback_from_run(run), status=status.HTTP_200_OK)
+
+    def post(self, request, run_id):
+        _context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        payload = _comment_payload_from_request(request.data or {})
+        if not payload["component_id"]:
+            return Response({"detail": "Choose an article component before adding a comment."}, status=status.HTTP_400_BAD_REQUEST)
+        if not payload["body"]:
+            return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
+        comment = VibeMarketingComponentComment.objects.create(
+            run=run,
+            actor=request.user if request.user and request.user.is_authenticated else None,
+            **payload,
+        )
+        return Response(_serialize_component_comment(comment), status=status.HTTP_201_CREATED)
+
+
+class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
+    def patch(self, request, run_id, comment_id):
+        _context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        comment = get_object_or_404(VibeMarketingComponentComment, id=comment_id, run=run)
+        if comment.status != VibeMarketingComponentCommentStatus.DRAFT:
+            return Response({"detail": "Only draft comments can be updated."}, status=status.HTTP_400_BAD_REQUEST)
+        payload = _comment_payload_from_request(request.data or {})
+        if not _request_includes_comment_anchor(request.data or {}):
+            payload["anchor"] = comment.anchor or {}
+        if not payload["body"]:
+            return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
+        for key, value in payload.items():
+            setattr(comment, key, value)
+        comment.save(update_fields=[
+            "component_id",
+            "component_type",
+            "component_label",
+            "source_section_id",
+            "selector",
+            "anchor",
+            "body",
+            "updated_at",
+        ])
+        return Response(_serialize_component_comment(comment), status=status.HTTP_200_OK)
+
+    def delete(self, request, run_id, comment_id):
+        _context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        comment = get_object_or_404(VibeMarketingComponentComment, id=comment_id, run=run)
+        if comment.status != VibeMarketingComponentCommentStatus.DRAFT:
+            return Response({"detail": "Only draft comments can be deleted."}, status=status.HTTP_400_BAD_REQUEST)
+        comment.delete()
+        return Response(_component_feedback_from_run(run), status=status.HTTP_200_OK)
+
+
+class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView):
+    def post(self, request, run_id):
+        context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        source_run = run
+        run_request = run.run_request if isinstance(run.run_request, dict) else {}
+        run_result = run.result if isinstance(run.result, dict) else {}
+        draft_comments = list(
+            VibeMarketingComponentComment.objects.filter(
+                run=source_run,
+                status=VibeMarketingComponentCommentStatus.DRAFT,
+            )
+            .order_by("created_at", "id")
+        )
+        draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        if run.workflow == "article_revision" and not draft_comments:
+            source_run_id = str(
+                run_request.get("source_run_id")
+                or run_request.get("sourceRunId")
+                or run_result.get("source_run_id")
+                or run_result.get("sourceRunId")
+                or ""
+            ).strip()
+            if source_run_id and run.status == ContentFactoryRunStatus.FAILED:
+                source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
+                draft_comments = list(
+                    VibeMarketingComponentComment.objects.filter(
+                        run=source_run,
+                        status=VibeMarketingComponentCommentStatus.DRAFT,
+                    )
+                    .order_by("created_at", "id")
+                )
+                draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        retry_existing_batch = False
+        if draft_comments:
+            batch_id = str(uuid.uuid4())
+            with transaction.atomic():
+                VibeMarketingComponentComment.objects.filter(
+                    id__in=[comment.id for comment in draft_comments],
+                    status=VibeMarketingComponentCommentStatus.DRAFT,
+                ).update(status=VibeMarketingComponentCommentStatus.SUBMITTED, batch_id=batch_id, updated_at=timezone.now())
+                draft_comments = list(VibeMarketingComponentComment.objects.filter(id__in=[comment.id for comment in draft_comments]).order_by("created_at", "id"))
+                _create_editorial_feedback_candidates(
+                    organization=context.organization,
+                    run=source_run,
+                    comments=draft_comments,
+                    batch_id=batch_id,
+                )
+        else:
+            latest_submitted = (
+                VibeMarketingComponentComment.objects.filter(
+                    run=source_run,
+                    status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                )
+                .exclude(batch_id="")
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            if not latest_submitted:
+                return Response({"detail": "Add at least one draft component comment before requesting a revision."}, status=status.HTTP_400_BAD_REQUEST)
+            batch_id = latest_submitted.batch_id
+            draft_comments = list(
+                VibeMarketingComponentComment.objects.filter(
+                    run=source_run,
+                    status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                    batch_id=batch_id,
+                ).order_by("created_at", "id")
+            )
+            retry_existing_batch = True
+
+        remote_payload = {
+            "source_run_id": source_run.run_id,
+            "feedback_batch_id": batch_id,
+            "requested_run_id": _component_revision_requested_run_id(source_run.run_id, batch_id),
+            "comments": [_remote_comment_payload(comment) for comment in draft_comments],
+            "request_source": "founder_tools_component_feedback",
+        }
+        remote_data = _call_content_factory_component_revision(run_id=source_run.run_id, payload=remote_payload)
+        new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
+        if remote_data.get("error") and not new_run_id:
+            result = source_run.result or {}
+            retryable = bool(remote_data.get("retryable"))
+            result["component_feedback_latest_batch"] = {
+                "id": batch_id,
+                "sourceRunId": source_run.run_id,
+                "status": "submitted" if retryable else "failed",
+                "error": remote_data.get("error"),
+                "retryable": retryable,
+            }
+            source_run.result = result
+            source_run.save(update_fields=["result", "updated_at"])
+            if retryable:
+                return Response(_serialize_run(source_run), status=status.HTTP_202_ACCEPTED)
+            return Response(
+                {
+                    "detail": remote_data.get("error") or "Content Factory could not queue the revision.",
+                    "componentFeedback": _component_feedback_from_run(source_run),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        config = _get_config(context.organization)
+        revision_run = _create_local_run(
+            workflow="article_revision",
+            domain=context.organization.domain,
+            github_repo=config.github_repo or run.github_repo or "",
+            actor_id=founder_actor_id_for_user(request.user),
+            payload=remote_payload,
+            remote_data=remote_data,
+        )
+        revision_result = revision_run.result or {}
+        revision_result.update(
+            {
+                "source_run_id": source_run.run_id,
+                "feedback_batch_id": batch_id,
+                "submitted_component_comments": [_serialize_component_comment(comment) for comment in draft_comments],
+            }
+        )
+        revision_run.result = revision_result
+        revision_run.save(update_fields=["result", "updated_at"])
+
+        result = source_run.result or {}
+        result["component_feedback_latest_batch"] = {
+            "id": batch_id,
+            "sourceRunId": source_run.run_id,
+            "revisionRunId": revision_run.run_id,
+            "status": "running",
+            "retry": retry_existing_batch,
+        }
+        result["component_feedback_revision_run_id"] = revision_run.run_id
+        source_run.result = result
+        source_run.save(update_fields=["result", "updated_at"])
+        return Response(_serialize_run(revision_run), status=status.HTTP_202_ACCEPTED)
+
+
+class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, APIView):
+    def post(self, request, run_id):
+        context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        run_request = run.run_request if isinstance(run.run_request, dict) else {}
+        result = run.result or {}
+        source_run_id = str(
+            request.data.get("sourceRunId")
+            or request.data.get("source_run_id")
+            or run_request.get("source_run_id")
+            or result.get("source_run_id")
+            or ""
+        ).strip()
+        source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() if source_run_id else run
+        if not source_run or not _run_belongs_to_context(source_run, context):
+            return Response({"detail": "Source run not found."}, status=status.HTTP_404_NOT_FOUND)
+        batch_id = str(
+            request.data.get("batchId")
+            or request.data.get("batch_id")
+            or run_request.get("feedback_batch_id")
+            or result.get("feedback_batch_id")
+            or ((source_run.result or {}).get("component_feedback_latest_batch") or {}).get("id")
+            or ""
+        ).strip()
+        if not batch_id:
+            return Response({"detail": "Feedback batch id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if run.status != ContentFactoryRunStatus.COMPLETED:
+            return Response({"detail": "The revised article must be completed before accepting feedback."}, status=status.HTTP_400_BAD_REQUEST)
+
+        promoted_count = _promote_editorial_feedback_batch(run=source_run, batch_id=batch_id, revision_run_id=run.run_id)
+        VibeMarketingComponentComment.objects.filter(run=source_run, batch_id=batch_id).update(
+            status=VibeMarketingComponentCommentStatus.APPLIED,
+            updated_at=timezone.now(),
+        )
+        for target in [source_run, run]:
+            target_result = target.result or {}
+            latest_batch = target_result.get("component_feedback_latest_batch")
+            if not isinstance(latest_batch, dict) or latest_batch.get("id") == batch_id:
+                target_result["component_feedback_latest_batch"] = {
+                    "id": batch_id,
+                    "sourceRunId": source_run.run_id,
+                    "revisionRunId": run.run_id,
+                    "status": "accepted",
+                    "promotedLearningCount": promoted_count,
+                }
+            target.result = target_result
+            target.save(update_fields=["result", "updated_at"])
+        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+
+
+class VibeMarketingRunLivePreviewView(APIView):
+    def _resolve_run(self, request, run_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=False)
+        if error_response:
+            return None, error_response
+        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        if not _run_belongs_to_context(run, context):
+            return None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return run, None
+
+    def _persist_preview(self, run, payload):
+        if isinstance(payload, dict) and payload:
+            result = run.result or {}
+            result["livePreview"] = payload
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+        return run
+
+    def get(self, request, run_id):
+        run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        payload = _call_content_factory_live_preview(run_id=run_id, method="GET")
+        if payload:
+            run = self._persist_preview(run, payload)
+        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+
+    def post(self, request, run_id):
+        run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        payload = {
+            "force": _bool_from_request(request.data.get("force")),
+            "local_repo_path": request.data.get("local_repo_path") or request.data.get("localRepoPath") or "",
+        }
+        remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
+        run = self._persist_preview(run, remote_data)
+        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+
+    def delete(self, request, run_id):
+        run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        remote_data = _call_content_factory_live_preview(run_id=run_id, method="DELETE")
+        run = self._persist_preview(run, remote_data)
+        return Response(_serialize_run(run), status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunControlView(APIView):
@@ -1497,6 +2472,8 @@ class VibeMarketingRunControlView(APIView):
                     "submitted_at": timezone.now().isoformat(),
                     "instructions": payload.get("revision_instructions") or payload.get("revisionInstructions") or "",
                     "edited_content": payload.get("edited_content") or payload.get("editedContent") or "",
+                    "component_id": payload.get("component_id") or payload.get("componentId") or "",
+                    "component_type": payload.get("component_type") or payload.get("componentType") or "",
                     "remote": remote_data,
                 }
             )

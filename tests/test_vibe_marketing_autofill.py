@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -349,6 +350,43 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertTrue(ContentFactoryRunStep.objects.filter(run=run, step_key="generate_keyword_landscape").exists())
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_run_detail_retries_remote_step_sync_on_transient_sqlite_lock(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-lock-sync-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+        remote_payload = {
+            "run_id": run.run_id,
+            "workflow": "article_generation",
+            "status": "completed",
+            "current_step": "finalize",
+            "result": {"status": "success"},
+            "steps": {"finalize": {"status": "completed", "attempts": 1, "message": "Done."}},
+        }
+        original_update_or_create = ContentFactoryRunStep.objects.update_or_create
+        attempts = {"count": 0}
+
+        def flaky_update_or_create(*args, **kwargs):
+            if attempts["count"] == 0:
+                attempts["count"] += 1
+                raise OperationalError("database is locked")
+            return original_update_or_create(*args, **kwargs)
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=200, payload=remote_payload)):
+            with patch("content_factory.vibe_marketing_views.ContentFactoryRunStep.objects.update_or_create", side_effect=flaky_update_or_create):
+                with patch("content_factory.vibe_marketing_views.time.sleep"):
+                    response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertTrue(ContentFactoryRunStep.objects.filter(run=run, step_key="finalize").exists())
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_baseline_starts_durable_run_and_bootstrap_exposes_check(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
@@ -429,6 +467,146 @@ class VibeMarketingAutofillTests(TestCase):
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertTrue(bootstrap.data["checks"]["baseline"]["passed"])
         self.assertEqual(bootstrap.data["websiteBaseline"]["overallScore"], 78)
+
+    def test_bootstrap_returns_topic_candidates_from_selection_options(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="discovery-selection-1",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            result={
+                "selection": {
+                    "options": [
+                        {
+                            "id": "aus-founders-ai",
+                            "keyword": "australian founders",
+                            "title": "What Australian Founders Need to Know Before Investing in AI Products",
+                            "reason": "Matches founder purchase intent.",
+                            "volume": 120,
+                            "difficulty": "medium",
+                            "opportunityScore": 82,
+                        }
+                    ],
+                    "selected": {
+                        "id": "selected",
+                        "keyword": "founder ai products",
+                        "title": "Selected AI Product Brief",
+                    },
+                }
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        candidates = response.data["topicCandidates"]
+        self.assertGreaterEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], "aus-founders-ai")
+        self.assertEqual(candidates[0]["keyword"], "australian founders")
+        self.assertEqual(candidates[0]["title"], "What Australian Founders Need to Know Before Investing in AI Products")
+        self.assertEqual(candidates[0]["opportunityScore"], 82)
+        self.assertEqual(candidates[0]["sourceRunId"], "discovery-selection-1")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_maps_selected_candidate_payload_to_content_factory_contract(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-selected-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {
+                    "topicCandidateId": "aus-founders-ai",
+                    "selectedTitle": "What Australian Founders Need to Know Before Investing in AI Products",
+                    "targetKeyword": "australian founders",
+                    "sourceRunId": "discovery-selection-1",
+                    "deliveryMode": "content_only",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["topic"], "What Australian Founders Need to Know Before Investing in AI Products")
+        self.assertEqual(captured["target_keyword"], "australian founders")
+        self.assertEqual(captured["custom_title"], "What Australian Founders Need to Know Before Investing in AI Products")
+        self.assertEqual(captured["source_run_id"], "discovery-selection-1")
+        self.assertNotIn("source_discovery_run_id", captured)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_blank_article_start_returns_validation_error_without_local_blocked_run(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        before_count = ContentFactoryRun.objects.count()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post("/api/v1/vibe-marketing/article/", {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Choose a discovered topic", response.data["detail"])
+        post.assert_not_called()
+        self.assertEqual(ContentFactoryRun.objects.count(), before_count)
+
+    def test_content_only_completed_run_serializes_package_evidence_without_publish_ready(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="article-content-only-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            acceptance_summary={
+                "content_packaged": True,
+                "evidence_summary": {
+                    "content_package_path": "/tmp/run/delivery_package.json",
+                    "article_markdown_path": "/tmp/run/article.md",
+                    "article_html_path": "/tmp/run/article.html",
+                    "article_json_path": "/tmp/run/article.json",
+                    "article_meta_path": "/tmp/run/article_meta.json",
+                    "image_manifest_path": "/tmp/run/image_manifest.json",
+                    "image_manifest_status": "complete",
+                    "hero_image_url": "https://storage.example/hero.png?token=secret",
+                    "generated_inline_image_count": 4,
+                    "image_errors": [],
+                    "content_package_title": "Content Package Article",
+                    "content_package_slug": "content-package-article",
+                    "content_package_target_keyword": "content package keyword",
+                },
+            },
+            result={"delivery_mode": "content_only"},
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        checks = response.data["checks"]
+        self.assertTrue(checks["write"]["passed"])
+        self.assertTrue(checks["contentPackage"]["passed"])
+        self.assertFalse(checks["publish"]["passed"])
+        package = response.data["publishEvidence"]["contentPackage"]
+        self.assertEqual(package["title"], "Content Package Article")
+        self.assertEqual(package["slug"], "content-package-article")
+        self.assertEqual(package["targetKeyword"], "content package keyword")
+        self.assertTrue(package["heroImagePresent"])
+        self.assertEqual(package["generatedInlineImageCount"], 4)
+        self.assertEqual(package["imageErrorCount"], 0)
+        self.assertEqual(package["artifactPaths"]["article.md"], "/tmp/run/article.md")
 
     def test_article_generation_requires_baseline_or_skip(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

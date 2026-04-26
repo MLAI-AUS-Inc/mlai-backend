@@ -9,7 +9,7 @@ import requests
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 3
 DEFAULT_READ_TIMEOUT_SECONDS = 5
-MAX_READ_TIMEOUT_SECONDS = 30
+MAX_READ_TIMEOUT_SECONDS = 90
 
 exceptions = requests.exceptions
 RequestException = requests.RequestException

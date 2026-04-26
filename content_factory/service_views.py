@@ -1491,21 +1491,28 @@ class ContentFactoryCallbackView(APIView):
         if error_message is not None:
             defaults['error_message'] = error_message
 
-        job, _ = ContentFactoryJob.objects.update_or_create(
-            job_id=job_id,
-            defaults=defaults,
-        )
-        requested_by_slack_user_id = str(
-            (self.request.data or {}).get('requested_by_slack_user_id')
-            or ''
-        ).strip()
-        if requested_by_slack_user_id:
-            request_meta = dict(job.request_meta or {})
-            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
-                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
-                job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
-        return job
+        requested_by_slack_user_id = str((self.request.data or {}).get('requested_by_slack_user_id') or '').strip()
+        max_attempts = 3 if connection.vendor == 'sqlite' else 1
+        last_error = None
+        for attempt in range(max_attempts):
+            try:
+                job, _ = ContentFactoryJob.objects.update_or_create(
+                    job_id=job_id,
+                    defaults=defaults,
+                )
+                if requested_by_slack_user_id:
+                    request_meta = dict(job.request_meta or {})
+                    if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                        request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                        job.request_meta = request_meta
+                        job.save(update_fields=['request_meta', 'updated_at'])
+                return job
+            except OperationalError as exc:
+                last_error = exc
+                if not _is_retryable_sqlite_lock(exc) or attempt == max_attempts - 1:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
+        raise last_error
 
     def _resolve_job_thread_context(self, *, job, data):
         channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''

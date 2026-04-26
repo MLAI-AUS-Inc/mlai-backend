@@ -7,6 +7,7 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from content_factory.models import ContentFactoryJob
 from organizations.models import Organization
 from startup_updates.models import UserStartupBinding
 from workflow_runs.models import ContentFactoryRun
@@ -95,6 +96,34 @@ class ContentFactoryRunSyncTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(ContentFactoryRun.objects.filter(run_id="run-sync-lock-1").exists())
+
+    def test_callback_job_sync_retries_transient_sqlite_lock(self):
+        original_update_or_create = ContentFactoryJob.objects.update_or_create
+        attempts = {"count": 0}
+
+        def flaky_update_or_create(*args, **kwargs):
+            if attempts["count"] == 0:
+                attempts["count"] += 1
+                raise OperationalError("database is locked")
+            return original_update_or_create(*args, **kwargs)
+
+        with patch("content_factory.models.ContentFactoryJob.objects.update_or_create", side_effect=flaky_update_or_create):
+            with patch("content_factory.service_views.time.sleep"):
+                response = self.client.post(
+                    "/api/content-factory/callback/",
+                    {
+                        "event_type": "discovery_progress",
+                        "job_id": "callback-lock-1",
+                        "domain": "acme.com",
+                        "slack_user_id": "U123",
+                        "milestone_key": "research",
+                        "message": "Researching topics.",
+                    },
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(ContentFactoryJob.objects.filter(job_id="callback-lock-1").exists())
 
     def test_draft_results_returns_retryable_response_for_transient_sqlite_lock(self):
         organization = Organization.objects.create(name="Acme", domain="acme.com")
