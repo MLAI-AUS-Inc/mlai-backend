@@ -591,8 +591,22 @@ def _extract_form_metrics(structured_memo) -> dict:
     return metrics
 
 
-def _serialize_draft_for_editor(draft) -> dict:
+def _structured_memo_with_xero_metrics(draft) -> dict:
     structured_memo = draft.structured_memo or {}
+    if not getattr(draft, "organization_id", None):
+        return structured_memo
+
+    merged_memo, _evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+        organization=draft.organization,
+        month=draft.month,
+        structured_memo=structured_memo,
+        evidence_metric_ids=getattr(draft, "evidence_metric_ids", []) or [],
+    )
+    return merged_memo
+
+
+def _serialize_draft_for_editor(draft) -> dict:
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     month_value = draft.month
     return {
         "month": month_value.strftime("%B"),
@@ -613,7 +627,7 @@ def _serialize_draft_for_editor(draft) -> dict:
 
 
 def _serialize_email_draft_month(draft) -> dict:
-    structured_memo = draft.structured_memo or {}
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     month_value = draft.month
     return {
         "draft_id": draft.id,

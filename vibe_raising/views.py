@@ -47,7 +47,9 @@ from startup_updates.services import (
     get_latest_startup_update_run,
     get_open_startup_update_run,
     gmail_required_for_sources,
+    merge_xero_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
+    publish_xero_metric_observations,
     record_valley_dispatch_result,
     resolve_or_create_profile,
     refresh_startup_update_run_source_context,
@@ -179,6 +181,53 @@ def _monthly_update_drafts_cover_input_sources(organization: Organization, input
     run_request = latest_draft.run.run_request or {}
     draft_sources = set(normalize_startup_update_input_sources(run_request.get("input_sources")))
     return requested_sources.issubset(draft_sources)
+
+
+def _month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def _previous_month_start(month: date) -> date:
+    if month.month == 1:
+        return date(month.year - 1, 12, 1)
+    return date(month.year, month.month - 1, 1)
+
+
+def _refresh_reusable_xero_metrics_for_drafts(
+    *,
+    organization: Organization,
+    input_sources: list[str],
+    source_warnings: dict[str, list[str]],
+) -> None:
+    selected = set(normalize_startup_update_input_sources(input_sources))
+    if ExternalServiceProvider.XERO not in selected:
+        return
+
+    now = timezone.now().date()
+    current_month = _month_start(now)
+    previous_month = _previous_month_start(current_month)
+    oldest_month = _previous_month_start(previous_month)
+    try:
+        summary = publish_xero_metric_observations(
+            organization=organization,
+            run=None,
+            start_date=oldest_month,
+            end_date=now,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Unable to refresh Xero metrics for reusable monthly update drafts",
+            extra={"organization_id": organization.id},
+        )
+        source_warnings.setdefault(ExternalServiceProvider.XERO, []).append(
+            str(exc) or "Xero metrics could not be refreshed before loading existing drafts."
+        )
+        return
+
+    for warning in summary.get("warnings", []) or []:
+        text = str(warning or "").strip()
+        if text:
+            source_warnings.setdefault(ExternalServiceProvider.XERO, []).append(text)
 
 
 def _get_profile_or_404(user):
@@ -491,8 +540,22 @@ def _extract_metrics(structured_memo):
     return metrics
 
 
-def _serialize_draft_for_form(draft):
+def _structured_memo_with_xero_metrics(draft):
     structured_memo = draft.structured_memo or {}
+    if not getattr(draft, "organization_id", None):
+        return structured_memo
+
+    merged_memo, _evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+        organization=draft.organization,
+        month=draft.month,
+        structured_memo=structured_memo,
+        evidence_metric_ids=getattr(draft, "evidence_metric_ids", []) or [],
+    )
+    return merged_memo
+
+
+def _serialize_draft_for_form(draft):
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
@@ -618,7 +681,7 @@ def _build_manual_structured_memo(payload):
 
 
 def _serialize_monthly_update(draft):
-    structured_memo = draft.structured_memo or {}
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     return {
         "id": draft.id,
@@ -657,7 +720,7 @@ def _serialize_draft_bundle(drafts):
     current = _serialize_draft_for_form(drafts[0])
     past_months = []
     for draft in drafts[1:3]:
-        structured_memo = draft.structured_memo or {}
+        structured_memo = _structured_memo_with_xero_metrics(draft)
         month_value = draft.month
         past_months.append(
             {
@@ -684,7 +747,7 @@ def _serialize_draft_bundle(drafts):
 
 
 def _serialize_email_draft_month(draft):
-    structured_memo = draft.structured_memo or {}
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
@@ -1793,6 +1856,11 @@ class VibeRaisingEmailDraftStartView(APIView):
 
         created = False
         if existing_run is None and reusable_drafts_cover_input_sources and not force_regenerate:
+            _refresh_reusable_xero_metrics_for_drafts(
+                organization=organization,
+                input_sources=input_sources,
+                source_warnings=source_warnings,
+            )
             latest_draft = organization.monthly_update_drafts.order_by("-month", "-updated_at").first()
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",

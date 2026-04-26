@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -1524,6 +1525,91 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(results_response.data["months"][0]["month"], "March")
         self.assertEqual(results_response.data["months"][0]["highlights"], "March highlight\nMarch second highlight")
 
+    def test_email_draft_results_hydrate_revenue_from_xero_observations(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        run.status = ContentFactoryRunStatus.COMPLETED
+        run.current_step = "groundedness_review"
+        run.result = {"generated_draft_months": ["2026-03-01", "2026-04-01"]}
+        run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 4, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["April highlight"],
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "25"}],
+            },
+            rendered_markdown="# April Update",
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 3, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["March highlight"],
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "20"}],
+            },
+            rendered_markdown="# March Update",
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            run=run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 3800.00",
+            value_number=Decimal("3800.00"),
+            unit="AUD",
+            period_month=date(2026, 4, 1),
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            run=run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 2735.75",
+            value_number=Decimal("2735.75"),
+            unit="AUD",
+            period_month=date(2026, 3, 1),
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+
+        response = self.client.get(
+            f"/api/v1/vibe-raising/email-draft/runs/{run.run_id}/draft-results/",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["draft"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["draft"]["metrics"]["activeUsers"], "25")
+        self.assertEqual(response.data["draft"]["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
+        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
+        stored_draft = MonthlyUpdateDraft.objects.get(organization=organization, month=date(2026, 4, 1))
+        self.assertNotIn(
+            "revenue",
+            [item.get("metric_key") for item in stored_draft.structured_memo["kpi_snapshot"]],
+        )
+
     def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
@@ -1564,6 +1650,64 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["state"], "completed")
         self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
         self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
+
+    def test_email_draft_start_refreshes_xero_metrics_when_reusing_completed_draft(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-123",
+            account_label="Acme Xero",
+            last_synced_at=timezone.now(),
+        )
+        run = create_startup_update_run(
+            organization=organization,
+            binding=binding,
+        )
+        run.status = ContentFactoryRunStatus.COMPLETED
+        run.run_request = {
+            **(run.run_request or {}),
+            "input_sources": ["gmail", "xero"],
+        }
+        run.save(update_fields=["status", "run_request", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 3, 1),
+            status="ready",
+            structured_memo={
+                "highlights": ["Closed two new pilots"],
+                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
+            },
+            rendered_markdown="# March Update",
+        )
+
+        with patch("vibe_raising.views.publish_xero_metric_observations") as mock_publish:
+            mock_publish.return_value = {"warnings": [], "published_metric_count": 0}
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "completed")
+        self.assertFalse(response.data["reusedExistingRun"])
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        mock_publish.assert_called_once()
+        self.assertEqual(mock_publish.call_args.kwargs["organization"], organization)
+        self.assertIsNone(mock_publish.call_args.kwargs["run"])
 
     def test_email_draft_start_merges_existing_startup_profile_context(self):
         self.client.force_authenticate(user=self.user)

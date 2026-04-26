@@ -1181,7 +1181,8 @@ def publish_xero_metric_observations(
         _previous_month_start(_previous_month_start(current_month)),
     ]
     report_metrics_available = False
-    delete_report_metrics(current_month)
+    for month in report_months:
+        delete_report_metrics(month)
     for connection in connections:
         scopes = set(connection.scopes or [])
         if XERO_REPORTS_SCOPE not in scopes and "accounting.reports" not in scopes:
@@ -1228,13 +1229,17 @@ def publish_xero_metric_observations(
         operating_expenses = current_report.get("operating_expenses")
         cost_of_sales = current_report.get("cost_of_sales")
         current_report_labels = _xero_report_entry_labels(current_report.get("entries") or [])
-        if current_revenue:
+        for report_month, report in profit_and_loss_by_month.items():
+            revenue = report.get("revenue")
+            if not revenue:
+                continue
+            report_labels = _xero_report_entry_labels(report.get("entries") or [])
             save_metric(
-                month=current_month,
+                month=report_month,
                 key="revenue",
                 name="Revenue",
-                value_text=_format_money(current_revenue["amount"], currency),
-                value_number=current_revenue["amount"],
+                value_text=_format_money(revenue["amount"], currency),
+                value_number=revenue["amount"],
                 unit=currency,
                 records_for_metric=[],
                 summary="Revenue calculated from Xero Profit and Loss total income.",
@@ -1242,13 +1247,13 @@ def publish_xero_metric_observations(
                     source_metric="xero_profit_and_loss_revenue",
                     warnings=warnings,
                     report_name="ProfitAndLoss",
-                    start_date=current_month,
-                    end_date=_month_end(current_month),
-                    entry=current_revenue,
+                    start_date=report_month,
+                    end_date=_month_end(report_month),
+                    entry=revenue,
                     extra={
                         "connection_id": connection.id,
                         "source_currency": currency,
-                        "parsed_row_labels": current_report_labels,
+                        "parsed_row_labels": report_labels,
                         "calculation_basis": "profit_and_loss_total_income",
                     },
                 ),
