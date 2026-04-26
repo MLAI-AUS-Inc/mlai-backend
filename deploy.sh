@@ -158,6 +158,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "✅ Verifying migration readiness..."
     compose_run_web python manage.py migrate --check --noinput
 
+    echo "🧩 Verifying startup update schema..."
+    compose_run_web python manage.py validate_startup_update_schema
+
     echo "🧭 Verifying Vibe Raising video upload routes..."
     compose_run_web python manage.py shell -c "
 from django.urls import resolve
