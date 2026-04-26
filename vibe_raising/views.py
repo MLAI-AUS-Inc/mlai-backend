@@ -533,6 +533,10 @@ def _extract_metric_suggestions(structured_memo):
     return suggestions
 
 
+def _structured_memo_section_text(structured_memo, key):
+    return _join_text_items_with_newlines((structured_memo or {}).get(key))
+
+
 def _structured_memo_with_xero_metrics(draft):
     structured_memo = draft.structured_memo or {}
     if not getattr(draft, "organization_id", None):
@@ -565,13 +569,13 @@ def _serialize_draft_for_form(draft):
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
     }
@@ -639,6 +643,8 @@ def _build_manual_structured_memo(payload):
         "highlights": _split_editor_text(payload.get("highlights")),
         "lowlights": _split_editor_text(payload.get("challenges")),
         "asks": _split_editor_text(payload.get("asks")),
+        "learnings": _split_editor_text(payload.get("learnings")),
+        "next_30_days": _split_editor_text(payload.get("next30Days")),
         "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
         "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
@@ -699,13 +705,13 @@ def _serialize_monthly_update(draft):
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
     }
 
 
@@ -725,13 +731,13 @@ def _serialize_draft_bundle(drafts):
                     ("Financial performance", "financial_performance"),
                     ("", "highlights"),
                     ("Product / GTM / Team / Fundraising", "operations"),
-                    ("Learning", "learnings"),
                 ]),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
                     ("", "asks"),
-                    ("Next 30 days", "next_30_days"),
                 ]),
+                "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+                "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
                 "metrics": _extract_metrics(structured_memo),
                 "metricSuggestions": _extract_metric_suggestions(structured_memo),
             }
@@ -765,13 +771,13 @@ def _serialize_email_draft_month(draft):
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
     }
 
 

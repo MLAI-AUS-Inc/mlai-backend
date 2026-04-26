@@ -2499,6 +2499,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                                 "highlights": ["Converted pilot to annual deal"],
                                 "lowlights": ["None"],
                                 "operations": ["Hiring one engineer"],
+                                "learnings": ["Paid pilots convert faster when buyer scope is narrow"],
                                 "next_30_days": ["Close two more pilots"],
                             },
                             "evidence_event_ids": [event.id],
@@ -2527,12 +2528,25 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                 reverse("startup_updates_draft_detail", args=[draft.id]),
                 **self.headers,
             )
+            draft_results = self.client.get(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                **self.headers,
+            )
 
         self.assertEqual(draft_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(draft_list.data["drafts"]), 1)
         self.assertEqual(draft_detail.status_code, status.HTTP_200_OK)
         self.assertEqual(draft_detail.data["events"][0]["canonical_key"], event.canonical_key)
         self.assertEqual(draft_detail.data["metrics"][0]["metric_key"], metric.metric_key)
+        self.assertEqual(draft_results.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            draft_results.data["draft"]["highlights"],
+            "Converted pilot to annual deal\nProduct / GTM / Team / Fundraising: Hiring one engineer",
+        )
+        self.assertEqual(draft_results.data["draft"]["learnings"], "Paid pilots convert faster when buyer scope is narrow")
+        self.assertEqual(draft_results.data["draft"]["next30Days"], "Close two more pilots")
+        self.assertNotIn("Learning:", draft_results.data["draft"]["highlights"])
+        self.assertNotIn("Next 30 days:", draft_results.data["draft"]["asks"])
 
 
 class StartupUpdateOpenRunsViewTest(StartupUpdateApiTestCase):
