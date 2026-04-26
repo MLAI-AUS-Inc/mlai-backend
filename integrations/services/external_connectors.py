@@ -40,6 +40,12 @@ from startup_updates.models import (
 )
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
 from startup_updates.services import bind_user_to_startup, get_default_gmail_binding, resolve_or_create_profile
+from integrations.services.xero_scopes import (
+    XERO_REPORT_SCOPE_WARNING,
+    XERO_REQUIRED_REPORT_SCOPES,
+    xero_has_report_scope,
+    xero_needs_report_reconnect,
+)
 from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
@@ -340,6 +346,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             "accounting.payments.read",
             "accounting.settings.read",
             "accounting.contacts.read",
+            *XERO_REQUIRED_REPORT_SCOPES,
         }
         missing = []
         if not client_id:
@@ -2050,6 +2057,74 @@ def _upsert_xero_payments(connection: ExternalServiceConnection, payments: list[
     return upserted
 
 
+def _previous_month_start(month: date) -> date:
+    if month.month == 1:
+        return date(month.year - 1, 12, 1)
+    return date(month.year, month.month - 1, 1)
+
+
+def _xero_report_metric_window(today: date) -> tuple[date, date]:
+    current_month = date(today.year, today.month, 1)
+    previous_month = _previous_month_start(current_month)
+    oldest_month = _previous_month_start(previous_month)
+    return oldest_month, today
+
+
+def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection, today: date) -> dict[str, Any]:
+    has_report_scope = xero_has_report_scope(connection.scopes)
+    needs_report_reconnect = xero_needs_report_reconnect(connection.scopes)
+    metric_warnings: list[str] = []
+    metrics_published_count = 0
+
+    if not has_report_scope:
+        logger.warning(
+            "Xero report metric sync skipped because reports scope is missing",
+            extra={"connection_id": connection.id, "user_id": connection.user_id},
+        )
+        metric_warnings.append(XERO_REPORT_SCOPE_WARNING)
+    elif not connection.organization_id:
+        logger.warning(
+            "Xero report metric sync skipped because connection is not linked to an organization",
+            extra={"connection_id": connection.id, "user_id": connection.user_id},
+        )
+        metric_warnings.append("Xero report metrics could not be published because the connection is not linked to a company.")
+    else:
+        try:
+            from startup_updates.services import publish_xero_metric_observations
+
+            start_date, end_date = _xero_report_metric_window(today)
+            summary = publish_xero_metric_observations(
+                organization=connection.organization,
+                run=None,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            metrics_published_count = int(summary.get("published_metric_count") or 0)
+            metric_warnings = [
+                str(warning or "").strip()
+                for warning in summary.get("warnings", []) or []
+                if str(warning or "").strip()
+                and "deterministic accounting context" not in str(warning or "")
+            ]
+        except Exception as exc:
+            logger.exception(
+                "Xero report metric sync failed",
+                extra={"connection_id": connection.id, "user_id": connection.user_id},
+            )
+            metric_warnings.append(str(exc) or "Xero report metrics could not be published after sync.")
+
+    return {
+        "hasReportScope": has_report_scope,
+        "has_report_scope": has_report_scope,
+        "needsReportReconnect": needs_report_reconnect,
+        "needs_report_reconnect": needs_report_reconnect,
+        "metricsPublishedCount": metrics_published_count,
+        "metrics_published_count": metrics_published_count,
+        "metricWarnings": metric_warnings,
+        "metric_warnings": metric_warnings,
+    }
+
+
 def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any]:
     if connection.provider != ExternalServiceProvider.XERO:
         raise ConnectorConfigurationError("Connection is not a Xero connection.")
@@ -2103,6 +2178,8 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
         }
         connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
 
+    report_metric_summary = _publish_xero_report_metrics_for_sync(connection, now.date())
+
     return {
         "connectionId": connection.id,
         "connection_id": connection.id,
@@ -2116,6 +2193,7 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
         "invoices_synced": invoices_synced,
         "paymentsSynced": payments_synced,
         "payments_synced": payments_synced,
+        **report_metric_summary,
     }
 
 
@@ -2244,6 +2322,12 @@ def serialize_xero_preview(
             "cash_collected": "0",
             "currencies": [],
             "warnings": ["Xero is not connected."],
+            "hasReportScope": False,
+            "has_report_scope": False,
+            "needsReportReconnect": False,
+            "needs_report_reconnect": False,
+            "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+            "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         }
 
     parsed_start_date = parse_date(str(start_date)) if start_date else None
@@ -2288,9 +2372,10 @@ def serialize_xero_preview(
     warnings = []
     if len(currencies) > 1:
         warnings.append("Xero records include multiple currencies; do not combine them into one MRR value.")
-    scopes = set(connection.scopes or [])
-    if "accounting.reports.read" not in scopes and "accounting.reports" not in scopes:
-        warnings.append("Reconnect Xero to allow Profit and Loss and Balance Sheet report metrics.")
+    has_report_scope = xero_has_report_scope(connection.scopes)
+    needs_report_reconnect = xero_needs_report_reconnect(connection.scopes)
+    if needs_report_reconnect:
+        warnings.append(XERO_REPORT_SCOPE_WARNING)
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
@@ -2327,6 +2412,12 @@ def serialize_xero_preview(
         "recurring_invoice_count": metric_values.get("recurringInvoiceCount") or str(len(recurring_records)),
         "currencies": currencies,
         "warnings": warnings,
+        "hasReportScope": has_report_scope,
+        "has_report_scope": has_report_scope,
+        "needsReportReconnect": needs_report_reconnect,
+        "needs_report_reconnect": needs_report_reconnect,
+        "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+        "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         "recurringInvoices": [_serialize_xero_record(record) for record in recurring_records],
         "recurring_invoices": [_serialize_xero_record(record) for record in recurring_records],
         "recentInvoices": [_serialize_xero_record(record) for record in invoice_records],
@@ -4417,7 +4508,7 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         if status_value in {"connected", "syncing"} and selected_project_count == 0:
             warning = warning or "Select Linear projects before using Linear in a monthly update."
 
-    return {
+    payload = {
         "key": provider,
         "provider": provider,
         "label": definition.label,
@@ -4445,6 +4536,22 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         "selectedProjectCount": selected_project_count,
         "selected_project_count": selected_project_count,
     }
+    if provider == ExternalServiceProvider.XERO:
+        has_report_scope = xero_has_report_scope(connection.scopes if connection else [])
+        needs_report_reconnect = bool(connection) and xero_needs_report_reconnect(connection.scopes)
+        if status_value in {"connected", "syncing"} and needs_report_reconnect:
+            payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_WARNING
+        payload.update(
+            {
+                "hasReportScope": has_report_scope,
+                "has_report_scope": has_report_scope,
+                "needsReportReconnect": needs_report_reconnect,
+                "needs_report_reconnect": needs_report_reconnect,
+                "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+                "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
+            }
+        )
+    return payload
 
 
 def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, Any]:

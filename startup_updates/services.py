@@ -26,6 +26,10 @@ from integrations.models import (
     ExternalServiceConnectionStatus,
     ExternalServiceProvider,
 )
+from integrations.services.xero_scopes import (
+    XERO_REPORT_SCOPE,
+    xero_has_report_scope,
+)
 from startup_updates.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
@@ -243,7 +247,7 @@ LINEAR_STEP_KEYS = {
 LINEAR_COMPACT_MAX_ISSUES = 35
 LINEAR_COMPACT_MAX_UPDATES = 8
 LINEAR_COMPACT_MAX_CHARS = 9000
-XERO_REPORTS_SCOPE = "accounting.reports.read"
+XERO_REPORTS_SCOPE = XERO_REPORT_SCOPE
 XERO_REPORT_METRIC_KEYS = {
     "revenue",
     "revenueGrowthRate",
@@ -1184,8 +1188,7 @@ def publish_xero_metric_observations(
     for month in report_months:
         delete_report_metrics(month)
     for connection in connections:
-        scopes = set(connection.scopes or [])
-        if XERO_REPORTS_SCOPE not in scopes and "accounting.reports" not in scopes:
+        if not xero_has_report_scope(connection.scopes):
             warnings.append(
                 "Xero reports scope is missing; reconnect Xero to calculate Revenue, Burn Rate, Runway, and Revenue Growth from accounting reports."
             )

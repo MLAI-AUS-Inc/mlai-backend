@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -138,6 +138,14 @@ def _xero_balance_sheet_report(*, total_bank: str) -> dict:
     XERO_CLIENT_ID="xero-client-real-123",
     XERO_CLIENT_SECRET="xero-client-secret-real-123",
     XERO_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/xero",
+    XERO_OAUTH_SCOPES=[
+        "offline_access",
+        "accounting.invoices.read",
+        "accounting.payments.read",
+        "accounting.reports.read",
+        "accounting.settings.read",
+        "accounting.contacts.read",
+    ],
     NOTION_CLIENT_ID="notion-client-id",
     NOTION_CLIENT_SECRET="notion-client-secret",
     NOTION_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/notion",
@@ -223,6 +231,7 @@ class ConnectorEndpointTests(TestCase):
                 self.assertIn("offline_access", params["scope"][0])
                 self.assertIn("accounting.invoices.read", params["scope"][0])
                 self.assertIn("accounting.payments.read", params["scope"][0])
+                self.assertIn("accounting.reports.read", params["scope"][0])
             if slug == "linear":
                 self.assertEqual(params["response_type"], ["code"])
                 self.assertEqual(params["client_id"], ["linear-client-id"])
@@ -577,6 +586,10 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(response.data["syncRuns"][0]["repeatingInvoicesSynced"], 1)
         self.assertEqual(response.data["syncRuns"][0]["invoicesSynced"], 1)
         self.assertEqual(response.data["syncRuns"][0]["paymentsSynced"], 1)
+        self.assertFalse(response.data["syncRuns"][0]["hasReportScope"])
+        self.assertTrue(response.data["syncRuns"][0]["needsReportReconnect"])
+        self.assertEqual(response.data["syncRuns"][0]["metricsPublishedCount"], 0)
+        self.assertIn("Reconnect Xero", response.data["syncRuns"][0]["metricWarnings"][0])
         connection.refresh_from_db()
         self.assertEqual(connection.access_token, "fresh-xero-access")
         self.assertEqual(connection.refresh_token, "new-xero-refresh")
@@ -604,6 +617,82 @@ class ConnectorEndpointTests(TestCase):
             record_type=ExternalFinancialRecord.RECORD_XERO_PAYMENT,
         )
         self.assertEqual(payment_record.external_record_id, "pay-1")
+
+    def test_xero_sync_with_reports_scope_publishes_report_metrics(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            access_token="xero-access",
+            refresh_token="xero-refresh",
+            token_expires_at=None,
+            external_account_id="tenant-123",
+            account_label="Demo Company",
+            scopes=["accounting.invoices.read", "accounting.payments.read", "accounting.reports.read"],
+        )
+
+        def fake_get(url, **kwargs):
+            if "RepeatingInvoices" in url:
+                return _json_response({"RepeatingInvoices": []})
+            if "Invoices" in url:
+                return _json_response(
+                    {
+                        "Invoices": [
+                            {
+                                "InvoiceID": "inv-1",
+                                "InvoiceNumber": "INV-001",
+                                "Type": "ACCREC",
+                                "Status": "PAID",
+                                "SubTotal": "3800.00",
+                                "CurrencyCode": "AUD",
+                                "DateString": "2026-04-12",
+                                "Contact": {"Name": "Customer Pty Ltd"},
+                            }
+                        ],
+                        "pagination": {"page": 1, "pageCount": 1},
+                    }
+                )
+            if "Payments" in url:
+                return _json_response({"Payments": [], "pagination": {"page": 1, "pageCount": 1}})
+            if "Reports/ProfitAndLoss" in url:
+                reports = {
+                    "2026-04-01": _xero_profit_and_loss_report(total_income="3800.00", total_expenses="4500.00", net_profit="(700.00)"),
+                    "2026-03-01": _xero_profit_and_loss_report(total_income="2735.75", total_expenses="3200.00", net_profit="(464.25)"),
+                    "2026-02-01": _xero_profit_and_loss_report(total_income="1900.00", total_expenses="1800.00", net_profit="100.00"),
+                }
+                return _json_response(reports[kwargs["params"]["fromDate"]])
+            if "Reports/BalanceSheet" in url:
+                return _json_response(_xero_balance_sheet_report(total_bank="9000.00"))
+            raise AssertionError(f"Unexpected Xero URL {url}")
+
+        with patch(
+            "integrations.services.external_connectors.timezone.now",
+            return_value=timezone.make_aware(datetime(2026, 4, 26, 12, 0, 0)),
+        ), patch(
+            "integrations.services.external_connectors.requests.get",
+            side_effect=fake_get,
+        ):
+            response = self.api_client.post(
+                "/api/v1/integrations/financial/sync",
+                {"providers": ["xero"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        run = response.data["syncRuns"][0]
+        self.assertTrue(run["hasReportScope"])
+        self.assertFalse(run["needsReportReconnect"])
+        self.assertGreaterEqual(run["metricsPublishedCount"], 7)
+        self.assertTrue(
+            StartupMetricObservation.objects.filter(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                metric_key="revenue",
+                period_month=date(2026, 4, 1),
+                value_text="AUD 3800.00",
+            ).exists()
+        )
 
     def test_xero_sync_refresh_failure_marks_connection_error(self):
         connection = ExternalServiceConnection.objects.create(
@@ -703,6 +792,10 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(preview_response.data["tenantLabel"], "Demo Company")
         self.assertEqual(preview_response.data["monthlyRecurringRevenue"], "1200.00")
         self.assertEqual(preview_response.data["cashCollected"], "500.00")
+        self.assertFalse(preview_response.data["hasReportScope"])
+        self.assertTrue(preview_response.data["needsReportReconnect"])
+        self.assertEqual(preview_response.data["requiredReportScopes"], ["accounting.reports.read"])
+        self.assertIn("Reconnect Xero", preview_response.data["warnings"][0])
         self.assertEqual(preview_response.data["recurringInvoices"][0]["externalRecordId"], "rep-1")
         self.assertEqual(preview_response.data["recentInvoices"][0]["invoiceNumber"], "INV-001")
         self.assertEqual(invoices_response.status_code, 200)
