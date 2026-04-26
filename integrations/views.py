@@ -438,7 +438,8 @@ def github_callback(request):
     except Exception:
         repos = []
 
-    selected_repo = repos[0]["full_name"] if len(repos) == 1 else None
+    repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
+    selected_repo = repo_names[0] if len(repo_names) == 1 else None
 
     retry_message = ""
     domain_display = ""
@@ -459,12 +460,22 @@ def github_callback(request):
 
         # Get or create config and update GitHub credentials
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+        previous_repo = str(config.github_repo or "").strip()
+        if not selected_repo and len(repo_names) > 1 and previous_repo:
+            selected_repo = next(
+                (repo_name for repo_name in repo_names if repo_name.casefold() == previous_repo.casefold()),
+                None,
+            )
+        repo_to_store = selected_repo
+        if not repo_to_store and len(repo_names) > 1 and previous_repo:
+            repo_to_store = previous_repo
+
         config.github_token_encrypted = access_token
         config.github_refresh_token_encrypted = refresh_token
         config.github_token_expires_at = token_expires_at
         config.github_user_name = github_login
         config.connected_slack_user_id = slack_user_id or config.connected_slack_user_id
-        config.github_repo = selected_repo if selected_repo else None
+        config.github_repo = repo_to_store if repo_to_store else None
         config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
@@ -473,7 +484,7 @@ def github_callback(request):
             "Org-level GitHub %s for %s: repo=%s, user=%s",
             setup_action,
             normalized_domain,
-            selected_repo,
+            repo_to_store,
             github_login,
         )
         domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
@@ -576,12 +587,12 @@ def github_callback(request):
     if selected_repo:
         repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
     elif len(repos) > 1:
-        repo_names = ", ".join(r["full_name"] for r in repos)
+        repo_names_html = ", ".join(repo_names)
         repo_list_html = (
             "<p style='color: orange;'>⚠️ Multiple repositories are selected for this installation.</p>"
             "<p>Roo requires exactly one repository per domain binding. Update the GitHub App installation "
             "and reconnect after narrowing it to a single repository.</p>"
-            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names}</p>"
+            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names_html}</p>"
         )
     else:
         repo_list_html = "<p style='color: orange;'>⚠️ No repositories were selected. Please reinstall the app and select at least one repository.</p>"

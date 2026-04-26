@@ -3,12 +3,13 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from content_factory.google_baseline import GA4_SCOPE, GSC_SCOPE, google_baseline_connection_status
 from content_factory.models import OrganizationContentConfig, WebsiteBaselineSnapshot
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
-from integrations.models import GoogleConnection
+from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 
@@ -474,3 +475,139 @@ class VibeMarketingAutofillTests(TestCase):
         complete = google_baseline_connection_status(self.user)
         self.assertTrue(complete["hasBaselineScopes"])
         self.assertEqual(complete["status"], "connected")
+
+    def test_github_connect_returns_auth_url_when_credentials_missing(self):
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "auth_required")
+        self.assertIn("https://github.com/apps/mlai-tools/installations/new", response.data["auth_url"])
+
+        config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
+        self.assertEqual(config.github_repo, "acme/site")
+        self.assertEqual(config.connected_slack_user_id, f"mlai_user:{self.user.id}")
+        self.assertNotIn("github_token", response.data)
+
+    def test_github_connect_reuses_valid_org_credentials(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "github_token_encrypted": "org-token",
+                "github_token_expires_at": timezone.now() + timezone.timedelta(hours=1),
+            },
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "already_connected")
+        self.assertEqual(response.data["connection_state"], "connected")
+        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertNotIn("org-token", str(response.data))
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        self.assertTrue(bootstrap.data["checks"]["github"]["passed"])
+
+    def test_github_connect_refreshes_expired_org_credentials_server_side(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "github_token_encrypted": "old-org-token",
+                "github_refresh_token_encrypted": "org-refresh",
+                "github_token_expires_at": timezone.now() - timezone.timedelta(minutes=1),
+            },
+        )
+
+        def fake_ensure_valid_org_token(domain):
+            self.assertEqual(domain, "acme.com")
+            config.github_token_encrypted = "new-org-token"
+            config.github_token_expires_at = timezone.now() + timezone.timedelta(hours=1)
+            config.save(update_fields=["github_token_encrypted", "github_token_expires_at", "updated_at"])
+            return "new-org-token"
+
+        with patch("content_factory.vibe_marketing_views.ensure_valid_org_token", side_effect=fake_ensure_valid_org_token):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/github/connect/",
+                {"githubRepo": "acme/site"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "already_connected")
+        self.assertNotIn("new-org-token", str(response.data))
+        config.refresh_from_db()
+        self.assertEqual(config.github_token_encrypted, "new-org-token")
+
+    def test_github_connect_promotes_matching_user_credentials_to_org(self):
+        actor_id = f"mlai_user:{self.user.id}"
+        UserIntegration.objects.create(
+            slack_user_id=actor_id,
+            github_access_token="user-token",
+            github_refresh_token="user-refresh",
+            github_token_expires_at=timezone.now() + timezone.timedelta(hours=1),
+            github_user_name="octocat",
+            github_repo="acme/site",
+            github_installation_id="inst-1",
+            github_scopes=["repo"],
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "already_connected")
+        self.assertEqual(response.data["credential_source"], "user_promoted")
+        self.assertNotIn("user-token", str(response.data))
+
+        config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
+        self.assertEqual(config.github_token_encrypted, "user-token")
+        self.assertEqual(config.github_refresh_token_encrypted, "user-refresh")
+        self.assertEqual(config.github_repo, "acme/site")
+        self.assertEqual(config.github_installation_id, "inst-1")
+
+    def test_unrelated_settings_update_not_blocked_by_enabled_daily_prerequisites(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.daily_discovery_enabled = True
+        config.save(update_fields=["daily_discovery_enabled", "updated_at"])
+
+        response = self.client.put(
+            "/api/v1/vibe-marketing/settings/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        config.refresh_from_db()
+        self.assertEqual(config.github_repo, "acme/site")
+
+    def test_enabling_daily_still_requires_prerequisites(self):
+        response = self.client.put(
+            "/api/v1/vibe-marketing/settings/",
+            {"dailyDiscoveryEnabled": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Daily generation prerequisites are not complete.")

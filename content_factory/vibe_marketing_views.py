@@ -30,7 +30,9 @@ from founder_tools.services import (
     string_list_from_value,
 )
 from integrations import http_client
-from integrations.services.github import build_github_auth_url
+from integrations.models import UserIntegration
+from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
+from integrations.services.github import ScanError, TokenRefreshError, build_github_auth_url, ensure_valid_token
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -112,6 +114,81 @@ def _resolve_context_or_response(request, *, require_domain=True):
 def _get_config(organization):
     config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
     return config
+
+
+def _clean_github_repo(value) -> str:
+    return str(value or "").strip()
+
+
+def _github_repo_matches(candidate: str, expected: str) -> bool:
+    return bool(candidate and expected and candidate.casefold() == expected.casefold())
+
+
+def _connected_github_response(config, *, status_value="already_connected"):
+    return {
+        "status": status_value,
+        "connection_state": "connected",
+        "github_repo": config.github_repo,
+        "github_user_name": config.github_user_name,
+        "credential_source": "org",
+    }
+
+
+def _promote_user_github_credentials_to_org(config, integration, github_repo: str):
+    config.github_token_encrypted = integration.github_access_token
+    config.github_refresh_token_encrypted = integration.github_refresh_token
+    config.github_token_expires_at = integration.github_token_expires_at
+    config.github_user_name = integration.github_user_name
+    config.github_installation_id = integration.github_installation_id
+    config.github_scopes = integration.github_scopes or []
+    config.github_repo = github_repo
+    config.save(
+        update_fields=[
+            "github_token_encrypted",
+            "github_refresh_token_encrypted",
+            "github_token_expires_at",
+            "github_user_name",
+            "github_installation_id",
+            "github_scopes",
+            "github_repo",
+            "updated_at",
+        ]
+    )
+
+
+def _connect_with_existing_github_credentials(config, *, domain: str, actor_id: str, requested_repo: str):
+    configured_repo = _clean_github_repo(config.github_repo)
+    if config.github_token_encrypted and configured_repo:
+        try:
+            ensure_valid_org_token(domain)
+            config.refresh_from_db()
+            return _connected_github_response(config)
+        except (ArticleGenerationError, TokenRefreshError):
+            pass
+
+    integration = UserIntegration.objects.filter(slack_user_id=actor_id).first()
+    if not integration or not integration.github_access_token:
+        return None
+
+    integration_repo = _clean_github_repo(integration.github_repo)
+    target_repo = requested_repo or configured_repo
+    if not integration_repo or not _github_repo_matches(integration_repo, target_repo):
+        return None
+
+    try:
+        ensure_valid_token(actor_id)
+        integration.refresh_from_db()
+    except (ScanError, TokenRefreshError):
+        return None
+
+    _promote_user_github_credentials_to_org(config, integration, target_repo or integration_repo)
+    return {
+        "status": "already_connected",
+        "connection_state": "connected",
+        "github_repo": config.github_repo,
+        "github_user_name": config.github_user_name,
+        "credential_source": "user_promoted",
+    }
 
 
 def _run_belongs_to_context(run, context) -> bool:
@@ -1049,13 +1126,14 @@ class VibeMarketingSettingsView(APIView):
             "article_delivery_mode",
             request.data.get("articleDeliveryMode", config.article_delivery_mode),
         )
-        if "daily_discovery_enabled" in request.data or "dailyDiscoveryEnabled" in request.data:
+        daily_enabled_submitted = "daily_discovery_enabled" in request.data or "dailyDiscoveryEnabled" in request.data
+        if daily_enabled_submitted:
             config.daily_discovery_enabled = _bool_from_request(
                 request.data.get("daily_discovery_enabled", request.data.get("dailyDiscoveryEnabled"))
             )
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
-        if config.daily_discovery_enabled:
+        if daily_enabled_submitted and config.daily_discovery_enabled:
             checks = _profile_checks(
                 organization,
                 config,
@@ -1231,12 +1309,29 @@ class VibeMarketingGitHubConnectView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
-        config.connected_slack_user_id = founder_actor_id_for_user(request.user)
-        if request.data.get("github_repo") or request.data.get("githubRepo"):
-            config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
+        actor_id = founder_actor_id_for_user(request.user)
+        config.connected_slack_user_id = actor_id
+        requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
+        if requested_repo:
+            config.github_repo = requested_repo
         config.save(update_fields=["connected_slack_user_id", "github_repo", "updated_at"])
+
+        existing_connection = _connect_with_existing_github_credentials(
+            config,
+            domain=context.organization.domain,
+            actor_id=actor_id,
+            requested_repo=requested_repo,
+        )
+        if existing_connection:
+            return Response(existing_connection, status=status.HTTP_200_OK)
+
         return Response(
-            {"auth_url": build_github_auth_url(config.connected_slack_user_id, domain=context.organization.domain)},
+            {
+                "status": "auth_required",
+                "connection_state": "auth_required",
+                "github_repo": config.github_repo,
+                "auth_url": build_github_auth_url(actor_id, domain=context.organization.domain, request=request),
+            },
             status=status.HTTP_200_OK,
         )
 
