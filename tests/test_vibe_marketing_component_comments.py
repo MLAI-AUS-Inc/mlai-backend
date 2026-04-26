@@ -93,6 +93,85 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.data["comments"][0]["anchor"]["createdFrom"], "live_preview_click")
 
+    def test_revision_run_does_not_serialize_source_run_comments(self):
+        VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Original title feedback.",
+            status="submitted",
+            batch_id="batch-original",
+        )
+        revision_run = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-revision",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            run_request={"source_run_id": self.run.run_id},
+            result={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-original"},
+        )
+
+        response = self.client.get(f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["comments"], [])
+        self.assertEqual(response.data["latestBatch"]["id"], "batch-original")
+        self.assertEqual(response.data["latestBatch"]["sourceRunId"], self.run.run_id)
+        self.assertEqual(response.data["latestBatch"]["revisionRunId"], revision_run.run_id)
+        self.assertEqual(response.data["latestBatch"]["status"], "completed")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_submit_from_completed_revision_uses_revision_draft_comments(self):
+        revision_run = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-revision",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            run_request={"source_run_id": self.run.run_id},
+            result={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-original"},
+        )
+        source_comment = VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Original title feedback.",
+            status="submitted",
+            batch_id="batch-original",
+        )
+        revision_comment = VibeMarketingComponentComment.objects.create(
+            run=revision_run,
+            actor=self.user,
+            component_id="section:section-2",
+            component_type="section",
+            component_label="Section 2",
+            selector='[data-cf-component-id="section:section-2"]',
+            body="Tighten the revised section.",
+        )
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": "article-run-comments-revision-2", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/submit", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments-revision/component-revisions")
+        self.assertEqual(captured["payload"]["source_run_id"], revision_run.run_id)
+        self.assertEqual(captured["payload"]["comments"][0]["comment_id"], str(revision_comment.id))
+        self.assertNotEqual(captured["payload"]["comments"][0]["comment_id"], str(source_comment.id))
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_sends_anchor_to_content_factory_revision(self):
         comment = VibeMarketingComponentComment.objects.create(

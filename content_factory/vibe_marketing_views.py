@@ -546,7 +546,6 @@ def _serialize_component_comment(comment):
 
 
 def _component_feedback_from_run(run):
-    feedback_source_run = run
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
     result = run.result or {}
     source_run_id = (
@@ -555,22 +554,37 @@ def _component_feedback_from_run(run):
         or result.get("source_run_id")
         or result.get("sourceRunId")
     )
+    batch_source_run = run
     if run.workflow == "article_revision" and source_run_id:
-        feedback_source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
+        batch_source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
     comments = list(
-        VibeMarketingComponentComment.objects.filter(run=feedback_source_run).order_by("created_at", "id")
+        VibeMarketingComponentComment.objects.filter(run=run).order_by("created_at", "id")
     )
     latest_batch = result.get("component_feedback_latest_batch")
     if not isinstance(latest_batch, dict):
-        source_result = feedback_source_run.result if isinstance(feedback_source_run.result, dict) else {}
+        source_result = batch_source_run.result if isinstance(batch_source_run.result, dict) else {}
         latest_batch = source_result.get("component_feedback_latest_batch")
+    if not isinstance(latest_batch, dict) and run.workflow == "article_revision":
+        feedback_batch_id = str(result.get("feedback_batch_id") or result.get("feedbackBatchId") or "").strip()
+        if feedback_batch_id:
+            latest_batch = {
+                "id": feedback_batch_id,
+                "sourceRunId": source_run_id or batch_source_run.run_id,
+                "revisionRunId": run.run_id,
+                "status": "running",
+            }
     if not isinstance(latest_batch, dict):
-        submitted = [comment for comment in comments if comment.batch_id]
+        submitted_comments = list(
+            VibeMarketingComponentComment.objects.filter(run=batch_source_run)
+            .exclude(batch_id="")
+            .order_by("created_at", "id")
+        )
+        submitted = [comment for comment in submitted_comments if comment.batch_id]
         latest_comment = submitted[-1] if submitted else None
         latest_batch = (
             {
                 "id": latest_comment.batch_id,
-                "sourceRunId": feedback_source_run.run_id,
+                "sourceRunId": batch_source_run.run_id,
                 "revisionRunId": result.get("component_feedback_revision_run_id")
                 or (run.run_id if run.workflow == "article_revision" else None),
                 "status": "submitted",
@@ -2196,16 +2210,6 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         source_run = run
         run_request = run.run_request if isinstance(run.run_request, dict) else {}
         run_result = run.result if isinstance(run.result, dict) else {}
-        if run.workflow == "article_revision":
-            source_run_id = str(
-                run_request.get("source_run_id")
-                or run_request.get("sourceRunId")
-                or run_result.get("source_run_id")
-                or run_result.get("sourceRunId")
-                or ""
-            ).strip()
-            if source_run_id:
-                source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
         draft_comments = list(
             VibeMarketingComponentComment.objects.filter(
                 run=source_run,
@@ -2214,6 +2218,24 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             .order_by("created_at", "id")
         )
         draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        if run.workflow == "article_revision" and not draft_comments:
+            source_run_id = str(
+                run_request.get("source_run_id")
+                or run_request.get("sourceRunId")
+                or run_result.get("source_run_id")
+                or run_result.get("sourceRunId")
+                or ""
+            ).strip()
+            if source_run_id and run.status == ContentFactoryRunStatus.FAILED:
+                source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).first() or run
+                draft_comments = list(
+                    VibeMarketingComponentComment.objects.filter(
+                        run=source_run,
+                        status=VibeMarketingComponentCommentStatus.DRAFT,
+                    )
+                    .order_by("created_at", "id")
+                )
+                draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
         retry_existing_batch = False
         if draft_comments:
             batch_id = str(uuid.uuid4())
