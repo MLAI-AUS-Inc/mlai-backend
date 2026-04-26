@@ -244,6 +244,8 @@ class VibeRaisingApiTests(TestCase):
                 "highlights": "Closed two pilots\nHired first AE",
                 "challenges": "Longer sales cycle",
                 "asks": "Intros to health system buyers",
+                "learnings": "Founder-led demos convert better with clinical operators",
+                "next30Days": "Close the hospital pilot and finish onboarding analytics",
                 "summary": "Strong month with enterprise momentum.",
                 "sourceUrl": "https://example.com/march-update",
                 "videoUrl": "https://storage.example.com/vibe-raising/demo.mp4",
@@ -271,6 +273,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(draft.structured_memo["highlights"], ["Closed two pilots", "Hired first AE"])
         self.assertEqual(draft.structured_memo["lowlights"], ["Longer sales cycle"])
         self.assertEqual(draft.structured_memo["asks"], ["Intros to health system buyers"])
+        self.assertEqual(draft.structured_memo["learnings"], ["Founder-led demos convert better with clinical operators"])
+        self.assertEqual(draft.structured_memo["next_30_days"], ["Close the hospital pilot and finish onboarding analytics"])
         self.assertEqual(draft.structured_memo["summary"], "Strong month with enterprise momentum.")
         self.assertEqual(draft.structured_memo["source_url"], "https://example.com/march-update")
         self.assertEqual(draft.structured_memo["video_url"], "https://storage.example.com/vibe-raising/demo.mp4")
@@ -286,6 +290,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["update"]["videoUrl"], "https://storage.example.com/vibe-raising/demo.mp4")
         self.assertEqual(response.data["update"]["videoContentType"], "video/mp4")
         self.assertEqual(response.data["update"]["videoOriginalFilename"], "demo.mp4")
+        self.assertEqual(response.data["update"]["learnings"], "Founder-led demos convert better with clinical operators")
+        self.assertEqual(response.data["update"]["next30Days"], "Close the hospital pilot and finish onboarding analytics")
         self.assertEqual(response.data["update"]["metrics"]["revenue"], "50000")
         self.assertEqual(response.data["update"]["metrics"]["websiteVisitors"], "1200")
         self.assertEqual(
@@ -547,6 +553,8 @@ class VibeRaisingApiTests(TestCase):
                 "highlights": ["Closed a channel partnership", "Shipped onboarding refresh"],
                 "lowlights": ["Sales cycle slipped"],
                 "asks": ["Intros to Series A fintech funds"],
+                "learnings": ["Channel partnerships convert faster with founder-led kickoff"],
+                "next_30_days": ["Close two fintech pilots"],
                 "summary": "February summary",
                 "source_url": "https://example.com/feb-update",
                 "video_url": "https://storage.example.com/feb.mp4",
@@ -577,6 +585,8 @@ class VibeRaisingApiTests(TestCase):
             response.data["updates"][0]["highlights"],
             "Closed a channel partnership\nShipped onboarding refresh",
         )
+        self.assertEqual(response.data["updates"][0]["learnings"], "Channel partnerships convert faster with founder-led kickoff")
+        self.assertEqual(response.data["updates"][0]["next30Days"], "Close two fintech pilots")
         self.assertEqual(response.data["updates"][0]["metrics"]["revenue"], "42000")
 
     def test_investor_gets_403_on_company_endpoints(self):
@@ -1481,6 +1491,8 @@ class VibeRaisingApiTests(TestCase):
                 "highlights": ["March highlight", "March second highlight"],
                 "lowlights": ["March challenge", "March second challenge"],
                 "asks": ["March ask", "March second ask"],
+                "learnings": ["March learning"],
+                "next_30_days": ["March next step"],
                 "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
             },
             rendered_markdown="# March Update",
@@ -1526,6 +1538,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(status_response.data["currentMonth"]["highlights"], "March highlight\nMarch second highlight")
         self.assertEqual(status_response.data["currentMonth"]["challenges"], "March challenge\nMarch second challenge")
         self.assertEqual(status_response.data["currentMonth"]["asks"], "March ask\nMarch second ask")
+        self.assertEqual(status_response.data["currentMonth"]["learnings"], "March learning")
+        self.assertEqual(status_response.data["currentMonth"]["next30Days"], "March next step")
 
         self.assertEqual(results_response.status_code, 200)
         self.assertEqual(results_response.data["runId"], older_run.run_id)
@@ -1536,6 +1550,10 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(results_response.data["draft"]["highlights"], "March highlight\nMarch second highlight")
         self.assertEqual(results_response.data["draft"]["challenges"], "March challenge\nMarch second challenge")
         self.assertEqual(results_response.data["draft"]["asks"], "March ask\nMarch second ask")
+        self.assertEqual(results_response.data["draft"]["learnings"], "March learning")
+        self.assertEqual(results_response.data["draft"]["next30Days"], "March next step")
+        self.assertNotIn("March learning", results_response.data["draft"]["highlights"])
+        self.assertNotIn("March next step", results_response.data["draft"]["asks"])
         self.assertEqual(results_response.data["months"][0]["month"], "March")
         self.assertEqual(results_response.data["months"][0]["highlights"], "March highlight\nMarch second highlight")
 

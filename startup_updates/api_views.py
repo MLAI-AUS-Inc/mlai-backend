@@ -590,6 +590,10 @@ def _extract_metric_suggestions(structured_memo) -> list[dict]:
     return suggestions
 
 
+def _structured_memo_section_text(structured_memo, key: str) -> str:
+    return _join_text_items_with_newlines((structured_memo or {}).get(key))
+
+
 def _structured_memo_with_xero_metrics(draft) -> dict:
     structured_memo = draft.structured_memo or {}
     if not getattr(draft, "organization_id", None):
@@ -614,13 +618,13 @@ def _serialize_draft_for_editor(draft) -> dict:
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
     }
@@ -640,13 +644,13 @@ def _serialize_email_draft_month(draft) -> dict:
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
     }
 
 
@@ -666,7 +670,10 @@ def _serialize_draft_results_bundle(drafts) -> Optional[dict]:
                 "highlights": payload["highlights"],
                 "challenges": payload["challenges"],
                 "asks": payload["asks"],
+                "learnings": payload["learnings"],
+                "next30Days": payload["next30Days"],
                 "metrics": payload["metrics"],
+                "metricSuggestions": payload["metricSuggestions"],
             }
         )
 

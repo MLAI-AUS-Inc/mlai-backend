@@ -150,6 +150,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "videoFileSizeBytes": ("video_file_size_bytes",),
         "videoOriginalFilename": ("video_original_filename",),
         "metricSuggestions": ("metric_suggestions",),
+        "next30Days": ("next_30_days",),
     }
 
     month = serializers.CharField()
@@ -164,6 +165,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     highlights = serializers.CharField(allow_blank=True, required=False, default="")
     challenges = serializers.CharField(allow_blank=True, required=False, default="")
     asks = serializers.CharField(allow_blank=True, required=False, default="")
+    learnings = serializers.CharField(allow_blank=True, required=False, default="")
+    next30Days = serializers.CharField(allow_blank=True, required=False, default="")
     metrics = serializers.DictField(
         child=serializers.CharField(allow_blank=True),
         required=False,
@@ -189,7 +192,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         attrs["month"] = calendar.month_name[month_number]
         attrs["month_number"] = month_number
 
-        for field in ("highlights", "challenges", "asks"):
+        for field in ("highlights", "challenges", "asks", "learnings", "next30Days"):
             attrs[field] = str(attrs.get(field) or "").strip()
 
         for field in (
