@@ -5,7 +5,7 @@ import re
 import secrets
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
 
@@ -36,6 +36,7 @@ from startup_updates.models import (
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
+    StartupMetricObservation,
 )
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
 from startup_updates.services import bind_user_to_startup, get_default_gmail_binding, resolve_or_create_profile
@@ -1876,6 +1877,19 @@ def _xero_collection(
     return items
 
 
+def fetch_xero_accounting_report(
+    connection: ExternalServiceConnection,
+    report_name: str,
+    *,
+    params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return _xero_get_json(
+        connection,
+        f"/Reports/{report_name.strip('/')}",
+        params=params,
+    )
+
+
 def _xero_contact_name(payload: dict[str, Any]) -> str:
     contact = _as_dict(payload.get("Contact") or payload.get("contact"))
     return _nested_text(contact, "Name", "name", "ContactID", "contact_id")
@@ -2170,6 +2184,25 @@ def _xero_monthly_normalized_amount(record: ExternalFinancialRecord) -> Optional
     return amount
 
 
+def _xero_preview_month(end_date: Optional[date]) -> date:
+    resolved = end_date or timezone.now().date()
+    return date(resolved.year, resolved.month, 1)
+
+
+def _xero_metric_value_lookup(connection: ExternalServiceConnection, month: date) -> dict[str, str]:
+    if connection.organization_id is None:
+        return {}
+    metrics = StartupMetricObservation.objects.filter(
+        organization=connection.organization,
+        source_provider=ExternalServiceProvider.XERO,
+        period_month=month,
+    ).order_by("metric_key", "-observed_at", "-updated_at", "-id")
+    values: dict[str, str] = {}
+    for metric in metrics:
+        values.setdefault(metric.metric_key, metric.value_text)
+    return values
+
+
 def serialize_xero_preview(
     user,
     *,
@@ -2187,6 +2220,20 @@ def serialize_xero_preview(
             "recurring_invoices": [],
             "recentInvoices": [],
             "recent_invoices": [],
+            "revenue": None,
+            "burnRate": None,
+            "burn_rate": None,
+            "runway": None,
+            "revenueGrowthRate": None,
+            "revenue_growth_rate": None,
+            "invoiceRevenue": "0",
+            "invoice_revenue": "0",
+            "invoiceCount": "0",
+            "invoice_count": "0",
+            "customerCount": "0",
+            "customer_count": "0",
+            "recurringInvoiceCount": "0",
+            "recurring_invoice_count": "0",
             "cashCollected": "0",
             "cash_collected": "0",
             "currencies": [],
@@ -2217,16 +2264,27 @@ def serialize_xero_preview(
         date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE)
         .order_by("-transaction_date", "-posted_at", "-id")[:10]
     )
+    all_invoice_records = list(date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE))
     payment_records = list(date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_PAYMENT))
+    invoice_revenue = sum((record.amount or Decimal("0") for record in all_invoice_records), Decimal("0"))
     cash_collected = sum((abs(record.amount or Decimal("0")) for record in payment_records), Decimal("0"))
     currencies = sorted({record.currency for record in list(recurring_records) + invoice_records + payment_records if record.currency})
     monthly_recurring_revenue = sum(
         (value for value in (_xero_monthly_normalized_amount(record) for record in recurring_records) if value is not None),
         Decimal("0"),
     )
+    customer_count = len({
+        record.merchant_name
+        for record in all_invoice_records + payment_records
+        if str(record.merchant_name or "").strip()
+    })
+    metric_values = _xero_metric_value_lookup(connection, _xero_preview_month(parsed_end_date))
     warnings = []
     if len(currencies) > 1:
         warnings.append("Xero records include multiple currencies; do not combine them into one MRR value.")
+    scopes = set(connection.scopes or [])
+    if "accounting.reports.read" not in scopes and "accounting.reports" not in scopes:
+        warnings.append("Reconnect Xero to allow Profit and Loss and Balance Sheet report metrics.")
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
@@ -2237,10 +2295,24 @@ def serialize_xero_preview(
         "tenant_id": connection.external_account_id,
         "lastSyncedAt": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
         "last_synced_at": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
-        "monthlyRecurringRevenue": _money_string(monthly_recurring_revenue),
-        "monthly_recurring_revenue": _money_string(monthly_recurring_revenue),
-        "cashCollected": _money_string(cash_collected),
-        "cash_collected": _money_string(cash_collected),
+        "monthlyRecurringRevenue": metric_values.get("mrr") or _money_string(monthly_recurring_revenue),
+        "monthly_recurring_revenue": metric_values.get("mrr") or _money_string(monthly_recurring_revenue),
+        "revenue": metric_values.get("revenue"),
+        "burnRate": metric_values.get("burnRate"),
+        "burn_rate": metric_values.get("burnRate"),
+        "runway": metric_values.get("runway"),
+        "revenueGrowthRate": metric_values.get("revenueGrowthRate"),
+        "revenue_growth_rate": metric_values.get("revenueGrowthRate"),
+        "invoiceRevenue": metric_values.get("invoiceRevenue") or _money_string(invoice_revenue),
+        "invoice_revenue": metric_values.get("invoiceRevenue") or _money_string(invoice_revenue),
+        "cashCollected": metric_values.get("cashCollected") or _money_string(cash_collected),
+        "cash_collected": metric_values.get("cashCollected") or _money_string(cash_collected),
+        "invoiceCount": metric_values.get("invoiceCount") or str(len(all_invoice_records)),
+        "invoice_count": metric_values.get("invoiceCount") or str(len(all_invoice_records)),
+        "customerCount": metric_values.get("customerCount") or str(customer_count),
+        "customer_count": metric_values.get("customerCount") or str(customer_count),
+        "recurringInvoiceCount": metric_values.get("recurringInvoiceCount") or str(len(recurring_records)),
+        "recurring_invoice_count": metric_values.get("recurringInvoiceCount") or str(len(recurring_records)),
         "currencies": currencies,
         "warnings": warnings,
         "recurringInvoices": [_serialize_xero_record(record) for record in recurring_records],

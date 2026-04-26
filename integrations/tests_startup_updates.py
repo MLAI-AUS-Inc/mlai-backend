@@ -1524,6 +1524,75 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertIn("3 bullets refreshed", draft.groundedness_notes)
         self.assertIn("1 added", draft.groundedness_notes)
 
+    def test_draft_results_merge_xero_metrics_into_kpi_snapshot(self):
+        month_bucket = date(2026, 3, 1)
+        revenue_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 4000.00",
+            value_number=Decimal("4000.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={
+                "report_name": "ProfitAndLoss",
+                "report_start_date": "2026-03-01",
+                "report_end_date": "2026-03-31",
+                "calculation_basis": "profit_and_loss_total_income",
+            },
+        )
+        burn_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="burnRate",
+            metric_name="Burn rate",
+            value_text="AUD 1500.00",
+            value_number=Decimal("1500.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                {
+                    "drafts": [
+                        {
+                            "month": month_bucket.isoformat(),
+                            "status": "ready",
+                            "model_name": "gpt-5.4",
+                            "structured_memo": {
+                                "title": "Acme March Update",
+                                "kpi_snapshot": [
+                                    {"metric_key": "revenue", "label": "Revenue", "value": "$1,000"},
+                                    {"metric_key": "activeUsers", "label": "Active Users", "value": "240"},
+                                ],
+                                "highlights": ["Launched onboarding refresh"],
+                            },
+                            "evidence_metric_ids": [],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=month_bucket)
+        snapshot = {item["metric_key"]: item for item in draft.structured_memo["kpi_snapshot"]}
+        self.assertEqual(snapshot["revenue"]["value"], "AUD 4000.00")
+        self.assertEqual(snapshot["revenue"]["source_provider"], ExternalServiceProvider.XERO)
+        self.assertEqual(snapshot["revenue"]["source_metadata"]["report_name"], "ProfitAndLoss")
+        self.assertEqual(snapshot["burnRate"]["value"], "AUD 1500.00")
+        self.assertEqual(snapshot["activeUsers"]["value"], "240")
+        self.assertEqual(set(draft.evidence_metric_ids), {revenue_metric.id, burn_metric.id})
+
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
 
