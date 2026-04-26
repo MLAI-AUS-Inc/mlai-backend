@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 import urllib.parse
 from datetime import date, timedelta
+from typing import Optional
 
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError
@@ -36,26 +37,69 @@ def _json_response(payload):
     return response
 
 
-def _xero_profit_and_loss_report(*, total_income: str, net_profit: str) -> dict:
+def _xero_profit_and_loss_report(
+    *,
+    total_income: str,
+    net_profit: str,
+    cost_of_sales: Optional[str] = None,
+    operating_expenses: Optional[str] = None,
+    total_expenses: Optional[str] = None,
+) -> dict:
+    rows = [
+        {
+            "RowType": "Section",
+            "Title": "Income",
+            "Rows": [
+                {
+                    "RowType": "SummaryRow",
+                    "Cells": [{"Value": "Total Income"}, {"Value": total_income}],
+                }
+            ],
+        },
+    ]
+    if cost_of_sales is not None:
+        rows.append(
+            {
+                "RowType": "Section",
+                "Title": "Cost of Sales",
+                "Rows": [
+                    {
+                        "RowType": "SummaryRow",
+                        "Cells": [{"Value": "Total Cost of Sales"}, {"Value": cost_of_sales}],
+                    }
+                ],
+            }
+        )
+    if operating_expenses is not None:
+        rows.append(
+            {
+                "RowType": "Section",
+                "Title": "Operating Expenses",
+                "Rows": [
+                    {
+                        "RowType": "SummaryRow",
+                        "Cells": [{"Value": "Total Operating Expenses"}, {"Value": operating_expenses}],
+                    }
+                ],
+            }
+        )
+    if total_expenses is not None:
+        rows.append(
+            {
+                "RowType": "SummaryRow",
+                "Cells": [{"Value": "Total Expenses"}, {"Value": total_expenses}],
+            }
+        )
+    rows.append(
+        {
+            "RowType": "Row",
+            "Cells": [{"Value": "Net Profit"}, {"Value": net_profit}],
+        }
+    )
     return {
         "Reports": [
             {
-                "Rows": [
-                    {
-                        "RowType": "Section",
-                        "Title": "Income",
-                        "Rows": [
-                            {
-                                "RowType": "SummaryRow",
-                                "Cells": [{"Value": "Total Income"}, {"Value": total_income}],
-                            }
-                        ],
-                    },
-                    {
-                        "RowType": "Row",
-                        "Cells": [{"Value": "Net Profit"}, {"Value": net_profit}],
-                    },
-                ]
+                "Rows": rows
             }
         ]
     }
@@ -1126,9 +1170,23 @@ class ConnectorEndpointTests(TestCase):
         def fake_report(_connection, report_name, *, params=None):
             if report_name == "ProfitAndLoss":
                 reports = {
-                    "2026-04-01": _xero_profit_and_loss_report(total_income="4000.00", net_profit="(1500.00)"),
-                    "2026-03-01": _xero_profit_and_loss_report(total_income="3000.00", net_profit="(1000.00)"),
-                    "2026-02-01": _xero_profit_and_loss_report(total_income="2000.00", net_profit="500.00"),
+                    "2026-04-01": _xero_profit_and_loss_report(
+                        total_income="4000.00",
+                        cost_of_sales="500.00",
+                        operating_expenses="5000.00",
+                        net_profit="(1500.00)",
+                    ),
+                    "2026-03-01": _xero_profit_and_loss_report(
+                        total_income="3000.00",
+                        cost_of_sales="500.00",
+                        operating_expenses="3500.00",
+                        net_profit="(1000.00)",
+                    ),
+                    "2026-02-01": _xero_profit_and_loss_report(
+                        total_income="2000.00",
+                        total_expenses="1500.00",
+                        net_profit="500.00",
+                    ),
                 }
                 return reports[params["fromDate"]]
             if report_name == "BalanceSheet":
@@ -1143,7 +1201,7 @@ class ConnectorEndpointTests(TestCase):
                 end_date=date(2026, 4, 30),
             )
 
-        self.assertGreaterEqual(summary["published_metric_count"], 10)
+        self.assertGreaterEqual(summary["published_metric_count"], 13)
         metrics = {
             metric.metric_key: metric
             for metric in StartupMetricObservation.objects.filter(
@@ -1157,13 +1215,95 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(metrics["revenueGrowthRate"].value_text, "33.33%")
         self.assertEqual(metrics["burnRate"].value_text, "AUD 1500.00")
         self.assertEqual(metrics["runway"].value_text, "7.2 months")
+        self.assertEqual(metrics["monthlyCosts"].value_text, "AUD 5500.00")
+        self.assertEqual(metrics["operatingExpenses"].value_text, "AUD 5000.00")
+        self.assertEqual(metrics["costOfSales"].value_text, "AUD 500.00")
         self.assertEqual(metrics["invoiceRevenue"].value_text, "AUD 2500.00")
         self.assertEqual(metrics["cashCollected"].value_text, "AUD 2400.00")
         self.assertEqual(metrics["customerCount"].value_text, "1")
         self.assertEqual(metrics["mrr"].source_record_ids, ["repeat-current"])
         self.assertEqual(metrics["mrr"].source_metadata["source_metric"], "xero_repeating_invoice_mrr")
         self.assertEqual(metrics["revenue"].source_metadata["report_name"], "ProfitAndLoss")
+        self.assertEqual(metrics["monthlyCosts"].source_metadata["report_name"], "ProfitAndLoss")
+        self.assertEqual(
+            metrics["monthlyCosts"].source_metadata["calculation_basis"],
+            "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+        )
+        self.assertEqual(
+            metrics["monthlyCosts"].source_metadata["component_labels"],
+            ["Total Cost of Sales", "Total Operating Expenses"],
+        )
         self.assertEqual(metrics["runway"].source_metadata["report_name"], "BalanceSheet")
+
+    def test_xero_metric_publishing_profitable_month_omits_burn_and_keeps_monthly_costs(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-123",
+            account_label="Acme Xero",
+            scopes=["accounting.reports.read"],
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE,
+            external_account_id="tenant-123",
+            external_record_id="invoice-current",
+            currency="AUD",
+            amount="5000.00",
+            status="PAID",
+            transaction_date=date(2026, 4, 15),
+            description="April sales invoice",
+            merchant_name="Acme Customer",
+        )
+
+        def fake_report(_connection, report_name, *, params=None):
+            if report_name == "ProfitAndLoss":
+                reports = {
+                    "2026-04-01": _xero_profit_and_loss_report(
+                        total_income="5000.00",
+                        total_expenses="4000.00",
+                        net_profit="1000.00",
+                    ),
+                    "2026-03-01": _xero_profit_and_loss_report(
+                        total_income="4000.00",
+                        total_expenses="3000.00",
+                        net_profit="1000.00",
+                    ),
+                    "2026-02-01": _xero_profit_and_loss_report(
+                        total_income="3000.00",
+                        total_expenses="2500.00",
+                        net_profit="500.00",
+                    ),
+                }
+                return reports[params["fromDate"]]
+            if report_name == "BalanceSheet":
+                return _xero_balance_sheet_report(total_bank="12000.00")
+            raise AssertionError(f"Unexpected report {report_name}")
+
+        with patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
+            publish_xero_metric_observations(
+                organization=organization,
+                run=None,
+                start_date=date(2026, 4, 1),
+                end_date=date(2026, 4, 30),
+            )
+
+        metrics = {
+            metric.metric_key: metric
+            for metric in StartupMetricObservation.objects.filter(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                period_month=date(2026, 4, 1),
+            )
+        }
+        self.assertEqual(metrics["monthlyCosts"].value_text, "AUD 4000.00")
+        self.assertEqual(metrics["operatingExpenses"].value_text, "AUD 4000.00")
+        self.assertNotIn("burnRate", metrics)
 
     def test_xero_metric_publishing_without_reports_scope_keeps_operational_metrics(self):
         organization = Organization.objects.create(name="Acme", domain="acme.example")

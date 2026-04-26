@@ -536,6 +536,12 @@ def _metric_key_from_label(label) -> Optional[str]:
         return "burnRate"
     if normalized == "runway":
         return "runway"
+    if normalized in {"monthly costs", "monthly cost", "costs", "costs per month", "monthly expenses", "expenses"}:
+        return "monthlyCosts"
+    if normalized in {"operating expenses", "operating expense", "opex", "op ex"}:
+        return "operatingExpenses"
+    if normalized in {"cost of sales", "cost of goods sold", "cogs"}:
+        return "costOfSales"
     if normalized in {"invoice revenue", "sales invoice revenue"}:
         return "invoiceRevenue"
     if normalized in {"cash collected", "cash received"}:

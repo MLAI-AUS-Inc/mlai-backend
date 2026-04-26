@@ -1557,6 +1557,22 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             confidence=1.0,
             source_metadata={"report_name": "ProfitAndLoss"},
         )
+        monthly_costs_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="monthlyCosts",
+            metric_name="Monthly costs",
+            value_text="AUD 2500.00",
+            value_number=Decimal("2500.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={
+                "report_name": "ProfitAndLoss",
+                "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+            },
+        )
 
         with self._with_key():
             response = self.client.post(
@@ -1571,6 +1587,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                                 "title": "Acme March Update",
                                 "kpi_snapshot": [
                                     {"metric_key": "revenue", "label": "Revenue", "value": "$1,000"},
+                                    {"metric_key": "monthlyCosts", "label": "Monthly Costs", "value": "$500"},
                                     {"metric_key": "activeUsers", "label": "Active Users", "value": "240"},
                                 ],
                                 "highlights": ["Launched onboarding refresh"],
@@ -1590,8 +1607,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(snapshot["revenue"]["source_provider"], ExternalServiceProvider.XERO)
         self.assertEqual(snapshot["revenue"]["source_metadata"]["report_name"], "ProfitAndLoss")
         self.assertEqual(snapshot["burnRate"]["value"], "AUD 1500.00")
+        self.assertEqual(snapshot["monthlyCosts"]["value"], "AUD 2500.00")
+        self.assertEqual(snapshot["monthlyCosts"]["source_provider"], ExternalServiceProvider.XERO)
         self.assertEqual(snapshot["activeUsers"]["value"], "240")
-        self.assertEqual(set(draft.evidence_metric_ids), {revenue_metric.id, burn_metric.id})
+        self.assertEqual(
+            set(draft.evidence_metric_ids),
+            {revenue_metric.id, burn_metric.id, monthly_costs_metric.id},
+        )
 
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)

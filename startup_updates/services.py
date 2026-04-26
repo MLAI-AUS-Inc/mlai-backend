@@ -249,12 +249,16 @@ XERO_REPORT_METRIC_KEYS = {
     "revenueGrowthRate",
     "burnRate",
     "runway",
+    "monthlyCosts",
+    "operatingExpenses",
+    "costOfSales",
 }
 XERO_DRAFT_METRIC_KEYS = (
     "revenue",
     "mrr",
     "burnRate",
     "runway",
+    "monthlyCosts",
     "invoiceRevenue",
     "cashCollected",
     "revenueGrowthRate",
@@ -268,6 +272,9 @@ XERO_DRAFT_METRIC_LABELS = {
     "mrr": "MRR",
     "burnRate": "Burn Rate",
     "runway": "Runway",
+    "monthlyCosts": "Monthly Costs",
+    "operatingExpenses": "Operating Expenses",
+    "costOfSales": "Cost of Sales",
     "invoiceRevenue": "Invoice Revenue",
     "cashCollected": "Cash Collected",
     "revenueGrowthRate": "Revenue Growth Rate",
@@ -714,14 +721,78 @@ def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str
     return None
 
 
+def _positive_xero_report_entry(entry: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not entry or entry.get("amount") is None:
+        return None
+    return {
+        **entry,
+        "amount": abs(entry["amount"]),
+    }
+
+
+def _xero_monthly_cost_entry(
+    *,
+    cost_of_sales: Optional[dict[str, Any]],
+    operating_expenses: Optional[dict[str, Any]],
+    total_expenses: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    cost_of_sales = _positive_xero_report_entry(cost_of_sales)
+    operating_expenses = _positive_xero_report_entry(operating_expenses)
+    total_expenses = _positive_xero_report_entry(total_expenses)
+    if cost_of_sales and operating_expenses:
+        return {
+            "label": "Cost of Sales + Operating Expenses",
+            "normalized_label": "cost of sales + operating expenses",
+            "amount": cost_of_sales["amount"] + operating_expenses["amount"],
+            "section": "",
+            "normalized_section": "",
+            "row_type": "calculated",
+            "component_labels": [cost_of_sales.get("label"), operating_expenses.get("label")],
+            "component_amounts": [str(cost_of_sales["amount"]), str(operating_expenses["amount"])],
+        }
+    return total_expenses or operating_expenses or cost_of_sales
+
+
 def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any]:
     entries = _xero_report_entries(payload)
     revenue = _find_xero_report_amount(entries, ["Total Income", "Total Revenue", "Income"])
     net = _find_xero_report_amount(entries, ["Net Profit", "Net Loss", "Net Profit/(Loss)", "Net Profit / (Loss)"])
+    cost_of_sales = _find_xero_report_amount(
+        entries,
+        [
+            "Total Cost of Sales",
+            "Total Cost of Goods Sold",
+            "Total Direct Costs",
+            "Cost of Sales",
+            "Cost of Goods Sold",
+        ],
+    )
+    operating_expenses = _find_xero_report_amount(
+        entries,
+        [
+            "Total Operating Expenses",
+            "Operating Expenses",
+        ],
+    )
+    total_expenses = _find_xero_report_amount(
+        entries,
+        [
+            "Total Expenses",
+            "Expenses",
+            "Total Expense",
+        ],
+    )
     return {
         "entries": entries,
         "revenue": revenue,
         "net": net,
+        "cost_of_sales": _positive_xero_report_entry(cost_of_sales),
+        "operating_expenses": _positive_xero_report_entry(operating_expenses or total_expenses),
+        "monthly_costs": _xero_monthly_cost_entry(
+            cost_of_sales=cost_of_sales,
+            operating_expenses=operating_expenses,
+            total_expenses=total_expenses,
+        ),
     }
 
 
@@ -1153,6 +1224,9 @@ def publish_xero_metric_observations(
         previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
         current_revenue = current_report.get("revenue")
         previous_revenue = previous_report.get("revenue")
+        monthly_costs = current_report.get("monthly_costs")
+        operating_expenses = current_report.get("operating_expenses")
+        cost_of_sales = current_report.get("cost_of_sales")
         current_report_labels = _xero_report_entry_labels(current_report.get("entries") or [])
         if current_revenue:
             save_metric(
@@ -1176,6 +1250,83 @@ def publish_xero_metric_observations(
                         "source_currency": currency,
                         "parsed_row_labels": current_report_labels,
                         "calculation_basis": "profit_and_loss_total_income",
+                    },
+                ),
+            )
+        if monthly_costs:
+            save_metric(
+                month=current_month,
+                key="monthlyCosts",
+                name="Monthly costs",
+                value_text=_format_money(monthly_costs["amount"], currency),
+                value_number=monthly_costs["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Monthly costs calculated from Xero Profit and Loss expense rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_monthly_costs",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=monthly_costs,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+                        "component_labels": monthly_costs.get("component_labels", []),
+                        "component_amounts": monthly_costs.get("component_amounts", []),
+                    },
+                ),
+            )
+        if operating_expenses:
+            save_metric(
+                month=current_month,
+                key="operatingExpenses",
+                name="Operating expenses",
+                value_text=_format_money(operating_expenses["amount"], currency),
+                value_number=operating_expenses["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Operating expenses calculated from Xero Profit and Loss expense rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_operating_expenses",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=operating_expenses,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "profit_and_loss_operating_or_total_expenses",
+                    },
+                ),
+            )
+        if cost_of_sales:
+            save_metric(
+                month=current_month,
+                key="costOfSales",
+                name="Cost of sales",
+                value_text=_format_money(cost_of_sales["amount"], currency),
+                value_number=cost_of_sales["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Cost of sales calculated from Xero Profit and Loss cost rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_cost_of_sales",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=cost_of_sales,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "profit_and_loss_cost_of_sales",
                     },
                 ),
             )
