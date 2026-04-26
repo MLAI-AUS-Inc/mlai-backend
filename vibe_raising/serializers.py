@@ -3,22 +3,14 @@ import calendar
 from rest_framework import serializers
 
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from startup_updates.metric_catalog import (
+    STARTUP_UPDATE_METRIC_KEY_SET,
+    startup_update_metric_key,
+    startup_update_metric_label,
+)
 
 
-VIBE_RAISING_UPDATE_METRIC_KEYS = {
-    "revenue",
-    "activeUsers",
-    "mrr",
-    "burnRate",
-    "runway",
-    "invoiceRevenue",
-    "cashCollected",
-    "revenueGrowthRate",
-    "customerCount",
-    "churn",
-    "invoiceCount",
-    "recurringInvoiceCount",
-}
+VIBE_RAISING_UPDATE_METRIC_KEYS = STARTUP_UPDATE_METRIC_KEY_SET
 
 
 def _blank_to_none(value):
@@ -157,6 +149,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "videoContentType": ("video_content_type",),
         "videoFileSizeBytes": ("video_file_size_bytes",),
         "videoOriginalFilename": ("video_original_filename",),
+        "metricSuggestions": ("metric_suggestions",),
     }
 
     month = serializers.CharField()
@@ -175,6 +168,11 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         child=serializers.CharField(allow_blank=True),
         required=False,
         default=dict,
+    )
+    metricSuggestions = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
     )
 
     def validate(self, attrs):
@@ -207,11 +205,34 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
 
         normalized_metrics = {}
         for key, value in (attrs.get("metrics") or {}).items():
-            if key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
+            metric_key = startup_update_metric_key(key)
+            if metric_key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
                 continue
             normalized_value = _blank_to_none(value)
             if normalized_value is not None:
-                normalized_metrics[key] = normalized_value
+                normalized_metrics[metric_key] = normalized_value
 
         attrs["metrics"] = normalized_metrics
+
+        normalized_suggestions = []
+        seen_suggestions = set()
+        for item in attrs.get("metricSuggestions") or []:
+            if not isinstance(item, dict):
+                continue
+            metric_key = startup_update_metric_key(
+                item.get("metricKey") or item.get("metric_key") or item.get("label")
+            )
+            if metric_key not in VIBE_RAISING_UPDATE_METRIC_KEYS or metric_key in seen_suggestions:
+                continue
+            seen_suggestions.add(metric_key)
+            normalized_suggestions.append(
+                {
+                    "metric_key": metric_key,
+                    "label": str(item.get("label") or startup_update_metric_label(metric_key)).strip()
+                    or startup_update_metric_label(metric_key),
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+
+        attrs["metricSuggestions"] = normalized_suggestions
         return attrs

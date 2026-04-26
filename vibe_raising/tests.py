@@ -254,8 +254,13 @@ class VibeRaisingApiTests(TestCase):
                 "metrics": {
                     "revenue": "50000",
                     "activeUsers": "3420",
+                    "websiteVisitors": "1200",
                     "ignored": "noop",
                 },
+                "metricSuggestions": [
+                    {"metricKey": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."},
+                    {"metricKey": "ignoredMetric", "label": "Ignored Metric", "reason": "Not curated."},
+                ],
             },
             format="json",
         )
@@ -271,6 +276,10 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(draft.structured_memo["video_url"], "https://storage.example.com/vibe-raising/demo.mp4")
         self.assertEqual(draft.structured_memo["video"]["content_type"], "video/mp4")
         self.assertEqual(draft.structured_memo["video"]["file_size_bytes"], 12345)
+        self.assertEqual(
+            draft.structured_memo["metric_suggestions"],
+            [{"metric_key": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
+        )
         self.assertEqual(response.data["update"]["month"], "March 2026")
         self.assertEqual(response.data["update"]["summary"], "Strong month with enterprise momentum.")
         self.assertEqual(response.data["update"]["sourceUrl"], "https://example.com/march-update")
@@ -278,6 +287,11 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["update"]["videoContentType"], "video/mp4")
         self.assertEqual(response.data["update"]["videoOriginalFilename"], "demo.mp4")
         self.assertEqual(response.data["update"]["metrics"]["revenue"], "50000")
+        self.assertEqual(response.data["update"]["metrics"]["websiteVisitors"], "1200")
+        self.assertEqual(
+            response.data["update"]["metricSuggestions"],
+            [{"metricKey": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
+        )
         self.assertNotIn("ignored", response.data["update"]["metrics"])
 
     @patch("vibe_raising.views.upload_file_to_storage")
