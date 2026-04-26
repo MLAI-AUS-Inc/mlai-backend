@@ -51,13 +51,18 @@ from startup_updates.services import (
     get_default_binding_for_domain,
     get_latest_startup_update_run,
     get_open_startup_update_run,
+    get_startup_update_run_target_month,
     gmail_required_for_sources,
+    build_startup_update_target_windows,
     merge_xero_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
+    parse_startup_update_target_month,
     publish_xero_metric_observations,
     record_valley_dispatch_result,
     resolve_or_create_profile,
     refresh_startup_update_run_source_context,
+    set_startup_update_run_target_month,
+    startup_update_run_matches_target_month,
     sync_startup_profile_from_company,
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -170,20 +175,24 @@ def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -
     return warnings
 
 
-def _monthly_update_drafts_cover_input_sources(organization: Organization, input_sources: list[str]) -> bool:
-    latest_draft = (
-        organization.monthly_update_drafts.select_related("run")
-        .order_by("-month", "-updated_at")
-        .first()
-    )
-    if latest_draft is None:
+def _monthly_update_drafts_cover_input_sources(
+    organization: Organization,
+    input_sources: list[str],
+    *,
+    target_month: Optional[date] = None,
+) -> bool:
+    draft_queryset = organization.monthly_update_drafts.select_related("run")
+    if target_month is not None:
+        draft_queryset = draft_queryset.filter(month=target_month)
+    draft = draft_queryset.order_by("-month", "-updated_at").first()
+    if draft is None:
         return False
 
     requested_sources = set(normalize_startup_update_input_sources(input_sources))
-    if latest_draft.run is None:
+    if draft.run is None:
         return requested_sources == {"gmail"}
 
-    run_request = latest_draft.run.run_request or {}
+    run_request = draft.run.run_request or {}
     draft_sources = set(normalize_startup_update_input_sources(run_request.get("input_sources")))
     return requested_sources.issubset(draft_sources)
 
@@ -203,21 +212,19 @@ def _refresh_reusable_xero_metrics_for_drafts(
     organization: Organization,
     input_sources: list[str],
     source_warnings: dict[str, list[str]],
+    target_month: Optional[date] = None,
 ) -> None:
     selected = set(normalize_startup_update_input_sources(input_sources))
     if ExternalServiceProvider.XERO not in selected:
         return
 
-    now = timezone.now().date()
-    current_month = _month_start(now)
-    previous_month = _previous_month_start(current_month)
-    oldest_month = _previous_month_start(previous_month)
+    windows = build_startup_update_target_windows(target_month)
     try:
         summary = publish_xero_metric_observations(
             organization=organization,
             run=None,
-            start_date=oldest_month,
-            end_date=now,
+            start_date=windows["financial_start_date"],
+            end_date=windows["financial_end_date"],
         )
     except Exception as exc:
         logger.exception(
@@ -288,6 +295,7 @@ def _serialize_binding_summary(binding):
 def _serialize_run_summary(run):
     if not run:
         return None
+    target_month = get_startup_update_run_target_month(run)
 
     step_states = {}
     for step in run.steps.order_by("display_order", "id"):
@@ -311,6 +319,7 @@ def _serialize_run_summary(run):
         "currentStep": run.current_step,
         "stepOrder": run.step_order or [],
         "stepStates": step_states,
+        "targetMonth": target_month.isoformat() if target_month else None,
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
     }
@@ -384,6 +393,26 @@ def _dispatch_run_to_valley(run):
     dispatch_result = notify_valley_run_created(run.run_id)
     record_valley_dispatch_result(run, dispatch_result)
     return dispatch_result
+
+
+def _requested_target_month_from_request(request) -> date:
+    raw_value = request.data.get("target_month") or request.data.get("targetMonth")
+    return parse_startup_update_target_month(raw_value)
+
+
+def _target_month_conflict_payload(*, requested_target_month: date, active_run) -> dict:
+    active_target_month = get_startup_update_run_target_month(active_run)
+    active_label = active_target_month.strftime("%B %Y") if active_target_month else "another month"
+    requested_label = requested_target_month.strftime("%B %Y")
+    return {
+        "targetMonthConflict": True,
+        "target_month_conflict": True,
+        "requestedTargetMonth": requested_target_month.isoformat(),
+        "requested_target_month": requested_target_month.isoformat(),
+        "activeTargetMonth": active_target_month.isoformat() if active_target_month else None,
+        "active_target_month": active_target_month.isoformat() if active_target_month else None,
+        "error": f"{active_label} is already generating. Finish or cancel it before generating {requested_label}.",
+    }
 
 
 def _normalize_text_list(value):
@@ -1078,6 +1107,7 @@ def _serialize_run_progress(run):
 
     completed_steps, total_steps = _count_completed_run_steps(run)
     meta = _get_run_meta(run)
+    target_month = get_startup_update_run_target_month(run)
     return {
         "runId": run.run_id,
         "status": run.status,
@@ -1101,6 +1131,7 @@ def _serialize_run_progress(run):
             else None
         ),
         "generatedDraftMonths": _get_run_generated_draft_months(run),
+        "targetMonth": target_month.isoformat() if target_month else None,
     }
 
 
@@ -1194,12 +1225,21 @@ def _build_status_payload(*, user, company, domain):
     }
 
 
-def _build_email_draft_payload(*, request, user, company, domain, run_id: Optional[str] = None):
+def _build_email_draft_payload(
+    *,
+    request,
+    user,
+    company,
+    domain,
+    run_id: Optional[str] = None,
+    target_month: Optional[date] = None,
+):
     google_connection = getattr(user, "google_connection", None)
     google_connected = bool(google_connection)
     google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
     auth_url = _build_google_oauth_url(request)
+    requested_target_month = target_month
 
     if not domain:
         return {
@@ -1215,6 +1255,8 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             "stepStates": {},
             "currentMonth": None,
             "pastMonths": [],
+            "targetMonth": requested_target_month.isoformat() if requested_target_month else None,
+            "requestedTargetMonth": requested_target_month.isoformat() if requested_target_month else None,
             "error": "Add a company domain before connecting Gmail.",
         }
 
@@ -1229,21 +1271,38 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             domain=organization.domain,
         ).order_by("-updated_at")
         selected_run = run_queryset.filter(run_id=run_id).first() if run_id else None
+        latest_matching_run = None
+        if requested_target_month is not None:
+            for candidate in run_queryset:
+                if startup_update_run_matches_target_month(candidate, requested_target_month):
+                    latest_matching_run = candidate
+                    break
         latest_run = selected_run or get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection_id,
-        ) or get_latest_startup_update_run(
-            organization=organization,
-            google_connection_id=google_connection_id,
+            target_month=requested_target_month,
         )
+        if latest_run is None:
+            latest_run = latest_matching_run if requested_target_month is not None else get_latest_startup_update_run(
+                organization=organization,
+                google_connection_id=google_connection_id,
+            )
         drafts = _get_drafts_for_run(latest_run)
-        if not drafts and latest_run is None and selected_run is None:
+        if requested_target_month is not None:
+            target_drafts = list(
+                organization.monthly_update_drafts.filter(month=requested_target_month).order_by("-month", "-updated_at")
+            )
+            if target_drafts:
+                drafts = target_drafts
+        if not drafts and latest_run is None and selected_run is None and requested_target_month is None:
             drafts = _get_recent_drafts_for_organization(organization)
 
     draft_payload = _serialize_draft_bundle(drafts)
     email_draft_payload = _serialize_email_draft_bundle(drafts)
     run_payload = _serialize_run_summary(latest_run)
     progress_payload = _serialize_run_progress(latest_run)
+    active_target_month = get_startup_update_run_target_month(latest_run) if latest_run is not None else None
+    resolved_target_month = requested_target_month or active_target_month
     latest_run_requires_gmail = (
         gmail_required_for_sources((latest_run.run_request or {}).get("input_sources"))
         if latest_run is not None
@@ -1303,6 +1362,10 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
         "canRetry": progress_payload["canRetry"] if progress_payload else False,
         "terminalState": progress_payload["terminalState"] if progress_payload else None,
         "generatedDraftMonths": progress_payload["generatedDraftMonths"] if progress_payload else [],
+        "targetMonth": resolved_target_month.isoformat() if resolved_target_month else None,
+        "requestedTargetMonth": requested_target_month.isoformat() if requested_target_month else None,
+        "activeTargetMonth": active_target_month.isoformat() if active_target_month else None,
+        "targetMonthConflict": False,
         "currentMonth": (email_draft_payload or {}).get("currentMonth"),
         "pastMonths": (email_draft_payload or {}).get("pastMonths", []),
         "error": error,
@@ -1724,6 +1787,10 @@ class VibeRaisingStartupUpdateRunView(APIView):
         )
         input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
         source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
+        try:
+            target_month = _requested_target_month_from_request(request)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = getattr(request.user, "google_connection", None)
         if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
@@ -1734,7 +1801,24 @@ class VibeRaisingStartupUpdateRunView(APIView):
         existing_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            target_month=target_month,
         )
+        conflicting_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id if google_connection else None,
+        )
+        if (
+            existing_run is None
+            and conflicting_run is not None
+            and not startup_update_run_matches_target_month(conflicting_run, target_month)
+        ):
+            payload = _build_status_payload(user=request.user, company=company, domain=domain)
+            payload["run"] = _serialize_run_summary(conflicting_run)
+            payload.update(_target_month_conflict_payload(
+                requested_target_month=target_month,
+                active_run=conflicting_run,
+            ))
+            return Response(payload, status=status.HTTP_200_OK)
         if existing_run is None:
             run = create_startup_update_run(
                 organization=organization,
@@ -1742,6 +1826,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 window_months=DEFAULT_BACKFILL_MONTHS,
                 input_sources=input_sources,
                 source_warnings=source_warnings,
+                target_month=target_month,
             )
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
@@ -1751,14 +1836,15 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
                 )
             if _should_dispatch_existing_run(run):
@@ -1825,6 +1911,10 @@ class VibeRaisingEmailDraftStartView(APIView):
             company=company,
         )
         input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
+        try:
+            target_month = _requested_target_month_from_request(request)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         google_connection = getattr(request.user, "google_connection", None)
         if gmail_required_for_sources(input_sources) and google_connection is None:
@@ -1834,6 +1924,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                     user=request.user,
                     company=company,
                     domain=domain,
+                    target_month=target_month,
                 ),
                 status=status.HTTP_200_OK,
             )
@@ -1852,10 +1943,35 @@ class VibeRaisingEmailDraftStartView(APIView):
         existing_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            target_month=target_month,
         )
+        conflicting_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id if google_connection else None,
+        )
+        if (
+            existing_run is None
+            and conflicting_run is not None
+            and not startup_update_run_matches_target_month(conflicting_run, target_month)
+        ):
+            payload = _build_email_draft_payload(
+                request=request,
+                user=request.user,
+                company=company,
+                domain=domain,
+                run_id=conflicting_run.run_id,
+                target_month=target_month,
+            )
+            payload["reusedExistingRun"] = True
+            payload.update(_target_month_conflict_payload(
+                requested_target_month=target_month,
+                active_run=conflicting_run,
+            ))
+            return Response(payload, status=status.HTTP_200_OK)
         reusable_drafts_cover_input_sources = _monthly_update_drafts_cover_input_sources(
             organization,
             input_sources,
+            target_month=target_month,
         )
 
         created = False
@@ -1864,8 +1980,9 @@ class VibeRaisingEmailDraftStartView(APIView):
                 organization=organization,
                 input_sources=input_sources,
                 source_warnings=source_warnings,
+                target_month=target_month,
             )
-            latest_draft = organization.monthly_update_drafts.order_by("-month", "-updated_at").first()
+            latest_draft = organization.monthly_update_drafts.filter(month=target_month).order_by("-updated_at").first()
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
                 extra={
@@ -1885,6 +2002,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 user=request.user,
                 company=company,
                 domain=domain,
+                target_month=target_month,
             )
             payload["reusedExistingRun"] = False
             return Response(payload, status=status.HTTP_200_OK)
@@ -1897,6 +2015,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 window_months=DEFAULT_BACKFILL_MONTHS,
                 input_sources=input_sources,
                 source_warnings=source_warnings,
+                target_month=target_month,
             )
             created = True
             dispatch_result = _dispatch_run_to_valley(run)
@@ -1907,19 +2026,21 @@ class VibeRaisingEmailDraftStartView(APIView):
                     company=company,
                     domain=domain,
                     run_id=run.run_id,
+                    target_month=target_month,
                 )
                 payload["reusedExistingRun"] = False
                 payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         elif _should_dispatch_existing_run(run):
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
                 )
             logger.info(
@@ -1934,19 +2055,21 @@ class VibeRaisingEmailDraftStartView(APIView):
                     company=company,
                     domain=domain,
                     run_id=run.run_id,
+                    target_month=target_month,
                 )
                 payload["reusedExistingRun"] = True
                 payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
                 )
             logger.info(
@@ -1969,6 +2092,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             company=company,
             domain=domain,
             run_id=run.run_id,
+            target_month=target_month,
         )
         payload["reusedExistingRun"] = not created
         return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

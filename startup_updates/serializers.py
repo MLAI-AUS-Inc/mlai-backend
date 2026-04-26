@@ -42,6 +42,8 @@ class StartupUpdateRunCreateSerializer(serializers.Serializer):
     window_months = serializers.IntegerField(required=False, default=1, min_value=1, max_value=24)
     input_sources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     inputSources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    target_month = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    targetMonth = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StartupUpdateIngestSerializer(serializers.Serializer):
