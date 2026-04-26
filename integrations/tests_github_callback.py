@@ -6,6 +6,7 @@ from django.urls import reverse
 from content_factory.models import OrganizationContentConfig
 from integrations.models import UserIntegration
 from integrations.services.github_connections import build_github_oauth_state, store_github_oauth_state
+from organizations.models import Organization
 
 
 def _json_response(payload):
@@ -158,5 +159,60 @@ class GitHubCallbackTests(TestCase):
         config = OrganizationContentConfig.objects.get(organization__domain="ambiguous.com")
         self.assertEqual(config.connected_slack_user_id, "U123")
         self.assertIsNone(config.github_repo)
+        mock_trigger_scan.assert_not_called()
+        mock_send_dm.assert_called_once()
+
+    def test_callback_preserves_preselected_repo_when_installation_has_multiple_repos(self):
+        org = Organization.objects.create(domain="preselected.com", name="Preselected")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            github_repo="owner/repo-two",
+            connected_slack_user_id="U123",
+        )
+
+        response, mock_trigger_scan, mock_send_dm = self._callback(
+            domain="preselected.com",
+            slack_user_id="U123",
+            installation_id="inst-4",
+            repos=[
+                {"full_name": "owner/repo-one"},
+                {"full_name": "owner/repo-two"},
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Linked repository: <strong>owner/repo-two</strong>", response.content)
+
+        config = OrganizationContentConfig.objects.get(organization__domain="preselected.com")
+        self.assertEqual(config.github_repo, "owner/repo-two")
+        self.assertEqual(config.github_installation_id, "inst-4")
+        mock_trigger_scan.assert_called_once_with("U123", domain="preselected.com")
+        mock_send_dm.assert_called_once()
+
+    def test_callback_keeps_existing_repo_without_auto_scan_when_multiple_repos_do_not_match(self):
+        org = Organization.objects.create(domain="needs-selection.com", name="Needs Selection")
+        OrganizationContentConfig.objects.create(
+            organization=org,
+            github_repo="owner/not-selected",
+            connected_slack_user_id="U123",
+        )
+
+        response, mock_trigger_scan, mock_send_dm = self._callback(
+            domain="needs-selection.com",
+            slack_user_id="U123",
+            installation_id="inst-5",
+            repos=[
+                {"full_name": "owner/repo-one"},
+                {"full_name": "owner/repo-two"},
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Multiple repositories are selected", response.content)
+
+        config = OrganizationContentConfig.objects.get(organization__domain="needs-selection.com")
+        self.assertEqual(config.github_repo, "owner/not-selected")
+        self.assertEqual(config.github_token_encrypted, "gh-access")
+        self.assertEqual(config.github_installation_id, "inst-5")
         mock_trigger_scan.assert_not_called()
         mock_send_dm.assert_called_once()
