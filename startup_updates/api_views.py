@@ -84,6 +84,7 @@ from startup_updates.services import (
     get_startup_update_run_cancel_backups,
     get_startup_update_run_google_connection_id,
     gmail_required_for_sources,
+    merge_xero_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
     pin_startup_update_run_connection,
     record_valley_dispatch_result,
@@ -2492,16 +2493,22 @@ class StartupUpdateDraftResultsView(APIView):
                 ).first()
                 if existing_draft is not None:
                     backups_changed = _backup_draft_if_needed(run, existing_draft, backups) or backups_changed
+                structured_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+                    organization=organization,
+                    month=item["month"],
+                    structured_memo=item["structured_memo"],
+                    evidence_metric_ids=item.get("evidence_metric_ids", []),
+                )
                 draft = upsert_monthly_update_draft(
                     organization=organization,
                     month=item["month"],
                     run=run,
-                    structured_memo=item["structured_memo"],
+                    structured_memo=structured_memo,
                     model_name=item.get("model_name", ""),
                     status=item.get("status"),
                     groundedness_status=item.get("groundedness_status"),
                     evidence_event_ids=item.get("evidence_event_ids", []),
-                    evidence_metric_ids=item.get("evidence_metric_ids", []),
+                    evidence_metric_ids=evidence_metric_ids,
                     carry_forward_event_ids=item.get("carry_forward_event_ids", []),
                     groundedness_notes=item.get("groundedness_notes", ""),
                 )

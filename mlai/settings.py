@@ -424,6 +424,7 @@ XERO_OAUTH_SCOPES = _env_list(
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
+        "accounting.reports.read",
         "accounting.settings.read",
         "accounting.contacts.read",
     ],

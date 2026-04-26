@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Optional, Union
 
 from django.db import transaction
 from django.utils import timezone
 
+from integrations import http_client
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -20,6 +21,7 @@ from workflow_runs.models import (
     ContentFactoryStepStatus,
 )
 from integrations.models import (
+    ExternalServiceConnection,
     ExternalFinancialRecord,
     ExternalServiceConnectionStatus,
     ExternalServiceProvider,
@@ -241,6 +243,39 @@ LINEAR_STEP_KEYS = {
 LINEAR_COMPACT_MAX_ISSUES = 35
 LINEAR_COMPACT_MAX_UPDATES = 8
 LINEAR_COMPACT_MAX_CHARS = 9000
+XERO_REPORTS_SCOPE = "accounting.reports.read"
+XERO_REPORT_METRIC_KEYS = {
+    "revenue",
+    "revenueGrowthRate",
+    "burnRate",
+    "runway",
+}
+XERO_DRAFT_METRIC_KEYS = (
+    "revenue",
+    "mrr",
+    "burnRate",
+    "runway",
+    "invoiceRevenue",
+    "cashCollected",
+    "revenueGrowthRate",
+    "customerCount",
+    "invoiceCount",
+    "recurringInvoiceCount",
+)
+XERO_DRAFT_METRIC_LABELS = {
+    "revenue": "Revenue",
+    "activeUsers": "Active Users",
+    "mrr": "MRR",
+    "burnRate": "Burn Rate",
+    "runway": "Runway",
+    "invoiceRevenue": "Invoice Revenue",
+    "cashCollected": "Cash Collected",
+    "revenueGrowthRate": "Revenue Growth Rate",
+    "customerCount": "Customer Count",
+    "churn": "Churn",
+    "invoiceCount": "Invoice Count",
+    "recurringInvoiceCount": "Recurring Invoice Count",
+}
 
 
 def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -> list[str]:
@@ -547,6 +582,206 @@ def _monthly_normalized_xero_amount(record: ExternalFinancialRecord) -> Optional
     return amount
 
 
+def _month_end(month: date) -> date:
+    next_month = date(month.year + 1, 1, 1) if month.month == 12 else date(month.year, month.month + 1, 1)
+    return next_month - timedelta(days=1)
+
+
+def _xero_schedule(record: ExternalFinancialRecord) -> dict[str, Any]:
+    payload = record.raw_payload if isinstance(record.raw_payload, dict) else {}
+    schedule = payload.get("Schedule") if isinstance(payload.get("Schedule"), dict) else payload.get("schedule")
+    return schedule if isinstance(schedule, dict) else {}
+
+
+def _xero_schedule_date(record: ExternalFinancialRecord, *keys: str) -> Optional[date]:
+    schedule = _xero_schedule(record)
+    for key in keys:
+        value = schedule.get(key)
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        parsed = None
+        try:
+            from django.utils.dateparse import parse_date
+
+            parsed = parse_date(str(value))
+        except Exception:
+            parsed = None
+        if parsed:
+            return parsed
+    return None
+
+
+def _xero_repeating_invoice_active_in_month(record: ExternalFinancialRecord, month: date) -> bool:
+    status = str(record.status or "").upper()
+    if status in {"DRAFT", "DELETED", "VOIDED"}:
+        return False
+    month_start = _month_start(month)
+    month_end = _month_end(month_start)
+    start = _xero_schedule_date(record, "StartDate", "start_date")
+    if start is None and record.transaction_date and record.transaction_date <= month_end:
+        start = record.transaction_date
+    end = _xero_schedule_date(record, "EndDate", "end_date")
+    if start and start > month_end:
+        return False
+    if end and end < month_start:
+        return False
+    return True
+
+
+def _report_decimal(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text in {"-", "--"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if not text or text in {"-", "."}:
+        return None
+    try:
+        amount = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return -amount if negative and amount > 0 else amount
+
+
+def _normalize_report_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _iter_xero_report_entries(rows: Any, *, section: str = "") -> Iterable[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_type = str(row.get("RowType") or row.get("row_type") or "").strip()
+        title = str(row.get("Title") or row.get("title") or "").strip()
+        cells = row.get("Cells") or row.get("cells") or []
+        values = [
+            str((cell or {}).get("Value") or (cell or {}).get("value") or "").strip()
+            for cell in cells
+            if isinstance(cell, dict)
+        ]
+        label = title or (values[0] if values else "")
+        amount = None
+        for value in reversed(values[1:] or values):
+            amount = _report_decimal(value)
+            if amount is not None:
+                break
+        if label and amount is not None:
+            yield {
+                "label": label,
+                "normalized_label": _normalize_report_label(label),
+                "amount": amount,
+                "section": section,
+                "normalized_section": _normalize_report_label(section),
+                "row_type": row_type,
+            }
+        nested_rows = row.get("Rows") or row.get("rows")
+        child_section = " > ".join(part for part in [section, title] if part)
+        yield from _iter_xero_report_entries(nested_rows, section=child_section)
+
+
+def _xero_report_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    reports = payload.get("Reports") or payload.get("reports") or []
+    report = reports[0] if reports and isinstance(reports[0], dict) else {}
+    return list(_iter_xero_report_entries(report.get("Rows") or report.get("rows") or []))
+
+
+def _xero_report_entry_labels(entries: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for entry in entries:
+        label = str(entry.get("label") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:40]
+
+
+def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str]) -> Optional[dict[str, Any]]:
+    normalized_labels = {_normalize_report_label(label) for label in labels}
+    for entry in entries:
+        if entry["normalized_label"] in normalized_labels:
+            return entry
+    for entry in entries:
+        if any(label in entry["normalized_label"] for label in normalized_labels if label):
+            return entry
+    return None
+
+
+def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any]:
+    entries = _xero_report_entries(payload)
+    revenue = _find_xero_report_amount(entries, ["Total Income", "Total Revenue", "Income"])
+    net = _find_xero_report_amount(entries, ["Net Profit", "Net Loss", "Net Profit/(Loss)", "Net Profit / (Loss)"])
+    return {
+        "entries": entries,
+        "revenue": revenue,
+        "net": net,
+    }
+
+
+def _parse_xero_balance_sheet_report(payload: dict[str, Any]) -> dict[str, Any]:
+    entries = _xero_report_entries(payload)
+    cash = _find_xero_report_amount(
+        entries,
+        [
+            "Total Bank",
+            "Total Cash",
+            "Cash and Cash Equivalents",
+            "Total Cash and Cash Equivalents",
+            "Cash at Bank",
+            "Total Cash at Bank",
+        ],
+    )
+    if cash is None:
+        bank_entries = [
+            entry for entry in entries
+            if "bank" in entry["normalized_section"] and entry["normalized_label"].startswith("total")
+        ]
+        cash = bank_entries[-1] if bank_entries else None
+    return {
+        "entries": entries,
+        "cash": cash,
+    }
+
+
+def _xero_connection_currency(connection, records: list[ExternalFinancialRecord]) -> str:
+    currencies = sorted({
+        record.currency
+        for record in records
+        if record.connection_id == connection.id and record.currency
+    })
+    return currencies[0] if len(currencies) == 1 else ""
+
+
+def _xero_report_metadata(
+    *,
+    source_metric: str,
+    warnings: list[str],
+    report_name: str,
+    start_date: Optional[date],
+    end_date: date,
+    entry: Optional[dict[str, Any]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return {
+        "source_metric": source_metric,
+        "warnings": warnings,
+        "source_record_count": 0,
+        "report_name": report_name,
+        "report_start_date": start_date.isoformat() if start_date else None,
+        "report_end_date": end_date.isoformat(),
+        "report_row_label": entry.get("label") if entry else "",
+        "report_row_section": entry.get("section") if entry else "",
+        **(extra or {}),
+    }
+
+
 def build_xero_run_context(*, organization: Organization, start_date: date, end_date: date) -> dict:
     records = (
         ExternalFinancialRecord.objects.filter(
@@ -682,6 +917,14 @@ def publish_xero_metric_observations(
         and record.transaction_date
         and start_date <= record.transaction_date <= end_date
     ]
+    connections = list(
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("id")
+    )
     currencies = sorted({record.currency for record in recurring_records + invoice_records + payment_records if record.currency})
     warnings = [
         "Xero financial metrics are deterministic accounting context. Do not infer additional financial values."
@@ -740,10 +983,20 @@ def publish_xero_metric_observations(
         )
         saved_metric_ids.append(metric.id)
 
+    def delete_report_metrics(month: date) -> None:
+        StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=month,
+            metric_key__in=XERO_REPORT_METRIC_KEYS,
+        ).delete()
+
     for currency in currencies or [""]:
         currency_recurring = records_for_currency(recurring_records, currency)
-        current_recurring_for_month = records_for_month(currency_recurring, current_month, currency)
-        current_recurring_metrics = current_recurring_for_month or currency_recurring
+        current_recurring_metrics = [
+            record for record in currency_recurring
+            if _xero_repeating_invoice_active_in_month(record, current_month)
+        ]
         current_mrr = sum(
             (value for value in (_monthly_normalized_xero_amount(record) for record in current_recurring_metrics) if value is not None),
             Decimal("0"),
@@ -771,31 +1024,6 @@ def publish_xero_metric_observations(
                 summary="Active Xero repeating invoice count.",
                 metadata=_metric_summary_metadata(source_metric="xero_recurring_invoice_count", warnings=warnings, records=current_recurring_metrics),
             )
-
-            previous_month = _previous_month_start(current_month)
-            previous_recurring = records_for_month(currency_recurring, previous_month, currency)
-            previous_mrr = sum(
-                (value for value in (_monthly_normalized_xero_amount(record) for record in previous_recurring) if value is not None),
-                Decimal("0"),
-            )
-            if previous_mrr > 0:
-                growth = (current_mrr - previous_mrr) / previous_mrr
-                save_metric(
-                    month=current_month,
-                    key="revenueGrowthRate",
-                    name="MRR growth rate",
-                    value_text=_format_percent(growth),
-                    value_number=growth,
-                    unit="ratio",
-                    records_for_metric=current_recurring_metrics + previous_recurring,
-                    summary="MRR growth calculated from current and previous Xero repeating invoice MRR.",
-                    metadata=_metric_summary_metadata(
-                        source_metric="xero_mrr_growth_rate",
-                        warnings=warnings,
-                        records=current_recurring_metrics + previous_recurring,
-                        extra={"previous_month": previous_month.isoformat(), "previous_mrr": str(previous_mrr)},
-                    ),
-                )
 
         months_with_activity = sorted({
             _month_start(record.transaction_date)
@@ -845,12 +1073,224 @@ def publish_xero_metric_observations(
                     metadata=_metric_summary_metadata(source_metric="xero_cash_collected", warnings=warnings, records=monthly_payments),
                 )
 
+            customer_ids = {
+                record.merchant_name
+                for record in monthly_invoices + monthly_payments
+                if str(record.merchant_name or "").strip()
+            }
+            if customer_ids:
+                save_metric(
+                    month=month,
+                    key="customerCount",
+                    name="Customer count",
+                    value_text=str(len(customer_ids)),
+                    value_number=Decimal(len(customer_ids)),
+                    unit="count",
+                    records_for_metric=monthly_invoices + monthly_payments,
+                    summary="Unique Xero customer contacts with sales invoices or payments in the month.",
+                    metadata=_metric_summary_metadata(
+                        source_metric="xero_customer_count",
+                        warnings=warnings,
+                        records=monthly_invoices + monthly_payments,
+                        extra={"customer_names": sorted(customer_ids)},
+                    ),
+                )
+
             month_summaries.setdefault(month.isoformat(), {})[currency or "unknown"] = {
                 "invoice_revenue": str(invoice_revenue),
                 "cash_collected": str(cash_collected),
                 "invoice_count": len(monthly_invoices),
                 "payment_count": len(monthly_payments),
+                "customer_count": len(customer_ids),
             }
+
+    report_months = [
+        current_month,
+        _previous_month_start(current_month),
+        _previous_month_start(_previous_month_start(current_month)),
+    ]
+    report_metrics_available = False
+    delete_report_metrics(current_month)
+    for connection in connections:
+        scopes = set(connection.scopes or [])
+        if XERO_REPORTS_SCOPE not in scopes and "accounting.reports" not in scopes:
+            warnings.append(
+                "Xero reports scope is missing; reconnect Xero to calculate Revenue, Burn Rate, Runway, and Revenue Growth from accounting reports."
+            )
+            continue
+        profit_and_loss_by_month: dict[date, dict[str, Any]] = {}
+        try:
+            from integrations.services.external_connectors import fetch_xero_accounting_report
+
+            for month in report_months:
+                month_payload = fetch_xero_accounting_report(
+                    connection,
+                    "ProfitAndLoss",
+                    params={"fromDate": month.isoformat(), "toDate": _month_end(month).isoformat()},
+                )
+                profit_and_loss_by_month[month] = _parse_xero_profit_and_loss_report(month_payload)
+            balance_payload = fetch_xero_accounting_report(
+                connection,
+                "BalanceSheet",
+                params={"date": _month_end(current_month).isoformat()},
+            )
+        except http_client.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 403:
+                warnings.append(
+                    "Xero reports permission was denied; reconnect Xero with accounting.reports.read to calculate Revenue, Burn Rate, Runway, and Revenue Growth."
+                )
+            else:
+                warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
+            continue
+        except Exception as exc:
+            warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
+            continue
+
+        report_metrics_available = True
+        currency = _xero_connection_currency(connection, records)
+        current_report = profit_and_loss_by_month.get(current_month) or {}
+        previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
+        current_revenue = current_report.get("revenue")
+        previous_revenue = previous_report.get("revenue")
+        current_report_labels = _xero_report_entry_labels(current_report.get("entries") or [])
+        if current_revenue:
+            save_metric(
+                month=current_month,
+                key="revenue",
+                name="Revenue",
+                value_text=_format_money(current_revenue["amount"], currency),
+                value_number=current_revenue["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Revenue calculated from Xero Profit and Loss total income.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_revenue",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=current_revenue,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "profit_and_loss_total_income",
+                    },
+                ),
+            )
+        if current_revenue and previous_revenue and previous_revenue["amount"] > 0:
+            growth = (current_revenue["amount"] - previous_revenue["amount"]) / previous_revenue["amount"]
+            save_metric(
+                month=current_month,
+                key="revenueGrowthRate",
+                name="Revenue growth rate",
+                value_text=_format_percent(growth),
+                value_number=growth,
+                unit="ratio",
+                records_for_metric=[],
+                summary="Revenue growth calculated from current and previous Xero Profit and Loss total income.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_revenue_growth",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=_previous_month_start(current_month),
+                    end_date=_month_end(current_month),
+                    entry=current_revenue,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "previous_month": _previous_month_start(current_month).isoformat(),
+                        "previous_revenue": str(previous_revenue["amount"]),
+                        "current_revenue": str(current_revenue["amount"]),
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "current_month_total_income_minus_previous_month_total_income_divided_by_previous_month_total_income",
+                    },
+                ),
+            )
+        current_net = current_report.get("net")
+        current_burn: Optional[Decimal] = None
+        if current_net:
+            label = _normalize_report_label(current_net.get("label"))
+            amount = current_net["amount"]
+            if "loss" in label and amount > 0:
+                current_burn = amount
+            elif amount < 0:
+                current_burn = abs(amount)
+        if current_burn and current_burn > 0:
+            save_metric(
+                month=current_month,
+                key="burnRate",
+                name="Burn rate",
+                value_text=_format_money(current_burn, currency),
+                value_number=current_burn,
+                unit=currency,
+                records_for_metric=[],
+                summary="Burn rate calculated as positive net accounting loss from Xero Profit and Loss.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_accounting_burn",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=current_net,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "positive_net_loss",
+                    },
+                ),
+            )
+        trailing_burns: list[Decimal] = []
+        for month in report_months:
+            net_entry = (profit_and_loss_by_month.get(month) or {}).get("net")
+            if not net_entry:
+                continue
+            amount = net_entry["amount"]
+            label = _normalize_report_label(net_entry.get("label"))
+            if "loss" in label and amount > 0:
+                trailing_burns.append(amount)
+            elif amount < 0:
+                trailing_burns.append(abs(amount))
+        balance = _parse_xero_balance_sheet_report(balance_payload)
+        cash_entry = balance.get("cash")
+        if cash_entry and cash_entry["amount"] > 0 and trailing_burns:
+            average_burn = sum(trailing_burns, Decimal("0")) / Decimal(len(trailing_burns))
+            if average_burn > 0:
+                runway_months = cash_entry["amount"] / average_burn
+                runway_value_number = runway_months.quantize(Decimal("0.0001"))
+                runway_text = f"{_format_decimal(runway_months, places='0.1')} months"
+                save_metric(
+                    month=current_month,
+                    key="runway",
+                    name="Runway",
+                    value_text=runway_text,
+                    value_number=runway_value_number,
+                    unit="months",
+                    records_for_metric=[],
+                    summary="Runway calculated from Xero Balance Sheet cash divided by trailing accounting burn.",
+                    metadata=_xero_report_metadata(
+                        source_metric="xero_balance_sheet_runway",
+                        warnings=warnings,
+                        report_name="BalanceSheet",
+                        start_date=None,
+                        end_date=_month_end(current_month),
+                        entry=cash_entry,
+                        extra={
+                            "connection_id": connection.id,
+                            "source_currency": currency,
+                            "cash_balance": str(cash_entry["amount"]),
+                            "average_burn": str(average_burn),
+                            "burn_month_count": len(trailing_burns),
+                            "parsed_row_labels": _xero_report_entry_labels(balance.get("entries") or []),
+                            "calculation_basis": "cash_balance_divided_by_trailing_positive_net_loss",
+                        },
+                    ),
+                )
+
+    if report_metrics_available:
+        month_summaries.setdefault(current_month.isoformat(), {}).setdefault("reports", {})["available"] = True
 
     return {
         "source": "xero",
@@ -2790,6 +3230,76 @@ def _unique_id_list(*values: Optional[list[int]]) -> list[int]:
             seen.add(normalized)
             merged.append(normalized)
     return merged
+
+
+def _draft_item_from_xero_metric(metric: StartupMetricObservation) -> dict[str, Any]:
+    value_number = str(metric.value_number) if metric.value_number is not None else None
+    return {
+        "metric_key": metric.metric_key,
+        "key": metric.metric_key,
+        "label": XERO_DRAFT_METRIC_LABELS.get(metric.metric_key) or metric.metric_name,
+        "value": metric.value_text,
+        "value_text": metric.value_text,
+        "value_number": value_number,
+        "unit": metric.unit,
+        "source_provider": ExternalServiceProvider.XERO,
+        "source_metric_id": metric.id,
+        "source_record_ids": metric.source_record_ids or [],
+        "source_metadata": {
+            **(metric.source_metadata or {}),
+            "draft_merge_basis": "xero_backed_metric_observation",
+        },
+        "summary": metric.summary,
+    }
+
+
+def merge_xero_metrics_into_structured_memo(
+    *,
+    organization: Organization,
+    month: date,
+    structured_memo: dict,
+    evidence_metric_ids: Optional[list[int]] = None,
+) -> tuple[dict, list[int]]:
+    month_start = _month_start(month)
+    memo = dict(structured_memo or {})
+    metrics = list(
+        StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=month_start,
+            metric_key__in=XERO_DRAFT_METRIC_KEYS,
+        )
+        .order_by("metric_key", "unit", "-observed_at", "-updated_at", "-id")
+    )
+    if not metrics:
+        return memo, evidence_metric_ids or []
+
+    by_key: dict[str, list[StartupMetricObservation]] = {}
+    for metric in metrics:
+        by_key.setdefault(metric.metric_key, []).append(metric)
+
+    xero_items: list[dict[str, Any]] = []
+    merged_metric_ids: list[int] = []
+    source_notes = list(memo.get("source_notes") or []) if isinstance(memo.get("source_notes"), list) else []
+    for key in XERO_DRAFT_METRIC_KEYS:
+        key_metrics = by_key.get(key) or []
+        if not key_metrics:
+            continue
+        units = {metric.unit for metric in key_metrics}
+        if len(key_metrics) > 1 and len(units) > 1:
+            note = f"Xero provided multiple currencies for {XERO_DRAFT_METRIC_LABELS.get(key, key)}; review source records before using a combined value."
+            if note not in source_notes:
+                source_notes.append(note)
+            continue
+        metric = key_metrics[0]
+        xero_items.append(_draft_item_from_xero_metric(metric))
+        merged_metric_ids.append(metric.id)
+
+    if xero_items:
+        memo["kpi_snapshot"] = _merge_kpi_snapshot(memo.get("kpi_snapshot"), xero_items)
+    if source_notes:
+        memo["source_notes"] = source_notes
+    return memo, _unique_id_list(evidence_metric_ids, merged_metric_ids)
 
 
 def _merge_groundedness_notes(existing_notes: str, incoming_notes: str, stats: dict[str, int]) -> str:

@@ -36,6 +36,52 @@ def _json_response(payload):
     return response
 
 
+def _xero_profit_and_loss_report(*, total_income: str, net_profit: str) -> dict:
+    return {
+        "Reports": [
+            {
+                "Rows": [
+                    {
+                        "RowType": "Section",
+                        "Title": "Income",
+                        "Rows": [
+                            {
+                                "RowType": "SummaryRow",
+                                "Cells": [{"Value": "Total Income"}, {"Value": total_income}],
+                            }
+                        ],
+                    },
+                    {
+                        "RowType": "Row",
+                        "Cells": [{"Value": "Net Profit"}, {"Value": net_profit}],
+                    },
+                ]
+            }
+        ]
+    }
+
+
+def _xero_balance_sheet_report(*, total_bank: str) -> dict:
+    return {
+        "Reports": [
+            {
+                "Rows": [
+                    {
+                        "RowType": "Section",
+                        "Title": "Bank",
+                        "Rows": [
+                            {
+                                "RowType": "SummaryRow",
+                                "Cells": [{"Value": "Total Bank"}, {"Value": total_bank}],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+
+
 @override_settings(
     DEFAULT_FRONTEND_URL="http://localhost:5173",
     VIBE_RAISING_URL="http://localhost:5173",
@@ -1013,6 +1059,7 @@ class ConnectorEndpointTests(TestCase):
             provider=ExternalServiceProvider.XERO,
             external_account_id="tenant-123",
             account_label="Acme Xero",
+            scopes=["accounting.reports.read"],
         )
 
         ExternalFinancialRecord.objects.create(
@@ -1028,7 +1075,7 @@ class ConnectorEndpointTests(TestCase):
             status="AUTHORISED",
             transaction_date=date(2026, 3, 1),
             description="March recurring invoice",
-            raw_payload={"Schedule": {"Unit": "MONTHLY", "Period": 1}},
+            raw_payload={"Schedule": {"Unit": "MONTHLY", "Period": 1, "StartDate": "2026-03-01", "EndDate": "2026-03-31"}},
         )
         ExternalFinancialRecord.objects.create(
             user=self.user,
@@ -1043,7 +1090,7 @@ class ConnectorEndpointTests(TestCase):
             status="AUTHORISED",
             transaction_date=date(2026, 4, 1),
             description="April recurring invoice",
-            raw_payload={"Schedule": {"Unit": "MONTHLY", "Period": 1}},
+            raw_payload={"Schedule": {"Unit": "MONTHLY", "Period": 1, "StartDate": "2026-04-01"}},
         )
         ExternalFinancialRecord.objects.create(
             user=self.user,
@@ -1058,6 +1105,7 @@ class ConnectorEndpointTests(TestCase):
             status="PAID",
             transaction_date=date(2026, 4, 15),
             description="April sales invoice",
+            merchant_name="Acme Customer",
         )
         ExternalFinancialRecord.objects.create(
             user=self.user,
@@ -1072,16 +1120,30 @@ class ConnectorEndpointTests(TestCase):
             status="AUTHORISED",
             transaction_date=date(2026, 4, 20),
             description="April payment",
+            merchant_name="Acme Customer",
         )
 
-        summary = publish_xero_metric_observations(
-            organization=organization,
-            run=None,
-            start_date=date(2026, 3, 1),
-            end_date=date(2026, 4, 30),
-        )
+        def fake_report(_connection, report_name, *, params=None):
+            if report_name == "ProfitAndLoss":
+                reports = {
+                    "2026-04-01": _xero_profit_and_loss_report(total_income="4000.00", net_profit="(1500.00)"),
+                    "2026-03-01": _xero_profit_and_loss_report(total_income="3000.00", net_profit="(1000.00)"),
+                    "2026-02-01": _xero_profit_and_loss_report(total_income="2000.00", net_profit="500.00"),
+                }
+                return reports[params["fromDate"]]
+            if report_name == "BalanceSheet":
+                return _xero_balance_sheet_report(total_bank="9000.00")
+            raise AssertionError(f"Unexpected report {report_name}")
 
-        self.assertGreaterEqual(summary["published_metric_count"], 5)
+        with patch("integrations.services.external_connectors.fetch_xero_accounting_report", side_effect=fake_report):
+            summary = publish_xero_metric_observations(
+                organization=organization,
+                run=None,
+                start_date=date(2026, 3, 1),
+                end_date=date(2026, 4, 30),
+            )
+
+        self.assertGreaterEqual(summary["published_metric_count"], 10)
         metrics = {
             metric.metric_key: metric
             for metric in StartupMetricObservation.objects.filter(
@@ -1091,8 +1153,60 @@ class ConnectorEndpointTests(TestCase):
             )
         }
         self.assertEqual(metrics["mrr"].value_text, "AUD 1200.00")
-        self.assertEqual(metrics["revenueGrowthRate"].value_text, "20.00%")
+        self.assertEqual(metrics["revenue"].value_text, "AUD 4000.00")
+        self.assertEqual(metrics["revenueGrowthRate"].value_text, "33.33%")
+        self.assertEqual(metrics["burnRate"].value_text, "AUD 1500.00")
+        self.assertEqual(metrics["runway"].value_text, "7.2 months")
         self.assertEqual(metrics["invoiceRevenue"].value_text, "AUD 2500.00")
         self.assertEqual(metrics["cashCollected"].value_text, "AUD 2400.00")
+        self.assertEqual(metrics["customerCount"].value_text, "1")
         self.assertEqual(metrics["mrr"].source_record_ids, ["repeat-current"])
         self.assertEqual(metrics["mrr"].source_metadata["source_metric"], "xero_repeating_invoice_mrr")
+        self.assertEqual(metrics["revenue"].source_metadata["report_name"], "ProfitAndLoss")
+        self.assertEqual(metrics["runway"].source_metadata["report_name"], "BalanceSheet")
+
+    def test_xero_metric_publishing_without_reports_scope_keeps_operational_metrics(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            external_account_id="tenant-123",
+            account_label="Acme Xero",
+            scopes=["accounting.transactions.read"],
+        )
+        ExternalFinancialRecord.objects.create(
+            user=self.user,
+            organization=organization,
+            connection=connection,
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE,
+            external_account_id="tenant-123",
+            external_record_id="invoice-current",
+            currency="AUD",
+            amount="2500.00",
+            status="PAID",
+            transaction_date=date(2026, 4, 15),
+            description="April sales invoice",
+            merchant_name="Acme Customer",
+        )
+
+        with patch("integrations.services.external_connectors.fetch_xero_accounting_report") as mock_report:
+            summary = publish_xero_metric_observations(
+                organization=organization,
+                run=None,
+                start_date=date(2026, 4, 1),
+                end_date=date(2026, 4, 30),
+            )
+
+        mock_report.assert_not_called()
+        self.assertTrue(any("reconnect Xero" in warning for warning in summary["warnings"]))
+        keys = set(
+            StartupMetricObservation.objects.filter(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                period_month=date(2026, 4, 1),
+            ).values_list("metric_key", flat=True)
+        )
+        self.assertIn("invoiceRevenue", keys)
+        self.assertNotIn("revenue", keys)
