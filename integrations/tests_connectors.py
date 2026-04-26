@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 import urllib.parse
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Optional
 
 from django.contrib.auth import get_user_model
@@ -1166,6 +1167,18 @@ class ConnectorEndpointTests(TestCase):
             description="April payment",
             merchant_name="Acme Customer",
         )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="burnRate",
+            metric_name="Burn rate",
+            value_text="AUD 999.00",
+            value_number=Decimal("999.00"),
+            unit="AUD",
+            period_month=date(2026, 2, 1),
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
 
         def fake_report(_connection, report_name, *, params=None):
             if report_name == "ProfitAndLoss":
@@ -1201,7 +1214,7 @@ class ConnectorEndpointTests(TestCase):
                 end_date=date(2026, 4, 30),
             )
 
-        self.assertGreaterEqual(summary["published_metric_count"], 13)
+        self.assertGreaterEqual(summary["published_metric_count"], 15)
         metrics = {
             metric.metric_key: metric
             for metric in StartupMetricObservation.objects.filter(
@@ -1221,6 +1234,28 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(metrics["invoiceRevenue"].value_text, "AUD 2500.00")
         self.assertEqual(metrics["cashCollected"].value_text, "AUD 2400.00")
         self.assertEqual(metrics["customerCount"].value_text, "1")
+        march_revenue = StartupMetricObservation.objects.get(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=date(2026, 3, 1),
+            metric_key="revenue",
+        )
+        february_revenue = StartupMetricObservation.objects.get(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=date(2026, 2, 1),
+            metric_key="revenue",
+        )
+        self.assertEqual(march_revenue.value_text, "AUD 3000.00")
+        self.assertEqual(february_revenue.value_text, "AUD 2000.00")
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(
+                organization=organization,
+                source_provider=ExternalServiceProvider.XERO,
+                period_month=date(2026, 2, 1),
+                metric_key="burnRate",
+            ).exists()
+        )
         self.assertEqual(metrics["mrr"].source_record_ids, ["repeat-current"])
         self.assertEqual(metrics["mrr"].source_metadata["source_metric"], "xero_repeating_invoice_mrr")
         self.assertEqual(metrics["revenue"].source_metadata["report_name"], "ProfitAndLoss")

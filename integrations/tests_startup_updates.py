@@ -1615,6 +1615,75 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             {revenue_metric.id, burn_metric.id, monthly_costs_metric.id},
         )
 
+    def test_draft_results_get_hydrates_xero_metrics_without_saving_draft(self):
+        current_month = date(2026, 4, 1)
+        previous_month = date(2026, 3, 1)
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=current_month,
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "title": "Acme April Update",
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "5"}],
+                "highlights": ["April highlight"],
+            },
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=previous_month,
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "title": "Acme March Update",
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "4"}],
+                "highlights": ["March highlight"],
+            },
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 3800.00",
+            value_number=Decimal("3800.00"),
+            unit="AUD",
+            period_month=current_month,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 2735.75",
+            value_number=Decimal("2735.75"),
+            unit="AUD",
+            period_month=previous_month,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["draft"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["draft"]["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
+        self.assertEqual(response.data["current_month"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["past_months"][0]["metrics"]["revenue"], "AUD 2735.75")
+        stored_draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=current_month)
+        self.assertNotIn(
+            "revenue",
+            [item.get("metric_key") for item in stored_draft.structured_memo["kpi_snapshot"]],
+        )
+
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
 
