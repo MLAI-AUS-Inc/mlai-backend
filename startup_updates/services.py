@@ -44,7 +44,6 @@ from startup_updates.models import (
     StartupProfile,
     UserStartupBinding,
 )
-from startup_updates.metric_catalog import startup_update_metric_label
 from integrations.services.valley_harness import ValleyHarnessResult, notify_valley_run_created
 from integrations.utils import normalize_domain
 
@@ -267,7 +266,23 @@ XERO_DRAFT_METRIC_KEYS = (
     "invoiceCount",
     "recurringInvoiceCount",
 )
-XERO_DRAFT_METRIC_LABELS = {key: startup_update_metric_label(key) for key in XERO_DRAFT_METRIC_KEYS}
+XERO_DRAFT_METRIC_LABELS = {
+    "revenue": "Revenue",
+    "activeUsers": "Active Users",
+    "mrr": "MRR",
+    "burnRate": "Burn Rate",
+    "runway": "Runway",
+    "monthlyCosts": "Monthly Costs",
+    "operatingExpenses": "Operating Expenses",
+    "costOfSales": "Cost of Sales",
+    "invoiceRevenue": "Invoice Revenue",
+    "cashCollected": "Cash Collected",
+    "revenueGrowthRate": "Revenue Growth Rate",
+    "customerCount": "Customer Count",
+    "churn": "Churn",
+    "invoiceCount": "Invoice Count",
+    "recurringInvoiceCount": "Recurring Invoice Count",
+}
 
 
 def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -> list[str]:
