@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -437,6 +438,58 @@ class ContentFactoryHealingRecord(models.Model):
 
     def __str__(self):
         return f"{self.domain}:{self.github_repo}:{self.failure_kind}:{self.failure_family_key}"
+
+
+class VibeMarketingComponentCommentStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    SUBMITTED = "submitted", "Submitted"
+    APPLIED = "applied", "Applied"
+    SUPERSEDED = "superseded", "Superseded"
+
+
+class VibeMarketingComponentComment(models.Model):
+    """Founder review comment attached to one generated article component."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(
+        "workflow_runs.ContentFactoryRun",
+        on_delete=models.CASCADE,
+        related_name="component_comments",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="vibe_marketing_component_comments",
+    )
+    component_id = models.CharField(max_length=255, db_index=True)
+    component_type = models.CharField(max_length=120, blank=True, default="")
+    component_label = models.CharField(max_length=255, blank=True, default="")
+    source_section_id = models.CharField(max_length=255, blank=True, default="")
+    selector = models.CharField(max_length=500, blank=True, default="")
+    anchor = models.JSONField(blank=True, default=dict)
+    body = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=VibeMarketingComponentCommentStatus.choices,
+        default=VibeMarketingComponentCommentStatus.DRAFT,
+        db_index=True,
+    )
+    batch_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_vibe_component_comment"
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["run", "status"], name="vibe_comment_run_status_idx"),
+            models.Index(fields=["run", "batch_id"], name="vibe_comment_run_batch_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id}:{self.component_id}:{self.status}"
 # =============================================================================
 # SEO Research Models
 # =============================================================================

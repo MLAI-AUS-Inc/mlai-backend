@@ -16,6 +16,7 @@ from .models import (
     ScheduledDiscoveryDispatch,
     SemanticCluster,
     TopicMap,
+    VibeMarketingComponentComment,
     WrittenArticle,
 )
 
@@ -175,7 +176,7 @@ class GeneratedComponentAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at'),
         }),
     )
-    
+
     def organization_domain(self, obj):
         return obj.organization.domain
     organization_domain.short_description = 'Domain'
@@ -202,6 +203,15 @@ class GeneratedComponentAdmin(admin.ModelAdmin):
         preview = obj.content[:1000] + "..." if len(obj.content) > 1000 else obj.content
         return format_html('<pre style="background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; max-height: 400px; overflow: auto; white-space: pre-wrap; font-family: monospace; font-size: 12px;">{}</pre>', preview)
     content_preview.short_description = 'Component Preview (TSX)'
+
+
+@admin.register(VibeMarketingComponentComment)
+class VibeMarketingComponentCommentAdmin(admin.ModelAdmin):
+    list_display = ("run", "component_label", "component_id", "status", "batch_id", "updated_at")
+    list_filter = ("status", "updated_at")
+    search_fields = ("run__run_id", "component_id", "component_label", "body", "batch_id")
+    readonly_fields = ("id", "created_at", "updated_at")
+    list_select_related = ("run", "actor")
 
 
 @admin.register(ComponentMapping)
