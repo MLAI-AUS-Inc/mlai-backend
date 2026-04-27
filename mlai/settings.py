@@ -390,10 +390,16 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+GOOGLE_OAUTH_IDENTITY_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
 GOOGLE_WEBSITE_BASELINE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
-    "https://www.googleapis.com/auth/analytics.readonly",
 ]
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(

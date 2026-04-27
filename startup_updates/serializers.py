@@ -33,7 +33,15 @@ class StartupProfileUpsertSerializer(serializers.Serializer):
     kpi_definitions = serializers.ListField(child=serializers.DictField(), required=False)
     default_currency = serializers.CharField(required=False, allow_blank=True)
     stage = serializers.CharField(required=False, allow_blank=True)
+    organization_kind = serializers.CharField(required=False, allow_blank=True)
+    organizationKind = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if "organizationKind" in attrs and "organization_kind" not in attrs:
+            attrs["organization_kind"] = attrs["organizationKind"]
+        attrs.pop("organizationKind", None)
+        return attrs
 
 
 class StartupUpdateRunCreateSerializer(serializers.Serializer):

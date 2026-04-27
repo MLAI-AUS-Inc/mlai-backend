@@ -1,3 +1,4 @@
+from datetime import datetime, timezone as datetime_timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,11 +8,17 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from content_factory.google_baseline import GA4_SCOPE, GSC_SCOPE, google_baseline_connection_status
+from content_factory.google_baseline import (
+    GA4_SCOPE,
+    GSC_SCOPE,
+    collect_verified_google_metrics,
+    google_baseline_connection_status,
+)
 from content_factory.models import OrganizationContentConfig, WebsiteBaselineSnapshot
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
+from startup_updates.models import StartupProfile
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 
 
@@ -27,6 +34,61 @@ class _Response(SimpleNamespace):
 
     def json(self):
         return self.payload
+
+
+class _SearchConsoleExecute:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
+class _SearchConsoleSites:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def list(self):
+        return _SearchConsoleExecute({"siteEntry": self.entries})
+
+
+class _SearchConsoleAnalytics:
+    def __init__(self):
+        self.queries = []
+
+    def query(self, siteUrl=None, body=None):
+        self.queries.append({"siteUrl": siteUrl, "body": body or {}})
+        dimensions = list((body or {}).get("dimensions") or [])
+        if dimensions == ["date"]:
+            return _SearchConsoleExecute(
+                {
+                    "rows": [
+                        {"keys": ["2026-03-31"], "clicks": 4, "impressions": 80, "ctr": 0.05, "position": 8.5},
+                        {"keys": ["2026-04-01"], "clicks": 6, "impressions": 100, "ctr": 0.06, "position": 7.4},
+                    ]
+                }
+            )
+        if dimensions == ["query"]:
+            return _SearchConsoleExecute(
+                {"rows": [{"keys": ["startup automation"], "clicks": 7, "impressions": 120, "ctr": 0.058, "position": 6.3}]}
+            )
+        if dimensions == ["page"]:
+            return _SearchConsoleExecute(
+                {"rows": [{"keys": ["https://acme.com/blog"], "clicks": 5, "impressions": 90, "ctr": 0.056, "position": 5.8}]}
+            )
+        return _SearchConsoleExecute({"rows": [{"clicks": 25, "impressions": 400, "ctr": 0.0625, "position": 7.1}]})
+
+
+class _SearchConsoleService:
+    def __init__(self, entries):
+        self.analytics = _SearchConsoleAnalytics()
+        self.entries = entries
+
+    def sites(self):
+        return _SearchConsoleSites(self.entries)
+
+    def searchanalytics(self):
+        return self.analytics
 
 
 class VibeMarketingAutofillTests(TestCase):
@@ -179,6 +241,157 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(bootstrap.data["startupProfile"]["founderNames"], ["Sam Donegan"])
         self.assertEqual(bootstrap.data["startupProfile"]["stage"], "Seed")
         self.assertEqual(bootstrap.data["startupProfile"]["notes"], "Founder tools for marketing and monthly updates.")
+
+    def test_settings_save_accepts_organization_kind_without_clearing_brand_or_notes(self):
+        organization = Organization.objects.create(domain="mlai.au", name="MLAI")
+        self.company.organization = organization
+        self.company.domain = "mlai.au"
+        self.company.save(update_fields=["organization", "domain", "updated_at"])
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            brand_name="Existing Brand",
+            company_context="Existing context",
+        )
+        startup_profile = StartupProfile.objects.create(organization=organization, notes="Existing private notes")
+
+        response = self.client.put(
+            "/api/v1/vibe-marketing/settings/",
+            {
+                "companyName": "MLAI",
+                "domain": "mlai.au",
+                "location": "Melbourne, Australia",
+                "abn": "94 807 394 137",
+                "companyContext": "Updated context",
+                "stage": "Pre-seed",
+                "organizationKind": "Not-for-profit",
+                "competitors": [],
+                "seedKeywords": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        config.refresh_from_db()
+        startup_profile.refresh_from_db()
+        self.assertEqual(config.brand_name, "Existing Brand")
+        self.assertEqual(startup_profile.notes, "Existing private notes")
+        self.assertEqual(startup_profile.stage, "Pre-seed")
+        self.assertEqual(startup_profile.organization_kind, "Not-for-profit")
+        self.assertEqual(response.data["startupProfile"]["organizationKind"], "Not-for-profit")
+
+    @override_settings(GOOGLE_PLACES_API_KEY="")
+    def test_location_lookup_missing_key_returns_empty_configured_false(self):
+        response = self.client.get("/api/v1/vibe-marketing/lookups/locations/?q=Mel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["configured"])
+        self.assertEqual(response.data["suggestions"], [])
+
+    @override_settings(GOOGLE_PLACES_API_KEY="places-key")
+    def test_location_lookup_normalizes_google_city_suggestions(self):
+        observed = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            observed["url"] = url
+            observed["headers"] = headers
+            observed["json"] = json
+            return _Response(
+                status_code=200,
+                payload={
+                    "suggestions": [
+                        {
+                            "placePrediction": {
+                                "placeId": "melbourne-place",
+                                "text": {"text": "Melbourne VIC, Australia"},
+                                "structuredFormat": {
+                                    "mainText": {"text": "Melbourne"},
+                                    "secondaryText": {"text": "VIC, Australia"},
+                                },
+                            }
+                        }
+                    ]
+                },
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.get("/api/v1/vibe-marketing/lookups/locations/?q=Mel&sessionToken=session-1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["url"], "https://places.googleapis.com/v1/places:autocomplete")
+        self.assertEqual(observed["headers"]["X-Goog-Api-Key"], "places-key")
+        self.assertEqual(observed["json"]["includedPrimaryTypes"], ["(cities)"])
+        self.assertEqual(observed["json"]["sessionToken"], "session-1")
+        self.assertTrue(response.data["configured"])
+        self.assertEqual(response.data["suggestions"][0]["label"], "Melbourne VIC, Australia")
+        self.assertEqual(response.data["suggestions"][0]["city"], "Melbourne")
+        self.assertEqual(response.data["suggestions"][0]["placeId"], "melbourne-place")
+
+    @override_settings(ABR_LOOKUP_AUTHENTICATION_GUID="")
+    def test_abn_lookup_missing_key_returns_empty_configured_false(self):
+        response = self.client.get("/api/v1/vibe-marketing/lookups/abns/?q=MLAI")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["configured"])
+        self.assertEqual(response.data["suggestions"], [])
+
+    @override_settings(ABR_LOOKUP_AUTHENTICATION_GUID="abr-guid")
+    def test_abn_lookup_searches_by_name_and_normalizes_xml(self):
+        observed = {}
+        xml = """<?xml version="1.0" encoding="utf-8"?>
+        <ABRPayloadSearchResults xmlns="http://abr.business.gov.au/ABRXMLSearch/">
+          <response>
+            <searchResultsList>
+              <searchResultsRecord>
+                <ABN><identifierValue>94807394137</identifierValue></ABN>
+                <mainName><organisationName>MLAI AUS INC</organisationName></mainName>
+                <mainBusinessPhysicalAddress><stateCode>VIC</stateCode><postcode>3000</postcode></mainBusinessPhysicalAddress>
+                <entityStatus><entityStatusCode>Active</entityStatusCode></entityStatus>
+              </searchResultsRecord>
+            </searchResultsList>
+          </response>
+        </ABRPayloadSearchResults>"""
+
+        def fake_get(url, params=None, timeout=None):
+            observed["url"] = url
+            observed["params"] = params
+            return _Response(status_code=200, text=xml, payload={})
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=fake_get):
+            response = self.client.get("/api/v1/vibe-marketing/lookups/abns/?q=MLAI")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("ABRSearchByNameAdvancedSimpleProtocol2017", observed["url"])
+        self.assertEqual(observed["params"]["name"], "MLAI")
+        self.assertEqual(observed["params"]["authenticationGuid"], "abr-guid")
+        self.assertEqual(response.data["suggestions"][0]["abn"], "94 807 394 137")
+        self.assertEqual(response.data["suggestions"][0]["entityName"], "MLAI AUS INC")
+        self.assertEqual(response.data["suggestions"][0]["state"], "VIC")
+
+    @override_settings(ABR_LOOKUP_AUTHENTICATION_GUID="abr-guid")
+    def test_abn_lookup_searches_numeric_query_by_abn(self):
+        observed = {}
+        xml = """<?xml version="1.0" encoding="utf-8"?>
+        <ABRPayloadSearchResults xmlns="http://abr.business.gov.au/ABRXMLSearch/">
+          <response>
+            <businessEntity202001>
+              <ABN><identifierValue>94807394137</identifierValue></ABN>
+              <mainName><organisationName>MLAI AUS INC</organisationName></mainName>
+            </businessEntity202001>
+          </response>
+        </ABRPayloadSearchResults>"""
+
+        def fake_get(url, params=None, timeout=None):
+            observed["url"] = url
+            observed["params"] = params
+            return _Response(status_code=200, text=xml, payload={})
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=fake_get):
+            response = self.client.get("/api/v1/vibe-marketing/lookups/abns/?q=94%20807%20394%20137")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("SearchByABNv202001", observed["url"])
+        self.assertEqual(observed["params"]["searchString"], "94807394137")
+        self.assertEqual(response.data["suggestions"][0]["abn"], "94 807 394 137")
 
     def test_autofill_rejects_personal_linkedin_profile_url(self):
         response = self.client.post(
@@ -634,7 +847,7 @@ class VibeMarketingAutofillTests(TestCase):
             )
         self.assertEqual(response.status_code, 202)
 
-    def test_google_baseline_connection_requires_all_verified_data_scopes(self):
+    def test_google_baseline_connection_accepts_search_console_scope(self):
         connection = GoogleConnection.objects.create(
             user=self.user,
             google_email="founder@example.com",
@@ -642,10 +855,10 @@ class VibeMarketingAutofillTests(TestCase):
             scope=GSC_SCOPE,
         )
 
-        partial = google_baseline_connection_status(self.user)
-        self.assertTrue(partial["connected"])
-        self.assertFalse(partial["hasBaselineScopes"])
-        self.assertEqual(partial["status"], "needs_reconnect")
+        status_payload = google_baseline_connection_status(self.user)
+        self.assertTrue(status_payload["connected"])
+        self.assertTrue(status_payload["hasBaselineScopes"])
+        self.assertEqual(status_payload["status"], "connected")
 
         connection.scope = f"{GSC_SCOPE} {GA4_SCOPE}"
         connection.save(update_fields=["scope", "updated_at"])
@@ -653,6 +866,101 @@ class VibeMarketingAutofillTests(TestCase):
         complete = google_baseline_connection_status(self.user)
         self.assertTrue(complete["hasBaselineScopes"])
         self.assertEqual(complete["status"], "connected")
+
+    def test_google_baseline_collects_search_console_metrics_without_ga4_scope(self):
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@example.com",
+            refresh_token="refresh-token",
+            scope=GSC_SCOPE,
+        )
+        service = _SearchConsoleService([{"siteUrl": "sc-domain:acme.com"}])
+
+        with patch("content_factory.google_baseline.get_refreshed_credentials", return_value=SimpleNamespace()):
+            with patch("googleapiclient.discovery.build", return_value=service):
+                result = collect_verified_google_metrics(
+                    user=self.user,
+                    domain="https://www.acme.com",
+                    now=datetime(2026, 4, 27, tzinfo=datetime_timezone.utc),
+                )
+
+        traffic = result["traffic"]
+        self.assertEqual(traffic["status"], "measured")
+        self.assertEqual(result["sourceStatus"]["googleSearchConsole"], "measured")
+        self.assertEqual(traffic["googleSearchConsole"]["siteUrl"], "sc-domain:acme.com")
+        self.assertEqual(traffic["googleSearchConsole"]["last28Days"]["clicks"], 25)
+        self.assertEqual(traffic["googleSearchConsole"]["daily"][0]["keys"], ["2026-03-31"])
+        self.assertEqual(traffic["googleSearchConsole"]["topQueries"][0]["keys"], ["startup automation"])
+        self.assertEqual(traffic["googleSearchConsole"]["topPages"][0]["keys"], ["https://acme.com/blog"])
+        self.assertEqual(traffic["googleAnalytics"]["status"], "needs_connection")
+        self.assertGreater(traffic["score"], 0)
+
+    def test_google_baseline_returns_needs_connection_when_no_search_console_property_matches(self):
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@example.com",
+            refresh_token="refresh-token",
+            scope=GSC_SCOPE,
+        )
+        service = _SearchConsoleService([{"siteUrl": "sc-domain:other.com"}])
+
+        with patch("content_factory.google_baseline.get_refreshed_credentials", return_value=SimpleNamespace()):
+            with patch("googleapiclient.discovery.build", return_value=service):
+                result = collect_verified_google_metrics(
+                    user=self.user,
+                    domain="acme.com",
+                    now=datetime(2026, 4, 27, tzinfo=datetime_timezone.utc),
+                )
+
+        self.assertEqual(result["traffic"]["status"], "needs_connection")
+        self.assertEqual(result["sourceStatus"]["googleSearchConsole"], "needs_connection")
+        self.assertIn("No verified Search Console property", result["traffic"]["googleSearchConsole"]["message"])
+
+    def test_baseline_google_refresh_merges_search_console_metrics_into_snapshot(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+        WebsiteBaselineSnapshot.objects.create(
+            organization=organization,
+            domain="acme.com",
+            run_id="baseline-google-refresh",
+            overall_score=76,
+            summary={"text": "Website baseline is workable."},
+            metrics={"traffic": {"status": "needs_connection", "score": None}},
+            source_status={"traffic": "needs_connection"},
+            raw_payload={
+                "metrics": {"traffic": {"status": "needs_connection", "score": None}},
+                "sourceStatus": {"traffic": "needs_connection"},
+            },
+        )
+        google_metrics = {
+            "traffic": {
+                "status": "measured",
+                "verified": True,
+                "score": 43,
+                "googleSearchConsole": {
+                    "status": "measured",
+                    "siteUrl": "sc-domain:acme.com",
+                    "last28Days": {"clicks": 25, "impressions": 400, "ctr": 0.0625, "position": 7.1},
+                    "last90Days": {"clicks": 50, "impressions": 900, "ctr": 0.055, "position": 8.0},
+                    "daily": [{"keys": ["2026-04-01"], "clicks": 6, "impressions": 100, "ctr": 0.06, "position": 7.4}],
+                    "topQueries": [{"keys": ["startup automation"], "clicks": 7, "impressions": 120, "ctr": 0.058, "position": 6.3}],
+                    "topPages": [{"keys": ["https://acme.com/blog"], "clicks": 5, "impressions": 90, "ctr": 0.056, "position": 5.8}],
+                },
+            },
+            "sourceStatus": {"googleSearchConsole": "measured", "googleAnalytics": "needs_connection"},
+        }
+
+        with patch("content_factory.vibe_marketing_views.collect_verified_google_metrics", return_value=google_metrics):
+            response = self.client.post("/api/v1/vibe-marketing/baseline/google-refresh/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["websiteBaseline"]["sourceStatus"]["traffic"], "measured")
+        self.assertEqual(response.data["websiteBaseline"]["metrics"]["traffic"]["googleSearchConsole"]["last28Days"]["clicks"], 25)
+        snapshot = WebsiteBaselineSnapshot.objects.get(run_id="baseline-google-refresh")
+        self.assertEqual(snapshot.source_status["traffic"], "measured")
+        self.assertEqual(snapshot.metrics["traffic"]["googleSearchConsole"]["topQueries"][0]["keys"], ["startup automation"])
 
     def test_github_connect_returns_auth_url_when_credentials_missing(self):
         response = self.client.post(

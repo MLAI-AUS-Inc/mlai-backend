@@ -72,6 +72,30 @@ class GoogleOAuthViewTests(TestCase):
         )
         self.assertEqual(params["state"], [session["google_oauth_state"]])
 
+    def test_google_connect_website_baseline_uses_search_console_scope_without_gmail(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("google_connect"),
+            {
+                "scope": "website_baseline",
+                "next": "http://localhost:5173/founder-tools/marketing/create?step=baseline&googleBaseline=refresh",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(response.url).query)
+        scopes = set(params["scope"][0].split())
+        self.assertIn("openid", scopes)
+        self.assertIn("https://www.googleapis.com/auth/userinfo.email", scopes)
+        self.assertIn("https://www.googleapis.com/auth/userinfo.profile", scopes)
+        self.assertIn("https://www.googleapis.com/auth/webmasters.readonly", scopes)
+        self.assertNotIn("https://www.googleapis.com/auth/gmail.readonly", scopes)
+        self.assertEqual(
+            self.client.session.get("google_oauth_next"),
+            "http://localhost:5173/founder-tools/marketing/create?step=baseline&googleBaseline=refresh",
+        )
+
     def test_google_connect_accepts_vibe_raising_next_url(self):
         self.client.force_login(self.user)
 

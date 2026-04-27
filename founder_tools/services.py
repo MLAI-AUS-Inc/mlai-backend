@@ -79,6 +79,15 @@ def _bool_from_value(value) -> bool:
     return bool(value)
 
 
+def _normalize_organization_kind(value) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"for-profit", "for profit", "profit", "commercial"}:
+        return "For-profit"
+    if raw in {"not-for-profit", "not for profit", "non-profit", "nonprofit", "nfp"}:
+        return "Not-for-profit"
+    return ""
+
+
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
     normalized_domain = normalize_company_domain(company.domain)
@@ -117,6 +126,7 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     seed_keywords_provided = _has_any_key(data, "seedKeywords", "seed_keywords")
     founder_names_provided = _has_any_key(data, "founderNames", "founder_names")
     stage_provided = "stage" in data
+    organization_kind_provided = _has_any_key(data, "organizationKind", "organization_kind")
     notes_provided = "notes" in data
 
     brand_name = str(_submitted_value(data, "brandName", "brand_name", default="") or "").strip()
@@ -131,6 +141,9 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     seed_keywords = string_list_from_value(_submitted_value(data, "seedKeywords", "seed_keywords", default=[]))
     founder_names = string_list_from_value(_submitted_value(data, "founderNames", "founder_names", default=[]))
     stage = str(_submitted_value(data, "stage", default="") or "").strip()
+    organization_kind = _normalize_organization_kind(
+        _submitted_value(data, "organizationKind", "organization_kind", default="")
+    )
     notes = str(_submitted_value(data, "notes", default="") or "").strip()
 
     organization_update_fields = []
@@ -208,6 +221,9 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if stage_provided and startup_profile.stage != stage:
         startup_profile.stage = stage
         startup_update_fields.append("stage")
+    if organization_kind_provided and startup_profile.organization_kind != organization_kind:
+        startup_profile.organization_kind = organization_kind
+        startup_update_fields.append("organization_kind")
     if notes_provided and startup_profile.notes != notes:
         startup_profile.notes = notes
         startup_update_fields.append("notes")

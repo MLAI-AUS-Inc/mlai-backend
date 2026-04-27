@@ -131,6 +131,32 @@ def _resolve_google_oauth_user(request):
     return user
 
 
+def _dedupe_scopes(*scope_groups):
+    scopes = []
+    for scope_group in scope_groups:
+        for scope in scope_group or []:
+            if scope and scope not in scopes:
+                scopes.append(scope)
+    return scopes
+
+
+def _google_oauth_scopes_for_request(request):
+    requested_scope = request.GET.get("scope")
+    if requested_scope in {"website_baseline", "vibe_marketing_baseline"}:
+        identity_scopes = getattr(
+            settings,
+            "GOOGLE_OAUTH_IDENTITY_SCOPES",
+            [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ],
+        )
+        return _dedupe_scopes(identity_scopes, getattr(settings, "GOOGLE_WEBSITE_BASELINE_SCOPES", []))
+
+    return _dedupe_scopes(getattr(settings, "GOOGLE_OAUTH_SCOPES", []))
+
+
 def _ensure_django_session_for_user(request, user) -> None:
     if str(request.session.get("_auth_user_id") or "") == str(user.pk):
         return
@@ -161,11 +187,7 @@ def google_connect(request):
     else:
         request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
-    scopes = list(settings.GOOGLE_OAUTH_SCOPES)
-    if request.GET.get("scope") in {"website_baseline", "vibe_marketing_baseline"}:
-        for scope in getattr(settings, "GOOGLE_WEBSITE_BASELINE_SCOPES", []):
-            if scope not in scopes:
-                scopes.append(scope)
+    scopes = _google_oauth_scopes_for_request(request)
 
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,

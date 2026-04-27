@@ -2101,6 +2101,7 @@ def build_startup_context_snapshot(
         "default_currency": profile.default_currency,
         "notes": profile.notes,
         "stage": profile.stage,
+        "organization_kind": profile.organization_kind,
     }
 
 

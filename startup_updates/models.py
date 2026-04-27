@@ -76,6 +76,7 @@ class StartupProfile(models.Model):
     kpi_definitions = models.JSONField(default=list, blank=True)
     default_currency = models.CharField(max_length=12, default="USD")
     stage = models.CharField(max_length=64, blank=True, default="")
+    organization_kind = models.CharField(max_length=32, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 import time
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import urlencode
+from xml.etree import ElementTree
 
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
@@ -43,6 +45,7 @@ from integrations import http_client
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
 from integrations.services.github import ScanError, TokenRefreshError, build_github_auth_url, ensure_valid_token
+from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -59,6 +62,7 @@ VIBE_MARKETING_WORKFLOWS = {
     "content_factory_discovery",
     "article_generation",
     "content_factory_article",
+    "article_revision",
     "daily_discovery",
     "startup_autofill",
     "website_baseline",
@@ -69,6 +73,104 @@ DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_dis
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "article_revision"}
 BASELINE_WORKFLOWS = {"website_baseline"}
 BASELINE_FRESH_DAYS = 30
+WORKFLOW_STEP_DEFS = [
+    {
+        "id": "profile",
+        "label": "Startup profile",
+        "phase": "Setup",
+        "href": "/founder-tools/marketing/create?step=startupDetails",
+        "check": "websiteProfile",
+        "summary": "Company, audience, competitors, and seed keywords.",
+    },
+    {
+        "id": "baseline",
+        "label": "Website baseline",
+        "phase": "Setup",
+        "href": "/founder-tools/marketing/create?step=baseline",
+        "check": "baseline",
+        "summary": "Capture website health before article work starts.",
+    },
+    {
+        "id": "repo",
+        "label": "Repository",
+        "phase": "Setup",
+        "href": "/founder-tools/marketing/create?step=github",
+        "check": "github",
+        "summary": "Connect the repository used for exact article previews and publishing.",
+    },
+    {
+        "id": "article_system",
+        "label": "Article system",
+        "phase": "Setup",
+        "href": "/founder-tools/marketing/create?step=articleSystem",
+        "check": "scaffold",
+        "summary": "Detect or prepare the article route, registry, and publish target.",
+    },
+    {
+        "id": "research",
+        "label": "Research topics",
+        "phase": "Plan",
+        "href": "/founder-tools/marketing/create?step=research",
+        "check": "research",
+        "summary": "Find article candidates from the company context.",
+    },
+    {
+        "id": "choose_topic",
+        "label": "Choose topic",
+        "phase": "Plan",
+        "href": "/founder-tools/marketing/create?step=chooseArticle",
+        "summary": "Pick a discovered topic or enter a custom article brief.",
+    },
+    {
+        "id": "generate",
+        "label": "Generate article",
+        "phase": "Create",
+        "href": "/founder-tools/marketing/create?step=writeCheck",
+        "check": "write",
+        "summary": "Generate the article and package its content artifacts.",
+    },
+    {
+        "id": "review",
+        "label": "Review article",
+        "phase": "Create",
+        "href": "/founder-tools/marketing/create?step=editArticle",
+        "summary": "Review the exact live article preview and leave component comments.",
+    },
+    {
+        "id": "revise",
+        "label": "Revise article",
+        "phase": "Create",
+        "href": "/founder-tools/marketing/create?step=editArticle",
+        "summary": "Send component comments for AI revision and accept the result.",
+    },
+    {
+        "id": "package",
+        "label": "Package ready",
+        "phase": "Publish",
+        "href": "/founder-tools/marketing/create?step=reviewPublish",
+        "check": "contentPackage",
+        "summary": "Content-only delivery artifacts are ready to inspect or promote.",
+    },
+    {
+        "id": "publish",
+        "label": "Publish to site",
+        "phase": "Publish",
+        "href": "/founder-tools/marketing/create?step=reviewPublish",
+        "check": "publish",
+        "summary": "Promote the package into a PR, preview URL, or CMS publish flow.",
+    },
+    {
+        "id": "automation",
+        "label": "Daily automation",
+        "phase": "Automate",
+        "href": "/founder-tools/marketing/create?step=dailyAutomation",
+        "check": "dailyAutomation",
+        "summary": "Enable recurring topic discovery with human review.",
+    },
+]
+WORKFLOW_STEP_IDS = [step["id"] for step in WORKFLOW_STEP_DEFS]
+RUNNING_RUN_STATUSES = {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}
+FAILED_RUN_STATUSES = {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}
 
 
 def _camel_list(value):
@@ -939,7 +1041,7 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
 def _google_baseline_connect_url(request):
     if request is None:
         return ""
-    next_url = "/founder-tools/marketing/create?step=baseline"
+    next_url = "/founder-tools/marketing/create?step=baseline&googleBaseline=refresh"
     query = urlencode({"scope": "website_baseline", "next": next_url})
     return request.build_absolute_uri(f"/integrations/connect/google?{query}")
 
@@ -951,6 +1053,7 @@ def _serialize_startup_profile(organization):
         return {
             "founderNames": [],
             "stage": "",
+            "organizationKind": "",
             "notes": "",
             "companyAliases": [],
             "domainAliases": [],
@@ -958,6 +1061,7 @@ def _serialize_startup_profile(organization):
     return {
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
+        "organizationKind": getattr(profile, "organization_kind", ""),
         "notes": profile.notes,
         "companyAliases": list(profile.company_aliases or []),
         "domainAliases": list(profile.domain_aliases or []),
@@ -966,7 +1070,328 @@ def _serialize_startup_profile(organization):
     }
 
 
-def _serialize_run(run):
+def _run_mapping(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _run_source_run_id(run):
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    return str(
+        run_request.get("source_run_id")
+        or run_request.get("sourceRunId")
+        or result.get("source_run_id")
+        or result.get("sourceRunId")
+        or ""
+    ).strip()
+
+
+def _run_delivery_mode(run):
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    return str(
+        run_request.get("resolved_delivery_mode")
+        or run_request.get("delivery_mode")
+        or result.get("resolved_delivery_mode")
+        or result.get("delivery_mode")
+        or ""
+    ).strip()
+
+
+def _workflow_step_action(label, *, href=None, intent=None, variant="primary"):
+    payload = {"label": label, "variant": variant}
+    if href:
+        payload["href"] = href
+    if intent:
+        payload["intent"] = intent
+    return payload
+
+
+def _run_url(run):
+    return f"/founder-tools/marketing/runs/{run.run_id}" if run else ""
+
+
+def _latest_publish_child_run(latest_runs, article_run):
+    if not article_run:
+        return None
+    candidates = []
+    for candidate in latest_runs or []:
+        if candidate.run_id == article_run.run_id or candidate.workflow not in ARTICLE_WORKFLOWS:
+            continue
+        if _run_source_run_id(candidate) != article_run.run_id:
+            continue
+        if candidate.workflow == "article_revision":
+            continue
+        delivery_mode = _run_delivery_mode(candidate)
+        if delivery_mode and delivery_mode not in {"publish_code", "publish_webflow"}:
+            continue
+        candidates.append(candidate)
+    return candidates[0] if candidates else None
+
+
+def _run_can_promote_package(run, config=None):
+    if not run:
+        return False
+    result = _run_mapping(run.result)
+    if result.get("promote_bundle_url") or result.get("publish_pr_url"):
+        return True
+    delivery_mode = _run_delivery_mode(run)
+    if delivery_mode == "content_only":
+        return bool(config and config.github_connection_state == "connected" and config.github_repo)
+    return False
+
+
+def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None):
+    organization = context.organization if context is not None else None
+    if organization is None and run is not None and run.domain:
+        organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
+    if organization is not None and context is not None:
+        config = _get_config(organization)
+    elif organization is not None:
+        config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    else:
+        config = None
+    if latest_runs is None:
+        latest_runs = _latest_runs_for_org(organization, limit=12) if organization is not None else []
+    latest_runs = list(latest_runs or [])
+    if run is not None and not any(candidate.pk == run.pk for candidate in latest_runs):
+        latest_runs.insert(0, run)
+    source_run_id = _run_source_run_id(run) if run is not None else ""
+    if source_run_id and not any(candidate.run_id == source_run_id for candidate in latest_runs):
+        source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).prefetch_related("steps").first()
+        if source_run is not None:
+            latest_runs.append(source_run)
+    if checks is None and organization is not None and config is not None:
+        checks = _profile_checks(organization, config, latest_runs, _latest_baseline_snapshot(organization))
+    return organization, config, latest_runs, checks or {}
+
+
+def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None):
+    _organization, config, latest_runs, checks = _workflow_progress_context(
+        context=context,
+        run=run,
+        latest_runs=latest_runs,
+        checks=checks,
+    )
+    scan_run = run if run and run.workflow in SCAN_WORKFLOWS else _latest_run_matching(latest_runs, SCAN_WORKFLOWS)
+    discovery_run = run if run and run.workflow in DISCOVERY_WORKFLOWS else _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
+    article_run = run if run and run.workflow in ARTICLE_WORKFLOWS else _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
+    active_run_source_id = _run_source_run_id(run) if run else ""
+    active_run_delivery_mode = _run_delivery_mode(run) if run else ""
+    active_run_is_publish_child = bool(
+        run
+        and run.workflow in ARTICLE_WORKFLOWS
+        and run.workflow != "article_revision"
+        and active_run_source_id
+        and (not active_run_delivery_mode or active_run_delivery_mode in {"publish_code", "publish_webflow"})
+    )
+    if active_run_is_publish_child:
+        source_run = next((candidate for candidate in latest_runs if candidate.run_id == active_run_source_id), None)
+        article_run = source_run or article_run
+        publish_child_run = run
+    else:
+        publish_child_run = _latest_publish_child_run(latest_runs, article_run)
+    publish_evidence_run = publish_child_run or article_run
+    publish_evidence = _publish_evidence_from_run(publish_evidence_run)
+    content_package = _content_package_from_run(article_run) if article_run else None
+    content_package_ready = bool(content_package and content_package.get("contentPackaged"))
+    component_feedback = _component_feedback_from_run(article_run) if article_run else {"comments": [], "latestBatch": None}
+    comments = component_feedback.get("comments") or []
+    latest_batch = component_feedback.get("latestBatch") or {}
+    draft_comment_count = len([comment for comment in comments if comment.get("status") == "draft" and str(comment.get("body") or "").strip()])
+    submitted_revision_pending = bool(
+        latest_batch
+        and latest_batch.get("status") in {"submitted", "running", "failed"}
+        and not latest_batch.get("revisionRunId")
+    )
+    revision_running = bool(
+        article_run
+        and article_run.workflow == "article_revision"
+        and article_run.status in RUNNING_RUN_STATUSES
+    )
+    revision_needs_acceptance = bool(
+        article_run
+        and article_run.workflow == "article_revision"
+        and article_run.status == ContentFactoryRunStatus.COMPLETED
+        and latest_batch.get("status") != "accepted"
+    )
+    package_can_promote = _run_can_promote_package(article_run, config=config)
+    publish_complete = bool(publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
+    publish_running = bool(publish_child_run and publish_child_run.status in RUNNING_RUN_STATUSES)
+
+    status_by_id = {}
+    action_by_id = {}
+    href_by_id = {}
+    run_by_id = {}
+    summary_by_id = {}
+
+    for step_def in WORKFLOW_STEP_DEFS:
+        step_id = step_def["id"]
+        check_key = step_def.get("check")
+        status_by_id[step_id] = "complete" if check_key and checks.get(check_key, {}).get("passed") else "locked"
+        href_by_id[step_id] = step_def["href"]
+        summary_by_id[step_id] = step_def["summary"]
+
+    if not checks.get("websiteProfile", {}).get("passed"):
+        status_by_id["profile"] = "needs_action"
+        action_by_id["profile"] = _workflow_step_action("Save startup profile", href=href_by_id["profile"])
+    if checks.get("websiteProfile", {}).get("passed") and not checks.get("baseline", {}).get("passed"):
+        status_by_id["baseline"] = "ready"
+        action_by_id["baseline"] = _workflow_step_action("Run or skip baseline", href=href_by_id["baseline"])
+    if checks.get("baseline", {}).get("passed") and not checks.get("github", {}).get("passed"):
+        status_by_id["repo"] = "ready"
+        action_by_id["repo"] = _workflow_step_action("Connect GitHub", href=href_by_id["repo"])
+
+    if scan_run and not checks.get("scaffold", {}).get("passed"):
+        run_by_id["article_system"] = scan_run.run_id
+        href_by_id["article_system"] = _run_url(scan_run)
+        if scan_run.status in RUNNING_RUN_STATUSES:
+            status_by_id["article_system"] = "running"
+            summary_by_id["article_system"] = "Repository scan is running."
+        elif scan_run.status in FAILED_RUN_STATUSES:
+            status_by_id["article_system"] = "blocked"
+            action_by_id["article_system"] = _workflow_step_action("Open scan run", href=_run_url(scan_run))
+        elif scan_run.status in {ContentFactoryRunStatus.AWAITING_CONFIRMATION, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+            status_by_id["article_system"] = "needs_action"
+            action_by_id["article_system"] = _workflow_step_action("Review scaffold approval", href=_run_url(scan_run))
+    if checks.get("github", {}).get("passed") and not checks.get("scaffold", {}).get("passed") and status_by_id["article_system"] == "locked":
+        status_by_id["article_system"] = "ready"
+        action_by_id["article_system"] = _workflow_step_action("Run repository scan", href=href_by_id["article_system"])
+
+    if discovery_run and not checks.get("research", {}).get("passed"):
+        run_by_id["research"] = discovery_run.run_id
+        href_by_id["research"] = _run_url(discovery_run)
+        if discovery_run.status in RUNNING_RUN_STATUSES:
+            status_by_id["research"] = "running"
+            summary_by_id["research"] = "Topic discovery is running."
+        elif discovery_run.status in FAILED_RUN_STATUSES:
+            status_by_id["research"] = "blocked"
+            action_by_id["research"] = _workflow_step_action("Open research run", href=_run_url(discovery_run))
+    if checks.get("scaffold", {}).get("passed") and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
+        status_by_id["research"] = "ready"
+        action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
+
+    topic_candidates = _topic_candidates_from_runs(latest_runs)
+    if article_run:
+        status_by_id["choose_topic"] = "complete"
+        run_by_id["choose_topic"] = article_run.run_id
+    elif checks.get("research", {}).get("passed"):
+        status_by_id["choose_topic"] = "needs_action" if topic_candidates else "ready"
+        action_by_id["choose_topic"] = _workflow_step_action("Choose article topic", href=href_by_id["choose_topic"])
+
+    if article_run:
+        run_by_id["generate"] = article_run.run_id
+        href_by_id["generate"] = _run_url(article_run)
+        if article_run.status in RUNNING_RUN_STATUSES:
+            status_by_id["generate"] = "running"
+            summary_by_id["generate"] = "Article generation is running."
+        elif article_run.status in FAILED_RUN_STATUSES:
+            status_by_id["generate"] = "blocked"
+            action_by_id["generate"] = _workflow_step_action("Open failed article run", href=_run_url(article_run))
+        elif checks.get("write", {}).get("passed") or content_package_ready:
+            status_by_id["generate"] = "complete"
+    elif status_by_id["choose_topic"] in {"ready", "needs_action"}:
+        status_by_id["generate"] = "locked"
+
+    if content_package_ready or (article_run and article_run.component_comments.exists()):
+        run_by_id["review"] = article_run.run_id
+        href_by_id["review"] = _run_url(article_run)
+    if content_package_ready:
+        status_by_id["review"] = "complete"
+        action_by_id["review"] = _workflow_step_action("Open live preview", href=_run_url(article_run))
+    elif article_run and article_run.status in RUNNING_RUN_STATUSES:
+        status_by_id["review"] = "locked"
+
+    if draft_comment_count:
+        status_by_id["revise"] = "needs_action"
+        href_by_id["revise"] = _run_url(article_run)
+        run_by_id["revise"] = article_run.run_id
+        action_by_id["revise"] = _workflow_step_action("Send comments for AI revision", href=_run_url(article_run), intent="submit-component-comments")
+        summary_by_id["revise"] = f"{draft_comment_count} draft comment{'s' if draft_comment_count != 1 else ''} ready."
+    elif submitted_revision_pending or revision_running:
+        status_by_id["revise"] = "running"
+        href_by_id["revise"] = _run_url(article_run)
+        run_by_id["revise"] = article_run.run_id
+        summary_by_id["revise"] = "AI revision is running or ready to retry."
+    elif revision_needs_acceptance:
+        status_by_id["revise"] = "needs_action"
+        href_by_id["revise"] = _run_url(article_run)
+        run_by_id["revise"] = article_run.run_id
+        action_by_id["revise"] = _workflow_step_action("Accept revised article", href=_run_url(article_run), intent="accept-component-revision")
+    elif latest_batch.get("status") == "accepted":
+        status_by_id["revise"] = "complete"
+        href_by_id["revise"] = _run_url(article_run)
+        run_by_id["revise"] = article_run.run_id
+
+    if content_package_ready:
+        status_by_id["package"] = "complete"
+        href_by_id["package"] = _run_url(article_run)
+        run_by_id["package"] = article_run.run_id
+        title = content_package.get("title") or content_package.get("slug")
+        summary_by_id["package"] = f"Article package ready{': ' + title if title else '.'}"
+        action_by_id["package"] = _workflow_step_action("Review package", href=_run_url(article_run))
+
+    if publish_complete:
+        status_by_id["publish"] = "complete"
+        href_by_id["publish"] = _run_url(publish_evidence_run)
+        run_by_id["publish"] = publish_evidence_run.run_id
+        action_by_id["publish"] = _workflow_step_action(
+            "Open published evidence",
+            href=publish_evidence.get("previewUrl") or publish_evidence.get("prUrl") or _run_url(publish_evidence_run),
+        )
+        summary_by_id["publish"] = "PR or preview evidence is ready."
+    elif publish_running:
+        status_by_id["publish"] = "running"
+        href_by_id["publish"] = _run_url(publish_child_run)
+        run_by_id["publish"] = publish_child_run.run_id
+        summary_by_id["publish"] = "Publishing child run is in progress."
+    elif content_package_ready and package_can_promote:
+        status_by_id["publish"] = "ready"
+        href_by_id["publish"] = _run_url(article_run)
+        run_by_id["publish"] = article_run.run_id
+        action_by_id["publish"] = _workflow_step_action("Publish to website", href=_run_url(article_run), intent="promote-bundle")
+        summary_by_id["publish"] = "Promote the content package into a publish run."
+    elif content_package_ready:
+        status_by_id["publish"] = "blocked"
+        href_by_id["publish"] = "/founder-tools/marketing/settings"
+        action_by_id["publish"] = _workflow_step_action("Configure publishing", href="/founder-tools/marketing/settings")
+        summary_by_id["publish"] = "Package is ready, but no publish target is connected."
+
+    if checks.get("dailyAutomation", {}).get("passed"):
+        status_by_id["automation"] = "complete"
+    elif status_by_id["publish"] == "complete":
+        status_by_id["automation"] = "ready"
+        action_by_id["automation"] = _workflow_step_action("Enable daily automation", href=href_by_id["automation"])
+
+    steps = []
+    for index, step_def in enumerate(WORKFLOW_STEP_DEFS):
+        step_id = step_def["id"]
+        steps.append(
+            {
+                "id": step_id,
+                "label": step_def["label"],
+                "phase": step_def["phase"],
+                "status": status_by_id.get(step_id, "locked"),
+                "href": href_by_id.get(step_id) or step_def["href"],
+                "runId": run_by_id.get(step_id),
+                "summary": summary_by_id.get(step_id) or step_def["summary"],
+                "primaryAction": action_by_id.get(step_id),
+                "order": index + 1,
+            }
+        )
+
+    active_statuses = {"blocked", "needs_action", "running", "ready"}
+    current_step = next((step for step in steps if step["status"] in active_statuses), steps[-1])
+    current_index = WORKFLOW_STEP_IDS.index(current_step["id"])
+    next_step = next((step for step in steps[current_index + 1 :] if step["status"] != "locked"), None)
+    return {
+        "currentStepId": current_step["id"],
+        "nextStepId": next_step["id"] if next_step else None,
+        "steps": steps,
+    }
+
+
+def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
     step_states = []
     for step in run.steps.order_by("display_order", "id"):
         step_states.append(
@@ -1014,6 +1439,7 @@ def _serialize_run(run):
         "componentManifest": component_manifest,
         "livePreview": live_preview,
         "componentFeedback": _component_feedback_from_run(run),
+        "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": result,
     }
 
@@ -1125,7 +1551,10 @@ def _serialize_bootstrap(context, request=None):
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
     for run in latest_runs:
-        latest_runs_by_workflow.setdefault(run.workflow, _serialize_run(run))
+        latest_runs_by_workflow.setdefault(
+            run.workflow,
+            _serialize_run(run, context=context, latest_runs=latest_runs, checks=checks),
+        )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
@@ -1162,13 +1591,14 @@ def _serialize_bootstrap(context, request=None):
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config),
         "googleBaselineConnection": google_status,
         "checks": checks,
-        "latestRuns": [_serialize_run(run) for run in latest_runs],
+        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": _topic_candidates_from_runs(latest_runs),
         "publishEvidence": _publish_evidence_from_run(latest_article_run),
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": _recommended_next_action(checks),
+        "workflowProgress": _workflow_progress(context=context, latest_runs=latest_runs, checks=checks),
     }
 
 
@@ -1222,6 +1652,7 @@ def _serialize_bootstrap_without_domain(company):
         "startupProfile": {
             "founderNames": [],
             "stage": "",
+            "organizationKind": "",
             "notes": "",
             "companyAliases": [company.name] if company.name else [],
             "domainAliases": [],
@@ -1235,6 +1666,7 @@ def _serialize_bootstrap_without_domain(company):
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": {"key": "websiteProfile", "label": "Save website profile"},
+        "workflowProgress": _workflow_progress(checks=checks),
     }
 
 
@@ -1675,6 +2107,207 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
     }
 
 
+def _lookup_query(request) -> str:
+    return str(request.query_params.get("q") or request.query_params.get("query") or "").strip()
+
+
+def _lookup_requires_founder(request):
+    profile = get_or_create_founder_profile(request.user)
+    if profile.role != profile.ROLE_FOUNDER:
+        return Response({"detail": "Only founders can access Vibe Marketing."}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _google_place_prediction_to_suggestion(prediction):
+    if not isinstance(prediction, dict):
+        return None
+    place_id = str(prediction.get("placeId") or prediction.get("place") or "").strip()
+    text = prediction.get("text") if isinstance(prediction.get("text"), dict) else {}
+    structured = prediction.get("structuredFormat") if isinstance(prediction.get("structuredFormat"), dict) else {}
+    main_text = structured.get("mainText") if isinstance(structured.get("mainText"), dict) else {}
+    secondary_text = structured.get("secondaryText") if isinstance(structured.get("secondaryText"), dict) else {}
+    label = str(text.get("text") or "").strip()
+    city = str(main_text.get("text") or "").strip()
+    secondary = str(secondary_text.get("text") or "").strip()
+    if not label:
+        label = ", ".join(part for part in [city, secondary] if part)
+    if not label:
+        return None
+    parts = [part.strip() for part in label.split(",") if part.strip()]
+    if not city and parts:
+        city = parts[0]
+    return {
+        "id": place_id or label,
+        "label": label,
+        "city": city,
+        "region": parts[-2] if len(parts) > 2 else "",
+        "country": parts[-1] if len(parts) > 1 else "",
+        "placeId": place_id,
+    }
+
+
+class VibeMarketingLocationLookupView(APIView):
+    def get(self, request):
+        error_response = _lookup_requires_founder(request)
+        if error_response:
+            return error_response
+
+        query = _lookup_query(request)
+        api_key = getattr(settings, "GOOGLE_PLACES_API_KEY", "")
+        if len(query) < 3:
+            return Response({"configured": bool(api_key), "suggestions": []}, status=status.HTTP_200_OK)
+        if not api_key:
+            return Response({"configured": False, "suggestions": []}, status=status.HTTP_200_OK)
+
+        payload = {
+            "input": query,
+            "includedPrimaryTypes": ["(cities)"],
+            "languageCode": "en",
+            "regionCode": "au",
+        }
+        session_token = str(request.query_params.get("sessionToken") or request.query_params.get("session_token") or "").strip()
+        if session_token:
+            payload["sessionToken"] = session_token
+
+        try:
+            response = http_client.post(
+                "https://places.googleapis.com/v1/places:autocomplete",
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-Api-Key": api_key,
+                    "X-Goog-FieldMask": ",".join(
+                        [
+                            "suggestions.placePrediction.place",
+                            "suggestions.placePrediction.placeId",
+                            "suggestions.placePrediction.text.text",
+                            "suggestions.placePrediction.structuredFormat.mainText.text",
+                            "suggestions.placePrediction.structuredFormat.secondaryText.text",
+                        ]
+                    ),
+                },
+                timeout=(2, 5),
+            )
+            if getattr(response, "status_code", 200) >= 400:
+                raise http_client.RequestException(f"Google Places returned {response.status_code}.")
+            data = response.json()
+        except Exception:
+            return Response({"configured": True, "suggestions": [], "error": "Location lookup is unavailable."}, status=status.HTTP_200_OK)
+
+        suggestions = []
+        for item in data.get("suggestions", []) if isinstance(data, dict) else []:
+            prediction = item.get("placePrediction") if isinstance(item, dict) else None
+            suggestion = _google_place_prediction_to_suggestion(prediction)
+            if suggestion:
+                suggestions.append(suggestion)
+        return Response({"configured": True, "suggestions": suggestions[:5]}, status=status.HTTP_200_OK)
+
+
+def _local_xml_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_text(element, *names: str) -> str:
+    wanted = set(names)
+    for node in element.iter():
+        if _local_xml_name(node.tag) in wanted and node.text:
+            return node.text.strip()
+    return ""
+
+
+def _format_abn(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 11:
+        return f"{digits[:2]} {digits[2:5]} {digits[5:8]} {digits[8:]}"
+    return value.strip()
+
+
+def _abn_records_from_xml(xml_text: str) -> list[dict]:
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError:
+        return []
+
+    candidates = [
+        node
+        for node in root.iter()
+        if _local_xml_name(node.tag)
+        in {"searchResultsRecord", "businessEntity", "businessEntity200506", "businessEntity201205", "businessEntity201408", "businessEntity202001"}
+    ]
+    if not candidates:
+        candidates = [root]
+
+    results = []
+    seen = set()
+    for node in candidates:
+        abn = _format_abn(_xml_text(node, "identifierValue", "ABN", "abn"))
+        if not abn or abn in seen:
+            continue
+        seen.add(abn)
+        results.append(
+            {
+                "abn": abn,
+                "entityName": _xml_text(node, "organisationName", "entityName", "name"),
+                "businessName": _xml_text(node, "businessName", "tradingName", "mainTradingName"),
+                "status": _xml_text(node, "entityStatusCode", "status"),
+                "state": _xml_text(node, "stateCode", "state"),
+                "postcode": _xml_text(node, "postcode"),
+            }
+        )
+    return results
+
+
+class VibeMarketingAbnLookupView(APIView):
+    def get(self, request):
+        error_response = _lookup_requires_founder(request)
+        if error_response:
+            return error_response
+
+        query = _lookup_query(request)
+        auth_guid = getattr(settings, "ABR_LOOKUP_AUTHENTICATION_GUID", "")
+        if len(query) < 3:
+            return Response({"configured": bool(auth_guid), "suggestions": []}, status=status.HTTP_200_OK)
+        if not auth_guid:
+            return Response({"configured": False, "suggestions": []}, status=status.HTTP_200_OK)
+
+        digits = re.sub(r"\D", "", query)
+        is_numeric_lookup = bool(digits) and len(digits) >= 9 and re.fullmatch(r"[\d\s]+", query)
+        if is_numeric_lookup:
+            endpoint = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/SearchByABNv202001"
+            params = {"searchString": digits, "includeHistoricalDetails": "N", "authenticationGuid": auth_guid}
+        else:
+            endpoint = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/ABRSearchByNameAdvancedSimpleProtocol2017"
+            params = {
+                "name": query,
+                "postcode": "",
+                "legalName": "Y",
+                "tradingName": "Y",
+                "businessName": "Y",
+                "activeABNsOnly": "Y",
+                "NSW": "",
+                "SA": "",
+                "ACT": "",
+                "VIC": "",
+                "WA": "",
+                "NT": "",
+                "QLD": "",
+                "TAS": "",
+                "authenticationGuid": auth_guid,
+                "searchWidth": "Typical",
+                "minimumScore": "50",
+                "maxSearchResults": "5",
+            }
+
+        try:
+            response = http_client.get(endpoint, params=params, timeout=(2, 6))
+            if getattr(response, "status_code", 200) >= 400:
+                raise http_client.RequestException(f"ABN Lookup returned {response.status_code}.")
+        except Exception:
+            return Response({"configured": True, "suggestions": [], "error": "ABN lookup is unavailable."}, status=status.HTTP_200_OK)
+
+        return Response({"configured": True, "suggestions": _abn_records_from_xml(response.text)[:5]}, status=status.HTTP_200_OK)
+
+
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
@@ -2104,7 +2737,7 @@ class VibeMarketingRunView(APIView):
             if run.workflow in BASELINE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
                 _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunArtifactsView(APIView):
@@ -2295,7 +2928,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             source_run.result = result
             source_run.save(update_fields=["result", "updated_at"])
             if retryable:
-                return Response(_serialize_run(source_run), status=status.HTTP_202_ACCEPTED)
+                return Response(_serialize_run(source_run, context=context), status=status.HTTP_202_ACCEPTED)
             return Response(
                 {
                     "detail": remote_data.get("error") or "Content Factory could not queue the revision.",
@@ -2335,7 +2968,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         result["component_feedback_revision_run_id"] = revision_run.run_id
         source_run.result = result
         source_run.save(update_fields=["result", "updated_at"])
-        return Response(_serialize_run(revision_run), status=status.HTTP_202_ACCEPTED)
+        return Response(_serialize_run(revision_run, context=context), status=status.HTTP_202_ACCEPTED)
 
 
 class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, APIView):
@@ -2386,18 +3019,18 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
                 }
             target.result = target_result
             target.save(update_fields=["result", "updated_at"])
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunLivePreviewView(APIView):
     def _resolve_run(self, request, run_id):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
-            return None, error_response
+            return None, None, error_response
         run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
         if not _run_belongs_to_context(run, context):
-            return None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
-        return run, None
+            return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return context, run, None
 
     def _persist_preview(self, run, payload):
         if isinstance(payload, dict) and payload:
@@ -2408,16 +3041,16 @@ class VibeMarketingRunLivePreviewView(APIView):
         return run
 
     def get(self, request, run_id):
-        run, error_response = self._resolve_run(request, run_id)
+        context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
         payload = _call_content_factory_live_preview(run_id=run_id, method="GET")
         if payload:
             run = self._persist_preview(run, payload)
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
     def post(self, request, run_id):
-        run, error_response = self._resolve_run(request, run_id)
+        context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
         payload = {
@@ -2426,15 +3059,15 @@ class VibeMarketingRunLivePreviewView(APIView):
         }
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
         run = self._persist_preview(run, remote_data)
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
     def delete(self, request, run_id):
-        run, error_response = self._resolve_run(request, run_id)
+        context, run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="DELETE")
         run = self._persist_preview(run, remote_data)
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
 class VibeMarketingRunControlView(APIView):
@@ -2463,7 +3096,7 @@ class VibeMarketingRunControlView(APIView):
                     payload=payload,
                     remote_data=remote_data,
                 )
-                return Response(_serialize_run(revised_run), status=status.HTTP_202_ACCEPTED)
+                return Response(_serialize_run(revised_run, context=context), status=status.HTTP_202_ACCEPTED)
 
             result = run.result or {}
             revisions = list(result.get("revisions") or [])
@@ -2485,7 +3118,33 @@ class VibeMarketingRunControlView(APIView):
                 run.status = ContentFactoryRunStatus.QUEUED
                 run.current_step = "revision_requested"
             run.save(update_fields=["status", "current_step", "result", "updated_at"])
-            return Response(_serialize_run(run), status=status.HTTP_202_ACCEPTED)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action in {"promote-bundle", "publish-pr"}:
+            new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or remote_data.get("job_id") or "").strip()
+            if new_run_id and new_run_id != run.run_id:
+                config = _get_config(context.organization)
+                publish_payload = {
+                    **payload,
+                    "source_run_id": run.run_id,
+                    "delivery_mode": "publish_code",
+                    "delivery_mode_confirmed": True,
+                }
+                publish_run = _create_local_run(
+                    workflow="article_generation",
+                    domain=context.organization.domain,
+                    github_repo=config.github_repo or run.github_repo or "",
+                    actor_id=founder_actor_id_for_user(request.user),
+                    payload=publish_payload,
+                    remote_data=remote_data,
+                )
+                result = run.result or {}
+                result["publish_child_run_id"] = publish_run.run_id
+                result["latest_control_response"] = remote_data
+                result["promote_bundle_requested_at"] = timezone.now().isoformat()
+                run.result = result
+                run.save(update_fields=["result", "updated_at"])
+                return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
             run.approval_state = ContentFactoryApprovalState.APPROVED
@@ -2517,7 +3176,7 @@ class VibeMarketingRunControlView(APIView):
                 run.current_step = remote_data["current_step"]
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "updated_at"])
-        return Response(_serialize_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
 class VibeMarketingDailyReplayView(APIView):
