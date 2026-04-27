@@ -44,6 +44,7 @@ from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE_WARNING,
     XERO_REQUIRED_REPORT_SCOPES,
     xero_has_report_scope,
+    xero_missing_report_scopes,
     xero_needs_report_reconnect,
 )
 from integrations.utils import normalize_domain
@@ -346,7 +347,6 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             "accounting.payments.read",
             "accounting.settings.read",
             "accounting.contacts.read",
-            *XERO_REQUIRED_REPORT_SCOPES,
         }
         missing = []
         if not client_id:
@@ -367,7 +367,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         parsed_redirect = urllib.parse.urlparse(redirect_uri)
         if parsed_redirect.scheme not in {"http", "https"} or not parsed_redirect.netloc:
             return "Xero OAuth redirect URI must be an absolute http or https URL."
-        missing_scopes = sorted(required_scopes - scopes)
+        missing_scopes = sorted((required_scopes - scopes) | set(xero_missing_report_scopes(scopes)))
         if missing_scopes:
             return f"Xero OAuth scopes are missing: {', '.join(missing_scopes)}."
         return None

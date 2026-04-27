@@ -1312,7 +1312,7 @@ def publish_xero_metric_observations(
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code == 403:
                 warnings.append(
-                    "Xero reports permission was denied; reconnect Xero with accounting.reports.read to calculate Revenue, Burn Rate, Runway, and Revenue Growth."
+                    "Xero reports permission was denied; reconnect Xero with Profit and Loss and Balance Sheet report scopes to calculate Revenue, Burn Rate, Runway, and Revenue Growth."
                 )
             else:
                 warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")

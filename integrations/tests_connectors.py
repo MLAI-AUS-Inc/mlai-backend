@@ -142,7 +142,8 @@ def _xero_balance_sheet_report(*, total_bank: str) -> dict:
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
-        "accounting.reports.read",
+        "accounting.reports.profitandloss.read",
+        "accounting.reports.balancesheet.read",
         "accounting.settings.read",
         "accounting.contacts.read",
     ],
@@ -231,7 +232,8 @@ class ConnectorEndpointTests(TestCase):
                 self.assertIn("offline_access", params["scope"][0])
                 self.assertIn("accounting.invoices.read", params["scope"][0])
                 self.assertIn("accounting.payments.read", params["scope"][0])
-                self.assertIn("accounting.reports.read", params["scope"][0])
+                self.assertIn("accounting.reports.profitandloss.read", params["scope"][0])
+                self.assertIn("accounting.reports.balancesheet.read", params["scope"][0])
             if slug == "linear":
                 self.assertEqual(params["response_type"], ["code"])
                 self.assertEqual(params["client_id"], ["linear-client-id"])
@@ -629,7 +631,12 @@ class ConnectorEndpointTests(TestCase):
             token_expires_at=None,
             external_account_id="tenant-123",
             account_label="Demo Company",
-            scopes=["accounting.invoices.read", "accounting.payments.read", "accounting.reports.read"],
+            scopes=[
+                "accounting.invoices.read",
+                "accounting.payments.read",
+                "accounting.reports.profitandloss.read",
+                "accounting.reports.balancesheet.read",
+            ],
         )
 
         def fake_get(url, **kwargs):
@@ -794,7 +801,10 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(preview_response.data["cashCollected"], "500.00")
         self.assertFalse(preview_response.data["hasReportScope"])
         self.assertTrue(preview_response.data["needsReportReconnect"])
-        self.assertEqual(preview_response.data["requiredReportScopes"], ["accounting.reports.read"])
+        self.assertEqual(
+            preview_response.data["requiredReportScopes"],
+            ["accounting.reports.profitandloss.read", "accounting.reports.balancesheet.read"],
+        )
         self.assertIn("Reconnect Xero", preview_response.data["warnings"][0])
         self.assertEqual(preview_response.data["recurringInvoices"][0]["externalRecordId"], "rep-1")
         self.assertEqual(preview_response.data["recentInvoices"][0]["invoiceNumber"], "INV-001")
