@@ -299,3 +299,84 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["component_feedback_latest_batch"]["status"], "submitted")
         self.assertTrue(self.run.result["component_feedback_latest_batch"]["retryable"])
+
+    def test_workflow_progress_marks_package_complete_before_publish(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "promote_bundle_url": f"/api/runs/{self.run.run_id}/promote-bundle",
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "target_keyword": "australian founders",
+                "article_markdown": "steps/package_content_delivery/attempt-01/artifacts/article.md",
+            },
+        }
+        self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
+
+        response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(steps["package"]["status"], "complete")
+        self.assertEqual(steps["publish"]["status"], "ready")
+        self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
+        self.assertNotEqual(steps["publish"]["status"], "complete")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_creates_local_publish_child_run(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.save(update_fields=["github_token_encrypted", "github_repo", "updated_at"])
+        self.run.run_request = {
+            "domain": "mlai.au",
+            "topic": "Australian founders",
+            "target_keyword": "australian founders",
+            "delivery_mode": "content_only",
+        }
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=202, payload={"run_id": "article-publish-child-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-publish-child-1")
+        publish_run = ContentFactoryRun.objects.get(run_id="article-publish-child-1")
+        self.assertEqual(publish_run.workflow, "article_generation")
+        self.assertEqual(publish_run.run_request["source_run_id"], self.run.run_id)
+        self.assertEqual(publish_run.run_request["delivery_mode"], "publish_code")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-1")
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["publish"]["status"], "running")

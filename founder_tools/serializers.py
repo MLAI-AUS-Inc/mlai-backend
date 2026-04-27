@@ -105,6 +105,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     input_aliases = {
         "companyId": ("company_id",),
         "companyLinkedInUrl": ("company_linkedin_url",),
+        "organizationKind": ("organization_kind",),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -120,6 +121,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     seedKeywords = serializers.JSONField(required=False)
     founderNames = serializers.JSONField(required=False)
     stage = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    organizationKind = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     notes = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     githubRepo = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     articleDeliveryMode = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -220,6 +222,7 @@ def _serialize_startup_profile(organization):
     return {
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
+        "organizationKind": getattr(profile, "organization_kind", ""),
         "notes": profile.notes,
         "companyAliases": list(profile.company_aliases or []),
         "domainAliases": list(profile.domain_aliases or []),
