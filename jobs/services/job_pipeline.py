@@ -7,6 +7,7 @@ from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime as django_parse_datetime
 
 from jobs.conf import settings
 from jobs.models import JobListing, JobRun, SeekJob, SourceRunLog
@@ -116,6 +117,9 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         for term in ("australia", "sydney", "melbourne", "brisbane", "perth", "adelaide", "canberra")
     ) else None
 
+    raw_date_posted = raw.get("date_posted") or date_posted_from_days(raw.get("posted_days_ago"))
+    normalized_date_posted = normalize_posted_datetime(raw_date_posted)
+
     return {
         "run_id": run.run_id,
         "run_date": run.run_date,
@@ -140,11 +144,26 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "apply_url": raw.get("apply_url") or raw.get("job_url"),
         "source_name": raw.get("source_name") or "Unknown",
         "source_type": raw.get("source_type") or "broad_board",
-        "date_posted": raw.get("date_posted") or date_posted_from_days(raw.get("posted_days_ago")),
+        "date_posted": normalized_date_posted,
         "posted_text": clean_text(raw.get("posted_text")) or None,
         "description": clean_text(raw.get("description")) or None,
         "source_quality_score": raw.get("source_quality_score"),
     }
+
+
+def normalize_posted_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, str):
+        parsed = django_parse_datetime(value)
+        if not parsed:
+            return None
+        value = parsed
+    if not isinstance(value, datetime):
+        return None
+    if timezone.is_naive(value):
+        return timezone.make_aware(value, _jobs_schedule_timezone())
+    return value.astimezone(_jobs_schedule_timezone())
 
 
 def is_valid_job_target(raw: dict[str, Any]) -> bool:

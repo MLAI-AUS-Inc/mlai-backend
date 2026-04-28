@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -185,12 +185,10 @@ def recency_score(date_posted: datetime | str | None, posted_text: str | None) -
         return max(0.0, 1.0 - (days / 7))
     if not date_posted:
         return 0.35
-    if isinstance(date_posted, str):
-        parsed_date = parse_datetime(date_posted)
-        if not parsed_date:
-            return 0.35
-        date_posted = parsed_date
-    age_days = max(0, (datetime.utcnow() - date_posted).days)
+    date_posted = coerce_datetime(date_posted)
+    if not date_posted:
+        return 0.35
+    age_days = max(0, (datetime.now(dt_timezone.utc) - date_posted).days)
     return max(0.0, 1.0 - (age_days / 7))
 
 
@@ -200,13 +198,22 @@ def parse_datetime(value: str) -> datetime | None:
         return None
     for candidate in (text, text.replace("Z", "+00:00")):
         try:
-            parsed = datetime.fromisoformat(candidate)
-            if parsed.tzinfo:
-                parsed = parsed.replace(tzinfo=None)
-            return parsed
+            return datetime.fromisoformat(candidate)
         except ValueError:
             continue
     return None
+
+
+def coerce_datetime(value: datetime | str | None) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, str):
+        value = parse_datetime(value)
+        if not value:
+            return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt_timezone.utc)
+    return value.astimezone(dt_timezone.utc)
 
 
 def quality_score(job: dict[str, Any]) -> float:
