@@ -32,6 +32,7 @@ urlpatterns = [
     path('api/v1/vibe-raising/', include('vibe_raising.urls')),
     path('api/v1/vibe-marketing/', include('content_factory.urls_vibe_marketing')),
     path('api/v1/points/', include('roo.urls')),
+    path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API
     path('api/content-factory/', include('content_factory.urls_service')),
