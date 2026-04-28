@@ -103,7 +103,7 @@ def melbourne_today() -> str:
 def date_posted_from_days(days_ago: int | None) -> datetime | None:
     if days_ago is None:
         return None
-    return datetime.now(MELBOURNE_TZ).replace(tzinfo=None) - timedelta(days=days_ago)
+    return datetime.now(MELBOURNE_TZ) - timedelta(days=days_ago)
 
 
 def collect_from_source(
