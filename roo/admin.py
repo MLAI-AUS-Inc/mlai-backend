@@ -9,10 +9,19 @@ from .models import (
 
 @admin.register(PointsAdmin)
 class PointsAdminAdmin(admin.ModelAdmin):
-    list_display = ('slack_user_id', 'role', 'portfolio', 'is_active', 'created_at')
+    list_display = ('admin_name', 'slack_user_id', 'role', 'portfolio', 'is_active', 'created_at')
+    list_display_links = ('admin_name',)
+    list_select_related = ('user',)
     list_filter = ('role', 'portfolio', 'is_active')
-    search_fields = ('slack_user_id', 'user__email')
+    search_fields = ('slack_user_id', 'user__email', 'user__first_name', 'user__last_name')
     readonly_fields = ('created_at',)
+
+    def admin_name(self, obj):
+        if obj.user:
+            return obj.user.full_name or obj.user.email
+        return obj.slack_user_id
+    admin_name.short_description = 'Admin Name'
+    admin_name.admin_order_field = 'user__first_name'
 
 
 @admin.register(PointsAccount)
@@ -127,4 +136,3 @@ class QuestProgressAdmin(admin.ModelAdmin):
     search_fields = ('slack_user_id', 'quest_id')
     readonly_fields = ('first_progress_at', 'created_at', 'updated_at')
     ordering = ('-updated_at',)
-
