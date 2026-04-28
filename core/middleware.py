@@ -76,6 +76,50 @@ class PointsEndpointTimeoutMiddleware:
         )
         return any(marker in message for marker in timeout_markers)
 
+    @staticmethod
+    def _is_connection_interruption_error(exc: Exception) -> bool:
+        error_parts = [str(exc)]
+        if exc.__cause__:
+            error_parts.append(str(exc.__cause__))
+        if exc.__context__:
+            error_parts.append(str(exc.__context__))
+        message = " ".join(error_parts).lower()
+        interruption_markers = (
+            "terminating connection due to administrator command",
+            "server closed the connection unexpectedly",
+            "connection already closed",
+            "connection is closed",
+            "connection not open",
+            "connection reset by peer",
+            "ssl connection has been closed unexpectedly",
+            "ssl syscall error",
+            "adminshutdown",
+        )
+        return any(marker in message for marker in interruption_markers)
+
+    @staticmethod
+    def _json_503_response(
+        *,
+        request_id: str,
+        message: str,
+        error_code: str,
+        error: str,
+        retryable: bool = True,
+    ) -> JsonResponse:
+        response = JsonResponse(
+            {
+                "status": "error",
+                "message": message,
+                "error_code": error_code,
+                "retryable": retryable,
+                "error": error,
+            },
+            status=503,
+        )
+        if request_id:
+            response["X-Request-ID"] = request_id
+        return response
+
     def __call__(self, request):
         if not self._is_points_path(request.path):
             return self.get_response(request)
@@ -94,29 +138,41 @@ class PointsEndpointTimeoutMiddleware:
                     cursor.execute(f"SET LOCAL lock_timeout = {lock_timeout_ms}")
                 return self.get_response(request)
         except OperationalError as exc:
-            if not self._is_timeout_error(exc):
+            is_timeout_error = self._is_timeout_error(exc)
+            is_connection_interruption_error = self._is_connection_interruption_error(exc)
+            if not is_timeout_error and not is_connection_interruption_error:
                 raise
+
+            if is_connection_interruption_error:
+                try:
+                    connection.close()
+                except Exception:
+                    logger.exception("points_connection_close_failed")
 
             request_id = getattr(request, "request_id", "")
             duration_ms = (time.monotonic() - started_at) * 1000
+            if is_timeout_error:
+                message = "Points subsystem timed out"
+                error_code = "points_timeout"
+            else:
+                message = "Points subsystem is temporarily unavailable"
+                error_code = "database_connection_interrupted"
             logger.warning(
-                "points_request_timed_out request_id=%s worker_pid=%s method=%s path=%s duration_ms=%.2f exc_type=%s error=%s",
+                "points_request_failed request_id=%s worker_pid=%s method=%s path=%s duration_ms=%.2f exc_type=%s error_code=%s retryable=%s error=%s",
                 request_id,
                 os.getpid(),
                 request.method,
                 request.get_full_path(),
                 duration_ms,
                 exc.__class__.__name__,
+                error_code,
+                True,
                 exc,
             )
-            response = JsonResponse(
-                {
-                    "status": "error",
-                    "message": "Points subsystem timed out",
-                    "error": str(exc),
-                },
-                status=503,
+            return self._json_503_response(
+                request_id=request_id,
+                message=message,
+                error_code=error_code,
+                retryable=True,
+                error=str(exc),
             )
-            if request_id:
-                response["X-Request-ID"] = request_id
-            return response
