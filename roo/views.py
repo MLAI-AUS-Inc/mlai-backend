@@ -734,6 +734,38 @@ class CoworkingViewSet(viewsets.ViewSet):
         
         return Response(results)
 
+    @action(detail=False, methods=['get'])
+    def report(self, request):
+        """Super-admin-only active coworking booking report."""
+        slack_user_id = (request.query_params.get('slack_user_id') or '').strip()
+        start_date_param = request.query_params.get('start_date')
+        end_date_param = request.query_params.get('end_date')
+
+        if not slack_user_id:
+            return Response(
+                {'error': 'slack_user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_points_super_admin(slack_user_id):
+            return Response(
+                {'error': 'Only the Roo points super admin can generate coworking reports'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not start_date_param or not end_date_param:
+            return Response(
+                {'error': 'start_date and end_date are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            start_date = date.fromisoformat(start_date_param)
+            end_date = date.fromisoformat(end_date_param)
+            report = CoworkingService.build_report(start_date, end_date)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(report)
+
     @action(detail=False, methods=['post'])
     def book(self, request):
         """Book a coworking day. Users can only book for today."""

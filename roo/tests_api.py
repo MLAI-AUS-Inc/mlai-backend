@@ -471,6 +471,112 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 6)
 
 
+class CoworkingReportViewSetTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('coworking-report')
+        self.super_admin_slack_id = 'U05QPB483K9'
+        self.other_slack_id = 'UNOTSUPER'
+        self.user_1 = User.objects.create_user(email='report1@example.com', slack_id='UREPORT1')
+        self.user_2 = User.objects.create_user(email='report2@example.com', slack_id='UREPORT2')
+        self.user_3 = User.objects.create_user(email='report3@example.com', slack_id='UREPORT3')
+
+    def _create_booking(self, user, booking_date, status='booked'):
+        return CoworkingBooking.objects.create(
+            user=user,
+            date=booking_date,
+            status=status,
+            points_cost=4,
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_report_counts_active_bookings_and_includes_rollups(self, mock_permission):
+        self._create_booking(self.user_1, date(2026, 1, 1))
+        self._create_booking(self.user_2, date(2026, 1, 1))
+        self._create_booking(self.user_1, date(2026, 1, 2), status='cancelled')
+        self._create_booking(self.user_1, date(2026, 1, 5))
+        self._create_booking(self.user_3, date(2026, 1, 10))
+        self._create_booking(self.user_2, date(2026, 2, 1))
+
+        response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.super_admin_slack_id,
+                'start_date': '2026-01-01',
+                'end_date': '2026-02-03',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['range']['source'], 'active_coworking_bookings')
+        self.assertEqual(response.data['totals']['booked_user_days'], 5)
+        self.assertEqual(response.data['totals']['unique_users'], 3)
+        self.assertEqual(response.data['totals']['active_days'], 4)
+        self.assertEqual(response.data['totals']['range_days'], 34)
+        self.assertEqual(response.data['totals']['average_per_day'], 0.15)
+        self.assertEqual(
+            response.data['totals']['busiest_days'],
+            [{'date': '2026-01-01', 'booked_users': 2}],
+        )
+
+        daily_by_date = {row['date']: row['booked_users'] for row in response.data['daily']}
+        self.assertEqual(daily_by_date['2026-01-01'], 2)
+        self.assertEqual(daily_by_date['2026-01-02'], 0)
+        self.assertEqual(daily_by_date['2026-01-03'], 0)
+        self.assertEqual(daily_by_date['2026-02-01'], 1)
+        self.assertEqual(len(response.data['daily']), 34)
+
+        weekly_total = sum(row['booked_user_days'] for row in response.data['weekly'])
+        monthly_by_month = {row['month']: row['booked_user_days'] for row in response.data['monthly']}
+        self.assertEqual(weekly_total, 5)
+        self.assertEqual(monthly_by_month['2026-01'], 4)
+        self.assertEqual(monthly_by_month['2026-02'], 1)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_report_requires_super_admin(self, mock_permission):
+        response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.other_slack_id,
+                'start_date': '2026-01-01',
+                'end_date': '2026-01-31',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('super admin', response.data['error'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_report_rejects_invalid_ranges(self, mock_permission):
+        invalid_date_response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.super_admin_slack_id,
+                'start_date': '2026-99-01',
+                'end_date': '2026-01-31',
+            },
+        )
+        reversed_range_response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.super_admin_slack_id,
+                'start_date': '2026-02-01',
+                'end_date': '2026-01-31',
+            },
+        )
+        too_long_response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.super_admin_slack_id,
+                'start_date': '2026-01-01',
+                'end_date': '2027-01-02',
+            },
+        )
+
+        self.assertEqual(invalid_date_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(reversed_range_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(too_long_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
 class FirstChannelPostAwardViewTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(

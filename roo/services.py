@@ -5,10 +5,13 @@ This module provides safe, idempotent operations for the points system.
 All write operations use database transactions and idempotency keys to prevent
 race conditions and duplicate transactions.
 """
+import calendar
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 from django.conf import settings
 from django.db import transaction, IntegrityError
+from django.db.models import Count
 from django.utils import timezone
 
 from .models import (
@@ -321,6 +324,8 @@ class CoworkingService:
     """
     Service class for coworking bookings.
     """
+
+    MAX_REPORT_DAYS = 366
     
     @staticmethod
     def get_coworking_cost() -> int:
@@ -370,6 +375,102 @@ class CoworkingService:
         booked = CoworkingService.get_booked_count(booking_date)
         available = max(0, capacity - booked)
         return available, capacity
+
+    @staticmethod
+    def build_report(start_date: date, end_date: date) -> dict:
+        """Build an inclusive active-booking report for a date range."""
+        range_days = (end_date - start_date).days + 1
+        if range_days <= 0:
+            raise ValueError("end_date must be on or after start_date")
+        if range_days > CoworkingService.MAX_REPORT_DAYS:
+            raise ValueError(
+                f"Coworking reports are limited to {CoworkingService.MAX_REPORT_DAYS} days"
+            )
+
+        daily_counts = OrderedDict(
+            (start_date + timedelta(days=offset), 0)
+            for offset in range(range_days)
+        )
+
+        bookings = CoworkingBooking.objects.filter(
+            date__range=(start_date, end_date),
+            status='booked',
+        )
+        for row in (
+            bookings.values('date')
+            .annotate(booked_users=Count('user_id', distinct=True))
+            .order_by('date')
+        ):
+            daily_counts[row['date']] = row['booked_users']
+
+        daily = [
+            {
+                'date': day.isoformat(),
+                'booked_users': count,
+            }
+            for day, count in daily_counts.items()
+        ]
+
+        weekly_buckets = OrderedDict()
+        monthly_buckets = OrderedDict()
+
+        for day, count in daily_counts.items():
+            week_start = day - timedelta(days=day.weekday())
+            week_end = week_start + timedelta(days=6)
+            if week_start not in weekly_buckets:
+                weekly_buckets[week_start] = {
+                    'week_start': week_start.isoformat(),
+                    'week_end': week_end.isoformat(),
+                    'booked_user_days': 0,
+                    'active_days': 0,
+                }
+            weekly_buckets[week_start]['booked_user_days'] += count
+            if count > 0:
+                weekly_buckets[week_start]['active_days'] += 1
+
+            month_key = (day.year, day.month)
+            if month_key not in monthly_buckets:
+                _, last_day = calendar.monthrange(day.year, day.month)
+                monthly_buckets[month_key] = {
+                    'month': f"{day.year:04d}-{day.month:02d}",
+                    'month_start': date(day.year, day.month, 1).isoformat(),
+                    'month_end': date(day.year, day.month, last_day).isoformat(),
+                    'booked_user_days': 0,
+                    'active_days': 0,
+                }
+            monthly_buckets[month_key]['booked_user_days'] += count
+            if count > 0:
+                monthly_buckets[month_key]['active_days'] += 1
+
+        total_user_days = sum(daily_counts.values())
+        max_daily = max(daily_counts.values()) if daily_counts else 0
+        busiest_days = [
+            {
+                'date': day.isoformat(),
+                'booked_users': count,
+            }
+            for day, count in daily_counts.items()
+            if count == max_daily and count > 0
+        ]
+
+        return {
+            'range': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+                'source': 'active_coworking_bookings',
+            },
+            'totals': {
+                'booked_user_days': total_user_days,
+                'unique_users': bookings.values('user_id').distinct().count(),
+                'active_days': sum(1 for count in daily_counts.values() if count > 0),
+                'range_days': range_days,
+                'average_per_day': round(total_user_days / range_days, 2),
+                'busiest_days': busiest_days,
+            },
+            'daily': daily,
+            'weekly': list(weekly_buckets.values()),
+            'monthly': list(monthly_buckets.values()),
+        }
     
     @staticmethod
     def is_refundable(booking_date: date) -> bool:
