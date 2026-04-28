@@ -42,9 +42,11 @@ from integrations.services.gmail import build_gmail_service, get_message_metadat
 from startup_updates.services import bind_user_to_startup, get_default_gmail_binding, resolve_or_create_profile
 from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE_WARNING,
+    XERO_REPORT_SCOPE_CONFIGURATION_WARNING,
+    XERO_REQUIRED_OPERATIONAL_SCOPES,
     XERO_REQUIRED_REPORT_SCOPES,
+    xero_can_request_report_scopes,
     xero_has_report_scope,
-    xero_missing_report_scopes,
     xero_needs_report_reconnect,
 )
 from integrations.utils import normalize_domain
@@ -265,6 +267,10 @@ def _xero_oauth_scope_list() -> list[str]:
     return deduped_scopes
 
 
+def _xero_can_request_report_scopes() -> bool:
+    return xero_can_request_report_scopes(_xero_oauth_scope_list())
+
+
 def _slack_oauth_user_scope_list() -> list[str]:
     configured = _as_scope_list(
         getattr(settings, "SLACK_OAUTH_USER_SCOPES", None)
@@ -341,13 +347,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         client_secret = str(getattr(settings, "XERO_CLIENT_SECRET", "") or "").strip()
         redirect_uri = str(getattr(settings, "XERO_OAUTH_REDIRECT_URI", "") or "").strip()
         scopes = set(_xero_oauth_scope_list())
-        required_scopes = {
-            "offline_access",
-            "accounting.invoices.read",
-            "accounting.payments.read",
-            "accounting.settings.read",
-            "accounting.contacts.read",
-        }
+        required_scopes = set(XERO_REQUIRED_OPERATIONAL_SCOPES)
         missing = []
         if not client_id:
             missing.append("XERO_CLIENT_ID")
@@ -367,7 +367,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         parsed_redirect = urllib.parse.urlparse(redirect_uri)
         if parsed_redirect.scheme not in {"http", "https"} or not parsed_redirect.netloc:
             return "Xero OAuth redirect URI must be an absolute http or https URL."
-        missing_scopes = sorted((required_scopes - scopes) | set(xero_missing_report_scopes(scopes)))
+        missing_scopes = sorted(required_scopes - scopes)
         if missing_scopes:
             return f"Xero OAuth scopes are missing: {', '.join(missing_scopes)}."
         return None
@@ -2072,7 +2072,9 @@ def _xero_report_metric_window(today: date) -> tuple[date, date]:
 
 def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection, today: date) -> dict[str, Any]:
     has_report_scope = xero_has_report_scope(connection.scopes)
-    needs_report_reconnect = xero_needs_report_reconnect(connection.scopes)
+    can_request_report_scopes = _xero_can_request_report_scopes()
+    needs_report_scope_configuration = not has_report_scope and not can_request_report_scopes
+    needs_report_reconnect = not has_report_scope and can_request_report_scopes and xero_needs_report_reconnect(connection.scopes)
     metric_warnings: list[str] = []
     metrics_published_count = 0
 
@@ -2081,7 +2083,11 @@ def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection,
             "Xero report metric sync skipped because reports scope is missing",
             extra={"connection_id": connection.id, "user_id": connection.user_id},
         )
-        metric_warnings.append(XERO_REPORT_SCOPE_WARNING)
+        metric_warnings.append(
+            XERO_REPORT_SCOPE_CONFIGURATION_WARNING
+            if needs_report_scope_configuration
+            else XERO_REPORT_SCOPE_WARNING
+        )
     elif not connection.organization_id:
         logger.warning(
             "Xero report metric sync skipped because connection is not linked to an organization",
@@ -2118,6 +2124,10 @@ def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection,
         "has_report_scope": has_report_scope,
         "needsReportReconnect": needs_report_reconnect,
         "needs_report_reconnect": needs_report_reconnect,
+        "canRequestReportScopes": can_request_report_scopes,
+        "can_request_report_scopes": can_request_report_scopes,
+        "needsReportScopeConfiguration": needs_report_scope_configuration,
+        "needs_report_scope_configuration": needs_report_scope_configuration,
         "metricsPublishedCount": metrics_published_count,
         "metrics_published_count": metrics_published_count,
         "metricWarnings": metric_warnings,
@@ -2326,6 +2336,10 @@ def serialize_xero_preview(
             "has_report_scope": False,
             "needsReportReconnect": False,
             "needs_report_reconnect": False,
+            "canRequestReportScopes": _xero_can_request_report_scopes(),
+            "can_request_report_scopes": _xero_can_request_report_scopes(),
+            "needsReportScopeConfiguration": False,
+            "needs_report_scope_configuration": False,
             "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
             "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         }
@@ -2373,9 +2387,13 @@ def serialize_xero_preview(
     if len(currencies) > 1:
         warnings.append("Xero records include multiple currencies; do not combine them into one MRR value.")
     has_report_scope = xero_has_report_scope(connection.scopes)
-    needs_report_reconnect = xero_needs_report_reconnect(connection.scopes)
+    can_request_report_scopes = _xero_can_request_report_scopes()
+    needs_report_scope_configuration = not has_report_scope and not can_request_report_scopes
+    needs_report_reconnect = not has_report_scope and can_request_report_scopes and xero_needs_report_reconnect(connection.scopes)
     if needs_report_reconnect:
         warnings.append(XERO_REPORT_SCOPE_WARNING)
+    elif needs_report_scope_configuration:
+        warnings.append(XERO_REPORT_SCOPE_CONFIGURATION_WARNING)
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
@@ -2416,6 +2434,10 @@ def serialize_xero_preview(
         "has_report_scope": has_report_scope,
         "needsReportReconnect": needs_report_reconnect,
         "needs_report_reconnect": needs_report_reconnect,
+        "canRequestReportScopes": can_request_report_scopes,
+        "can_request_report_scopes": can_request_report_scopes,
+        "needsReportScopeConfiguration": needs_report_scope_configuration,
+        "needs_report_scope_configuration": needs_report_scope_configuration,
         "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
         "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         "recurringInvoices": [_serialize_xero_record(record) for record in recurring_records],
@@ -4538,15 +4560,28 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
     }
     if provider == ExternalServiceProvider.XERO:
         has_report_scope = xero_has_report_scope(connection.scopes if connection else [])
-        needs_report_reconnect = bool(connection) and xero_needs_report_reconnect(connection.scopes)
+        can_request_report_scopes = _xero_can_request_report_scopes()
+        needs_report_scope_configuration = bool(connection) and not has_report_scope and not can_request_report_scopes
+        needs_report_reconnect = (
+            bool(connection)
+            and not has_report_scope
+            and can_request_report_scopes
+            and xero_needs_report_reconnect(connection.scopes)
+        )
         if status_value in {"connected", "syncing"} and needs_report_reconnect:
             payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_WARNING
+        elif status_value in {"connected", "syncing"} and needs_report_scope_configuration:
+            payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_CONFIGURATION_WARNING
         payload.update(
             {
                 "hasReportScope": has_report_scope,
                 "has_report_scope": has_report_scope,
                 "needsReportReconnect": needs_report_reconnect,
                 "needs_report_reconnect": needs_report_reconnect,
+                "canRequestReportScopes": can_request_report_scopes,
+                "can_request_report_scopes": can_request_report_scopes,
+                "needsReportScopeConfiguration": needs_report_scope_configuration,
+                "needs_report_scope_configuration": needs_report_scope_configuration,
                 "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
                 "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
             }

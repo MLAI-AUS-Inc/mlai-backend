@@ -142,8 +142,6 @@ def _xero_balance_sheet_report(*, total_bank: str) -> dict:
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
-        "accounting.reports.profitandloss.read",
-        "accounting.reports.balancesheet.read",
         "accounting.settings.read",
         "accounting.contacts.read",
     ],
@@ -198,6 +196,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(sources["stripe"]["status"], "connected")
         self.assertEqual(sources["stripe"]["externalAccountId"], "acct_123")
         self.assertEqual(sources["xero"]["status"], "not_connected")
+        self.assertFalse(sources["xero"]["canRequestReportScopes"])
+        self.assertFalse(sources["xero"]["needsReportScopeConfiguration"])
 
     def test_connector_connect_builds_oauth_redirect_and_stores_state(self):
         cases = {
@@ -232,8 +232,8 @@ class ConnectorEndpointTests(TestCase):
                 self.assertIn("offline_access", params["scope"][0])
                 self.assertIn("accounting.invoices.read", params["scope"][0])
                 self.assertIn("accounting.payments.read", params["scope"][0])
-                self.assertIn("accounting.reports.profitandloss.read", params["scope"][0])
-                self.assertIn("accounting.reports.balancesheet.read", params["scope"][0])
+                self.assertNotIn("accounting.reports.profitandloss.read", params["scope"][0])
+                self.assertNotIn("accounting.reports.balancesheet.read", params["scope"][0])
             if slug == "linear":
                 self.assertEqual(params["response_type"], ["code"])
                 self.assertEqual(params["client_id"], ["linear-client-id"])
@@ -243,6 +243,23 @@ class ConnectorEndpointTests(TestCase):
                 session_state["next"],
                 "http://localhost:5173/vibe-raising/connect-data?next=/vibe-raising/create-update",
             )
+
+    @override_settings(
+        XERO_OAUTH_SCOPES=[
+            "offline_access",
+            "accounting.invoices.read",
+            "accounting.payments.read",
+            "accounting.settings.read",
+        ],
+    )
+    def test_xero_connect_requires_operational_scopes(self):
+        response = self.client.get(
+            "/integrations/connect/xero",
+            {"next": "http://localhost:5173/vibe-raising/connect-data"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("accounting.contacts.read", response.content.decode())
 
     @override_settings(
         STRIPE_OAUTH_REDIRECT_URI="https://api.mlai.au/integrations/callback/stripe",
@@ -589,9 +606,11 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(response.data["syncRuns"][0]["invoicesSynced"], 1)
         self.assertEqual(response.data["syncRuns"][0]["paymentsSynced"], 1)
         self.assertFalse(response.data["syncRuns"][0]["hasReportScope"])
-        self.assertTrue(response.data["syncRuns"][0]["needsReportReconnect"])
+        self.assertFalse(response.data["syncRuns"][0]["needsReportReconnect"])
+        self.assertFalse(response.data["syncRuns"][0]["canRequestReportScopes"])
+        self.assertTrue(response.data["syncRuns"][0]["needsReportScopeConfiguration"])
         self.assertEqual(response.data["syncRuns"][0]["metricsPublishedCount"], 0)
-        self.assertIn("Reconnect Xero", response.data["syncRuns"][0]["metricWarnings"][0])
+        self.assertIn("report metrics are disabled", response.data["syncRuns"][0]["metricWarnings"][0])
         connection.refresh_from_db()
         self.assertEqual(connection.access_token, "fresh-xero-access")
         self.assertEqual(connection.refresh_token, "new-xero-refresh")
@@ -800,16 +819,48 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(preview_response.data["monthlyRecurringRevenue"], "1200.00")
         self.assertEqual(preview_response.data["cashCollected"], "500.00")
         self.assertFalse(preview_response.data["hasReportScope"])
-        self.assertTrue(preview_response.data["needsReportReconnect"])
+        self.assertFalse(preview_response.data["needsReportReconnect"])
+        self.assertFalse(preview_response.data["canRequestReportScopes"])
+        self.assertTrue(preview_response.data["needsReportScopeConfiguration"])
         self.assertEqual(
             preview_response.data["requiredReportScopes"],
             ["accounting.reports.profitandloss.read", "accounting.reports.balancesheet.read"],
         )
-        self.assertIn("Reconnect Xero", preview_response.data["warnings"][0])
+        self.assertIn("report metrics are disabled", preview_response.data["warnings"][0])
         self.assertEqual(preview_response.data["recurringInvoices"][0]["externalRecordId"], "rep-1")
         self.assertEqual(preview_response.data["recentInvoices"][0]["invoiceNumber"], "INV-001")
         self.assertEqual(invoices_response.status_code, 200)
         self.assertEqual(invoices_response.data["invoices"][0]["externalRecordId"], "inv-1")
+
+    @override_settings(
+        XERO_OAUTH_SCOPES=[
+            "offline_access",
+            "accounting.invoices.read",
+            "accounting.payments.read",
+            "accounting.settings.read",
+            "accounting.contacts.read",
+            "accounting.reports.profitandloss.read",
+            "accounting.reports.balancesheet.read",
+        ],
+    )
+    def test_xero_preview_prompts_reconnect_when_report_scopes_are_configured(self):
+        ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.XERO,
+            access_token="xero-access",
+            refresh_token="xero-refresh",
+            external_account_id="tenant-123",
+            account_label="Demo Company",
+        )
+
+        response = self.api_client.get("/api/v1/integrations/financial/xero/preview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["hasReportScope"])
+        self.assertTrue(response.data["canRequestReportScopes"])
+        self.assertFalse(response.data["needsReportScopeConfiguration"])
+        self.assertTrue(response.data["needsReportReconnect"])
+        self.assertIn("Reconnect Xero", response.data["warnings"][0])
 
     def test_xero_preview_returns_json_when_storage_is_unavailable(self):
         with patch(
