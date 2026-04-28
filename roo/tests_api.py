@@ -474,11 +474,16 @@ class CoworkingViewSetTests(APITestCase):
 class CoworkingReportViewSetTests(APITestCase):
     def setUp(self):
         self.url = reverse('coworking-report')
-        self.super_admin_slack_id = 'U05QPB483K9'
-        self.other_slack_id = 'UNOTSUPER'
+        self.admin_slack_id = 'UPOINTSADMIN'
+        self.other_slack_id = 'UNOTADMIN'
         self.user_1 = User.objects.create_user(email='report1@example.com', slack_id='UREPORT1')
         self.user_2 = User.objects.create_user(email='report2@example.com', slack_id='UREPORT2')
         self.user_3 = User.objects.create_user(email='report3@example.com', slack_id='UREPORT3')
+        PointsAdmin.objects.create(
+            slack_user_id=self.admin_slack_id,
+            role='admin',
+            is_active=True,
+        )
 
     def _create_booking(self, user, booking_date, status='booked'):
         return CoworkingBooking.objects.create(
@@ -500,7 +505,7 @@ class CoworkingReportViewSetTests(APITestCase):
         response = self.client.get(
             self.url,
             {
-                'slack_user_id': self.super_admin_slack_id,
+                'slack_user_id': self.admin_slack_id,
                 'start_date': '2026-01-01',
                 'end_date': '2026-02-03',
             },
@@ -532,7 +537,7 @@ class CoworkingReportViewSetTests(APITestCase):
         self.assertEqual(monthly_by_month['2026-02'], 1)
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
-    def test_report_requires_super_admin(self, mock_permission):
+    def test_report_requires_points_admin(self, mock_permission):
         response = self.client.get(
             self.url,
             {
@@ -543,14 +548,14 @@ class CoworkingReportViewSetTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertIn('super admin', response.data['error'])
+        self.assertIn('Points Admins', response.data['error'])
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_report_rejects_invalid_ranges(self, mock_permission):
         invalid_date_response = self.client.get(
             self.url,
             {
-                'slack_user_id': self.super_admin_slack_id,
+                'slack_user_id': self.admin_slack_id,
                 'start_date': '2026-99-01',
                 'end_date': '2026-01-31',
             },
@@ -558,7 +563,7 @@ class CoworkingReportViewSetTests(APITestCase):
         reversed_range_response = self.client.get(
             self.url,
             {
-                'slack_user_id': self.super_admin_slack_id,
+                'slack_user_id': self.admin_slack_id,
                 'start_date': '2026-02-01',
                 'end_date': '2026-01-31',
             },
@@ -566,7 +571,7 @@ class CoworkingReportViewSetTests(APITestCase):
         too_long_response = self.client.get(
             self.url,
             {
-                'slack_user_id': self.super_admin_slack_id,
+                'slack_user_id': self.admin_slack_id,
                 'start_date': '2026-01-01',
                 'end_date': '2027-01-02',
             },

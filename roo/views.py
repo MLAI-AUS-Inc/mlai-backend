@@ -736,7 +736,7 @@ class CoworkingViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def report(self, request):
-        """Super-admin-only active coworking booking report."""
+        """Points-admin-only active coworking booking report."""
         slack_user_id = (request.query_params.get('slack_user_id') or '').strip()
         start_date_param = request.query_params.get('start_date')
         end_date_param = request.query_params.get('end_date')
@@ -746,9 +746,9 @@ class CoworkingViewSet(viewsets.ViewSet):
                 {'error': 'slack_user_id is required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not is_points_super_admin(slack_user_id):
+        if not is_points_admin(slack_user_id):
             return Response(
-                {'error': 'Only the Roo points super admin can generate coworking reports'},
+                {'error': 'Only Roo Points Admins can generate coworking reports'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         if not start_date_param or not end_date_param:
