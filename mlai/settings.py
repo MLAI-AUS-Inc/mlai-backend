@@ -334,10 +334,11 @@ if not DEBUG:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-try:
-    from .settings_prod import *
-except ImportError:
-    pass
+if IS_PRODUCTION_ENV:
+    try:
+        from .settings_prod import *
+    except ImportError:
+        pass
 
 # App URLs
 DEFAULT_FRONTEND_URL = os.getenv('DEFAULT_FRONTEND_URL') or (
