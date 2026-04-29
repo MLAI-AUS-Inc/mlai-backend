@@ -16,7 +16,7 @@ rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh $USER@$DROPLET_IP << EOF
+ssh $USER@$DROPLET_IP <<EOF
     set -euo pipefail
 
     upsert_env_value() {
@@ -189,9 +189,9 @@ print(index_name)
     docker compose up -d --force-recreate web scheduler bridge-worker
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."
-    running_release=$(docker compose exec -T web sh -lc 'printf "%s" "$APP_RELEASE"' </dev/null)
-    if [ "$running_release" != "$APP_RELEASE" ]; then
-        echo "Expected running web container APP_RELEASE=$APP_RELEASE but found $running_release"
+    running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
+    if [ "\$running_release" != "$APP_RELEASE" ]; then
+        echo "Expected running web container APP_RELEASE=$APP_RELEASE but found \$running_release"
         exit 1
     fi
 
