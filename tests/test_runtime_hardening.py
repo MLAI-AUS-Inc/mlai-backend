@@ -83,6 +83,8 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn('runtime_services=(web scheduler)', deploy)
         self.assertIn('runtime_services+=(bridge-worker)', deploy)
         self.assertIn('if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then', deploy)
+        self.assertIn('docker compose stop bridge-worker || true', deploy)
+        self.assertIn('docker compose rm -f bridge-worker || true', deploy)
         self.assertLess(
             deploy.index("docker compose stop web"),
             deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),

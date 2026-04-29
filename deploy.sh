@@ -93,7 +93,9 @@ ssh $USER@$DROPLET_IP <<EOF
     runtime_services=(web scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
         runtime_services+=(bridge-worker)
+        bridge_worker_enabled=1
     else
+        bridge_worker_enabled=0
         echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
     fi
 
@@ -199,6 +201,12 @@ print(index_name)
 
     echo "🌐 Starting runtime services: \${runtime_services[*]}..."
     docker compose up -d --force-recreate "\${runtime_services[@]}"
+
+    if [ "\$bridge_worker_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled bridge-worker service..."
+        docker compose stop bridge-worker || true
+        docker compose rm -f bridge-worker || true
+    fi
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
