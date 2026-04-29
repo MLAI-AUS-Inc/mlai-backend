@@ -128,7 +128,7 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     docker compose build web scheduler bridge-worker
 
     echo "🔗 Validating production URL configuration and service connectivity..."
-    docker compose run --rm --no-deps web python manage.py validate_prod_urls --check-connectivity --timeout 8
+    compose_run_web python manage.py validate_prod_urls --check-connectivity --timeout 8
 
     echo "🔍 Inspecting for stale generated migrations..."
     inspect_stale_migration \
