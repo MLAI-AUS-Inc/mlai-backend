@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.conf import settings
 import uuid
 
@@ -94,7 +95,7 @@ class TaskTemplate(models.Model):
 
 class Task(models.Model):
     """
-    Tasks with points attached.
+    Volunteer work definition / opportunity.
     """
     STATUS_CHOICES = (
         ('open', 'Open'),
@@ -107,13 +108,67 @@ class Task(models.Model):
     )
     
     PORTFOLIO_CHOICES = PointsAdmin.PORTFOLIO_CHOICES
+    WORK_DOMAIN_CHOICES = (
+        ('tech', 'Tech'),
+        ('event_ops', 'Event Ops'),
+        ('content_comms', 'Content & Comms'),
+        ('community', 'Community'),
+        ('governance', 'Governance'),
+        ('partnerships', 'Partnerships'),
+        ('grants', 'Grants'),
+        ('finance', 'Finance'),
+        ('design', 'Design'),
+        ('ops', 'Ops'),
+    )
+    REVIEW_FLOW_CHOICES = (
+        ('pr_review', 'PR Review'),
+        ('deliverable_review', 'Deliverable Review'),
+        ('attendance_confirmation', 'Attendance Confirmation'),
+    )
+    VISIBILITY_CHOICES = (
+        ('internal', 'Internal'),
+        ('volunteer', 'Volunteer'),
+        ('public', 'Public'),
+    )
+    DIFFICULTY_CHOICES = (
+        ('tiny', 'Tiny'),
+        ('small', 'Small'),
+        ('medium', 'Medium'),
+        ('large', 'Large'),
+        ('lead', 'Lead'),
+    )
 
     id = models.AutoField(primary_key=True)
+    task_code = models.CharField(max_length=20, unique=True, blank=True, null=True, db_index=True)
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     portfolio = models.CharField(max_length=50, choices=PORTFOLIO_CHOICES, default='events')
+    work_domain = models.CharField(max_length=50, choices=WORK_DOMAIN_CHOICES, default='event_ops')
+    review_flow = models.CharField(max_length=50, choices=REVIEW_FLOW_CHOICES, default='deliverable_review')
     points = models.IntegerField(default=1)
+    points_estimate = models.IntegerField(default=1)
+    points_min = models.IntegerField(default=1)
+    points_max = models.IntegerField(default=1)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default='volunteer')
+    volunteer_ready = models.BooleanField(default=False)
+    difficulty = models.CharField(max_length=20, choices=DIFFICULTY_CHOICES, default='small', blank=True)
+    estimate_minutes = models.PositiveIntegerField(blank=True, null=True)
+    outcome = models.TextField(blank=True)
+    definition_of_done = models.TextField(blank=True)
+    acceptance_criteria = models.TextField(blank=True)
+    how_to_test = models.TextField(blank=True)
+    repo = models.CharField(max_length=255, blank=True)
+    reviewer_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    fallback_reviewer_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    source_system = models.CharField(max_length=50, blank=True)
+    source_ref = models.CharField(max_length=100, blank=True)
+    source_url = models.URLField(blank=True)
+    group_key = models.CharField(max_length=100, blank=True)
+    slot_label = models.CharField(max_length=100, blank=True)
+    group_capacity = models.PositiveIntegerField(blank=True, null=True)
+    blocked_reason = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
 
     # Slack Integrations - keeping original field names for backwards compat
     created_by_user_id = models.CharField(max_length=50, help_text="Slack ID of minter")
@@ -138,12 +193,95 @@ class Task(models.Model):
     closed_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
-        return f"#{self.id} {self.title} ({self.points} pts)"
+        return f"{self.task_code or f'#{self.id}'} {self.title} ({self.points_estimate} pts)"
+
+    def save(self, *args, **kwargs):
+        creating = self.pk is None
+        super().save(*args, **kwargs)
+        if creating and not self.task_code:
+            self.task_code = f"ROO-{self.id:04d}"
+            super().save(update_fields=['task_code'])
+
+    def get_active_assignment(self):
+        return self.assignments.filter(status__in=TaskAssignment.ACTIVE_STATUSES).order_by('-claimed_at', '-created_at').first()
+
+    def get_current_assignment(self):
+        active = self.get_active_assignment()
+        if active:
+            return active
+        return self.assignments.exclude(status='released').order_by('-approved_at', '-submitted_at', '-claimed_at', '-created_at').first()
+
+    def sync_status_projection(self):
+        if self.status == 'cancelled':
+            return 'cancelled'
+
+        assignment = self.get_current_assignment()
+        if assignment is None:
+            projected = 'open'
+        elif assignment.status == 'claimed':
+            projected = 'claimed'
+        elif assignment.status == 'submitted':
+            projected = 'submitted'
+        elif assignment.status == 'approved':
+            projected = 'approved'
+        else:
+            projected = 'open'
+
+        return projected
+
+
+class TaskAssignment(models.Model):
+    """
+    Execution / ownership record for a task.
+    """
+    STATUS_CHOICES = (
+        ('claimed', 'Claimed'),
+        ('submitted', 'Submitted'),
+        ('approved', 'Approved'),
+        ('released', 'Released'),
+        ('cancelled', 'Cancelled'),
+    )
+    ACTIVE_STATUSES = ('claimed', 'submitted')
+
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='assignments')
+    assigned_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='task_assignments',
+    )
+    assigned_to_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    claimed_points_snapshot = models.IntegerField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='claimed')
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    released_at = models.DateTimeField(blank=True, null=True)
+    submitted_at = models.DateTimeField(blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+    approved_by_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    awarded_points = models.IntegerField(blank=True, null=True)
+    closed_reason = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['task'],
+                condition=Q(status__in=ACTIVE_STATUSES),
+                name='roo_taskassignment_one_active_per_task',
+            )
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.task} -> {self.assigned_to_slack_id or self.assigned_user_id or 'unassigned'} ({self.status})"
 
 
 class TaskSubmission(models.Model):
     """
-    Submission records for tasks - tracks the submit → approve workflow.
+    Submission records for task assignments - tracks the submit → review workflow.
     """
     STATUS_CHOICES = (
         ('submitted', 'Submitted'),
@@ -153,10 +291,22 @@ class TaskSubmission(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='submissions')
+    assignment = models.ForeignKey(
+        TaskAssignment,
+        on_delete=models.CASCADE,
+        related_name='submissions',
+        blank=True,
+        null=True,
+    )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='task_submissions')
     submission_text = models.TextField(help_text="Description of work completed")
     submission_url = models.URLField(blank=True, null=True, help_text="Link to proof of work")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='submitted')
+    evidence_kind = models.CharField(max_length=30, blank=True, default='text')
+    evidence_payload = models.JSONField(default=dict, blank=True)
+    review_notes = models.TextField(blank=True)
+    reviewed_by_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    reviewed_at = models.DateTimeField(blank=True, null=True)
     approved_by_slack_id = models.CharField(max_length=50, blank=True, null=True)
     approved_at = models.DateTimeField(blank=True, null=True)
     rejection_reason = models.TextField(blank=True, null=True)
@@ -174,6 +324,40 @@ class TaskSubmission(models.Model):
 
     def __str__(self):
         return f"Submission for Task #{self.task.id} by {self.user.email}"
+
+
+class TaskActivity(models.Model):
+    """
+    Append-only task workflow audit trail.
+    """
+    EVENT_CHOICES = (
+        ('created', 'Created'),
+        ('updated', 'Updated'),
+        ('published', 'Published'),
+        ('claimed', 'Claimed'),
+        ('unclaimed', 'Unclaimed'),
+        ('submitted', 'Submitted'),
+        ('changes_requested', 'Changes Requested'),
+        ('approved', 'Approved'),
+        ('cancelled', 'Cancelled'),
+        ('blocked', 'Blocked'),
+        ('unblocked', 'Unblocked'),
+    )
+
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='activity')
+    assignment = models.ForeignKey(TaskAssignment, on_delete=models.SET_NULL, blank=True, null=True, related_name='activity')
+    submission = models.ForeignKey(TaskSubmission, on_delete=models.SET_NULL, blank=True, null=True, related_name='activity')
+    event_type = models.CharField(max_length=30, choices=EVENT_CHOICES)
+    actor_slack_id = models.CharField(max_length=50, blank=True, null=True)
+    summary = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+
+    def __str__(self):
+        return f"{self.task} {self.event_type}"
 
 
 class Ledger(models.Model):

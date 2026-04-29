@@ -56,6 +56,7 @@ jobs:
     - name: Run targeted Django tests
       run: |
         python manage.py test \
+          roo.tests_api.TaskViewSetTests \
           tests.test_validate_prod_urls \
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \

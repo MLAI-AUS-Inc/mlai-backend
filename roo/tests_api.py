@@ -6,7 +6,17 @@ from django.test import TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from .models import ChannelFirstPost, CoworkingBooking, Ledger, PointsAccount, PointsAdmin, PointsRequest
+from .models import (
+    ChannelFirstPost,
+    CoworkingBooking,
+    Ledger,
+    PointsAccount,
+    PointsAdmin,
+    PointsRequest,
+    Task,
+    TaskAssignment,
+    TaskSubmission,
+)
 from django.contrib.auth import get_user_model
 from unittest.mock import patch
 from .services import PointsService
@@ -18,10 +28,15 @@ class ManualAwardViewTests(APITestCase):
         self.url = reverse('manual-award')
         self.admin_slack_id = 'UADMIN123'
         self.target_slack_id = 'UTARGET456'
+        self.admin_user = User.objects.create_user(
+            email='manual-admin@example.com',
+            slack_id=self.admin_slack_id,
+        )
         
         # Create admin
         PointsAdmin.objects.create(
             slack_user_id=self.admin_slack_id,
+            user=self.admin_user,
             role='admin',
             is_active=True
         )
@@ -66,6 +81,47 @@ class ManualAwardViewTests(APITestCase):
         response = self.client.post(self.url, data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_award_requires_linked_admin_user(self, mock_permission):
+        PointsAdmin.objects.create(
+            slack_user_id='UNLINKEDADMIN',
+            role='admin',
+            is_active=True,
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UNLINKEDADMIN',
+                'target_slack_id': self.target_slack_id,
+                'points': 10,
+                'reason': 'Should fail',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('linked user account', response.data['error'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_award_requires_real_points_admin_role(self, mock_permission):
+        non_admin_user = User.objects.create_user(
+            email='not-admin@example.com',
+            slack_id='UNOTADMINLINKED',
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': non_admin_user.slack_id,
+                'target_slack_id': self.target_slack_id,
+                'points': 10,
+                'reason': 'Should fail',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Only Points Admins can award points manually', response.data['error'])
 
 
 class PointsAdminManagementViewSetTests(APITestCase):
@@ -419,6 +475,436 @@ class PointsRequestViewSetTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data['error'], 'Not a points admin')
+
+
+class TaskViewSetTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='task-admin@example.com',
+            slack_id='UTASKADMIN',
+        )
+        self.reviewer = User.objects.create_user(
+            email='reviewer@example.com',
+            slack_id='UREVIEWER',
+        )
+        PointsAdmin.objects.create(
+            slack_user_id='UTASKADMIN',
+            user=self.admin,
+            role='admin',
+            is_active=True,
+        )
+
+    def _make_task(self, **overrides):
+        defaults = {
+            'title': 'Implement volunteer flow',
+            'description': 'Task description',
+            'portfolio': 'tech',
+            'work_domain': 'tech',
+            'review_flow': 'pr_review',
+            'points': 18,
+            'points_estimate': 18,
+            'points_min': 18,
+            'points_max': 18,
+            'created_by_user_id': 'UTASKADMIN',
+            'reviewer_slack_id': 'UREVIEWER',
+            'volunteer_ready': True,
+            'repo': 'mlai-backend',
+            'acceptance_criteria': 'Ship the change',
+            'how_to_test': 'Run the tests',
+            'estimate_minutes': 30,
+        }
+        defaults.update(overrides)
+        return Task.objects.create(**defaults)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value={
+        'email': 'new-volunteer@example.com',
+        'real_name': 'New Volunteer',
+        'image_url': 'https://example.com/avatar.png',
+    })
+    def test_claim_auto_links_user_and_creates_assignment(self, mock_profile, mock_permission):
+        task = self._make_task()
+        response = self.client.post(
+            reverse('task-claim', args=[task.id]),
+            {'slack_user_id': 'UNEWVOL'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        volunteer = User.objects.get(slack_id='UNEWVOL')
+        assignment = TaskAssignment.objects.get(task=task)
+        self.assertEqual(task.status, 'claimed')
+        self.assertEqual(task.assigned_user, volunteer)
+        self.assertEqual(assignment.status, 'claimed')
+        self.assertEqual(assignment.assigned_user, volunteer)
+        self.assertTrue(task.task_code.startswith('ROO-'))
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_reject_without_submission_id_rejects_latest_pending_submission(self, mock_permission):
+        volunteer = User.objects.create_user(
+            email='volunteer@example.com',
+            slack_id='UVOL',
+        )
+        task = self._make_task(status='claimed', assigned_user=volunteer, assigned_to_user_id='UVOL')
+        assignment = TaskAssignment.objects.create(
+            task=task,
+            assigned_user=volunteer,
+            assigned_to_slack_id='UVOL',
+            status='submitted',
+        )
+        rejected = TaskSubmission.objects.create(
+            task=task,
+            assignment=assignment,
+            user=volunteer,
+            submission_text='Attempt one',
+            status='rejected',
+        )
+        pending = TaskSubmission.objects.create(
+            task=task,
+            assignment=assignment,
+            user=volunteer,
+            submission_text='Attempt two',
+            status='submitted',
+        )
+
+        response = self.client.post(
+            reverse('task-reject', args=[task.id]),
+            {'slack_user_id': 'UREVIEWER', 'reason': 'Needs another pass'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rejected.refresh_from_db()
+        pending.refresh_from_db()
+        assignment.refresh_from_db()
+        task.refresh_from_db()
+        self.assertEqual(rejected.status, 'rejected')
+        self.assertEqual(pending.status, 'rejected')
+        self.assertEqual(pending.reviewed_by_slack_id, 'UREVIEWER')
+        self.assertEqual(assignment.status, 'claimed')
+        self.assertEqual(task.status, 'claimed')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_unclaim_is_blocked_after_any_submission_exists(self, mock_permission):
+        volunteer = User.objects.create_user(
+            email='volunteer2@example.com',
+            slack_id='UVOL2',
+        )
+        task = self._make_task(status='claimed', assigned_user=volunteer, assigned_to_user_id='UVOL2')
+        assignment = TaskAssignment.objects.create(
+            task=task,
+            assigned_user=volunteer,
+            assigned_to_slack_id='UVOL2',
+            status='claimed',
+        )
+        TaskSubmission.objects.create(
+            task=task,
+            assignment=assignment,
+            user=volunteer,
+            submission_text='Earlier attempt',
+            status='rejected',
+        )
+
+        response = self.client.post(
+            reverse('task-unclaim', args=[task.id]),
+            {'slack_user_id': 'UVOL2'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cannot be unclaimed', response.data['error'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value={
+        'email': 'coder@example.com',
+        'real_name': 'Coder Volunteer',
+        'image_url': 'https://example.com/coder.png',
+    })
+    def test_multi_submission_flow_awards_points_once(self, mock_profile, mock_permission):
+        task = self._make_task(points=24, points_estimate=24, points_min=24, points_max=24)
+
+        claim_response = self.client.post(
+            reverse('task-claim', args=[task.id]),
+            {'slack_user_id': 'UCODER'},
+            format='json',
+        )
+        self.assertEqual(claim_response.status_code, status.HTTP_200_OK)
+
+        first_submit = self.client.post(
+            reverse('task-submit', args=[task.id]),
+            {'slack_user_id': 'UCODER', 'submission_text': 'First try'},
+            format='json',
+        )
+        self.assertEqual(first_submit.status_code, status.HTTP_201_CREATED)
+
+        reject_response = self.client.post(
+            reverse('task-reject', args=[task.id]),
+            {'slack_user_id': 'UREVIEWER', 'reason': 'Please fix the tests'},
+            format='json',
+        )
+        self.assertEqual(reject_response.status_code, status.HTTP_200_OK)
+
+        second_submit = self.client.post(
+            reverse('task-submit', args=[task.id]),
+            {'slack_user_id': 'UCODER', 'submission_text': 'Second try'},
+            format='json',
+        )
+        self.assertEqual(second_submit.status_code, status.HTTP_201_CREATED)
+
+        approve_response = self.client.post(
+            reverse('task-approve', args=[task.id]),
+            {'slack_user_id': 'UREVIEWER'},
+            format='json',
+        )
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+
+        task.refresh_from_db()
+        assignment = TaskAssignment.objects.get(task=task)
+        submissions = list(TaskSubmission.objects.filter(task=task).order_by('created_at'))
+        volunteer = User.objects.get(slack_id='UCODER')
+
+        self.assertEqual(len(submissions), 2)
+        self.assertEqual(submissions[0].status, 'rejected')
+        self.assertEqual(submissions[1].status, 'approved')
+        self.assertEqual(assignment.status, 'approved')
+        self.assertEqual(task.status, 'approved')
+        self.assertEqual(Ledger.objects.filter(reference_type='TASK_ASSIGNMENT', reference_id=str(assignment.id)).count(), 1)
+        self.assertEqual(PointsAccount.objects.get(user=volunteer).balance, 24)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_task_code_lookup_and_claimable_filter(self, mock_permission):
+        open_task = self._make_task(title='Open fix', estimate_minutes=20)
+        self._make_task(title='Not ready', volunteer_ready=False, created_by_user_id='UTASKADMIN')
+        volunteer = User.objects.create_user(
+            email='claimed-filter@example.com',
+            slack_id='UFILTER',
+        )
+        claimed_task = self._make_task(title='Claimed feature', status='claimed', assigned_user=volunteer, assigned_to_user_id='UFILTER')
+        TaskAssignment.objects.create(
+            task=claimed_task,
+            assigned_user=volunteer,
+            assigned_to_slack_id='UFILTER',
+            claimed_points_snapshot=claimed_task.points_estimate,
+            status='claimed',
+        )
+
+        by_code_response = self.client.get(
+            reverse('task-by-code', kwargs={'task_code': open_task.task_code}),
+        )
+        self.assertEqual(by_code_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(by_code_response.data['id'], open_task.id)
+
+        claimable_response = self.client.get(reverse('task-list'), {'claimable': 'true'})
+        self.assertEqual(claimable_response.status_code, status.HTTP_200_OK)
+        returned_ids = {row['id'] for row in claimable_response.data}
+        self.assertIn(open_task.id, returned_ids)
+        self.assertNotIn(claimed_task.id, returned_ids)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_patch_task_requires_matching_updated_at(self, mock_permission):
+        task = self._make_task()
+        response = self.client.patch(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'UTASKADMIN',
+                'expected_updated_at': '2026-01-01T00:00:00Z',
+                'title': 'Updated title',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('Task changed', response.data['error'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_patch_task_rejects_unsupported_fields(self, mock_permission):
+        task = self._make_task()
+        response = self.client.patch(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'UTASKADMIN',
+                'expected_updated_at': task.updated_at.isoformat(),
+                'status': 'approved',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('You can edit:', response.data['error'])
+        self.assertIn('status', response.data['unsupported_fields'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_put_task_uses_same_partial_update_contract(self, mock_permission):
+        task = self._make_task()
+        response = self.client.put(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'UTASKADMIN',
+                'expected_updated_at': task.updated_at.isoformat(),
+                'title': 'Retitled task',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        self.assertEqual(task.title, 'Retitled task')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_patch_task_requires_admin_role_even_for_linked_user(self, mock_permission):
+        task = self._make_task()
+        User.objects.create_user(
+            email='linked-non-admin@example.com',
+            slack_id='ULINKEDNONADMIN',
+        )
+        response = self.client.patch(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'ULINKEDNONADMIN',
+                'expected_updated_at': task.updated_at.isoformat(),
+                'title': 'Should not work',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Only Points Admins can edit tasks', response.data['error'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_cancel_task_cancels_active_assignment_with_history(self, mock_permission):
+        volunteer = User.objects.create_user(
+            email='cancel-volunteer@example.com',
+            slack_id='UCANCELVOL',
+        )
+        task = self._make_task(status='claimed', assigned_user=volunteer, assigned_to_user_id='UCANCELVOL')
+        assignment = TaskAssignment.objects.create(
+            task=task,
+            assigned_user=volunteer,
+            assigned_to_slack_id='UCANCELVOL',
+            claimed_points_snapshot=task.points_estimate,
+            status='claimed',
+        )
+        TaskSubmission.objects.create(
+            task=task,
+            assignment=assignment,
+            user=volunteer,
+            submission_text='Earlier attempt',
+            status='rejected',
+        )
+
+        response = self.client.post(
+            reverse('task-cancel', args=[task.id]),
+            {'slack_user_id': 'UTASKADMIN', 'reason': 'No longer needed'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        assignment.refresh_from_db()
+        self.assertEqual(task.status, 'cancelled')
+        self.assertEqual(assignment.status, 'cancelled')
+        self.assertEqual(assignment.closed_reason, 'task_cancelled')
+        self.assertEqual(TaskSubmission.objects.filter(task=task).count(), 1)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_delete_task_returns_405(self, mock_permission):
+        task = self._make_task()
+        response = self.client.delete(reverse('task-detail', args=[task.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_cancel_task_requires_linked_points_admin(self, mock_permission):
+        task = self._make_task()
+        response = self.client.post(
+            reverse('task-cancel', args=[task.id]),
+            {'slack_user_id': 'UNOTADMIN'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value={
+        'email': 'freeze-volunteer@example.com',
+        'real_name': 'Freeze Volunteer',
+        'image_url': 'https://example.com/freeze.png',
+    })
+    def test_claimed_task_points_are_frozen_when_task_points_change(self, mock_profile, mock_permission):
+        task = self._make_task(points=18, points_estimate=18, points_min=18, points_max=18)
+        self.client.post(
+            reverse('task-claim', args=[task.id]),
+            {'slack_user_id': 'UFREEZE'},
+            format='json',
+        )
+        task.refresh_from_db()
+
+        patch_response = self.client.patch(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'UTASKADMIN',
+                'expected_updated_at': task.updated_at.isoformat(),
+                'points': 30,
+            },
+            format='json',
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+
+        submit_response = self.client.post(
+            reverse('task-submit', args=[task.id]),
+            {'slack_user_id': 'UFREEZE', 'submission_text': 'Done'},
+            format='json',
+        )
+        self.assertEqual(submit_response.status_code, status.HTTP_201_CREATED)
+
+        approve_response = self.client.post(
+            reverse('task-approve', args=[task.id]),
+            {'slack_user_id': 'UREVIEWER'},
+            format='json',
+        )
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+
+        assignment = TaskAssignment.objects.get(task=task)
+        volunteer = User.objects.get(slack_id='UFREEZE')
+        task.refresh_from_db()
+        self.assertEqual(task.points, 30)
+        self.assertEqual(assignment.claimed_points_snapshot, 18)
+        self.assertEqual(assignment.awarded_points, 18)
+        self.assertEqual(PointsAccount.objects.get(user=volunteer).balance, 18)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value={
+        'email': 'edit-active@example.com',
+        'real_name': 'Edit Active',
+        'image_url': 'https://example.com/edit-active.png',
+    })
+    def test_edit_during_active_assignment_preserves_submission_foundations(self, mock_profile, mock_permission):
+        task = self._make_task(points=18, points_estimate=18, points_min=18, points_max=18)
+        self.client.post(
+            reverse('task-claim', args=[task.id]),
+            {'slack_user_id': 'UEDITACTIVE'},
+            format='json',
+        )
+        task.refresh_from_db()
+
+        response = self.client.patch(
+            reverse('task-detail', args=[task.id]),
+            {
+                'slack_user_id': 'UTASKADMIN',
+                'expected_updated_at': task.updated_at.isoformat(),
+                'points': 30,
+                'acceptance_criteria': 'Updated criteria',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        assignment = TaskAssignment.objects.get(task=task)
+        self.assertEqual(task.points, 30)
+        self.assertEqual(task.acceptance_criteria, 'Updated criteria')
+        self.assertEqual(assignment.claimed_points_snapshot, 18)
 
 
 class CoworkingViewSetTests(APITestCase):

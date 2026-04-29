@@ -9,14 +9,16 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
-from django.db.models import Sum
+from django.utils.dateparse import parse_datetime
+from django.db.models import Q, Sum
 from django.conf import settings
+from django.shortcuts import get_object_or_404
 from datetime import date, timedelta
 from typing import Optional, Tuple
 
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
-    TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
+    TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest
 )
 
@@ -43,7 +45,7 @@ from .models import (
 )
 from .serializers import (
     PointsAdminSerializer, MinterSerializer, TaskSerializer, LedgerSerializer,
-    PointsAccountSerializer, PointsBalanceSerializer, TaskSubmissionSerializer,
+    PointsAccountSerializer, PointsBalanceSerializer, TaskAssignmentSerializer, TaskSubmissionSerializer,
     CoworkingBookingSerializer, CoworkingAvailabilitySerializer,
     CoworkingDayCapacitySerializer, RewardsCatalogSerializer, RewardRedemptionSerializer,
     TaskTemplateSerializer, PointsRequestSerializer,
@@ -94,6 +96,29 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         first_name="Unknown Slack User",
         role='participant',
     )
+
+
+def get_existing_user_for_slack_id(slack_user_id: Optional[str]) -> Optional[User]:
+    """Resolve an already-linked Slack user without creating a placeholder."""
+    if not slack_user_id:
+        return None
+    return PointsService.get_user_by_slack_id(slack_user_id.strip())
+
+
+def require_linked_points_admin(slack_user_id: Optional[str], *, action_label: str) -> User:
+    """Require a real linked user account plus an active Points Admin role."""
+    cleaned_slack_id = (slack_user_id or '').strip()
+    if not cleaned_slack_id:
+        raise ValueError('created_by_user_id or slack_user_id is required')
+
+    user = get_existing_user_for_slack_id(cleaned_slack_id)
+    if not user:
+        raise PermissionDeniedError(
+            f'A linked user account is required to {action_label}'
+        )
+    if not is_points_admin(cleaned_slack_id):
+        raise PermissionDeniedError(f'Only Points Admins can {action_label}')
+    return user
 
 
 def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple[bool, Optional[int]]:
@@ -338,21 +363,139 @@ class TaskViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Tasks with full workflow support.
     """
+    TASK_EDITABLE_FIELDS = {
+        'title',
+        'description',
+        'points',
+        'portfolio',
+        'work_domain',
+        'review_flow',
+        'reviewer_slack_id',
+        'fallback_reviewer_slack_id',
+        'repo',
+        'estimate_minutes',
+        'difficulty',
+        'due_date',
+        'volunteer_ready',
+        'acceptance_criteria',
+        'how_to_test',
+        'definition_of_done',
+        'blocked_reason',
+    }
+    TASK_EDIT_META_FIELDS = {
+        'slack_user_id',
+        'created_by_user_id',
+        'expected_updated_at',
+        'task_title',
+    }
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
     permission_classes = [HasAPIKey | HasRooApiKey]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        status_param = self.request.query_params.get('status')
-        portfolio_param = self.request.query_params.get('portfolio')
-        
+        qs = super().get_queryset().select_related('assigned_user').prefetch_related('assignments', 'submissions')
+        params = self.request.query_params
+
+        status_param = params.get('status')
+        portfolio_param = params.get('portfolio')
+        task_code = params.get('task_code')
+        work_domain = params.get('work_domain')
+        review_flow = params.get('review_flow')
+        group_key = params.get('group_key')
+        reviewer_slack_id = params.get('reviewer_slack_id')
+        assigned_to_me = params.get('assigned_to_me')
+        claimable = self._parse_bool_param(params.get('claimable'))
+        volunteer_ready = self._parse_bool_param(params.get('volunteer_ready'))
+        needs_review = self._parse_bool_param(params.get('needs_review'))
+
         if status_param:
             qs = qs.filter(status=status_param)
         if portfolio_param:
             qs = qs.filter(portfolio=portfolio_param)
-        
-        return qs.order_by('-created_at')
+        if task_code:
+            qs = qs.filter(task_code__iexact=task_code.strip())
+        if work_domain:
+            qs = qs.filter(work_domain=work_domain)
+        if review_flow:
+            qs = qs.filter(review_flow=review_flow)
+        if group_key:
+            qs = qs.filter(group_key=group_key)
+        if volunteer_ready is not None:
+            qs = qs.filter(volunteer_ready=volunteer_ready)
+        if reviewer_slack_id:
+            qs = qs.filter(
+                Q(reviewer_slack_id=reviewer_slack_id) |
+                Q(fallback_reviewer_slack_id=reviewer_slack_id)
+            )
+        if assigned_to_me:
+            qs = qs.filter(
+                Q(assignments__assigned_to_slack_id=assigned_to_me, assignments__status__in=TaskAssignment.ACTIVE_STATUSES) |
+                Q(assigned_to_user_id=assigned_to_me)
+            )
+        if claimable:
+            qs = qs.filter(status='open', volunteer_ready=True).exclude(
+                assignments__status__in=TaskAssignment.ACTIVE_STATUSES
+            )
+        if needs_review:
+            qs = qs.filter(status='submitted')
+
+        return qs.distinct().order_by('-created_at')
+
+    def _parse_bool_param(self, value):
+        if value is None:
+            return None
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _serialize_task(self, task):
+        return TaskSerializer(task, context={'request': self.request}).data
+
+    def _task_edit_help(self):
+        editable_fields = ", ".join(sorted(self.TASK_EDITABLE_FIELDS))
+        return f"You can edit: {editable_fields}."
+
+    def _coerce_expected_updated_at(self, expected_updated_at: str):
+        expected_dt = parse_datetime((expected_updated_at or '').strip())
+        if expected_dt is None:
+            raise ValueError('expected_updated_at must be a valid ISO-8601 datetime')
+        return expected_dt
+
+    def _validate_task_update_request(self, task: Task, data):
+        actor_slack_id = data.get('created_by_user_id') or data.get('slack_user_id')
+        require_linked_points_admin(actor_slack_id, action_label='edit tasks')
+
+        expected_updated_at = data.get('expected_updated_at')
+        if not expected_updated_at:
+            raise ValueError('expected_updated_at is required')
+
+        expected_dt = self._coerce_expected_updated_at(expected_updated_at)
+        if expected_dt != task.updated_at:
+            return actor_slack_id, Response(
+                {
+                    'error': 'Task changed since you last saw it. Refresh the task and try again.',
+                    'task': self._serialize_task(task),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        requested_fields = {
+            key
+            for key in data.keys()
+            if key not in self.TASK_EDIT_META_FIELDS
+        }
+        if not requested_fields:
+            raise ValueError(self._task_edit_help())
+
+        unsupported_fields = sorted(requested_fields - self.TASK_EDITABLE_FIELDS)
+        if unsupported_fields:
+            return actor_slack_id, Response(
+                {
+                    'error': self._task_edit_help(),
+                    'unsupported_fields': unsupported_fields,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return actor_slack_id, None
 
     def create(self, request, *args, **kwargs):
         """Create a new task. Only Points Admins can create tasks."""
@@ -382,17 +525,91 @@ class TaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if creator is a Points Admin
-        if not is_points_admin(creator_slack_id):
-            return Response(
-                {'error': 'Only Points Admins can create tasks'},
-                status=status.HTTP_403_FORBIDDEN
+        try:
+            require_linked_points_admin(creator_slack_id, action_label='create tasks')
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        task = serializer.save()
+        TaskService.ensure_task_code(task)
+        TaskService.create_activity(
+            task=task,
+            event_type='created',
+            actor_slack_id=creator_slack_id,
+            summary='Task created',
+        )
+        if task.volunteer_ready:
+            TaskService.create_activity(
+                task=task,
+                event_type='published',
+                actor_slack_id=creator_slack_id,
+                summary='Task marked volunteer-ready',
             )
-        
-        # Proceed with normal creation
-        self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+        assigned_slack_id = data.get('assigned_to_user_id')
+        if assigned_slack_id:
+            user = get_or_create_user_for_slack_id(assigned_slack_id)
+            try:
+                TaskService.claim_task(task, user, assigned_slack_id)
+            except ValueError:
+                pass
+
+        task.refresh_from_db()
+        headers = self.get_success_headers(self._serialize_task(task))
+        return Response(self._serialize_task(task), status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        """Treat PUT the same as PATCH for task edits."""
+        return self.partial_update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Admin-only partial task edit with optimistic locking."""
+        task = self.get_object()
+        data = request.data.copy()
+
+        if 'task_title' in data and 'title' not in data:
+            data['title'] = data['task_title']
+
+        try:
+            actor_slack_id, error_response = self._validate_task_update_request(task, data)
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if error_response is not None:
+            return error_response
+
+        serializer_data = {
+            key: value
+            for key, value in data.items()
+            if key in self.TASK_EDITABLE_FIELDS
+        }
+        serializer = self.get_serializer(task, data=serializer_data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        task = serializer.save()
+        TaskService.create_activity(
+            task=task,
+            event_type='updated',
+            actor_slack_id=actor_slack_id,
+            summary='Task details updated',
+            metadata={'fields': sorted(serializer_data.keys())},
+        )
+        task.refresh_from_db()
+        return Response(self._serialize_task(task))
+
+    def destroy(self, request, *args, **kwargs):
+        return Response(
+            {'error': 'Hard delete is not supported for tasks. Use cancel instead.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    @action(detail=False, methods=['get'], url_path=r'by-code/(?P<task_code>[^/.]+)')
+    def by_code(self, request, task_code=None):
+        task = get_object_or_404(self.get_queryset(), task_code__iexact=task_code)
+        return Response(self._serialize_task(task))
 
     @action(detail=True, methods=['post'])
     def claim(self, request, pk=None):
@@ -402,20 +619,39 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         if not slack_user_id:
             return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        user = get_or_create_user_for_slack_id(slack_user_id)
 
-        if task.status != 'open':
-            return Response({'error': f'Task is not open (status: {task.status})'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            TaskService.claim_task(task, user, slack_user_id)
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Link to user if possible
-        user = PointsService.get_user_by_slack_id(slack_user_id)
-        if user:
-            task.assigned_user = user
-        
-        task.assigned_to_user_id = slack_user_id
-        task.status = 'claimed'
-        task.save()
-        
-        return Response(TaskSerializer(task).data)
+        task.refresh_from_db()
+        return Response(self._serialize_task(task))
+
+    @action(detail=True, methods=['post'])
+    def unclaim(self, request, pk=None):
+        """Release a task back to the queue before any submission exists."""
+        task = self.get_object()
+        slack_user_id = request.data.get('slack_user_id')
+
+        if not slack_user_id:
+            return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            assignment = TaskService.unclaim_task(task, slack_user_id)
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        task.refresh_from_db()
+        return Response({
+            'task': self._serialize_task(task),
+            'assignment': TaskAssignmentSerializer(assignment).data,
+        })
 
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
@@ -428,32 +664,19 @@ class TaskViewSet(viewsets.ModelViewSet):
         if not slack_user_id:
             return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if task.status not in ['claimed', 'open']:
-            return Response({'error': f'Task cannot be submitted (status: {task.status})'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Get user
-        user = PointsService.get_user_by_slack_id(slack_user_id)
-        if not user:
-            return Response({'error': 'Please link your Slack account first'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Check if user is assigned (if task was claimed)
-        if task.assigned_user and task.assigned_user != user:
-            return Response({'error': 'Only the assigned user can submit'}, status=status.HTTP_403_FORBIDDEN)
-
-        # Create submission
-        submission = TaskSubmission.objects.create(
-            task=task,
-            user=user,
-            submission_text=submission_text,
-            submission_url=submission_url,
-            status='submitted',
-        )
-
-        # Update task
-        task.status = 'submitted'
-        task.assigned_user = user
-        task.assigned_to_user_id = slack_user_id
-        task.save()
+        user = get_or_create_user_for_slack_id(slack_user_id)
+        try:
+            _, submission = TaskService.submit_task(
+                task=task,
+                user=user,
+                slack_user_id=slack_user_id,
+                submission_text=submission_text or 'Submitted via API',
+                submission_url=submission_url,
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(TaskSubmissionSerializer(submission).data, status=status.HTTP_201_CREATED)
 
@@ -463,12 +686,11 @@ class TaskViewSet(viewsets.ModelViewSet):
         task = self.get_object()
         approver_slack_id = request.data.get('slack_user_id')
         submission_id = request.data.get('submission_id')
+        awarded_points = request.data.get('awarded_points')
+        review_notes = request.data.get('review_notes', '')
 
         if not approver_slack_id:
             return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not is_points_admin(approver_slack_id):
-            return Response({'error': 'You are not authorized to approve tasks'}, status=status.HTTP_403_FORBIDDEN)
 
         # Get submission
         if submission_id:
@@ -478,15 +700,23 @@ class TaskViewSet(viewsets.ModelViewSet):
                 return Response({'error': 'Submission not found'}, status=status.HTTP_404_NOT_FOUND)
         else:
             # Get latest submission
-            submission = task.submissions.filter(status='submitted').order_by('-created_at').first()
+            submission = TaskService.get_latest_submitted_submission(task)
             if not submission:
                 # Legacy flow: direct approve without submission
-                return self._legacy_approve(task, approver_slack_id)
+                return self._legacy_approve(task, approver_slack_id, awarded_points=awarded_points, review_notes=review_notes)
 
         try:
-            submission, ledger = TaskService.approve_submission(submission, approver_slack_id)
+            if awarded_points is not None:
+                awarded_points = int(awarded_points)
+            submission, ledger, _ = TaskService.approve_submission(
+                submission,
+                approver_slack_id,
+                awarded_points=awarded_points,
+                review_notes=review_notes,
+            )
+            task.refresh_from_db()
             return Response({
-                'task': TaskSerializer(task).data,
+                'task': self._serialize_task(task),
                 'submission': TaskSubmissionSerializer(submission).data,
                 'points_awarded': ledger.delta,
             })
@@ -495,7 +725,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    def _legacy_approve(self, task, approver_slack_id):
+    def _legacy_approve(self, task, approver_slack_id, *, awarded_points=None, review_notes=''):
         """Legacy approval flow for tasks without submissions."""
         if task.status not in ['claimed', 'submitted']:
             return Response({'error': 'Task is not in a state to be approved'}, status=status.HTTP_400_BAD_REQUEST)
@@ -503,36 +733,34 @@ class TaskViewSet(viewsets.ModelViewSet):
         # Get assigned user
         user = task.assigned_user
         if not user and task.assigned_to_user_id:
-            user = PointsService.get_user_by_slack_id(task.assigned_to_user_id)
-        
+            user = get_or_create_user_for_slack_id(task.assigned_to_user_id)
+
         if not user:
             return Response({'error': 'No user assigned to this task'}, status=status.HTTP_400_BAD_REQUEST)
 
-        idempotency_key = f"task_award:{task.id}:{user.id}"
-
         try:
-            ledger, created = PointsService.award(
-                user=user,
-                delta=task.points,
-                source='TASK',
-                description=f"Completed task: {task.title}",
-                created_by_slack_id=approver_slack_id,
-                idempotency_key=idempotency_key,
-                reference_type='TASK',
-                reference_id=str(task.id),
+            if awarded_points is not None:
+                awarded_points = int(awarded_points)
+            _, ledger = TaskService.approve_assignment_without_submission(
+                task,
+                user,
+                approver_slack_id,
+                slack_user_id=user.slack_id or task.assigned_to_user_id,
+                awarded_points=awarded_points,
+                review_notes=review_notes,
             )
+            task.refresh_from_db()
+        except PermissionDeniedError as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        task.status = 'approved'
-        task.closed_by_user_id = approver_slack_id
-        task.closed_at = timezone.now()
-        task.save()
-
         return Response({
-            'task': TaskSerializer(task).data,
+            'task': self._serialize_task(task),
             'points_awarded': ledger.delta,
-            'created': created,
+            'created': True,
         })
     
     @action(detail=True, methods=['post'])
@@ -543,29 +771,40 @@ class TaskViewSet(viewsets.ModelViewSet):
         reason = request.data.get('reason', '')
         submission_id = request.data.get('submission_id')
 
-        if not is_points_admin(rejector_slack_id):
-            return Response({'error': 'You are not authorized to reject tasks'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            submission, assignment = TaskService.reject_submission(
+                task,
+                rejector_slack_id,
+                reason=reason,
+                submission_id=submission_id,
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        if submission_id:
-            try:
-                submission = task.submissions.get(id=submission_id)
-                submission.status = 'rejected'
-                submission.rejection_reason = reason
-                submission.save()
-            except TaskSubmission.DoesNotExist:
-                pass
-
-        task.status = 'claimed'
-        task.save()
-        return Response(TaskSerializer(task).data)
+        task.refresh_from_db()
+        return Response({
+            'task': self._serialize_task(task),
+            'submission': TaskSubmissionSerializer(submission).data,
+            'assignment': TaskAssignmentSerializer(assignment).data if assignment else None,
+        })
     
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         """Cancel a task."""
         task = self.get_object()
-        task.status = 'cancelled'
-        task.save()
-        return Response(TaskSerializer(task).data)
+        actor_slack_id = request.data.get('slack_user_id') or request.data.get('created_by_user_id')
+        reason = request.data.get('reason', '')
+        try:
+            require_linked_points_admin(actor_slack_id, action_label='cancel tasks')
+            task, active_assignment = TaskService.cancel_task(task, actor_slack_id, reason=reason)
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        task.refresh_from_db()
+        return Response(self._serialize_task(task))
 
     @action(detail=True, methods=['post'])
     def award(self, request, pk=None):
@@ -577,42 +816,33 @@ class TaskViewSet(viewsets.ModelViewSet):
         if not assignee_slack_id:
             return Response({'error': 'assigned_to_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not is_points_admin(approver_slack_id):
-            return Response({'error': 'You are not authorized to award tasks'}, status=status.HTTP_403_FORBIDDEN)
-
-        if task.status != 'open':
-            return Response({'error': 'Task must be open to direct award'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Get user
-        user = PointsService.get_user_by_slack_id(assignee_slack_id)
-        if not user:
-            return Response({'error': 'Assignee must have linked Slack account'}, status=status.HTTP_400_BAD_REQUEST)
-
-        idempotency_key = f"task_award:{task.id}:{user.id}"
-
         try:
-            ledger, created = PointsService.award(
-                user=user,
-                delta=task.points,
-                source='TASK',
-                description=f"Completed task: {task.title}",
-                created_by_slack_id=approver_slack_id,
-                idempotency_key=idempotency_key,
-                reference_type='TASK',
-                reference_id=str(task.id),
+            require_linked_points_admin(approver_slack_id, action_label='award task points')
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = get_or_create_user_for_slack_id(assignee_slack_id)
+        try:
+            if not task.get_active_assignment():
+                TaskService.claim_task(task, user, assignee_slack_id)
+            _, ledger = TaskService.approve_assignment_without_submission(
+                task,
+                user,
+                approver_slack_id,
+                slack_user_id=assignee_slack_id,
             )
+            task.refresh_from_db()
+        except PermissionDeniedError as e:
+            return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        task.assigned_user = user
-        task.assigned_user_id = assignee_slack_id
-        task.status = 'approved'
-        task.closed_by_user_id = approver_slack_id
-        task.closed_at = timezone.now()
-        task.save()
-
         return Response({
-            'task': TaskSerializer(task).data,
+            'task': self._serialize_task(task),
             'points_awarded': ledger.delta,
         })
 
@@ -623,15 +853,26 @@ class TaskViewSet(viewsets.ModelViewSet):
         task = self.get_object()
         requester_id = request.data.get('slack_user_id')
 
-        if task.status != 'claimed':
-            return Response({'error': 'Task is not claimed'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        if task.assigned_to_user_id and requester_id and task.assigned_to_user_id != requester_id:
-            return Response({'error': 'Only the assignee can complete this task'}, status=status.HTTP_403_FORBIDDEN)
+        if not requester_id:
+            return Response({'error': 'slack_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        task.status = 'submitted'
-        task.save()
-        return Response(TaskSerializer(task).data)
+        user = get_or_create_user_for_slack_id(requester_id)
+        try:
+            TaskService.submit_task(
+                task=task,
+                user=user,
+                slack_user_id=requester_id,
+                submission_text='Completion requested via legacy endpoint',
+                evidence_kind='legacy_request_complete',
+                evidence_payload={'source': 'request-complete'},
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        task.refresh_from_db()
+        return Response(self._serialize_task(task))
 
 
 class UserBalanceViewSet(viewsets.ViewSet):
@@ -1229,10 +1470,12 @@ class ManualAwardView(APIView):
         # For now, if HasRooApiKey is the ONLY permission, then everyone here is Roo.
         # But let's be explicitly safe and check if it's NOT an admin AND NOT authorized via key (impossible here)
         
-        # If we really want to enforce that the *ID provided* is an admin, unless it's Roo:
-        if not is_points_admin(admin_slack_id):
-             # Allow if verified Roo API Request (which it is, due to permission_classes)
-             pass 
+        try:
+            require_linked_points_admin(admin_slack_id, action_label='award points manually')
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             points = int(points)

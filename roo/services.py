@@ -12,10 +12,11 @@ from typing import Optional, Tuple
 from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.db.models import Count
+from django.db import transaction, IntegrityError, models
 from django.utils import timezone
 
 from .models import (
-    PointsAccount, Ledger, Task, TaskSubmission,
+    PointsAccount, Ledger, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, PointsAdmin
 )
@@ -661,11 +662,311 @@ class TaskService:
     """
     
     @staticmethod
+    def ensure_task_code(task: Task) -> str:
+        """Ensure a volunteer-facing ROO task code exists."""
+        if task.task_code:
+            return task.task_code
+
+        if not task.id:
+            task.save()
+
+        task.task_code = f"ROO-{task.id:04d}"
+        task.save(update_fields=['task_code'])
+        return task.task_code
+
+    @staticmethod
+    def can_review(task: Task, slack_user_id: str) -> bool:
+        """Return whether the given Slack user can review the task."""
+        if not slack_user_id:
+            return False
+        if is_points_admin(slack_user_id):
+            return True
+
+        allowed_reviewers = {
+            task.reviewer_slack_id,
+            task.fallback_reviewer_slack_id,
+        }
+        return slack_user_id in {reviewer for reviewer in allowed_reviewers if reviewer}
+
+    @staticmethod
+    def create_activity(
+        *,
+        task: Task,
+        event_type: str,
+        actor_slack_id: Optional[str] = None,
+        assignment: Optional[TaskAssignment] = None,
+        submission: Optional[TaskSubmission] = None,
+        summary: str = "",
+        metadata: Optional[dict] = None,
+    ) -> TaskActivity:
+        """Persist a raw audit trail event."""
+        return TaskActivity.objects.create(
+            task=task,
+            assignment=assignment,
+            submission=submission,
+            event_type=event_type,
+            actor_slack_id=actor_slack_id,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @staticmethod
+    def sync_task_projection(task: Task) -> Task:
+        """Mirror assignment state back to the legacy Task row."""
+        task.refresh_from_db(fields=None)
+        current_assignment = task.get_current_assignment()
+        projected = task.sync_status_projection()
+
+        update_fields = []
+        if task.status != projected:
+            task.status = projected
+            update_fields.append('status')
+
+        assigned_user = current_assignment.assigned_user if current_assignment else None
+        assigned_slack_id = current_assignment.assigned_to_slack_id if current_assignment else None
+        approved_by = current_assignment.approved_by_slack_id if current_assignment else None
+        approved_at = current_assignment.approved_at if current_assignment else None
+
+        if task.assigned_user_id != (assigned_user.id if assigned_user else None):
+            task.assigned_user = assigned_user
+            update_fields.append('assigned_user')
+        if task.assigned_to_user_id != assigned_slack_id:
+            task.assigned_to_user_id = assigned_slack_id
+            update_fields.append('assigned_to_user_id')
+
+        if projected == 'approved':
+            if task.closed_by_user_id != approved_by:
+                task.closed_by_user_id = approved_by
+                update_fields.append('closed_by_user_id')
+            if task.closed_at != approved_at:
+                task.closed_at = approved_at
+                update_fields.append('closed_at')
+        elif task.status != 'cancelled':
+            if task.closed_by_user_id is not None:
+                task.closed_by_user_id = None
+                update_fields.append('closed_by_user_id')
+            if task.closed_at is not None:
+                task.closed_at = None
+                update_fields.append('closed_at')
+
+        if update_fields:
+            task.save(update_fields=update_fields)
+        return task
+
+    @staticmethod
+    def _ensure_assignment_for_legacy_task(task: Task, user: User, slack_user_id: str) -> TaskAssignment:
+        """Backfill an active assignment for legacy tasks that predate TaskAssignment."""
+        assignment = task.get_active_assignment()
+        if assignment:
+            return assignment
+
+        assignment_status = 'submitted' if task.status == 'submitted' else 'claimed'
+        assignment = TaskAssignment.objects.create(
+            task=task,
+            assigned_user=user,
+            assigned_to_slack_id=slack_user_id,
+            claimed_points_snapshot=task.points_estimate or task.points,
+            status=assignment_status,
+            claimed_at=task.updated_at or timezone.now(),
+            submitted_at=task.updated_at if assignment_status == 'submitted' else None,
+        )
+        return assignment
+
+    @staticmethod
+    @transaction.atomic
+    def claim_task(task: Task, user: User, slack_user_id: str) -> TaskAssignment:
+        """Claim a task by creating the active assignment."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+        TaskService.ensure_task_code(task)
+
+        if task.status == 'cancelled':
+            raise ValueError('Task is cancelled')
+        if task.status == 'approved':
+            raise ValueError('Task is already approved')
+        if task.get_active_assignment():
+            raise ValueError('Task already has an active assignment')
+
+        assignment = TaskAssignment.objects.create(
+            task=task,
+            assigned_user=user,
+            assigned_to_slack_id=slack_user_id,
+            claimed_points_snapshot=task.points_estimate or task.points,
+            status='claimed',
+            claimed_at=timezone.now(),
+        )
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            event_type='claimed',
+            actor_slack_id=slack_user_id,
+            summary=f'Claimed by {slack_user_id}',
+        )
+        TaskService.sync_task_projection(task)
+        return assignment
+
+    @staticmethod
+    def _resolve_assignment_for_submission(task: Task, user: User, slack_user_id: str) -> TaskAssignment:
+        """Resolve or backfill the assignment that owns this submission."""
+        assignment = task.get_active_assignment()
+        if assignment:
+            if assignment.status == 'submitted':
+                raise ValueError('Task already has submitted work pending review')
+            if assignment.assigned_to_slack_id and assignment.assigned_to_slack_id != slack_user_id:
+                raise PermissionDeniedError('Only the assigned user can submit')
+            if assignment.assigned_user and assignment.assigned_user != user:
+                raise PermissionDeniedError('Only the assigned user can submit')
+            updates = []
+            if assignment.assigned_user_id != user.id:
+                assignment.assigned_user = user
+                updates.append('assigned_user')
+            if assignment.assigned_to_slack_id != slack_user_id:
+                assignment.assigned_to_slack_id = slack_user_id
+                updates.append('assigned_to_slack_id')
+            if updates:
+                assignment.save(update_fields=updates)
+            return assignment
+
+        if task.status == 'cancelled':
+            raise ValueError('Task is cancelled')
+        if task.status == 'approved':
+            raise ValueError('Task is already approved')
+        if task.assigned_to_user_id and task.assigned_to_user_id != slack_user_id:
+            raise PermissionDeniedError('Only the assigned user can submit')
+        if task.assigned_user and task.assigned_user != user:
+            raise PermissionDeniedError('Only the assigned user can submit')
+
+        return TaskAssignment.objects.create(
+            task=task,
+            assigned_user=user,
+            assigned_to_slack_id=slack_user_id,
+            claimed_points_snapshot=task.points_estimate or task.points,
+            status='claimed',
+            claimed_at=timezone.now(),
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def submit_task(
+        task: Task,
+        user: User,
+        slack_user_id: str,
+        submission_text: str,
+        submission_url: Optional[str] = None,
+        evidence_kind: str = 'text',
+        evidence_payload: Optional[dict] = None,
+    ) -> Tuple[TaskAssignment, TaskSubmission]:
+        """Create a submission for the task's active assignment."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+        TaskService.ensure_task_code(task)
+        assignment = TaskService._resolve_assignment_for_submission(task, user, slack_user_id)
+
+        submission = TaskSubmission.objects.create(
+            task=task,
+            assignment=assignment,
+            user=user,
+            submission_text=submission_text,
+            submission_url=submission_url,
+            status='submitted',
+            evidence_kind=evidence_kind or 'text',
+            evidence_payload=evidence_payload or {},
+        )
+        assignment.status = 'submitted'
+        assignment.submitted_at = timezone.now()
+        assignment.save(update_fields=['status', 'submitted_at'])
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            submission=submission,
+            event_type='submitted',
+            actor_slack_id=slack_user_id,
+            summary='Work submitted for review',
+        )
+        TaskService.sync_task_projection(task)
+        return assignment, submission
+
+    @staticmethod
+    def get_latest_submitted_submission(task: Task) -> Optional[TaskSubmission]:
+        """Return the latest pending submission for a task."""
+        return task.submissions.filter(status='submitted').order_by('-created_at').first()
+
+    @staticmethod
+    @transaction.atomic
+    def reject_submission(
+        task: Task,
+        rejector_slack_id: str,
+        *,
+        reason: str = "",
+        submission_id: Optional[str] = None,
+    ) -> Tuple[TaskSubmission, Optional[TaskAssignment]]:
+        """Reject the targeted or latest submitted attempt and return task to claimed."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+        if not TaskService.can_review(task, rejector_slack_id):
+            raise PermissionDeniedError(f"{rejector_slack_id} is not authorized to reject submissions")
+
+        if submission_id:
+            try:
+                submission = task.submissions.get(id=submission_id)
+            except TaskSubmission.DoesNotExist as exc:
+                raise ValueError('Submission not found') from exc
+        else:
+            submission = TaskService.get_latest_submitted_submission(task)
+            if not submission:
+                raise ValueError('No submitted work found to reject')
+
+        if submission.status != 'submitted':
+            raise ValueError(f"Submission is not in submitted status (current: {submission.status})")
+
+        assignment = submission.assignment
+        if not assignment:
+            assignment = TaskService._ensure_assignment_for_legacy_task(
+                task=task,
+                user=submission.user,
+                slack_user_id=submission.user.slack_id or task.assigned_to_user_id or '',
+            )
+            submission.assignment = assignment
+
+        now = timezone.now()
+        submission.status = 'rejected'
+        submission.rejection_reason = reason
+        submission.review_notes = reason
+        submission.reviewed_by_slack_id = rejector_slack_id
+        submission.reviewed_at = now
+        submission.save(
+            update_fields=[
+                'assignment',
+                'status',
+                'rejection_reason',
+                'review_notes',
+                'reviewed_by_slack_id',
+                'reviewed_at',
+            ]
+        )
+
+        if assignment.status == 'submitted':
+            assignment.status = 'claimed'
+            assignment.save(update_fields=['status'])
+
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            submission=submission,
+            event_type='changes_requested',
+            actor_slack_id=rejector_slack_id,
+            summary='Changes requested',
+            metadata={'reason': reason} if reason else {},
+        )
+        TaskService.sync_task_projection(task)
+        return submission, assignment
+
+    @staticmethod
     @transaction.atomic
     def approve_submission(
         submission: TaskSubmission,
         approver_slack_id: str,
-    ) -> Tuple[TaskSubmission, Ledger]:
+        *,
+        awarded_points: Optional[int] = None,
+        review_notes: str = "",
+    ) -> Tuple[TaskSubmission, Ledger, TaskAssignment]:
         """
         Approve a task submission and award points.
         
@@ -680,44 +981,229 @@ class TaskService:
             PermissionDeniedError: If approver is not an admin
             ValueError: If submission is not in submitted status
         """
-        if not is_points_admin(approver_slack_id):
+        task = submission.task
+        if not TaskService.can_review(task, approver_slack_id):
             raise PermissionDeniedError(f"{approver_slack_id} is not authorized to approve submissions")
         
         if submission.status != 'submitted':
             raise ValueError(f"Submission is not in submitted status (current: {submission.status})")
-        
-        task = submission.task
-        user = submission.user
-        
-        # Create idempotency key
-        idempotency_key = f"task_award:{task.id}:{user.id}"
-        
-        # Award points
+
+        assignment = submission.assignment
+        if not assignment:
+            assignment = TaskService._ensure_assignment_for_legacy_task(
+                task=task,
+                user=submission.user,
+                slack_user_id=submission.user.slack_id or task.assigned_to_user_id or '',
+            )
+
+        user = assignment.assigned_user or submission.user
+        if not user:
+            raise ValueError('No user is associated with this submission')
+
+        if awarded_points is None:
+            awarded_points = assignment.claimed_points_snapshot or task.points_estimate or task.points
+        elif awarded_points < task.points_min or awarded_points > task.points_max:
+            raise ValueError(
+                f"Approved points must be between {task.points_min} and {task.points_max}"
+            )
+
+        idempotency_key = f"task_award:{task.id}"
         ledger, created = PointsService.award(
             user=user,
-            delta=task.points,
+            delta=awarded_points,
             source='TASK',
             description=f"Completed task: {task.title}",
             created_by_slack_id=approver_slack_id,
             idempotency_key=idempotency_key,
-            reference_type='TASK_SUBMISSION',
-            reference_id=str(submission.id),
+            reference_type='TASK_ASSIGNMENT',
+            reference_id=str(assignment.id),
         )
         
-        # Update submission
+        now = timezone.now()
         submission.status = 'approved'
+        submission.assignment = assignment
+        submission.review_notes = review_notes
+        submission.reviewed_by_slack_id = approver_slack_id
+        submission.reviewed_at = now
         submission.approved_by_slack_id = approver_slack_id
-        submission.approved_at = timezone.now()
+        submission.approved_at = now
         submission.ledger_entry = ledger
-        submission.save()
+        submission.save(
+            update_fields=[
+                'assignment',
+                'status',
+                'review_notes',
+                'reviewed_by_slack_id',
+                'reviewed_at',
+                'approved_by_slack_id',
+                'approved_at',
+                'ledger_entry',
+            ]
+        )
+
+        assignment.assigned_user = user
+        assignment.assigned_to_slack_id = assignment.assigned_to_slack_id or user.slack_id
+        assignment.status = 'approved'
+        assignment.approved_at = now
+        assignment.approved_by_slack_id = approver_slack_id
+        assignment.claimed_points_snapshot = assignment.claimed_points_snapshot or awarded_points
+        assignment.awarded_points = awarded_points
+        assignment.save(
+            update_fields=[
+                'assigned_user',
+                'assigned_to_slack_id',
+                'status',
+                'approved_at',
+                'approved_by_slack_id',
+                'claimed_points_snapshot',
+                'awarded_points',
+            ]
+        )
+
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            submission=submission,
+            event_type='approved',
+            actor_slack_id=approver_slack_id,
+            summary='Submission approved',
+            metadata={'points_awarded': awarded_points, 'created': created},
+        )
+        TaskService.sync_task_projection(task)
         
-        # Update task
-        task.status = 'approved'
-        task.closed_by_slack_id = approver_slack_id
+        return submission, ledger, assignment
+
+    @staticmethod
+    @transaction.atomic
+    def approve_assignment_without_submission(
+        task: Task,
+        user: User,
+        approver_slack_id: str,
+        *,
+        slack_user_id: Optional[str] = None,
+        awarded_points: Optional[int] = None,
+        review_notes: str = "",
+    ) -> Tuple[TaskAssignment, Ledger]:
+        """Legacy/direct-award path where approval does not require a normal submission."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+        if not TaskService.can_review(task, approver_slack_id):
+            raise PermissionDeniedError(f"{approver_slack_id} is not authorized to approve tasks")
+
+        slack_user_id = slack_user_id or user.slack_id or task.assigned_to_user_id or ''
+        assignment = task.get_active_assignment()
+        if not assignment:
+            assignment = TaskService._ensure_assignment_for_legacy_task(task, user, slack_user_id)
+
+        if awarded_points is None:
+            awarded_points = assignment.claimed_points_snapshot or task.points_estimate or task.points
+        elif awarded_points < task.points_min or awarded_points > task.points_max:
+            raise ValueError(
+                f"Approved points must be between {task.points_min} and {task.points_max}"
+            )
+
+        ledger, created = PointsService.award(
+            user=user,
+            delta=awarded_points,
+            source='TASK',
+            description=f"Completed task: {task.title}",
+            created_by_slack_id=approver_slack_id,
+            idempotency_key=f"task_award:{task.id}",
+            reference_type='TASK_ASSIGNMENT',
+            reference_id=str(assignment.id),
+        )
+
+        now = timezone.now()
+        assignment.assigned_user = user
+        assignment.assigned_to_slack_id = slack_user_id
+        assignment.status = 'approved'
+        assignment.approved_at = now
+        assignment.approved_by_slack_id = approver_slack_id
+        assignment.claimed_points_snapshot = assignment.claimed_points_snapshot or awarded_points
+        assignment.awarded_points = awarded_points
+        assignment.closed_reason = review_notes
+        assignment.save(
+            update_fields=[
+                'assigned_user',
+                'assigned_to_slack_id',
+                'status',
+                'approved_at',
+                'approved_by_slack_id',
+                'claimed_points_snapshot',
+                'awarded_points',
+                'closed_reason',
+            ]
+        )
+
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            event_type='approved',
+            actor_slack_id=approver_slack_id,
+            summary='Task approved without submission',
+            metadata={'points_awarded': awarded_points, 'created': created},
+        )
+        TaskService.sync_task_projection(task)
+        return assignment, ledger
+
+    @staticmethod
+    @transaction.atomic
+    def unclaim_task(task: Task, slack_user_id: str) -> TaskAssignment:
+        """Release a claimed task only if no submission attempts exist."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+        assignment = task.get_active_assignment()
+        if not assignment:
+            raise ValueError('Task does not have an active assignment')
+        if assignment.status != 'claimed':
+            raise ValueError('Task can only be unclaimed before submission')
+        if assignment.assigned_to_slack_id and assignment.assigned_to_slack_id != slack_user_id:
+            raise PermissionDeniedError('Only the current assignee can unclaim this task')
+        if assignment.submissions.exists():
+            raise ValueError('Task cannot be unclaimed after a submission exists')
+
+        assignment.status = 'released'
+        assignment.released_at = timezone.now()
+        assignment.save(update_fields=['status', 'released_at'])
+        TaskService.create_activity(
+            task=task,
+            assignment=assignment,
+            event_type='unclaimed',
+            actor_slack_id=slack_user_id,
+            summary='Task released back to the queue',
+        )
+        TaskService.sync_task_projection(task)
+        return assignment
+
+    @staticmethod
+    @transaction.atomic
+    def cancel_task(task: Task, actor_slack_id: str, *, reason: str = "") -> Tuple[Task, Optional[TaskAssignment]]:
+        """Cancel a task and any active assignment while preserving audit history."""
+        task = Task.objects.select_for_update().get(pk=task.pk)
+
+        if task.status == 'cancelled':
+            raise ValueError('Task is already cancelled')
+        if task.status == 'approved':
+            raise ValueError('Approved tasks cannot be cancelled')
+
+        active_assignment = task.get_active_assignment()
+        if active_assignment:
+            active_assignment.status = 'cancelled'
+            active_assignment.closed_reason = 'task_cancelled'
+            active_assignment.save(update_fields=['status', 'closed_reason'])
+
+        task.status = 'cancelled'
         task.closed_at = timezone.now()
-        task.save()
-        
-        return submission, ledger
+        task.closed_by_user_id = actor_slack_id
+        task.save(update_fields=['status', 'closed_at', 'closed_by_user_id'])
+
+        TaskService.create_activity(
+            task=task,
+            assignment=active_assignment,
+            event_type='cancelled',
+            actor_slack_id=actor_slack_id,
+            summary='Task cancelled',
+            metadata={'reason': reason} if reason else {},
+        )
+        return task, active_assignment
 
 
 class RewardsService:
