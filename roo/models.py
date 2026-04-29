@@ -229,6 +229,8 @@ class Task(models.Model):
 
         return projected
 
+TASK_ASSIGNMENT_ACTIVE_STATUSES = ('claimed', 'submitted')
+
 
 class TaskAssignment(models.Model):
     """
@@ -241,7 +243,7 @@ class TaskAssignment(models.Model):
         ('released', 'Released'),
         ('cancelled', 'Cancelled'),
     )
-    ACTIVE_STATUSES = ('claimed', 'submitted')
+    ACTIVE_STATUSES = TASK_ASSIGNMENT_ACTIVE_STATUSES
 
     task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='assignments')
     assigned_user = models.ForeignKey(
@@ -269,7 +271,7 @@ class TaskAssignment(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['task'],
-                condition=Q(status__in=ACTIVE_STATUSES),
+                condition=Q(status__in=TASK_ASSIGNMENT_ACTIVE_STATUSES),
                 name='roo_taskassignment_one_active_per_task',
             )
         ]
