@@ -39,6 +39,11 @@ ssh $USER@$DROPLET_IP <<EOF
         fi
     }
 
+    env_has_value() {
+        local key="\$1"
+        grep -Eq "^\${key}=.+" .env
+    }
+
     # Install Docker if not exists
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -85,6 +90,13 @@ ssh $USER@$DROPLET_IP <<EOF
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
 
+    runtime_services=(web scheduler)
+    if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
+        runtime_services+=(bridge-worker)
+    else
+        echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
+    fi
+
     migration_applied() {
         local app_label="\$1"
         local migration_name="\$2"
@@ -124,8 +136,8 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🐘 Starting database..."
     docker compose up -d db
 
-    echo "🏗️ Building web, scheduler, and bridge-worker images..."
-    docker compose build web scheduler bridge-worker
+    echo "🏗️ Building runtime images: \${runtime_services[*]}..."
+    docker compose build "\${runtime_services[@]}"
 
     echo "🔗 Validating production URL configuration and service connectivity..."
     compose_run_web python manage.py validate_prod_urls --check-connectivity --timeout 8
@@ -185,8 +197,8 @@ print(index_name)
 
     trap - ERR
 
-    echo "🌐 Starting web, scheduler, and bridge-worker services..."
-    docker compose up -d --force-recreate web scheduler bridge-worker
+    echo "🌐 Starting runtime services: \${runtime_services[*]}..."
+    docker compose up -d --force-recreate "\${runtime_services[@]}"
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."
     running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)

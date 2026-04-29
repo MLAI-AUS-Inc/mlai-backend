@@ -80,9 +80,12 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
 
         self.assertIn("docker compose stop web", deploy)
         self.assertIn("unique_active_booking_per_user_date is missing", deploy)
+        self.assertIn('runtime_services=(web scheduler)', deploy)
+        self.assertIn('runtime_services+=(bridge-worker)', deploy)
+        self.assertIn('if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then', deploy)
         self.assertLess(
             deploy.index("docker compose stop web"),
-            deploy.index("docker compose up -d web scheduler bridge-worker"),
+            deploy.index('docker compose up -d --force-recreate "\\${runtime_services[@]}"'),
         )
 
     def test_deploy_compose_run_does_not_consume_ssh_stdin(self):
