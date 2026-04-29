@@ -186,7 +186,14 @@ print(index_name)
     trap - ERR
 
     echo "🌐 Starting web, scheduler, and bridge-worker services..."
-    docker compose up -d web scheduler bridge-worker
+    docker compose up -d --force-recreate web scheduler bridge-worker
+
+    echo "🔁 Verifying the running web container picked up APP_RELEASE..."
+    running_release=$(docker compose exec -T web sh -lc 'printf "%s" "$APP_RELEASE"' </dev/null)
+    if [ "$running_release" != "$APP_RELEASE" ]; then
+        echo "Expected running web container APP_RELEASE=$APP_RELEASE but found $running_release"
+        exit 1
+    fi
 
     echo "🩺 Verifying external health release..."
     release_ok=0
