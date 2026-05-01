@@ -38,14 +38,16 @@ def format_slack_message(run_date: str, top_jobs: list[JobListing], full_list_ur
     return {"channel": settings.slack_jobs_channel, "text": "\n".join(lines)}
 
 
-def post_slack_message(payload: dict) -> bool:
+def post_slack_message(payload: dict) -> tuple[bool, str | None]:
     channel = str(payload.get("channel") or settings.slack_jobs_channel)
     slack_service = _slack_service()
     channel_id = channel if not channel.startswith("#") else slack_service.get_channel_id_by_name(channel[1:])
     if not channel_id:
-        return False
+        return False, f"Slack channel not found for {channel}"
     success, _ts = slack_service.send_message(channel_id, payload.get("text", ""))
-    return bool(success)
+    if not success:
+        return False, f"Slack message send failed for {channel}"
+    return True, None
 
 
 def post_failure_alert(run_id: str, error_message: str) -> bool:
@@ -55,4 +57,5 @@ def post_failure_alert(run_id: str, error_message: str) -> bool:
         f"Error: {error_message[:500]}\n"
         f"Status: {settings.public_base_url}/api/v1/jobs/runs/{run_id}"
     )
-    return post_slack_message({"channel": settings.slack_jobs_channel, "text": text})
+    success, _error = post_slack_message({"channel": settings.slack_jobs_channel, "text": text})
+    return success

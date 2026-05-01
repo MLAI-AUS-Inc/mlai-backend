@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from html import escape
-from threading import Thread
 
 from django.http import Http404, HttpResponse
 from django.utils.decorators import method_decorator
@@ -16,7 +15,7 @@ from core.permissions import HasRooApiKey
 from .conf import settings
 from .models import JobListing, JobRun
 from .serializers import DailyRunRequestSerializer, JobListingSerializer
-from .services.job_pipeline import create_run, latest_run_for_date, run_daily_jobs
+from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date
 from .services.slack import format_slack_message
 
 
@@ -42,20 +41,6 @@ def _render_job_card(job: JobListing) -> str:
       <p><a href="{link}" target="_blank" rel="noopener noreferrer">Read more</a></p>
     </article>
     """
-
-
-def _launch_daily_run(run_id: str, validated: dict) -> None:
-    run_daily_jobs(
-        run_id,
-        validated.get("collect_live", True),
-        validated.get("post_to_slack", False),
-        validated.get("post_to_notion", True),
-        validated.get("sources"),
-        validated.get("max_pages"),
-        validated.get("per_keyword_limit"),
-    )
-
-
 @method_decorator(csrf_exempt, name="dispatch")
 class DailyRunTriggerView(APIView):
     permission_classes = [HasRooApiKey]
@@ -63,9 +48,7 @@ class DailyRunTriggerView(APIView):
     def post(self, request):
         serializer = DailyRunRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        run = create_run()
-        worker = Thread(target=_launch_daily_run, args=(run.run_id, serializer.validated_data), daemon=True)
-        worker.start()
+        run = enqueue_run_from_request(serializer.validated_data, trigger_source="manual_api")
         return Response(
             {
                 "run_id": run.run_id,
@@ -205,4 +188,3 @@ class DailyJobsHtmlView(APIView):
         </html>
         """
         return HttpResponse(html)
-

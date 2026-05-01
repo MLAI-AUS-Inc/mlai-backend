@@ -59,7 +59,7 @@ class JobsSettings:
 
     @property
     def jobs_scrape_headless(self) -> bool:
-        return bool(getattr(django_settings, "JOBS_SCRAPE_HEADLESS", False))
+        return bool(getattr(django_settings, "JOBS_SCRAPE_HEADLESS", True))
 
     @property
     def jobs_seek_max_pages(self) -> int:

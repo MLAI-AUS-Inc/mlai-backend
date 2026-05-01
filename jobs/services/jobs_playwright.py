@@ -204,44 +204,55 @@ def collect_jobs_for_keyword(
         from playwright.sync_api import sync_playwright
     except ModuleNotFoundError as exc:
         raise RuntimeError("Playwright is not installed for the SEEK connector") from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "Playwright could not be initialized for the SEEK connector. "
+            "Ensure browser binaries are installed with `python -m playwright install chromium`."
+        ) from exc
 
     results: list[dict[str, Any]] = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
-        detail_page = context.new_page()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context()
+            page = context.new_page()
+            detail_page = context.new_page()
 
-        try:
-            for page_num in range(1, max_pages + 1):
-                search_url = build_search_url(keyword, page_num)
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(5000)
+            try:
+                for page_num in range(1, max_pages + 1):
+                    search_url = build_search_url(keyword, page_num)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(5000)
 
-                try:
-                    page.wait_for_selector(
-                        'article[data-automation="normalJob"], article[data-automation="premiumJob"]',
-                        timeout=10000,
-                    )
-                except PlaywrightTimeoutError:
-                    continue
+                    try:
+                        page.wait_for_selector(
+                            'article[data-automation="normalJob"], article[data-automation="premiumJob"]',
+                            timeout=10000,
+                        )
+                    except PlaywrightTimeoutError:
+                        continue
 
-                job_links = extract_card_links(page)
+                    job_links = extract_card_links(page)
 
-                for job_url in job_links:
-                    if len(results) >= per_keyword_limit:
-                        return results
+                    for job_url in job_links:
+                        if len(results) >= per_keyword_limit:
+                            return results
 
-                    detail_page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
-                    detail_page.wait_for_timeout(4000)
+                        detail_page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+                        detail_page.wait_for_timeout(4000)
 
-                    job = extract_job_detail(detail_page, job_url, keyword)
-                    if job:
-                        results.append(job)
+                        job = extract_job_detail(detail_page, job_url, keyword)
+                        if job:
+                            results.append(job)
 
-            return results
+                return results
 
-        finally:
-            context.close()
-            browser.close()
+            finally:
+                context.close()
+                browser.close()
+    except Exception as exc:
+        raise RuntimeError(
+            "Playwright failed while scraping SEEK. "
+            "Ensure Chromium is installed and the runtime can launch it."
+        ) from exc

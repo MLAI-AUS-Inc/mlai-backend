@@ -71,11 +71,33 @@ def validate_scheduler_configuration() -> None:
         raise ValueError("; ".join(errors))
 
 
-def create_run(run_date: str | None = None) -> JobRun:
+def create_run(
+    run_date: str | None = None,
+    *,
+    collect_live: bool = True,
+    post_to_slack: bool = False,
+    post_to_notion: bool = True,
+    source_names: list[str] | None = None,
+    max_pages: int | None = None,
+    per_keyword_limit: int | None = None,
+    trigger_source: str = "manual_api",
+) -> JobRun:
     run_date = run_date or melbourne_today()
     run_id = f"{run_date}-{uuid.uuid4().hex[:8]}"
     full_list_url = f"{settings.public_base_url}/api/v1/jobs/daily/{run_date}"
-    return JobRun.objects.create(run_id=run_id, run_date=run_date, status="queued", full_list_url=full_list_url)
+    return JobRun.objects.create(
+        run_id=run_id,
+        run_date=run_date,
+        status="queued",
+        full_list_url=full_list_url,
+        collect_live=collect_live,
+        post_to_slack=post_to_slack,
+        post_to_notion=post_to_notion,
+        source_names=source_names,
+        max_pages=max_pages,
+        per_keyword_limit=per_keyword_limit,
+        trigger_source=trigger_source,
+    )
 
 
 def latest_run_for_date(run_date: str) -> JobRun | None:
@@ -187,8 +209,9 @@ def fetch_raw_jobs(
     source_names: list[str] | None,
     max_pages: int | None,
     per_keyword_limit: int | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     raw_jobs: list[dict[str, Any]] = []
+    failed_sources: list[str] = []
     allowed_sources = {name.lower() for name in source_names} if source_names else None
 
     if collect_live:
@@ -207,6 +230,7 @@ def fetch_raw_jobs(
             except Exception as exc:
                 log.status = "error"
                 log.error_message = str(exc)
+                failed_sources.append(f"{source.name}: {exc}")
             finally:
                 log.completed_at = timezone.now()
                 log.save(update_fields=["status", "fetched_count", "error_message", "completed_at"])
@@ -214,7 +238,79 @@ def fetch_raw_jobs(
     if not raw_jobs and (not collect_live or not source_names):
         raw_jobs.extend(collect_existing_seek_jobs(run.run_date))
 
-    return raw_jobs
+    return raw_jobs, failed_sources
+
+
+def _build_run_status(*, top_jobs_count: int, source_errors: list[str], slack_error: str | None) -> str:
+    if slack_error:
+        return "completed_with_publish_errors"
+    if source_errors and top_jobs_count:
+        return "completed_with_source_errors"
+    if source_errors:
+        return "completed_no_results_with_source_errors"
+    if top_jobs_count:
+        return "completed"
+    return "completed_no_results"
+
+
+def _summarize_run_issues(source_errors: list[str], slack_error: str | None) -> str | None:
+    issues: list[str] = []
+    if source_errors:
+        issues.append("Source errors: " + "; ".join(source_errors[:5]))
+    if slack_error:
+        issues.append(f"Slack publish error: {slack_error}")
+    return " | ".join(issues) if issues else None
+
+
+def enqueue_run_from_request(validated: dict[str, Any], *, trigger_source: str = "manual_api") -> JobRun:
+    return create_run(
+        collect_live=validated.get("collect_live", True),
+        post_to_slack=validated.get("post_to_slack", False),
+        post_to_notion=validated.get("post_to_notion", True),
+        source_names=validated.get("sources"),
+        max_pages=validated.get("max_pages"),
+        per_keyword_limit=validated.get("per_keyword_limit"),
+        trigger_source=trigger_source,
+    )
+
+
+def claim_queued_run() -> JobRun | None:
+    with transaction.atomic():
+        run = (
+            JobRun.objects.select_for_update(skip_locked=True)
+            .filter(status="queued")
+            .order_by("created_at", "id")
+            .first()
+        )
+        if not run:
+            return None
+        run.status = "running"
+        run.claimed_at = timezone.now()
+        run.started_at = run.started_at or run.claimed_at
+        run.save(update_fields=["status", "claimed_at", "started_at", "updated_at"])
+        return run
+
+
+def process_next_queued_run() -> dict[str, Any]:
+    run = claim_queued_run()
+    if not run:
+        return {"status": "skipped", "reason": "no_queued_runs"}
+
+    run_daily_jobs(
+        run.run_id,
+        collect_live=run.collect_live,
+        post_to_slack=run.post_to_slack,
+        post_to_notion=run.post_to_notion,
+        source_names=run.source_names,
+        max_pages=run.max_pages,
+        per_keyword_limit=run.per_keyword_limit,
+    )
+    refreshed = JobRun.objects.get(pk=run.pk)
+    return {
+        "status": refreshed.status,
+        "run_id": refreshed.run_id,
+        "trigger_source": refreshed.trigger_source,
+    }
 
 
 def insert_matched_jobs(run: JobRun, raw_jobs: list[dict[str, Any]]) -> list[JobListing]:
@@ -351,12 +447,16 @@ def run_daily_jobs(
 ) -> None:
     run = JobRun.objects.get(run_id=run_id)
     try:
-        run.status = "running"
-        run.started_at = timezone.now()
-        run.save(update_fields=["status", "started_at", "updated_at"])
+        if run.status != "running":
+            run.status = "running"
+            run.started_at = timezone.now()
+            run.save(update_fields=["status", "started_at", "updated_at"])
 
-        raw_jobs = fetch_raw_jobs(run, collect_live, source_names, max_pages, per_keyword_limit)
+        raw_jobs, source_errors = fetch_raw_jobs(run, collect_live, source_names, max_pages, per_keyword_limit)
         run.fetched_count = len(raw_jobs)
+
+        if collect_live and source_errors and not raw_jobs:
+            raise RuntimeError("All live job sources failed. " + "; ".join(source_errors[:5]))
 
         matched = insert_matched_jobs(run, raw_jobs)
         run.matched_count = len(matched)
@@ -365,6 +465,7 @@ def run_daily_jobs(
         top_jobs = select_top_jobs(run)
         run.ranked_count = len(top_jobs)
 
+        slack_error: str | None = None
         if post_to_notion and top_jobs:
             all_jobs = list(JobListing.objects.filter(run=run).order_by("-is_top_pick", "rank", "-ranking_score"))
             notion_url = publish_daily_jobs_page(run, top_jobs, all_jobs)
@@ -373,13 +474,28 @@ def run_daily_jobs(
 
         if post_to_slack and top_jobs:
             payload = format_slack_message(run.run_date, top_jobs, run.full_list_url or "")
-            posted = post_slack_message(payload)
+            posted, slack_error = post_slack_message(payload)
             if posted:
                 run.slack_posted_at = timezone.now()
+            else:
+                logger.error("Jobs Slack publish failed for run %s: %s", run.run_id, slack_error)
 
-        run.status = "completed" if top_jobs else "completed_no_results"
+        if source_errors:
+            logger.warning("Jobs run %s completed with source errors: %s", run.run_id, "; ".join(source_errors))
+
+        run.status = _build_run_status(
+            top_jobs_count=len(top_jobs),
+            source_errors=source_errors,
+            slack_error=slack_error,
+        )
+        run.error_message = _summarize_run_issues(source_errors, slack_error)
         run.completed_at = timezone.now()
         run.save()
+        if source_errors:
+            try:
+                post_failure_alert(run.run_id, run.error_message or "Run completed with source errors")
+            except Exception:
+                logger.exception("Failed to send source error alert for jobs run %s", run.run_id)
     except Exception as exc:
         run.status = "failed"
         run.error_message = str(exc)
@@ -401,6 +517,10 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
         logger.error("Jobs scheduler misconfigured: %s", "; ".join(errors))
         return {"status": "failed", "reason": "invalid_scheduler_config", "errors": errors}
 
+    queued_result = process_next_queued_run()
+    if queued_result.get("status") != "skipped":
+        return {"status": "ok", "queued_run": queued_result}
+
     local_now = _jobs_schedule_local_now(now)
     run_date = local_now.date().isoformat()
     schedule_hour = settings.jobs_schedule_hour
@@ -412,7 +532,11 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
     completed_statuses = ["completed", "completed_no_results"]
     open_statuses = ["queued", "running"]
 
-    if JobRun.objects.filter(run_date=run_date, status__in=open_statuses + completed_statuses).exists():
+    if JobRun.objects.filter(
+        run_date=run_date,
+        trigger_source="daily_scheduler",
+        status__in=open_statuses + completed_statuses,
+    ).exists():
         return {"status": "skipped", "reason": "run_already_exists", "run_date": run_date}
 
     failed_days = 0
@@ -442,7 +566,10 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
         else:
             break
 
-    failed_runs = list(JobRun.objects.filter(run_date=run_date, status="failed").order_by("-completed_at", "-id"))
+    failed_runs = list(
+        JobRun.objects.filter(run_date=run_date, trigger_source="daily_scheduler", status="failed")
+        .order_by("-completed_at", "-id")
+    )
     failed_count = len(failed_runs)
     if failed_count >= settings.jobs_retry_attempts:
         return {
@@ -464,14 +591,23 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
                 "retry_after": retry_after.isoformat(),
             }
 
-    run = create_run(run_date=run_date)
-    run_daily_jobs(
-        run.run_id,
+    run = create_run(
+        run_date=run_date,
         collect_live=True,
         post_to_slack=settings.jobs_scheduler_post_to_slack,
         post_to_notion=settings.jobs_scheduler_post_to_notion,
         max_pages=settings.jobs_scheduler_max_pages,
         per_keyword_limit=settings.jobs_scheduler_per_keyword_limit,
+        trigger_source="daily_scheduler",
+    )
+    run_daily_jobs(
+        run.run_id,
+        collect_live=run.collect_live,
+        post_to_slack=run.post_to_slack,
+        post_to_notion=run.post_to_notion,
+        source_names=run.source_names,
+        max_pages=run.max_pages,
+        per_keyword_limit=run.per_keyword_limit,
     )
     refreshed = JobRun.objects.get(pk=run.pk)
     return {

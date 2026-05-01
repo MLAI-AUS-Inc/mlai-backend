@@ -29,23 +29,29 @@ def collect_rendered_jobs(
     except ModuleNotFoundError as exc:
         raise RenderedSourceBlockedError("Playwright is not installed for rendered source connector") from exc
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=settings.jobs_scrape_headless)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=settings.jobs_scrape_headless)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
             )
-        )
-        page = context.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(wait_ms)
-            html = page.content()
-        finally:
-            context.close()
-            browser.close()
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(wait_ms)
+                html = page.content()
+            finally:
+                context.close()
+                browser.close()
+    except Exception as exc:
+        raise RenderedSourceBlockedError(
+            "Playwright failed while scraping a rendered jobs source. "
+            "Ensure Chromium is installed and the runtime can launch it."
+        ) from exc
 
     return parse_rendered_jobs(
         html=html,
