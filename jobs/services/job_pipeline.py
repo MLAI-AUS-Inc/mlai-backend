@@ -23,6 +23,14 @@ from jobs.services.summaries import build_job_summary
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_COMPLETED_STATUSES = [
+    "completed",
+    "completed_no_results",
+    "completed_with_source_errors",
+    "completed_no_results_with_source_errors",
+    "completed_with_publish_errors",
+]
+
 
 def _jobs_schedule_timezone():
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -509,6 +517,10 @@ def run_daily_jobs(
 
 
 def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
+    queued_result = process_next_queued_run()
+    if queued_result.get("status") != "skipped":
+        return {"status": "ok", "queued_run": queued_result}
+
     if not settings.jobs_scheduler_enabled:
         return {"status": "skipped", "reason": "scheduler_disabled"}
 
@@ -516,10 +528,6 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
     if errors:
         logger.error("Jobs scheduler misconfigured: %s", "; ".join(errors))
         return {"status": "failed", "reason": "invalid_scheduler_config", "errors": errors}
-
-    queued_result = process_next_queued_run()
-    if queued_result.get("status") != "skipped":
-        return {"status": "ok", "queued_run": queued_result}
 
     local_now = _jobs_schedule_local_now(now)
     run_date = local_now.date().isoformat()
@@ -529,13 +537,12 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
     if (local_now.hour, local_now.minute) < (schedule_hour, schedule_minute):
         return {"status": "skipped", "reason": "before_schedule_window", "run_date": run_date}
 
-    completed_statuses = ["completed", "completed_no_results"]
     open_statuses = ["queued", "running"]
 
     if JobRun.objects.filter(
         run_date=run_date,
         trigger_source="daily_scheduler",
-        status__in=open_statuses + completed_statuses,
+        status__in=open_statuses + TERMINAL_COMPLETED_STATUSES,
     ).exists():
         return {"status": "skipped", "reason": "run_already_exists", "run_date": run_date}
 
@@ -547,7 +554,7 @@ def run_daily_jobs_scheduler(now: datetime | None = None) -> dict[str, Any]:
         .distinct()
     ):
         statuses = set(JobRun.objects.filter(run_date=previous_run_date).values_list("status", flat=True))
-        if statuses & set(completed_statuses):
+        if statuses & set(TERMINAL_COMPLETED_STATUSES):
             break
         if statuses and statuses <= {"failed"}:
             failed_days += 1
