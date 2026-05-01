@@ -7,6 +7,7 @@ from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
 )
+from jobs.services.job_pipeline import run_daily_jobs_scheduler
 
 
 class Command(BaseCommand):
@@ -54,4 +55,5 @@ class Command(BaseCommand):
             return
 
         result = run_daily_discovery_scheduler()
-        self.stdout.write(json.dumps(result, sort_keys=True))
+        jobs_result = run_daily_jobs_scheduler()
+        self.stdout.write(json.dumps({"daily_discovery": result, "jobs": jobs_result}, sort_keys=True))

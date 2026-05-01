@@ -1,0 +1,17 @@
+AI_KEYWORDS = [
+    "artificial intelligence",
+    "AI",
+    "machine learning",
+    "ML",
+    "deep learning",
+    "LLM",
+    "generative AI",
+    "data science",
+    "computer vision",
+    "NLP",
+    "MLOps",
+    "AI engineer",
+    "ML engineer",
+    "research engineer",
+    "research scientist",
+]
