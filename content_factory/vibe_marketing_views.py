@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
 from django.shortcuts import get_object_or_404
+from django.utils.text import slugify
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
@@ -24,14 +25,18 @@ from content_factory.google_baseline import collect_verified_google_metrics, goo
 from content_factory.models import (
     ContentFactoryHealingPromotionState,
     ContentFactoryHealingRecord,
+    KeywordStatus,
     OrganizationContentConfig,
+    ResearchedKeyword,
     VibeMarketingComponentComment,
     VibeMarketingComponentCommentStatus,
     WebsiteBaselineSnapshot,
+    WrittenArticle,
 )
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     apply_shared_startup_details,
+    actor_ids_for_user,
     ensure_company_organization,
     founder_actor_id_for_user,
     get_founder_company_context,
@@ -228,6 +233,21 @@ def _get_config(organization):
     return config
 
 
+def _assign_config_actor(config, user) -> list[str]:
+    actor_id = founder_actor_id_for_user(user)
+    actor_aliases = actor_ids_for_user(user)
+    current_actor_id = str(config.connected_slack_user_id or "").strip()
+    update_fields = []
+    if (
+        not current_actor_id
+        or current_actor_id in actor_aliases
+        or current_actor_id.startswith("mlai_user:")
+    ) and current_actor_id != actor_id:
+        config.connected_slack_user_id = actor_id
+        update_fields.append("connected_slack_user_id")
+    return update_fields
+
+
 def _clean_github_repo(value) -> str:
     return str(value or "").strip()
 
@@ -421,7 +441,71 @@ def _extract_topic_candidates_from_result(result):
     return candidates
 
 
-def _topic_candidates_from_runs(runs):
+def _normalize_keyword_memory(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _serialize_written_article(article):
+    return {
+        "id": str(article.id),
+        "title": article.title,
+        "slug": article.slug,
+        "keyword": article.primary_keyword,
+        "articleUrl": article.article_url or "",
+        "prUrl": article.pr_url or "",
+        "writtenAt": article.published_at.isoformat() if article.published_at else article.created_at.isoformat(),
+    }
+
+
+def _written_topic_memory(organization):
+    keywords = {
+        keyword.keyword_normalized: keyword
+        for keyword in ResearchedKeyword.objects.filter(organization=organization).select_related("written_article")
+    }
+    articles = list(WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:50])
+    written_by_keyword = {
+        _normalize_keyword_memory(article.primary_keyword): article
+        for article in articles
+        if _normalize_keyword_memory(article.primary_keyword)
+    }
+    written_by_slug = {article.slug: article for article in articles if article.slug}
+    return {
+        "keywords": keywords,
+        "written_by_keyword": written_by_keyword,
+        "written_by_slug": written_by_slug,
+        "recent_articles": articles,
+    }
+
+
+def _candidate_written_article(candidate, memory):
+    keyword_key = _normalize_keyword_memory(candidate.get("keyword"))
+    title_slug = slugify(str(candidate.get("title") or ""))
+    keyword = memory["keywords"].get(keyword_key)
+    if keyword and (keyword.status == KeywordStatus.WRITTEN or keyword.written_article_id):
+        return keyword.written_article
+    return memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
+
+
+def _enrich_topic_candidates(organization, candidates, *, include_written=False):
+    memory = _written_topic_memory(organization)
+    enriched = []
+    for candidate in candidates:
+        keyword_key = _normalize_keyword_memory(candidate.get("keyword"))
+        keyword = memory["keywords"].get(keyword_key)
+        written_article = _candidate_written_article(candidate, memory)
+        already_written = bool(written_article or (keyword and keyword.status == KeywordStatus.WRITTEN))
+        enriched_candidate = {
+            **candidate,
+            "status": KeywordStatus.WRITTEN if already_written else (keyword.status if keyword else KeywordStatus.PENDING),
+            "alreadyWritten": already_written,
+            "writtenArticle": _serialize_written_article(written_article) if written_article else None,
+        }
+        if include_written or not already_written:
+            enriched.append(enriched_candidate)
+    return enriched
+
+
+def _topic_candidates_from_runs(runs, *, organization=None, include_written=False):
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
             continue
@@ -429,8 +513,52 @@ def _topic_candidates_from_runs(runs):
         if candidates:
             for candidate in candidates:
                 candidate["sourceRunId"] = candidate.get("sourceRunId") or run.run_id
+            if organization is not None:
+                return _enrich_topic_candidates(organization, candidates, include_written=include_written)
             return candidates
     return []
+
+
+def _recent_written_topics(organization, *, limit=8):
+    return [
+        _serialize_written_article(article)
+        for article in WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
+    ]
+
+
+def _topic_is_already_written(organization, *, keyword: str, title: str = ""):
+    memory = _written_topic_memory(organization)
+    keyword_key = _normalize_keyword_memory(keyword)
+    title_slug = slugify(str(title or ""))
+    keyword_row = memory["keywords"].get(keyword_key)
+    if keyword_row and (keyword_row.status == KeywordStatus.WRITTEN or keyword_row.written_article_id):
+        return keyword_row.written_article or memory["written_by_keyword"].get(keyword_key)
+    return memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
+
+
+def _mark_keyword_in_progress(organization, keyword_text: str):
+    keyword_text = str(keyword_text or "").strip()
+    if not keyword_text:
+        return None
+    keyword, _created = ResearchedKeyword.objects.get_or_create(
+        organization=organization,
+        keyword_normalized=_normalize_keyword_memory(keyword_text),
+        defaults={"keyword": keyword_text, "status": KeywordStatus.IN_PROGRESS},
+    )
+    keyword_update_fields = []
+    if keyword.keyword != keyword_text:
+        keyword.keyword = keyword_text
+        keyword_update_fields.append("keyword")
+    if keyword.status not in {KeywordStatus.WRITTEN, KeywordStatus.IN_PROGRESS}:
+        keyword.status = KeywordStatus.IN_PROGRESS
+        keyword.status_changed_at = timezone.now()
+        keyword_update_fields.extend(["status", "status_changed_at"])
+    keyword.times_selected += 1
+    keyword.last_selected_at = timezone.now()
+    keyword_update_fields.extend(["times_selected", "last_selected_at"])
+    if keyword_update_fields:
+        keyword.save(update_fields=list(dict.fromkeys(keyword_update_fields)))
+    return keyword
 
 
 def _artifact_paths_from_run(run):
@@ -567,6 +695,57 @@ def _content_package_from_run(run):
         ),
         "contentPackaged": content_packaged,
     }
+
+
+def _persist_article_memory_from_run(*, organization, run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    if run.status != ContentFactoryRunStatus.COMPLETED:
+        return None
+    content_package = _content_package_from_run(run)
+    if not content_package or not content_package.get("contentPackaged"):
+        return None
+
+    result = run.result or {}
+    title = str(content_package.get("title") or result.get("title") or "").strip()
+    primary_keyword = str(
+        content_package.get("targetKeyword")
+        or result.get("target_keyword")
+        or result.get("targetKeyword")
+        or ""
+    ).strip()
+    if not title and primary_keyword:
+        title = primary_keyword
+    if not primary_keyword and title:
+        primary_keyword = title
+    if not title or not primary_keyword:
+        return None
+
+    slug = str(content_package.get("slug") or result.get("slug") or slugify(title) or run.run_id).strip()
+    evidence = _publish_evidence_from_run(run)
+    article, _created = WrittenArticle.objects.update_or_create(
+        organization=organization,
+        slug=slug,
+        defaults={
+            "title": title,
+            "category": str(result.get("category") or "featured"),
+            "article_url": evidence.get("previewUrl") or result.get("article_url") or "",
+            "pr_url": evidence.get("prUrl") or result.get("pr_url") or "",
+            "primary_keyword": primary_keyword,
+            "published_at": timezone.now(),
+        },
+    )
+    keyword, _keyword_created = ResearchedKeyword.objects.get_or_create(
+        organization=organization,
+        keyword_normalized=_normalize_keyword_memory(primary_keyword),
+        defaults={"keyword": primary_keyword},
+    )
+    keyword.keyword = primary_keyword
+    keyword.status = KeywordStatus.WRITTEN
+    keyword.written_article = article
+    keyword.status_changed_at = timezone.now()
+    keyword.save(update_fields=["keyword", "status", "written_article", "status_changed_at"])
+    return article
 
 
 def _component_manifest_from_run(run):
@@ -1041,7 +1220,15 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
 def _google_baseline_connect_url(request):
     if request is None:
         return ""
-    next_url = "/founder-tools/marketing/create?step=baseline&googleBaseline=refresh"
+    for setting_name in ("FOUNDER_TOOLS_URL", "VIBE_RAISING_URL", "DEFAULT_FRONTEND_URL"):
+        value = str(getattr(settings, setting_name, "") or "").strip()
+        if value:
+            frontend_base_url = value.rstrip("/")
+            break
+    else:
+        frontend_base_url = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+    next_path = "/founder-tools/marketing/create?step=baseline&googleBaseline=refresh"
+    next_url = f"{frontend_base_url}{next_path}"
     query = urlencode({"scope": "website_baseline", "next": next_url})
     return request.build_absolute_uri(f"/integrations/connect/google?{query}")
 
@@ -1167,7 +1354,7 @@ def _workflow_progress_context(*, context=None, run=None, latest_runs=None, chec
 
 
 def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None):
-    _organization, config, latest_runs, checks = _workflow_progress_context(
+    organization, config, latest_runs, checks = _workflow_progress_context(
         context=context,
         run=run,
         latest_runs=latest_runs,
@@ -1271,7 +1458,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None)
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
-    topic_candidates = _topic_candidates_from_runs(latest_runs)
+    topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
     if article_run:
         status_by_id["choose_topic"] = "complete"
         run_by_id["choose_topic"] = article_run.run_id
@@ -1461,7 +1648,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
     discovery_run = _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
-    topic_candidates = _topic_candidates_from_runs(latest_runs)
+    topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
     research_ready = bool(topic_candidates) or bool(
         discovery_run and discovery_run.status in {
             ContentFactoryRunStatus.AWAITING_CONFIRMATION,
@@ -1593,7 +1780,13 @@ def _serialize_bootstrap(context, request=None):
         "checks": checks,
         "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
-        "topicCandidates": _topic_candidates_from_runs(latest_runs),
+        "topicCandidates": _topic_candidates_from_runs(latest_runs, organization=context.organization),
+        "hiddenTopicCandidates": _topic_candidates_from_runs(
+            latest_runs,
+            organization=context.organization,
+            include_written=True,
+        ),
+        "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run),
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
@@ -1662,6 +1855,8 @@ def _serialize_bootstrap_without_domain(company):
         "latestRuns": [],
         "latestRunsByWorkflow": {},
         "topicCandidates": [],
+        "hiddenTopicCandidates": [],
+        "writtenTopics": [],
         "publishEvidence": {},
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
@@ -2370,7 +2565,7 @@ class VibeMarketingSettingsView(APIView):
         organization.save(update_fields=["competitors", "seed_keywords", "company_linkedin_url"])
 
         config = _get_config(organization)
-        config.connected_slack_user_id = founder_actor_id_for_user(request.user)
+        _assign_config_actor(config, request.user)
         config.brand_name = request.data.get("brand_name", request.data.get("brandName", config.brand_name))
         config.company_context = request.data.get("company_context", request.data.get("companyContext", config.company_context))
         config.github_repo = request.data.get("github_repo", request.data.get("githubRepo", config.github_repo))
@@ -2562,11 +2757,13 @@ class VibeMarketingGitHubConnectView(APIView):
             return error_response
         config = _get_config(context.organization)
         actor_id = founder_actor_id_for_user(request.user)
-        config.connected_slack_user_id = actor_id
+        config_update_fields = _assign_config_actor(config, request.user)
         requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
         if requested_repo:
             config.github_repo = requested_repo
-        config.save(update_fields=["connected_slack_user_id", "github_repo", "updated_at"])
+            config_update_fields.append("github_repo")
+        config_update_fields.append("updated_at")
+        config.save(update_fields=list(dict.fromkeys(config_update_fields)))
 
         existing_connection = _connect_with_existing_github_credentials(
             config,
@@ -2682,6 +2879,20 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        written_article = _topic_is_already_written(
+            context.organization,
+            keyword=target_keyword or topic,
+            title=selected_title or custom_title or topic,
+        )
+        if written_article:
+            return Response(
+                {
+                    "detail": "This topic has already been written. Choose a pending topic or enter a new custom article.",
+                    "field": "topicCandidateId",
+                    "writtenArticle": _serialize_written_article(written_article),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         source_run_id = _request_value(
             request.data,
             "source_run_id",
@@ -2705,6 +2916,7 @@ class VibeMarketingArticleView(APIView):
             "custom_title": selected_title or custom_title or None,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_keyword_in_progress(context.organization, payload["target_keyword"])
         run = _queue_content_factory_run(
             endpoint="article",
             workflow="article_generation",
@@ -2736,6 +2948,8 @@ class VibeMarketingRunView(APIView):
                     time.sleep(0.15 * (attempt + 1))
             if run.workflow in BASELINE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
                 _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
+            if run.workflow in ARTICLE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
+                _persist_article_memory_from_run(organization=context.organization, run=run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
@@ -3006,6 +3220,7 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
             status=VibeMarketingComponentCommentStatus.APPLIED,
             updated_at=timezone.now(),
         )
+        _persist_article_memory_from_run(organization=context.organization, run=run)
         for target in [source_run, run]:
             target_result = target.result or {}
             latest_batch = target_result.get("component_feedback_latest_batch")

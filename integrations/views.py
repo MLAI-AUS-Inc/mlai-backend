@@ -51,6 +51,8 @@ def _known_frontend_origins() -> Set[str]:
             _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
             _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
             _origin_from_url(getattr(settings, "VIBE_RAISING_URL", None)),
+            _origin_from_url(getattr(settings, "FOUNDER_TOOLS_URL", None)),
+            _origin_from_url(getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", None)),
         )
         if origin
     }

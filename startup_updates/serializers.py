@@ -109,6 +109,21 @@ class LinearClassificationResultsSerializer(serializers.Serializer):
     results = LinearClassificationResultItemSerializer(many=True)
 
 
+class NotionClassificationResultItemSerializer(serializers.Serializer):
+    notion_page_id = serializers.CharField()
+    notion_chunk_id = serializers.CharField(required=False, allow_blank=True, default="")
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    important_block_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    extraction_hint = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class NotionClassificationResultsSerializer(serializers.Serializer):
+    results = NotionClassificationResultItemSerializer(many=True)
+
+
 class AttachmentUpdateSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     extracted_text = serializers.CharField(required=False, allow_blank=True, default="")
@@ -202,6 +217,26 @@ class LinearExtractionResultItemSerializer(serializers.Serializer):
 
 class LinearExtractionResultsSerializer(serializers.Serializer):
     results = LinearExtractionResultItemSerializer(many=True)
+
+
+class NotionExtractionResultItemSerializer(serializers.Serializer):
+    notion_page_id = serializers.CharField()
+    notion_chunk_id = serializers.CharField(required=False, allow_blank=True, default="")
+    extraction_status = serializers.ChoiceField(
+        choices=ArtifactProcessingStatus.choices,
+        required=False,
+        default=ArtifactProcessingStatus.PROCESSED,
+    )
+    events = EventResultSerializer(many=True, required=False, default=list)
+    metrics = MetricResultSerializer(many=True, required=False, default=list)
+
+
+class NotionExtractionResultsSerializer(serializers.Serializer):
+    results = NotionExtractionResultItemSerializer(many=True)
+
+
+class CurationResultsSerializer(serializers.Serializer):
+    candidates = serializers.ListField(child=serializers.DictField(), required=False, default=list)
 
 
 class DraftResultSerializer(serializers.Serializer):

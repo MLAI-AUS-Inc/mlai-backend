@@ -39,8 +39,42 @@ def normalize_company_linkedin_url(value: str | None) -> str:
     return f"https://www.linkedin.com/company/{slug}"
 
 
-def founder_actor_id_for_user(user) -> str:
+def synthetic_actor_id_for_user(user) -> str:
     return f"mlai_user:{user.id}"
+
+
+def actor_ids_for_user(user) -> list[str]:
+    actor_ids = []
+    slack_id = str(getattr(user, "slack_id", "") or "").strip()
+    if slack_id:
+        actor_ids.append(slack_id)
+    actor_ids.append(synthetic_actor_id_for_user(user))
+    return list(dict.fromkeys(actor_ids))
+
+
+def founder_actor_id_for_user(user) -> str:
+    return actor_ids_for_user(user)[0]
+
+
+def _is_synthetic_actor_id(value: str | None) -> bool:
+    return str(value or "").strip().startswith("mlai_user:")
+
+
+def reconcile_user_slack_id_from_email(user) -> bool:
+    if getattr(user, "slack_id", None) or not getattr(user, "email", None):
+        return False
+    slack_backed_user = (
+        type(user).objects.filter(email__iexact=user.email)
+        .exclude(pk=user.pk)
+        .exclude(slack_id__isnull=True)
+        .exclude(slack_id="")
+        .first()
+    )
+    if slack_backed_user is None:
+        return False
+    user.slack_id = slack_backed_user.slack_id
+    user.save(update_fields=["slack_id"])
+    return True
 
 
 def string_list_from_value(value) -> list[str]:
@@ -171,7 +205,20 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
     config_update_fields = []
     actor_id = founder_actor_id_for_user(user)
-    if config.connected_slack_user_id != actor_id:
+    actor_aliases = actor_ids_for_user(user)
+    connected_actor_id = str(config.connected_slack_user_id or "").strip()
+    if not connected_actor_id:
+        config.connected_slack_user_id = actor_id
+        config_update_fields.append("connected_slack_user_id")
+    elif connected_actor_id not in actor_aliases and _is_synthetic_actor_id(connected_actor_id):
+        config.connected_slack_user_id = actor_id
+        config_update_fields.append("connected_slack_user_id")
+    elif (
+        connected_actor_id in actor_aliases
+        and connected_actor_id != actor_id
+        and not _is_synthetic_actor_id(actor_id)
+        and _is_synthetic_actor_id(connected_actor_id)
+    ):
         config.connected_slack_user_id = actor_id
         config_update_fields.append("connected_slack_user_id")
     if brand_name_provided and config.brand_name != brand_name:
@@ -242,6 +289,7 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
 
 
 def get_or_create_founder_profile(user) -> VibeRaisingProfile:
+    reconcile_user_slack_id_from_email(user)
     profile, _created = VibeRaisingProfile.objects.get_or_create(
         user=user,
         defaults={"role": VibeRaisingProfile.ROLE_FOUNDER},

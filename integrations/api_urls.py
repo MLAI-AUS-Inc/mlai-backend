@@ -2,6 +2,7 @@ from django.urls import path
 from . import api_views
 from . import api_views_bridge
 from . import api_views_connectors
+from . import api_views_finance
 from . import api_views_luma
 from startup_updates import api_views as startup_update_api_views
 
@@ -34,8 +35,30 @@ urlpatterns = [
         api_views_connectors.ConnectorSourceConnectionDetailView.as_view(),
         name='connector_source_connection_detail',
     ),
-    path('financial/status', api_views_connectors.FinancialSourcesStatusView.as_view(), name='financial_sources_status'),
-    path('financial/sync', api_views_connectors.FinancialSourcesSyncView.as_view(), name='financial_sources_sync'),
+    path('financial/status', api_views_finance.FinancialStatusView.as_view(), name='financial_sources_status'),
+    path('financial/sync', api_views_finance.FinancialSyncView.as_view(), name='financial_sources_sync'),
+    path(
+        'financial/connections/<int:connection_id>',
+        api_views_finance.FinancialConnectionDetailView.as_view(),
+        name='financial_source_connection_detail',
+    ),
+    path('financial/stripe/webhook', api_views_finance.StripeFinancialWebhookView.as_view(), name='financial_stripe_webhook'),
+    path('financial/runs', api_views_finance.FinancialRunCreateView.as_view(), name='financial_run_create'),
+    path(
+        'financial/runs/<str:run_id>/sync-next-page',
+        api_views_finance.FinancialRunSyncNextPageView.as_view(),
+        name='financial_run_sync_next_page',
+    ),
+    path(
+        'financial/runs/<str:run_id>/calculate-monthly-revenue',
+        api_views_finance.FinancialRunCalculateView.as_view(),
+        name='financial_run_calculate',
+    ),
+    path(
+        'financial/runs/<str:run_id>/revenue-snapshots',
+        api_views_finance.FinancialRunSnapshotsView.as_view(),
+        name='financial_run_snapshots',
+    ),
     path(
         'financial/bank-feed/accounts',
         api_views_connectors.BankFeedAccountListView.as_view(),
@@ -91,12 +114,6 @@ urlpatterns = [
         api_views_connectors.LinearPreviewView.as_view(),
         name='linear_preview',
     ),
-    path(
-        'financial/connections/<int:connection_id>',
-        api_views_connectors.ConnectorSourceConnectionDetailView.as_view(),
-        name='financial_source_connection_detail',
-    ),
-
     # Startup updates / investor memo workflow
     path('startup-updates/profile', startup_update_api_views.StartupProfileView.as_view(), name='startup_updates_profile'),
     path('startup-updates/run', startup_update_api_views.StartupUpdateRunView.as_view(), name='startup_updates_run'),
@@ -120,7 +137,17 @@ urlpatterns = [
     path('startup-updates/runs/<str:run_id>/linear/classification-results', startup_update_api_views.StartupUpdateLinearClassificationResultsView.as_view(), name='startup_updates_linear_classification_results'),
     path('startup-updates/runs/<str:run_id>/linear/extraction-batch', startup_update_api_views.StartupUpdateLinearExtractionBatchView.as_view(), name='startup_updates_linear_extraction_batch'),
     path('startup-updates/runs/<str:run_id>/linear/extraction-results', startup_update_api_views.StartupUpdateLinearExtractionResultsView.as_view(), name='startup_updates_linear_extraction_results'),
+    path('startup-updates/runs/<str:run_id>/notion/backfill', startup_update_api_views.StartupUpdateNotionBackfillView.as_view(), name='startup_updates_notion_backfill'),
+    path('startup-updates/runs/<str:run_id>/notion/classification-batch', startup_update_api_views.StartupUpdateNotionClassificationBatchView.as_view(), name='startup_updates_notion_classification_batch'),
+    path('startup-updates/runs/<str:run_id>/notion/classification-results', startup_update_api_views.StartupUpdateNotionClassificationResultsView.as_view(), name='startup_updates_notion_classification_results'),
+    path('startup-updates/runs/<str:run_id>/notion/extraction-batch', startup_update_api_views.StartupUpdateNotionExtractionBatchView.as_view(), name='startup_updates_notion_extraction_batch'),
+    path('startup-updates/runs/<str:run_id>/notion/extraction-results', startup_update_api_views.StartupUpdateNotionExtractionResultsView.as_view(), name='startup_updates_notion_extraction_results'),
     path('startup-updates/runs/<str:run_id>/timeline', startup_update_api_views.StartupUpdateTimelineView.as_view(), name='startup_updates_timeline'),
+    path('startup-updates/runs/<str:run_id>/curation-context', startup_update_api_views.StartupUpdateCurationContextView.as_view(), name='startup_updates_curation_context'),
+    path('startup-updates/runs/<str:run_id>/curation-results', startup_update_api_views.StartupUpdateCurationResultsView.as_view(), name='startup_updates_curation_results'),
+    path('startup-updates/runs/<str:run_id>/review-candidates', startup_update_api_views.StartupUpdateReviewCandidatesView.as_view(), name='startup_updates_review_candidates'),
+    path('startup-updates/runs/<str:run_id>/founder-review/auto-approve', startup_update_api_views.StartupUpdateFounderReviewAutoApproveView.as_view(), name='startup_updates_founder_review_auto_approve'),
+    path('startup-updates/runs/<str:run_id>/curated-timeline', startup_update_api_views.StartupUpdateCuratedTimelineView.as_view(), name='startup_updates_curated_timeline'),
     path('startup-updates/runs/<str:run_id>/draft-results', startup_update_api_views.StartupUpdateDraftResultsView.as_view(), name='startup_updates_draft_results'),
     path('startup-updates/drafts', startup_update_api_views.StartupUpdateDraftListView.as_view(), name='startup_updates_draft_list'),
     path('startup-updates/drafts/<int:draft_id>', startup_update_api_views.StartupUpdateDraftDetailView.as_view(), name='startup_updates_draft_detail'),

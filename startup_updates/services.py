@@ -217,12 +217,25 @@ RUN_STEP_ORDER = [
     "relevance_classification",
     "thread_hydration",
     "event_extraction",
+    "slack_backfill",
+    "slack_relevance_classification",
+    "slack_event_extraction",
+    "linear_backfill",
+    "linear_relevance_classification",
+    "linear_event_extraction",
+    "notion_backfill",
+    "notion_relevance_classification",
+    "notion_event_extraction",
     "timeline_merge",
+    "candidate_curation",
+    "founder_review",
     "draft_generation",
     "groundedness_review",
 ]
 SOURCE_REPROCESS_STEPS = {
     "timeline_merge",
+    "candidate_curation",
+    "founder_review",
     "draft_generation",
     "groundedness_review",
 }
@@ -243,6 +256,15 @@ LINEAR_STEP_KEYS = {
     "linear_backfill",
     "linear_relevance_classification",
     "linear_event_extraction",
+}
+NOTION_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "notion_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
+NOTION_STEP_KEYS = {
+    "notion_backfill",
+    "notion_relevance_classification",
+    "notion_event_extraction",
 }
 LINEAR_COMPACT_MAX_ISSUES = 35
 LINEAR_COMPACT_MAX_UPDATES = 8
@@ -317,6 +339,36 @@ def gmail_required_for_sources(input_sources: Optional[list[str]]) -> bool:
     return "gmail" in normalize_startup_update_input_sources(input_sources)
 
 
+def startup_update_run_input_sources(run: ContentFactoryRun) -> list[str]:
+    return normalize_startup_update_input_sources((run.run_request or {}).get("input_sources"))
+
+
+def startup_update_run_matches_input_sources(
+    run: ContentFactoryRun,
+    input_sources: Optional[list[str]],
+    *,
+    google_connection_id: Optional[int],
+) -> bool:
+    if input_sources is None:
+        return True
+
+    requested = set(normalize_startup_update_input_sources(input_sources))
+    existing = set(startup_update_run_input_sources(run))
+    requested_uses_gmail = "gmail" in requested
+    existing_uses_gmail = "gmail" in existing
+
+    if not requested_uses_gmail:
+        return not existing_uses_gmail and requested == existing
+
+    if not existing_uses_gmail:
+        return False
+
+    run_google_connection_id = get_startup_update_run_google_connection_id(run)
+    if google_connection_id is not None and run_google_connection_id not in (None, google_connection_id):
+        return False
+    return existing.issubset(requested)
+
+
 def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[str]:
     selected = set(normalize_startup_update_input_sources(input_sources))
     steps = ["profile_resolution"]
@@ -331,7 +383,9 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
         steps.extend(["slack_backfill", "slack_relevance_classification", "slack_event_extraction"])
     if ExternalServiceProvider.LINEAR in selected:
         steps.extend(["linear_backfill", "linear_relevance_classification", "linear_event_extraction"])
-    steps.extend(["timeline_merge", "draft_generation", "groundedness_review"])
+    if ExternalServiceProvider.NOTION in selected:
+        steps.extend(["notion_backfill", "notion_relevance_classification", "notion_event_extraction"])
+    steps.extend(["timeline_merge", "candidate_curation", "founder_review", "draft_generation", "groundedness_review"])
     return steps
 
 
@@ -349,6 +403,8 @@ def reconcile_startup_update_run_source_steps(
     slack_classification_was_added = "slack_relevance_classification" in added_steps
     linear_was_added = any(step in LINEAR_STEP_KEYS for step in added_steps)
     linear_classification_was_added = "linear_relevance_classification" in added_steps
+    notion_was_added = any(step in NOTION_STEP_KEYS for step in added_steps)
+    notion_classification_was_added = "notion_relevance_classification" in added_steps
 
     update_fields: list[str] = []
     if previous_step_order != desired_step_order:
@@ -369,6 +425,12 @@ def reconcile_startup_update_run_source_steps(
         update_fields.append("current_step")
     elif linear_classification_was_added and run.current_step in LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS:
         run.current_step = "linear_relevance_classification"
+        update_fields.append("current_step")
+    elif "notion_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "notion_backfill"
+        update_fields.append("current_step")
+    elif notion_classification_was_added and run.current_step in NOTION_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "notion_relevance_classification"
         update_fields.append("current_step")
 
     if update_fields:
@@ -416,6 +478,25 @@ def reconcile_startup_update_run_source_steps(
         reset_steps = set(SOURCE_REPROCESS_STEPS)
         if linear_classification_was_added:
             reset_steps.update(LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS)
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=reset_steps,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    if notion_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if notion_classification_was_added:
+            reset_steps.update(NOTION_CLASSIFICATION_DOWNSTREAM_STEPS)
         downstream_steps = ContentFactoryRunStep.objects.filter(
             run=run,
             step_key__in=reset_steps,
@@ -1625,6 +1706,54 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
     }
 
 
+def latest_external_connection_for_startup(
+    *,
+    user,
+    organization: Organization,
+    provider: str,
+) -> Optional[ExternalServiceConnection]:
+    connection = (
+        user.external_service_connections.filter(
+            provider=provider,
+            organization=organization,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if connection is not None:
+        return connection
+    return (
+        user.external_service_connections.filter(provider=provider)
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def build_notion_run_context(*, organization: Organization) -> dict:
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.NOTION,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    sync_cursor = connection.sync_cursor if connection is not None and isinstance(connection.sync_cursor, dict) else {}
+    return {
+        "source": "notion",
+        "purpose": "founder_workspace_context",
+        "scope": "whole_accessible_workspace",
+        "connection_id": connection.id if connection else None,
+        "workspace": connection.account_label if connection else "",
+        "last_synced_at": connection.last_synced_at.isoformat() if connection and connection.last_synced_at else None,
+        "index_partial": bool(sync_cursor.get("startup_update_index_partial", True)) if connection else True,
+        "warnings": [] if connection else ["Notion was selected but no Notion connection is available."],
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -1662,6 +1791,8 @@ def build_external_context_for_sources(
             organization=organization,
             selected_project_ids=None,
         )
+    if ExternalServiceProvider.NOTION in selected:
+        context["notion"] = build_notion_run_context(organization=organization)
     return context
 
 
@@ -1695,6 +1826,27 @@ def refresh_startup_update_run_source_context(
                 selected=True,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
+    if ExternalServiceProvider.NOTION in set(selected_input_sources):
+        binding = (
+            UserStartupBinding.objects.select_related("user")
+            .filter(id=run_request.get("binding_id"), organization=organization)
+            .first()
+            or organization.user_startup_bindings.select_related("user").first()
+        )
+        notion_connection = (
+            latest_external_connection_for_startup(
+                user=binding.user,
+                organization=organization,
+                provider=ExternalServiceProvider.NOTION,
+            )
+            if binding is not None
+            else None
+        )
+        if notion_connection is not None:
+            if notion_connection.organization_id != organization.id:
+                notion_connection.organization = organization
+                notion_connection.save(update_fields=["organization", "updated_at"])
+            run_request["notion_connection_id"] = notion_connection.id
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
@@ -2195,6 +2347,7 @@ def get_open_startup_update_run(
     organization: Organization,
     google_connection_id: Optional[int] = None,
     target_month: Optional[date] = None,
+    input_sources: Optional[list[str]] = None,
 ) -> Optional[ContentFactoryRun]:
     runs = _iter_startup_update_runs(
         organization=organization,
@@ -2205,9 +2358,16 @@ def get_open_startup_update_run(
     def matches_target(run: ContentFactoryRun) -> bool:
         return target is None or startup_update_run_matches_target_month(run, target)
 
+    def matches_sources(run: ContentFactoryRun) -> bool:
+        return startup_update_run_matches_input_sources(
+            run,
+            input_sources,
+            google_connection_id=google_connection_id,
+        )
+
     if google_connection_id is None:
         for run in runs:
-            if matches_target(run):
+            if matches_target(run) and matches_sources(run):
                 return run
         return None
 
@@ -2215,10 +2375,15 @@ def get_open_startup_update_run(
     for run in runs:
         run_google_connection_id = get_startup_update_run_google_connection_id(run)
         if run_google_connection_id == google_connection_id:
-            if matches_target(run):
+            if matches_target(run) and matches_sources(run):
                 return run
             continue
-        if run_google_connection_id is None and legacy_candidate is None and matches_target(run):
+        if (
+            run_google_connection_id is None
+            and legacy_candidate is None
+            and matches_target(run)
+            and matches_sources(run)
+        ):
             legacy_candidate = run
     return legacy_candidate
 
@@ -2294,6 +2459,7 @@ def create_startup_update_run(
         organization=organization,
         google_connection_id=google_connection_id,
         target_month=selected_target_month,
+        input_sources=selected_input_sources,
     )
     if existing:
         pin_startup_update_run_connection(existing, google_connection_id)
@@ -2350,6 +2516,17 @@ def create_startup_update_run(
         "startup_context": startup_context,
     }
     run_request["input_sources"] = list(selected_input_sources)
+    if ExternalServiceProvider.NOTION in selected_source_set:
+        notion_connection = latest_external_connection_for_startup(
+            user=binding.user,
+            organization=organization,
+            provider=ExternalServiceProvider.NOTION,
+        )
+        if notion_connection is not None:
+            if notion_connection.organization_id != organization.id:
+                notion_connection.organization = organization
+                notion_connection.save(update_fields=["organization", "updated_at"])
+            run_request["notion_connection_id"] = notion_connection.id
     selected_slack_channels = []
     if ExternalServiceProvider.SLACK in selected_source_set:
         selected_slack_channels = [

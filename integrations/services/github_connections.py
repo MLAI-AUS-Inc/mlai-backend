@@ -219,25 +219,34 @@ def build_github_oauth_url(domain: str, slack_user_id: str = "", request=None) -
     return build_github_installation_url(state.raw)
 
 
+def _actor_id_filter_values(slack_user_id) -> list[str]:
+    if isinstance(slack_user_id, (list, tuple, set)):
+        return [str(value).strip() for value in slack_user_id if str(value).strip()]
+    value = str(slack_user_id or "").strip()
+    return [value] if value else []
+
+
 def get_owned_org_configs(slack_user_id: str):
+    actor_ids = _actor_id_filter_values(slack_user_id)
     return (
         OrganizationContentConfig.objects
         .select_related("organization")
-        .filter(connected_slack_user_id=slack_user_id)
+        .filter(connected_slack_user_id__in=actor_ids)
         .order_by("organization__domain")
     )
 
 
 def get_owned_org_config(slack_user_id: str, domain: str) -> Optional[OrganizationContentConfig]:
     normalized_domain = normalize_domain(domain or "")
-    if not slack_user_id or not normalized_domain:
+    actor_ids = _actor_id_filter_values(slack_user_id)
+    if not actor_ids or not normalized_domain:
         return None
 
     return (
         OrganizationContentConfig.objects
         .select_related("organization")
         .filter(
-            connected_slack_user_id=slack_user_id,
+            connected_slack_user_id__in=actor_ids,
             organization__domain=normalized_domain,
         )
         .first()
