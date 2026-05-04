@@ -4,6 +4,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from hospital.models import Team as HospitalTeam
+
 User = get_user_model()
 
 
@@ -54,6 +56,25 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['email'], 'current-user@example.com')
         self.assertEqual(response.data['full_name'], 'Current User')
+        self.assertEqual(response.data['role'], 'participant')
+        self.assertFalse(response.data['has_team'])
+
+    def test_current_user_derives_has_team_from_membership(self):
+        user = User.objects.create_user(
+            email='team-user@example.com',
+            first_name='Team',
+            last_name='User',
+        )
+        team = HospitalTeam.objects.create(team_name='Team Contract')
+        team.members.add(user)
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get('/api/v1/auth/me/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['has_team'])
+        self.assertEqual(response.data['team']['team_name'], 'Team Contract')
+        self.assertEqual(response.data['team']['members'][0]['role'], 'participant')
 
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=abc')
@@ -226,6 +247,8 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['user']['id'], user.id)
         self.assertEqual(response.data['user']['email'], 'verify@example.com')
+        self.assertEqual(response.data['user']['role'], 'participant')
+        self.assertFalse(response.data['user']['has_team'])
         self.assertEqual(response.data['redirect'], '/hospital/app')
         self.assertTrue(response.data['next_url'].endswith('/hospital/app'))
         self.assertIn('access_token', response.cookies)

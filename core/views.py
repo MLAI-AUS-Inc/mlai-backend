@@ -26,18 +26,22 @@ from hospital.models import Team as HospitalTeam
 from .serializers import MyTokenObtainPairSerializer, HackathonSerializer, UserSerializer
 from rest_framework.generics import ListAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from .permissions import IsOwnerOrTeammateOrSuperuser, HasAPIKey, HasRooApiKey
+from .user_compat import DEFAULT_USER_ROLE, get_compat_user_role, user_has_team
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
-ROLE_ALIASES = {
-    'mentor': 'professional',
-    'judge': 'professional',
-    'organizer': 'professional',
-}
 ALLOWED_PERSONAS = {"hacker", "hustler", "hipster", "healer"}
 MEDHACK_TEAM_MIN_MEMBERS = 2
 MEDHACK_TEAM_MAX_MEMBERS = 6
+
+
+def _team_member_payload_from_values(member):
+    return {
+        "full_name": f"{member['first_name']} {member['last_name']}".strip(),
+        "avatar_url": member["avatar_url"],
+        "role": DEFAULT_USER_ROLE,
+    }
 
 
 def _normalize_app_context(app_value, default='hospital'):
@@ -189,11 +193,6 @@ class CreateUserView(APIView):
         first_name = data.get('firstName') or data.get('first_name') or ''
         last_name = data.get('lastName') or data.get('last_name') or ''
         phone = data.get('phone')
-        requested_role = (data.get('role') or 'participant').strip().lower()
-        role = ROLE_ALIASES.get(requested_role, requested_role)
-        allowed_roles = {choice[0] for choice in User.ROLE_CHOICES}
-        if role not in allowed_roles:
-            role = 'participant'
         app = _normalize_app_context(data.get('app'), default='hospital')
         next_path = _normalize_next_path(data.get('next'))
 
@@ -210,7 +209,6 @@ class CreateUserView(APIView):
 
                 user = User.objects.create_user(
                     email=email,
-                    role=role,
                     first_name=first_name,
                     last_name=last_name,
                     phone=phone
@@ -327,10 +325,10 @@ class MagicLinkVerifyView(APIView):
                         'first_name': user.first_name,
                         'last_name': user.last_name,
                         'full_name': user.full_name,
-                        'role': user.role,
+                        'role': get_compat_user_role(user),
                         'is_superuser': user.is_superuser,
                         'is_active': user.is_active,
-                        'has_team': user.has_team,
+                        'has_team': user_has_team(user),
                         'avatar_url': user.avatar_url,
                     },
                     'redirect': redirect_path,
@@ -446,39 +444,39 @@ class CurrentUserView(APIView):
         hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
         hospital_team_data = None
         if hospital_team:
-            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
                 "avatar_url": hospital_team.avatar_url,
                 "member_count": hospital_team.members.count(),
                 "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
 
         # Retrieve esafety team
         esafety_team = user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None
         esafety_team_data = None
         if esafety_team:
-            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url")
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
                 "avatar_url": esafety_team.avatar_url,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
 
         innovate_connect_alliance_team = user.innovate_connect_alliance_teams.first() if hasattr(user, 'innovate_connect_alliance_teams') else None
         innovate_connect_alliance_team_data = None
         if innovate_connect_alliance_team:
-            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url")
             innovate_connect_alliance_team_data = {
                 "team_name": innovate_connect_alliance_team.team_name,
                 "team_id": innovate_connect_alliance_team.team_id,
                 "avatar_url": innovate_connect_alliance_team.avatar_url,
                 "member_count": innovate_connect_alliance_team.members.count(),
                 "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= innovate_connect_alliance_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
         
         # Determine primary team for backward compatibility (prefer hospital)
@@ -491,9 +489,9 @@ class CurrentUserView(APIView):
             'email': user.email,
             'phone': user.phone,
             'about': user.about,
-            'role': user.role,
+            'role': get_compat_user_role(user),
             'is_superuser': user.is_superuser,
-            'has_team': user.has_team,
+            'has_team': user_has_team(user),
             'team': primary_team_data,  # Backward compatibility
             'hospital_team': hospital_team_data,
             'innovate_connect_alliance_team': innovate_connect_alliance_team_data,
@@ -650,38 +648,38 @@ class UpdateProfileView(APIView):
         hospital_team = user.hospital_teams.first()
         hospital_team_data = None
         if hospital_team:
-            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")
             hospital_team_data = {
                 "team_name": hospital_team.team_name,
                 "team_id": hospital_team.team_id,
                 "avatar_url": hospital_team.avatar_url,
                 "member_count": hospital_team.members.count(),
                 "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= hospital_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
 
         esafety_team = user.esafety_teams.first()
         esafety_team_data = None
         if esafety_team:
-            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = esafety_team.members.all().values("first_name", "last_name", "avatar_url")
             esafety_team_data = {
                 "team_name": esafety_team.team_name,
                 "team_id": esafety_team.team_id,
                 "avatar_url": esafety_team.avatar_url,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
 
         innovate_connect_alliance_team = user.innovate_connect_alliance_teams.first()
         innovate_connect_alliance_team_data = None
         if innovate_connect_alliance_team:
-            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url", "role")
+            members = innovate_connect_alliance_team.members.all().values("first_name", "last_name", "avatar_url")
             innovate_connect_alliance_team_data = {
                 "team_name": innovate_connect_alliance_team.team_name,
                 "team_id": innovate_connect_alliance_team.team_id,
                 "avatar_url": innovate_connect_alliance_team.avatar_url,
                 "member_count": innovate_connect_alliance_team.members.count(),
                 "is_valid_team_size": MEDHACK_TEAM_MIN_MEMBERS <= innovate_connect_alliance_team.members.count() <= MEDHACK_TEAM_MAX_MEMBERS,
-                "members": [{"full_name": f"{m['first_name']} {m['last_name']}".strip(), "avatar_url": m["avatar_url"], "role": m["role"]} for m in members]
+                "members": [_team_member_payload_from_values(m) for m in members]
             }
 
         primary_team_data = hospital_team_data or innovate_connect_alliance_team_data or esafety_team_data
@@ -691,13 +689,13 @@ class UpdateProfileView(APIView):
             'email': user.email,
             'phone': user.phone,
             'about': user.about,
-            'role': user.role,
+            'role': get_compat_user_role(user),
             'is_superuser': user.is_superuser,
             'team': primary_team_data,
             'hospital_team': hospital_team_data,
             'innovate_connect_alliance_team': innovate_connect_alliance_team_data,
             'esafety_team': esafety_team_data,
-            'has_team': user.has_team,
+            'has_team': user_has_team(user),
             'avatar_url': user.avatar_url,
             'personas': user.personas,
         }

@@ -1,7 +1,9 @@
+from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
 
+from core.admin import UserAdmin
 from core.forms import CustomUserCreationForm
 
 
@@ -61,4 +63,14 @@ class UserAdminAddViewTests(TestCase):
         user = User.objects.get(email='created-through-admin@example.com')
         self.assertTrue(user.has_usable_password())
         self.assertTrue(user.check_password('StrongPass123!'))
-        self.assertEqual(user.role, 'participant')
+
+    def test_admin_change_form_does_not_expose_removed_user_fields(self):
+        model_admin = UserAdmin(User, admin.site)
+        rendered_fields = {
+            field
+            for _, fieldset_options in model_admin.fieldsets
+            for field in fieldset_options['fields']
+        }
+
+        self.assertNotIn('role', rendered_fields)
+        self.assertNotIn('has_team', rendered_fields)
