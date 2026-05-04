@@ -24,7 +24,19 @@ class PointsAccountSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = PointsAccount
-        fields = ['user_id', 'email', 'slack_id', 'balance', 'lifetime_earned', 'lifetime_spent', 'updated_at']
+        fields = [
+            'user_id',
+            'email',
+            'slack_id',
+            'balance',
+            'earned_balance',
+            'purchased_topup_balance',
+            'lifetime_earned',
+            'lifetime_purchased_topup',
+            'lifetime_spent',
+            'expired_or_reversed_points',
+            'updated_at',
+        ]
 
 
 class LedgerSerializer(serializers.ModelSerializer):

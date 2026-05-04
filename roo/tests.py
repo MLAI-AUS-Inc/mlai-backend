@@ -42,8 +42,12 @@ class PointsServiceTests(TestCase):
         # Create account
         account = PointsService.get_or_create_account(self.user)
         self.assertEqual(account.balance, 0)
+        self.assertEqual(account.earned_balance, 0)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 0)
+        self.assertEqual(account.lifetime_purchased_topup, 0)
         self.assertEqual(account.lifetime_spent, 0)
+        self.assertEqual(account.expired_or_reversed_points, 0)
         
         # Second call returns same account
         account2 = PointsService.get_or_create_account(self.user)
@@ -66,8 +70,66 @@ class PointsServiceTests(TestCase):
         
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 10)
+        self.assertEqual(account.earned_balance, 10)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 10)
+        self.assertEqual(account.lifetime_purchased_topup, 0)
         self.assertEqual(account.lifetime_spent, 0)
+
+    def test_credit_purchased_topup_does_not_increase_lifetime_earned(self):
+        """Purchased top-up points are spendable but not contribution points."""
+        ledger, created = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            created_by_slack_id='STRIPE',
+            idempotency_key='test_topup_1',
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-1',
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(ledger.delta, 10)
+        self.assertEqual(ledger.kind, 'EARN')
+        self.assertEqual(ledger.source, 'purchased_topup')
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.earned_balance, 0)
+        self.assertEqual(account.purchased_topup_balance, 10)
+        self.assertEqual(account.lifetime_earned, 0)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+
+    def test_credit_purchased_topup_is_idempotent(self):
+        """Duplicate Stripe/webhook handling must not double-credit top-up points."""
+        key = 'test_topup_idempotent'
+
+        ledger1, created1 = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            idempotency_key=key,
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-2',
+        )
+        ledger2, created2 = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Duplicate top-up Roo Points purchase',
+            idempotency_key=key,
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-2',
+        )
+
+        self.assertTrue(created1)
+        self.assertFalse(created2)
+        self.assertEqual(ledger1.id, ledger2.id)
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.purchased_topup_balance, 10)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+        self.assertEqual(account.lifetime_earned, 0)
     
     def test_spend_decreases_balance_increases_lifetime_spent(self):
         """Test that spending points decreases balance and increases lifetime_spent."""
@@ -97,8 +159,44 @@ class PointsServiceTests(TestCase):
         
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 15)  # 20 - 5
+        self.assertEqual(account.earned_balance, 15)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 20)
         self.assertEqual(account.lifetime_spent, 5)
+
+    def test_spend_debits_topup_balance_before_earned_balance(self):
+        """Spending keeps earned/top-up balances coherent."""
+        PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            idempotency_key='test_topup_before_spend',
+        )
+        PointsService.award(
+            user=self.user,
+            delta=20,
+            source='TASK',
+            description='Earned points',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='test_earned_before_spend',
+        )
+
+        PointsService.spend(
+            user=self.user,
+            delta=15,
+            source='MERCH',
+            description='Redeemed reward',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='test_mixed_spend',
+        )
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 15)
+        self.assertEqual(account.purchased_topup_balance, 0)
+        self.assertEqual(account.earned_balance, 15)
+        self.assertEqual(account.lifetime_earned, 20)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+        self.assertEqual(account.lifetime_spent, 15)
     
     def test_spend_below_zero_raises_error(self):
         """Test that spending more than balance raises InsufficientBalanceError."""

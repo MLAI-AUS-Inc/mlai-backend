@@ -26,7 +26,16 @@ class PointsAdminAdmin(admin.ModelAdmin):
 
 @admin.register(PointsAccount)
 class PointsAccountAdmin(admin.ModelAdmin):
-    list_display = ('user', 'balance', 'lifetime_earned', 'lifetime_spent', 'updated_at')
+    list_display = (
+        'user',
+        'balance',
+        'earned_balance',
+        'purchased_topup_balance',
+        'lifetime_earned',
+        'lifetime_purchased_topup',
+        'lifetime_spent',
+        'updated_at',
+    )
     list_filter = ('updated_at',)
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('user', 'created_at', 'updated_at')

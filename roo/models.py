@@ -59,8 +59,12 @@ class PointsAccount(models.Model):
         primary_key=True
     )
     balance = models.IntegerField(default=0, help_text="Current spendable balance")
+    earned_balance = models.IntegerField(default=0, help_text="Current balance from earned contribution points")
+    purchased_topup_balance = models.IntegerField(default=0, help_text="Current balance from purchased top-up points")
     lifetime_earned = models.IntegerField(default=0, help_text="Total points ever earned")
+    lifetime_purchased_topup = models.IntegerField(default=0, help_text="Total purchased top-up points ever credited")
     lifetime_spent = models.IntegerField(default=0, help_text="Total points ever spent")
+    expired_or_reversed_points = models.IntegerField(default=0, help_text="Total points expired or reversed")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -381,6 +385,7 @@ class Ledger(models.Model):
         ('CONTENT_FACTORY', 'Content Factory'),
         ('TOOLS', 'Tools'),
         ('DONATION', 'Donation'),
+        ('purchased_topup', 'Purchased Top-Up'),
         ('MANUAL', 'Manual'),
         ('LEGACY', 'Legacy'),  # For migrated entries
     )

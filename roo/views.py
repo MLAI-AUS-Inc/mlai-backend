@@ -891,8 +891,12 @@ class UserBalanceViewSet(viewsets.ViewSet):
                 'slack_user_id': slack_user_id,
                 'email': user.email,
                 'balance': balance_data['balance'],
+                'earned_balance': balance_data['earned_balance'],
+                'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
+                'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
+                'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
                 'annual_balance': balance_data['lifetime_earned'],  # For backwards compat
                 'lifetime_balance': balance_data['lifetime_earned'],  # For backwards compat
             }

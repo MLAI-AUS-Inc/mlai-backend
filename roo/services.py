@@ -61,9 +61,29 @@ class PointsService:
         account = PointsService.get_or_create_account(user)
         return {
             'balance': account.balance,
+            'earned_balance': account.earned_balance,
+            'purchased_topup_balance': account.purchased_topup_balance,
             'lifetime_earned': account.lifetime_earned,
+            'lifetime_purchased_topup': account.lifetime_purchased_topup,
             'lifetime_spent': account.lifetime_spent,
+            'expired_or_reversed_points': account.expired_or_reversed_points,
         }
+
+    @staticmethod
+    def _debit_account_balances(account: PointsAccount, delta: int) -> None:
+        """
+        Deduct spendable points while keeping earned/top-up sub-balances coherent.
+
+        A full point-lot allocator can replace this when expiry-aware redemption
+        lands. For now, spend purchased top-up points first, then earned points.
+        """
+        remaining = delta
+        purchased_debit = min(account.purchased_topup_balance, remaining)
+        account.purchased_topup_balance -= purchased_debit
+        remaining -= purchased_debit
+
+        earned_debit = min(account.earned_balance, remaining)
+        account.earned_balance -= earned_debit
     
     @staticmethod
     def get_user_by_slack_id(slack_id: str) -> Optional[User]:
@@ -188,9 +208,59 @@ class PointsService:
         
         # Update account
         account.balance += delta
+        account.earned_balance += delta
         account.lifetime_earned += delta
         account.save()
         
+        return ledger, True
+
+    @staticmethod
+    @transaction.atomic
+    def credit_purchased_topup(
+        user: User,
+        delta: int,
+        description: str,
+        idempotency_key: str,
+        reference_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+        created_by_slack_id: str = "STRIPE",
+    ) -> Tuple[Ledger, bool]:
+        """
+        Credit purchased top-up points without increasing contribution metrics.
+        """
+        if delta <= 0:
+            raise ValueError("Top-up credit delta must be positive")
+
+        existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            return existing, False
+
+        account = PointsAccount.objects.select_for_update().filter(user=user).first()
+        if not account:
+            account = PointsAccount.objects.create(user=user)
+            account = PointsAccount.objects.select_for_update().get(user=user)
+
+        try:
+            ledger = Ledger.objects.create(
+                user=user,
+                delta=delta,
+                kind='EARN',
+                source='purchased_topup',
+                reference_type=reference_type,
+                reference_id=reference_id,
+                description=description,
+                created_by_slack_id=created_by_slack_id,
+                idempotency_key=idempotency_key,
+            )
+        except IntegrityError:
+            existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            return existing, False
+
+        account.balance += delta
+        account.purchased_topup_balance += delta
+        account.lifetime_purchased_topup += delta
+        account.save()
+
         return ledger, True
     
     @staticmethod
@@ -264,6 +334,7 @@ class PointsService:
         
         # Update account
         account.balance -= delta
+        PointsService._debit_account_balances(account, delta)
         account.lifetime_spent += delta
         account.save()
         
@@ -315,6 +386,7 @@ class PointsService:
             return existing, False
         
         account.balance += delta
+        account.earned_balance += delta
         # Note: Don't decrease lifetime_spent on refund - it's a historical record
         account.save()
         
