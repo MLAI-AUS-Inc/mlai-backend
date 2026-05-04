@@ -16,9 +16,14 @@ class SlackService:
     @classmethod
     def get_client(cls) -> WebClient:
         if cls._client is None:
-            token = os.environ.get('SLACK_BOT_TOKEN')
+            token = (
+                os.environ.get('SLACK_BOT_TOKEN')
+                or os.environ.get('JOBS_SLACK_BOT_TOKEN')
+                or getattr(settings, 'SLACK_BOT_TOKEN', '')
+                or getattr(settings, 'JOBS_SLACK_BOT_TOKEN', '')
+            )
             if not token:
-                logger.warning("SLACK_BOT_TOKEN not found in environment variables")
+                logger.warning("SLACK_BOT_TOKEN or JOBS_SLACK_BOT_TOKEN not found in environment variables")
             cls._client = WebClient(token=token)
         return cls._client
 

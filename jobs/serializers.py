@@ -7,7 +7,7 @@ from .models import JobListing, JobRun
 
 class DailyRunRequestSerializer(serializers.Serializer):
     collect_live = serializers.BooleanField(default=True)
-    post_to_slack = serializers.BooleanField(default=False)
+    post_to_slack = serializers.BooleanField(default=True)
     post_to_notion = serializers.BooleanField(default=True)
     sources = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
     max_pages = serializers.IntegerField(required=False, allow_null=True)
@@ -64,4 +64,3 @@ class JobRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobRun
         fields = "__all__"
-
