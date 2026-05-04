@@ -13,6 +13,7 @@ from .models import (
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
+    StartupDataDeletionRequest,
     StartupEvent,
     StartupMetricObservation,
     StartupProfile,
@@ -170,3 +171,11 @@ class MonthlyUpdateDraftAdmin(admin.ModelAdmin):
     list_display = ("organization", "month", "status", "groundedness_status", "model_name", "updated_at")
     search_fields = ("organization__domain", "title", "model_name")
     list_filter = ("status", "groundedness_status", "month")
+
+
+@admin.register(StartupDataDeletionRequest)
+class StartupDataDeletionRequestAdmin(admin.ModelAdmin):
+    list_display = ("organization", "provider", "status", "delete_derived_data", "google_account", "completed_at")
+    search_fields = ("organization__domain", "request_id", "google_account", "reason")
+    list_filter = ("provider", "status", "delete_derived_data", "created_at")
+    readonly_fields = ("request_id", "deleted_counts", "warnings", "metadata", "started_at", "completed_at")

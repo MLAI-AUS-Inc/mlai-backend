@@ -85,6 +85,11 @@ urlpatterns = [
         name='gmail_preview',
     ),
     path(
+        'gmail/connection',
+        api_views_connectors.GmailConnectionDetailView.as_view(),
+        name='gmail_connection_detail',
+    ),
+    path(
         'slack/channels',
         api_views_connectors.SlackChannelListView.as_view(),
         name='slack_channels',

@@ -54,6 +54,12 @@ class GroundednessStatus(models.TextChoices):
     NEEDS_REVIEW = "needs_review", "Needs Review"
 
 
+class StartupDataDeletionStatus(models.TextChoices):
+    DELETING = "deleting", "Deleting"
+    DELETED = "deleted", "Deleted"
+    FAILED = "failed", "Failed"
+
+
 class StartupProfile(models.Model):
     organization = models.OneToOneField(
         "organizations.Organization",
@@ -839,3 +845,47 @@ class MonthlyUpdateDraft(models.Model):
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
+
+
+class StartupDataDeletionRequest(models.Model):
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="startup_data_deletion_requests",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="startup_data_deletion_requests",
+    )
+    request_id = models.CharField(max_length=120, unique=True, db_index=True)
+    provider = models.CharField(max_length=32, default="gmail", db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=StartupDataDeletionStatus.choices,
+        default=StartupDataDeletionStatus.DELETING,
+        db_index=True,
+    )
+    delete_derived_data = models.BooleanField(default=False)
+    google_account = models.EmailField(blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    deleted_counts = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_startupdatadeletionrequest"
+        indexes = [
+            models.Index(fields=["organization", "status", "-updated_at"], name="startup_delete_org_status_idx"),
+            models.Index(fields=["provider", "status"], name="startup_delete_provider_idx"),
+        ]
+        ordering = ["-updated_at", "-id"]
+
+    def __str__(self):
+        return f"{self.organization_id}:{self.provider}:{self.status}"
