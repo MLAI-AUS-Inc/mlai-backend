@@ -4,7 +4,9 @@ from django.db import models
 
 class GmailRelevanceLabel(models.TextChoices):
     PENDING = "pending", "Pending"
+    UPDATE_WORTHY = "update_worthy", "Update Worthy"
     RELEVANT = "relevant", "Relevant"
+    BACKGROUND = "background", "Background"
     IRRELEVANT = "irrelevant", "Irrelevant"
     AMBIGUOUS = "ambiguous", "Ambiguous"
 

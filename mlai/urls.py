@@ -36,6 +36,7 @@ urlpatterns = [
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API
     path('api/content-factory/', include('content_factory.urls_service')),
+    path('api/v1/content-factory/app/', include('integrations.content_factory_app_urls')),
     path('api/v1/content/', include('content_factory.urls_content')),
     # SEO Research API
     path('api/seo/', include('content_factory.urls_seo')),

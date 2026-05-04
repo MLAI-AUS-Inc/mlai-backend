@@ -52,6 +52,8 @@ def _normalize_app_context(app_value, default='hospital'):
         return 'founder-tools'
     if app in ('vibe-raising', 'vibe_raising', 'viberaising'):
         return 'founder-tools'
+    if app in ('content-factory', 'content_factory', 'contentfactory'):
+        return 'content-factory'
     return default
 
 
@@ -108,6 +110,8 @@ def _frontend_base_url(app_context):
             or getattr(settings, 'VIBE_RAISING_URL', None),
             default_origin,
         )
+    if app_context == 'content-factory':
+        return _origin_from_url(getattr(settings, 'CONTENT_FACTORY_FRONTEND_URL', None), default_origin)
     return default_origin
 
 
@@ -308,6 +312,8 @@ class MagicLinkVerifyView(APIView):
                     redirect_path = "/innovate-connect-alliance"
                 elif app_param == 'founder-tools':
                     redirect_path = "/founder-tools"
+                elif app_param == 'content-factory':
+                    redirect_path = "/content-factory"
                 else:
                     redirect_path = "/hospital/app"
 
