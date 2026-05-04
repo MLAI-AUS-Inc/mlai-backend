@@ -24,6 +24,7 @@ from .models import (
 
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import (
+    can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
     InsufficientBalanceError,
@@ -987,7 +988,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 {'error': 'slack_user_id is required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not is_points_admin(slack_user_id):
+        if not can_generate_coworking_reports(slack_user_id):
             return Response(
                 {'error': 'Only Roo Points Admins can generate coworking reports'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -1462,14 +1463,6 @@ class ManualAwardView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Bypass admin check if authenticated via API Key (Roo)
-        # The permission class has already passed at this point.
-        # But we still run the check for non-API-Key users (if any could get here)
-        # Since usage is restricted to HasRooApiKey, we technically know it's allowed.
-        # But if we want to support human users via session in future, we keep the check.
-        # For now, if HasRooApiKey is the ONLY permission, then everyone here is Roo.
-        # But let's be explicitly safe and check if it's NOT an admin AND NOT authorized via key (impossible here)
-        
         try:
             require_linked_points_admin(admin_slack_id, action_label='award points manually')
         except PermissionDeniedError as exc:
@@ -1532,6 +1525,55 @@ class ManualAwardView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
              return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SystemAwardView(APIView):
+    """
+    Roo-internal positive point award path for non-human system automations.
+    """
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        created_by_slack_id = (request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM').strip()
+        target_slack_id = (request.data.get('target_slack_id') or '').strip()
+        points = request.data.get('points')
+        reason = request.data.get('reason', 'System award')
+
+        if not target_slack_id or points is None:
+            return Response(
+                {'error': 'target_slack_id and points are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            points = int(points)
+        except (ValueError, TypeError):
+            return Response({'error': 'Points must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if points <= 0:
+            return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = get_or_create_user_for_slack_id(target_slack_id)
+        idempotency_key = f"system:{created_by_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
+
+        try:
+            ledger, _ = PointsService.award(
+                user=user,
+                delta=points,
+                source='EVENT',
+                description=reason,
+                created_by_slack_id=created_by_slack_id,
+                idempotency_key=idempotency_key,
+            )
+            balance = PointsService.get_balance(user)
+            return Response({
+                'success': True,
+                'points_awarded': ledger.delta,
+                'new_balance': balance['balance'],
+                'ledger_id': ledger.id,
+            })
+        except Exception as e:
+            return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ============================================================

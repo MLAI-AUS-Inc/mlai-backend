@@ -13,6 +13,8 @@ from .models import (
     PointsAccount,
     PointsAdmin,
     PointsRequest,
+    RewardRedemption,
+    RewardsCatalog,
     Task,
     TaskAssignment,
     TaskSubmission,
@@ -27,10 +29,15 @@ class ManualAwardViewTests(APITestCase):
     def setUp(self):
         self.url = reverse('manual-award')
         self.admin_slack_id = 'UADMIN123'
+        self.partner_slack_id = 'UPARTNER123'
         self.target_slack_id = 'UTARGET456'
         self.admin_user = User.objects.create_user(
             email='manual-admin@example.com',
             slack_id=self.admin_slack_id,
+        )
+        self.partner_user = User.objects.create_user(
+            email='manual-partner@example.com',
+            slack_id=self.partner_slack_id,
         )
         
         # Create admin
@@ -39,6 +46,12 @@ class ManualAwardViewTests(APITestCase):
             user=self.admin_user,
             role='admin',
             is_active=True
+        )
+        PointsAdmin.objects.create(
+            slack_user_id=self.partner_slack_id,
+            user=self.partner_user,
+            role='partner',
+            is_active=True,
         )
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
@@ -68,6 +81,20 @@ class ManualAwardViewTests(APITestCase):
         response = self.client.post(self.url, data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data['success'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_partner_cannot_award_points(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.partner_slack_id,
+                'target_slack_id': self.target_slack_id,
+                'points': 10,
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data['error'], 'Only Points Admins can award points manually')
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_award_with_legacy_admin_slack_id(self, mock_permission):
@@ -122,6 +149,45 @@ class ManualAwardViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('Only Points Admins can award points manually', response.data['error'])
+
+
+class SystemAwardViewTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('system-award')
+        self.target_slack_id = 'USYSTEMTARGET'
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_system_award_can_award_without_human_points_admin(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'created_by_slack_id': 'UROOBOT',
+                'target_slack_id': self.target_slack_id,
+                'points': 12,
+                'reason': 'System award test',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['points_awarded'], 12)
+        ledger = Ledger.objects.get(created_by_slack_id='UROOBOT')
+        self.assertEqual(ledger.source, 'EVENT')
+        self.assertEqual(ledger.delta, 12)
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_system_award_rejects_non_positive_points(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'target_slack_id': self.target_slack_id,
+                'points': 0,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['error'], 'System awards must be positive')
 
 
 class PointsAdminManagementViewSetTests(APITestCase):
@@ -961,6 +1027,7 @@ class CoworkingReportViewSetTests(APITestCase):
     def setUp(self):
         self.url = reverse('coworking-report')
         self.admin_slack_id = 'UPOINTSADMIN'
+        self.partner_slack_id = 'UPOINTSPARTNER'
         self.other_slack_id = 'UNOTADMIN'
         self.user_1 = User.objects.create_user(email='report1@example.com', slack_id='UREPORT1')
         self.user_2 = User.objects.create_user(email='report2@example.com', slack_id='UREPORT2')
@@ -968,6 +1035,11 @@ class CoworkingReportViewSetTests(APITestCase):
         PointsAdmin.objects.create(
             slack_user_id=self.admin_slack_id,
             role='admin',
+            is_active=True,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id=self.partner_slack_id,
+            role='partner',
             is_active=True,
         )
 
@@ -1023,6 +1095,22 @@ class CoworkingReportViewSetTests(APITestCase):
         self.assertEqual(monthly_by_month['2026-02'], 1)
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_can_generate_report(self, mock_permission):
+        self._create_booking(self.user_1, date(2026, 1, 1))
+
+        response = self.client.get(
+            self.url,
+            {
+                'slack_user_id': self.partner_slack_id,
+                'start_date': '2026-01-01',
+                'end_date': '2026-01-31',
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['totals']['booked_user_days'], 1)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_report_requires_points_admin(self, mock_permission):
         response = self.client.get(
             self.url,
@@ -1066,6 +1154,156 @@ class CoworkingReportViewSetTests(APITestCase):
         self.assertEqual(invalid_date_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(reversed_range_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(too_long_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PartnerRoleRestrictionTests(APITestCase):
+    def setUp(self):
+        self.partner_slack_id = 'UPARTNERONLY'
+        self.full_admin_slack_id = 'UFULLADMIN'
+        self.member = User.objects.create_user(email='member@example.com', slack_id='UMEMBER')
+        self.other_member = User.objects.create_user(email='other-member@example.com', slack_id='UOTHERBOOK')
+        PointsAdmin.objects.create(
+            slack_user_id=self.partner_slack_id,
+            role='partner',
+            is_active=True,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id=self.full_admin_slack_id,
+            role='committee',
+            is_active=True,
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_cannot_create_or_administer_tasks(self, mock_permission):
+        create_response = self.client.post(
+            reverse('task-list'),
+            {
+                'slack_user_id': self.partner_slack_id,
+                'title': 'Partner blocked task',
+                'points': 5,
+                'created_by_user_id': self.partner_slack_id,
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        task = Task.objects.create(
+            title='Existing task',
+            points=5,
+            created_by_user_id=self.full_admin_slack_id,
+            assigned_to_user_id=self.member.slack_id,
+            assigned_user=self.member,
+            status='submitted',
+        )
+        approve_response = self.client.post(
+            reverse('task-approve', args=[task.id]),
+            {'slack_user_id': self.partner_slack_id},
+            format='json',
+        )
+        reject_response = self.client.post(
+            reverse('task-reject', args=[task.id]),
+            {'slack_user_id': self.partner_slack_id},
+            format='json',
+        )
+        award_response = self.client.post(
+            reverse('task-award', args=[task.id]),
+            {
+                'created_by_user_id': self.partner_slack_id,
+                'assigned_to_user_id': self.member.slack_id,
+            },
+            format='json',
+        )
+
+        self.assertEqual(approve_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(reject_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(award_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_cannot_approve_points_requests(self, mock_permission):
+        points_request = PointsRequest.objects.create(
+            requester_slack_id=self.member.slack_id,
+            target_slack_id=self.member.slack_id,
+            points=5,
+            reason='Partner restriction test',
+        )
+
+        response = self.client.post(
+            reverse('points-request-approve', args=[points_request.id]),
+            {'admin_slack_id': self.partner_slack_id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_cannot_fetch_admin_allowance(self, mock_permission):
+        response = self.client.get(
+            reverse('admin-allowance'),
+            {'slack_id': self.partner_slack_id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error'], 'Not a points admin')
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_cannot_administer_rewards(self, mock_permission):
+        reward = RewardsCatalog.objects.create(
+            code='PARTNER_BLOCKED_REWARD',
+            name='Partner Blocked Reward',
+            cost_points=1,
+        )
+        redemption = RewardRedemption.objects.create(
+            user=self.member,
+            reward=reward,
+            quantity=1,
+            status='requested',
+        )
+
+        approve_response = self.client.post(
+            reverse('rewards-approve'),
+            {
+                'slack_user_id': self.partner_slack_id,
+                'redemption_id': redemption.id,
+            },
+            format='json',
+        )
+        pending_response = self.client.get(
+            reverse('rewards-pending'),
+            {'slack_user_id': self.partner_slack_id},
+        )
+
+        self.assertEqual(approve_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(pending_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_partner_cannot_set_capacity_or_cancel_other_user_booking(self, mock_permission):
+        booking = CoworkingBooking.objects.create(
+            user=self.other_member,
+            date=date(2026, 1, 5),
+            status='booked',
+            points_cost=4,
+        )
+
+        capacity_response = self.client.post(
+            reverse('coworking-set-capacity'),
+            {
+                'slack_user_id': self.partner_slack_id,
+                'date': '2026-01-05',
+                'capacity': 20,
+            },
+            format='json',
+        )
+        cancel_response = self.client.post(
+            reverse('coworking-cancel'),
+            {
+                'slack_user_id': self.partner_slack_id,
+                'booking_id': booking.id,
+            },
+            format='json',
+        )
+
+        self.assertEqual(capacity_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(cancel_response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class FirstChannelPostAwardViewTests(APITestCase):
