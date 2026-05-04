@@ -11,6 +11,7 @@ from .models import PointsAdmin
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = ("admin", "committee", "portfolio_lead")
 COWORKING_REPORT_ROLES = (*FULL_POINTS_ADMIN_ROLES, "partner")
+LUMA_EXPORT_ROLES = ("admin", "committee", "partner")
 
 
 def _clean_slack_id(slack_id: str) -> str:
@@ -67,6 +68,23 @@ def can_generate_coworking_reports(slack_id: str) -> bool:
         return True
 
     return _active_admin_with_role_exists(slack_id, COWORKING_REPORT_ROLES)
+
+
+def can_export_luma_attendees(slack_id: str) -> bool:
+    """
+    Check if a Slack user ID can export Luma attendee data.
+
+    Luma attendee data contains PII, so this uses an explicit role allowlist
+    rather than the broader full-admin helper.
+    """
+    slack_id = _clean_slack_id(slack_id)
+    if not slack_id:
+        return False
+
+    if _is_bootstrap_admin(slack_id):
+        return True
+
+    return _active_admin_with_role_exists(slack_id, LUMA_EXPORT_ROLES)
 
 
 def is_points_super_admin(slack_id: str) -> bool:
