@@ -441,6 +441,104 @@ def _extract_topic_candidates_from_result(result):
     return candidates
 
 
+def _safe_number(value, default=0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _latest_keyword_velocity(keyword):
+    try:
+        snapshot = keyword.velocity_snapshots.first()
+    except Exception:
+        snapshot = None
+    if not snapshot:
+        return None
+    return {
+        "velocityScore": snapshot.velocity_score,
+        "trendStatus": snapshot.trend_status,
+        "absoluteVolume": snapshot.absolute_volume,
+    }
+
+
+def _latest_keyword_saturation(keyword):
+    try:
+        snapshot = keyword.ai_saturation_snapshots.first()
+    except Exception:
+        snapshot = None
+    if not snapshot:
+        return None
+    return {
+        "saturationScore": snapshot.saturation_score,
+        "aiOverviewPresent": snapshot.ai_overview_present,
+        "hostilityScore": snapshot.hostility_score,
+        "hostilityRecommendation": snapshot.hostility_recommendation,
+    }
+
+
+def _keyword_is_available_for_topic_picker(keyword, *, include_written=False):
+    if include_written:
+        return True
+    if keyword.status in {KeywordStatus.WRITTEN, KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}:
+        return False
+    if keyword.written_article_id:
+        return False
+    if keyword.cooldown_until and keyword.cooldown_until > timezone.now():
+        return False
+    return True
+
+
+def _topic_candidate_from_keyword(keyword):
+    title = keyword.keyword
+    intent = str(keyword.intent or "").replace("_", " ").strip()
+    reason_parts = []
+    if keyword.opportunity_index:
+        reason_parts.append(f"Opportunity score {keyword.opportunity_index:g}")
+    if keyword.volume:
+        reason_parts.append(f"{keyword.volume:,} monthly searches")
+    if keyword.difficulty is not None:
+        reason_parts.append(f"difficulty {keyword.difficulty}/100")
+    if intent:
+        reason_parts.append(f"{intent} intent")
+    reason = ". ".join(reason_parts) or "Recommended from stored topic research."
+    written_article = keyword.written_article
+    already_written = bool(keyword.status == KeywordStatus.WRITTEN or written_article)
+    return {
+        "id": f"keyword:{keyword.id}",
+        "keyword": keyword.keyword,
+        "title": title,
+        "reason": reason,
+        "source": "researched_keyword",
+        "intent": keyword.intent,
+        "difficulty": keyword.difficulty,
+        "opportunityScore": keyword.opportunity_index,
+        "volume": keyword.volume,
+        "tier": keyword.tier,
+        "status": keyword.status,
+        "alreadyWritten": already_written,
+        "writtenArticle": _serialize_written_article(written_article) if written_article else None,
+        "velocity": _latest_keyword_velocity(keyword),
+        "aiSaturation": _latest_keyword_saturation(keyword),
+    }
+
+
+def _stored_keyword_topic_candidates(organization, *, include_written=False, limit=50):
+    keywords = (
+        ResearchedKeyword.objects.filter(organization=organization)
+        .select_related("written_article")
+        .prefetch_related("velocity_snapshots", "ai_saturation_snapshots")
+        .order_by("-opportunity_index", "-volume", "difficulty", "-metrics_updated_at")[:limit]
+    )
+    return [
+        _topic_candidate_from_keyword(keyword)
+        for keyword in keywords
+        if _keyword_is_available_for_topic_picker(keyword, include_written=include_written)
+    ]
+
+
 def _normalize_keyword_memory(value) -> str:
     return str(value or "").strip().lower()
 
@@ -494,18 +592,27 @@ def _enrich_topic_candidates(organization, candidates, *, include_written=False)
         keyword = memory["keywords"].get(keyword_key)
         written_article = _candidate_written_article(candidate, memory)
         already_written = bool(written_article or (keyword and keyword.status == KeywordStatus.WRITTEN))
+        unavailable = bool(
+            keyword
+            and not include_written
+            and (
+                keyword.status in {KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}
+                or (keyword.cooldown_until and keyword.cooldown_until > timezone.now())
+            )
+        )
         enriched_candidate = {
             **candidate,
             "status": KeywordStatus.WRITTEN if already_written else (keyword.status if keyword else KeywordStatus.PENDING),
             "alreadyWritten": already_written,
             "writtenArticle": _serialize_written_article(written_article) if written_article else None,
         }
-        if include_written or not already_written:
+        if include_written or (not already_written and not unavailable):
             enriched.append(enriched_candidate)
     return enriched
 
 
 def _topic_candidates_from_runs(runs, *, organization=None, include_written=False):
+    run_candidates = []
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
             continue
@@ -513,10 +620,45 @@ def _topic_candidates_from_runs(runs, *, organization=None, include_written=Fals
         if candidates:
             for candidate in candidates:
                 candidate["sourceRunId"] = candidate.get("sourceRunId") or run.run_id
-            if organization is not None:
-                return _enrich_topic_candidates(organization, candidates, include_written=include_written)
-            return candidates
-    return []
+            run_candidates = candidates
+            break
+    if organization is None:
+        return run_candidates
+
+    stored_candidates = _stored_keyword_topic_candidates(organization, include_written=include_written)
+    enriched_run_candidates = _enrich_topic_candidates(
+        organization,
+        run_candidates,
+        include_written=include_written,
+    )
+    merged = {}
+    for candidate in [*stored_candidates, *enriched_run_candidates]:
+        key = _normalize_keyword_memory(candidate.get("keyword"))
+        if not key:
+            continue
+        existing = merged.get(key)
+        if existing:
+            merged[key] = {
+                **existing,
+                **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
+                "volume": existing.get("volume") or candidate.get("volume"),
+                "difficulty": existing.get("difficulty") if existing.get("difficulty") is not None else candidate.get("difficulty"),
+                "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
+                "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
+                "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
+            }
+        else:
+            merged[key] = candidate
+
+    return sorted(
+        merged.values(),
+        key=lambda candidate: (
+            -_safe_number(candidate.get("opportunityScore")),
+            -_safe_number(candidate.get("volume")),
+            _safe_number(candidate.get("difficulty"), default=100),
+            str(candidate.get("keyword") or ""),
+        ),
+    )
 
 
 def _recent_written_topics(organization, *, limit=8):
@@ -524,6 +666,24 @@ def _recent_written_topics(organization, *, limit=8):
         _serialize_written_article(article)
         for article in WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
     ]
+
+
+def _has_completed_article_flow(organization, latest_runs=None):
+    if WrittenArticle.objects.filter(organization=organization).exists():
+        return True
+    for run in latest_runs or []:
+        if run.workflow not in ARTICLE_WORKFLOWS or run.status != ContentFactoryRunStatus.COMPLETED:
+            continue
+        content_package = _content_package_from_run(run)
+        if content_package and content_package.get("contentPackaged"):
+            return True
+    return False
+
+
+def _start_page_mode(organization, latest_runs=None):
+    if not organization or not normalize_company_domain(getattr(organization, "domain", "")):
+        return "first_article_setup"
+    return "topic_picker" if _has_completed_article_flow(organization, latest_runs) else "first_article_setup"
 
 
 def _topic_is_already_written(organization, *, keyword: str, title: str = ""):
@@ -746,6 +906,18 @@ def _persist_article_memory_from_run(*, organization, run):
     keyword.status_changed_at = timezone.now()
     keyword.save(update_fields=["keyword", "status", "written_article", "status_changed_at"])
     return article
+
+
+def _persist_completed_article_memory_if_possible(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS or run.status != ContentFactoryRunStatus.COMPLETED:
+        return None
+    domain = normalize_company_domain(run.domain)
+    if not domain:
+        return None
+    organization = Organization.objects.filter(domain__iexact=domain).first()
+    if organization is None:
+        return None
+    return _persist_article_memory_from_run(organization=organization, run=run)
 
 
 def _component_manifest_from_run(run):
@@ -1733,6 +1905,8 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
 def _serialize_bootstrap(context, request=None):
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
+    for run in latest_runs:
+        _persist_completed_article_memory_if_possible(run)
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
@@ -1745,6 +1919,7 @@ def _serialize_bootstrap(context, request=None):
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
+    has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs)
     return {
         "company": {
             "id": str(context.company.id),
@@ -1792,6 +1967,8 @@ def _serialize_bootstrap(context, request=None):
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": _recommended_next_action(checks),
         "workflowProgress": _workflow_progress(context=context, latest_runs=latest_runs, checks=checks),
+        "hasCompletedArticleFlow": has_completed_article_flow,
+        "startPageMode": "topic_picker" if has_completed_article_flow else "first_article_setup",
     }
 
 
@@ -1862,6 +2039,8 @@ def _serialize_bootstrap_without_domain(company):
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": {"key": "websiteProfile", "label": "Save website profile"},
         "workflowProgress": _workflow_progress(checks=checks),
+        "hasCompletedArticleFlow": False,
+        "startPageMode": "first_article_setup",
     }
 
 
@@ -2148,6 +2327,7 @@ def _sync_local_run_from_remote(run, remote_data):
             "updated_at",
         ]
     )
+    _persist_completed_article_memory_if_possible(run)
     return run
 
 
