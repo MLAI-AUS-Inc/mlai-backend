@@ -78,9 +78,14 @@ class InnovateConnectAllianceApiTests(TestCase):
         self.assertEqual(response.data["team"]["code"], "TEAM1")
         self.assertEqual(response.data["team"]["member_count"], 1)
         self.assertEqual(response.data["team"]["members"][0]["email"], self.user.email)
+        self.assertEqual(response.data["team"]["members"][0]["role"], "participant")
 
         self.user.refresh_from_db()
-        self.assertTrue(self.user.has_team)
+        self.assertTrue(Team.objects.filter(members=self.user).exists())
+
+        auth_response = self.client.get("/api/v1/auth/me/")
+        self.assertEqual(auth_response.status_code, 200)
+        self.assertTrue(auth_response.data["has_team"])
 
         list_response = self.client.get("/api/v1/hackathons/innovate-connect-alliance/teams/")
         self.assertEqual(list_response.status_code, 200)

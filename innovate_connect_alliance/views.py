@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.firebase_utils import upload_file_to_storage
+from core.user_compat import get_compat_user_role
 
 from .models import Announcement, Team, VideoSubmission
 from .serializers import AnnouncementSerializer
@@ -45,7 +46,7 @@ def _member_payload(member):
         "full_name": member.full_name,
         "email": member.email,
         "avatar_url": member.avatar_url,
-        "role": member.role,
+        "role": get_compat_user_role(member),
         "personas": member.personas,
     }
 
@@ -203,9 +204,6 @@ class TeamListView(APIView):
             current_team.members.remove(user)
 
         team.members.add(user)
-        if not user.has_team:
-            user.has_team = True
-            user.save(update_fields=["has_team"])
 
         return Response(
             {"created": created, "team": _team_payload(team)},
@@ -251,9 +249,6 @@ class JoinTeamView(APIView):
             current_team.members.remove(user)
 
         team.members.add(user)
-        if not user.has_team:
-            user.has_team = True
-            user.save(update_fields=["has_team"])
 
         return Response(
             {
