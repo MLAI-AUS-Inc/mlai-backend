@@ -65,8 +65,6 @@ class PointsPurchaseAdmin(admin.ModelAdmin):
         'slack_user_id',
         'pack_id',
         'stripe_checkout_session_id',
-        'stripe_payment_intent_id',
-        'stripe_customer_id',
     )
     readonly_fields = (
         'id',
@@ -78,10 +76,6 @@ class PointsPurchaseAdmin(admin.ModelAdmin):
         'currency',
         'status',
         'stripe_checkout_session_id',
-        'stripe_payment_intent_id',
-        'stripe_customer_id',
-        'checkout_url',
-        'frontend_checkout_url',
         'terms_version_accepted',
         'terms_accepted_at',
         'privacy_version_accepted',

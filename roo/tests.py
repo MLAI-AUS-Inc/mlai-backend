@@ -315,7 +315,6 @@ class PointsPurchaseModelTests(TestCase):
             pack_id='topup_10',
             points_amount=10,
             amount_cents=3699,
-            frontend_checkout_url='https://mlai.au/roo/topup/purchase-id',
             purchase_from={
                 'source': 'slack',
                 'slack_user_id': 'UTOPUP123',

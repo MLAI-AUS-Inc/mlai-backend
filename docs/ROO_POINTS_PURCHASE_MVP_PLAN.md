@@ -197,10 +197,6 @@ amount_cents: int
 currency: string, default "aud"
 status: pending | paid | failed | cancelled | refunded
 stripe_checkout_session_id: nullable unique string
-stripe_payment_intent_id: nullable string
-stripe_customer_id: nullable string
-checkout_url: nullable URL/text
-frontend_checkout_url: URL/text
 terms_version_accepted: nullable string
 terms_accepted_at: nullable datetime
 privacy_version_accepted: nullable string
@@ -220,7 +216,7 @@ Current MVP statuses:
 pending | paid | failed | cancelled | refunded
 ```
 
-Do not add `checkout_created` for the MVP. After Stripe Checkout is created, keep the purchase as `pending` and use `stripe_checkout_session_id` / `checkout_url` to indicate that a Checkout Session exists.
+Do not add `checkout_created` for the MVP. After Stripe Checkout is created, keep the purchase as `pending` and use `stripe_checkout_session_id` to indicate that a Checkout Session exists.
 
 Do not add `expired` for the MVP. Use `expires_at` to decide whether a pending purchase is still usable.
 
@@ -280,7 +276,7 @@ Responsibilities:
 - Create a local `PointsPurchase(status='pending')`.
 - Set `expires_at` using the backend expiry constant.
 - Store Slack origin details in `purchase_from`.
-- Return the `frontend_checkout_url`.
+- Return the `frontend_checkout_page_url` (derived from `MLAI_FRONTEND_URL` and `purchase.id`, not stored on `PointsPurchase`).
 - Do not create a ledger entry.
 - Do not create a Stripe Checkout Session yet if terms/privacy acceptance is collected on the frontend.
 
@@ -301,7 +297,7 @@ Responsibilities:
 - Store terms/privacy acceptance versions and timestamps.
 - Create Stripe Checkout Session using dynamic `price_data`.
 - Include local purchase identity in Stripe metadata.
-- Save `stripe_checkout_session_id` and `checkout_url`.
+- Save `stripe_checkout_session_id`.
 - Keep `status='pending'` until a webhook confirms payment or the flow is explicitly cancelled/failed.
 
 Stripe metadata should include:
@@ -388,7 +384,7 @@ Response:
   "amount_cents": 3699,
   "currency": "aud",
   "expires_at": "2026-05-06T00:00:00Z",
-  "frontend_checkout_url": "https://mlai.au/roo/topup/purchase-uuid"
+  "frontend_checkout_page_url": "https://mlai.au/roo/topup/purchase-uuid"
 }
 ```
 
@@ -420,7 +416,7 @@ Response:
   "id": "purchase-uuid",
   "status": "pending",
   "stripe_checkout_session_id": "cs_test_...",
-  "checkout_url": "https://checkout.stripe.com/...",
+  "checkout_session_url": "https://checkout.stripe.com/...",
   "expires_at": "2026-05-06T00:00:00Z"
 }
 ```
@@ -444,7 +440,7 @@ Responsibilities:
 - Reject or ignore payment attempts for purchases that were already cancelled/refunded/failed.
 - If already paid and ledger entry exists, return success without double-crediting.
 - Credit purchased top-up points using `PointsService.credit_purchased_topup(...)`.
-- Mark purchase as `paid`, set `paid_at`, save Stripe payment/customer IDs.
+- Mark purchase as `paid` and set `paid_at`.
 - Trigger Slack thread confirmation.
 
 Optionally handle:
@@ -547,7 +543,7 @@ Responsibilities:
 - Show terms/privacy acceptance checkbox.
 - Do not show an AUD-per-point value.
 - Call backend to create a Stripe Checkout Session after acceptance.
-- Redirect the user to Stripe Checkout using the returned `checkout_url`.
+- Redirect the user to Stripe Checkout using the returned `checkout_session_url`.
 
 Required acceptance text:
 
@@ -686,7 +682,7 @@ I can only help with these fixed top-up packs right now: 5, 10, or 25 Top-up Roo
 
 ```text
 I created your Top-up Roo Points checkout. Continue here:
-<frontend_checkout_url>
+<frontend_checkout_page_url>
 
 Top-up Roo Points are MLAI community reward points. They are not money, have no cash value, cannot be converted to cash, and cannot be sold or transferred.
 ```
