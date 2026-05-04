@@ -4,6 +4,13 @@ This document describes the MVP for letting MLAI members purchase limited **Top-
 
 The updated implementation uses a local `PointsPurchase` row as the source of truth. Roo creates the pending purchase, the frontend loads it by purchase ID, Stripe Checkout processes payment, and the backend credits points only after a verified Stripe webhook confirms payment.
 
+Current model decisions:
+
+- `PointsPurchase.id` is a UUID primary key because the purchase ID appears in frontend URLs.
+- Purchase requests expire using `expires_at`, not an `expired` status.
+- The default request expiry is controlled by `POINTS_PURCHASE_EXPIRY_HOURS = 24`.
+- Creating a Stripe Checkout Session does not change the purchase status; the purchase remains `pending` until payment succeeds, fails, is cancelled, or is refunded.
+
 ## Core Principle
 
 Roo Points are not money.
@@ -188,7 +195,7 @@ pack_id: string
 points_amount: int
 amount_cents: int
 currency: string, default "aud"
-status: pending | checkout_created | paid | failed | expired | cancelled | refunded
+status: pending | paid | failed | cancelled | refunded
 stripe_checkout_session_id: nullable unique string
 stripe_payment_intent_id: nullable string
 stripe_customer_id: nullable string
@@ -201,10 +208,21 @@ privacy_accepted_at: nullable datetime
 purchase_from: JSON object
 ledger_entry: nullable FK to Ledger
 metadata: JSON
+expires_at: datetime
 created_at
 updated_at
 paid_at
 ```
+
+Current MVP statuses:
+
+```text
+pending | paid | failed | cancelled | refunded
+```
+
+Do not add `checkout_created` for the MVP. After Stripe Checkout is created, keep the purchase as `pending` and use `stripe_checkout_session_id` / `checkout_url` to indicate that a Checkout Session exists.
+
+Do not add `expired` for the MVP. Use `expires_at` to decide whether a pending purchase is still usable.
 
 `purchase_from` stores origin-specific details. For the MVP, purchases originate from Slack through Roo:
 
@@ -224,6 +242,8 @@ Important constraints:
 - `stripe_checkout_session_id` should be unique when present.
 - `ledger_entry` should only be set once.
 - `status='paid'` should be terminal for successful purchases except explicit refund/reversal workflows.
+- Pending purchases must not be usable after `expires_at`.
+- `expires_at` should default to `timezone.now() + timedelta(hours=POINTS_PURCHASE_EXPIRY_HOURS)`.
 
 ### 3. Add Purchase Limits
 
@@ -258,6 +278,7 @@ Responsibilities:
 - Verify the Slack user is linked to an MLAI account.
 - Validate or resolve the requested pack.
 - Create a local `PointsPurchase(status='pending')`.
+- Set `expires_at` using the backend expiry constant.
 - Store Slack origin details in `purchase_from`.
 - Return the `frontend_checkout_url`.
 - Do not create a ledger entry.
@@ -276,10 +297,12 @@ PointsPurchaseService.create_checkout_session(
 Responsibilities:
 
 - Re-check purchase limits.
+- Reject the request if `purchase.expires_at <= timezone.now()`.
 - Store terms/privacy acceptance versions and timestamps.
 - Create Stripe Checkout Session using dynamic `price_data`.
 - Include local purchase identity in Stripe metadata.
-- Save `stripe_checkout_session_id`, `checkout_url`, and status.
+- Save `stripe_checkout_session_id` and `checkout_url`.
+- Keep `status='pending'` until a webhook confirms payment or the flow is explicitly cancelled/failed.
 
 Stripe metadata should include:
 
@@ -364,6 +387,7 @@ Response:
   "points_amount": 10,
   "amount_cents": 3699,
   "currency": "aud",
+  "expires_at": "2026-05-06T00:00:00Z",
   "frontend_checkout_url": "https://mlai.au/roo/topup/purchase-uuid"
 }
 ```
@@ -394,9 +418,10 @@ Response:
 ```json
 {
   "id": "purchase-uuid",
-  "status": "checkout_created",
+  "status": "pending",
   "stripe_checkout_session_id": "cs_test_...",
-  "checkout_url": "https://checkout.stripe.com/..."
+  "checkout_url": "https://checkout.stripe.com/...",
+  "expires_at": "2026-05-06T00:00:00Z"
 }
 ```
 
@@ -416,6 +441,7 @@ Responsibilities:
 - Fallback to `stripe_checkout_session_id` lookup if metadata is missing.
 - Lock the purchase row with `select_for_update()`.
 - Verify Checkout Session status and payment status are successful.
+- Reject or ignore payment attempts for purchases that were already cancelled/refunded/failed.
 - If already paid and ledger entry exists, return success without double-crediting.
 - Credit purchased top-up points using `PointsService.credit_purchased_topup(...)`.
 - Mark purchase as `paid`, set `paid_at`, save Stripe payment/customer IDs.
@@ -423,7 +449,6 @@ Responsibilities:
 
 Optionally handle:
 
-- `checkout.session.expired`
 - `payment_intent.payment_failed`
 
 ### 8. Configure Stripe Webhook Delivery
@@ -453,7 +478,6 @@ Enabled events for Checkout MVP:
 
 ```text
 checkout.session.completed
-checkout.session.expired
 payment_intent.payment_failed
 ```
 
@@ -517,6 +541,8 @@ Responsibilities:
 
 - Load `PointsPurchase` by ID from `mlai-backend`.
 - Show the selected pack and price.
+- If `status` is not `pending`, show the relevant paid/cancelled/failed/refunded state and do not start a new Checkout Session.
+- If `expires_at` is in the past, show an expired-link message and ask the user to request a new top-up from Roo.
 - Show required compliance copy.
 - Show terms/privacy acceptance checkbox.
 - Do not show an AUD-per-point value.
@@ -725,7 +751,10 @@ points_purchase:{purchase.id}:paid
   - pack ID
   - points amount
   - amount
+  - `expires_at` about 24 hours after creation.
   - `purchase_from` Slack channel/thread.
+- `PointsPurchase` status choices exclude `checkout_created` and `expired`.
+- Checkout creation rejects purchases past `expires_at`.
 - Checkout creation requires terms/privacy acceptance.
 - Checkout creation includes purchase ID and acceptance versions in Stripe metadata.
 - Webhook with valid signature marks purchase paid.
@@ -738,6 +767,7 @@ points_purchase:{purchase.id}:paid
 ### Frontend Tests
 
 - Purchase page loads purchase by ID.
+- Expired purchase page blocks Checkout and asks the user to request a new top-up.
 - Compliance copy is visible.
 - User cannot continue to Stripe without accepting terms.
 - Continue action creates Checkout Session.
@@ -829,4 +859,3 @@ Preferred implementation:
 - Track earned and purchased top-up balances separately.
 - On redemption, allocate debits against eligible point lots.
 - Record allocation metadata on the redemption ledger row.
-

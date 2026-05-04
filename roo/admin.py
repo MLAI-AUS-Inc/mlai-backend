@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    PointsAdmin, Minter, Task, Ledger, PointsAccount,
+    PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
@@ -40,6 +40,61 @@ class PointsAccountAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('user', 'created_at', 'updated_at')
     ordering = ('-balance',)
+
+
+@admin.register(PointsPurchase)
+class PointsPurchaseAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'slack_user_id',
+        'pack_id',
+        'points_amount',
+        'amount_cents',
+        'currency',
+        'status',
+        'expires_at',
+        'created_at',
+        'paid_at',
+    )
+    list_filter = ('status', 'currency', 'expires_at', 'created_at', 'paid_at')
+    search_fields = (
+        'id',
+        'user__email',
+        'user__slack_id',
+        'slack_user_id',
+        'pack_id',
+        'stripe_checkout_session_id',
+        'stripe_payment_intent_id',
+        'stripe_customer_id',
+    )
+    readonly_fields = (
+        'id',
+        'user',
+        'slack_user_id',
+        'pack_id',
+        'points_amount',
+        'amount_cents',
+        'currency',
+        'status',
+        'stripe_checkout_session_id',
+        'stripe_payment_intent_id',
+        'stripe_customer_id',
+        'checkout_url',
+        'frontend_checkout_url',
+        'terms_version_accepted',
+        'terms_accepted_at',
+        'privacy_version_accepted',
+        'privacy_accepted_at',
+        'purchase_from',
+        'ledger_entry',
+        'metadata',
+        'expires_at',
+        'paid_at',
+        'created_at',
+        'updated_at',
+    )
+    ordering = ('-created_at',)
 
 
 @admin.register(Task)

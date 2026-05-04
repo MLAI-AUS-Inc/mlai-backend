@@ -6,11 +6,13 @@ from decimal import Decimal
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.utils import timezone
 from unittest.mock import patch
 
 from .models import (
     PointsAdmin, PointsAccount, Task, TaskSubmission, Ledger,
-    CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption
+    CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
+    PointsPurchase,
 )
 from .services import PointsService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
@@ -294,6 +296,43 @@ class PointsServiceTests(TestCase):
         # Balance should be 15 (20 - 5), not 10
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 15)
+
+
+class PointsPurchaseModelTests(TestCase):
+    """Tests for the Top-up Roo Points purchase record."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='topup@example.com',
+            slack_id='UTOPUP123',
+        )
+
+    def test_purchase_defaults_and_origin_metadata(self):
+        before_create = timezone.now()
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id='UTOPUP123',
+            pack_id='topup_10',
+            points_amount=10,
+            amount_cents=3699,
+            frontend_checkout_url='https://mlai.au/roo/topup/purchase-id',
+            purchase_from={
+                'source': 'slack',
+                'slack_user_id': 'UTOPUP123',
+                'slack_channel_id': 'C123',
+                'slack_thread_ts': '1712345678.000100',
+            },
+        )
+
+        self.assertEqual(purchase.status, 'pending')
+        self.assertEqual(purchase.currency, 'aud')
+        self.assertIsNone(purchase.ledger_entry)
+        self.assertIsNone(purchase.paid_at)
+        self.assertGreaterEqual(purchase.expires_at, before_create + timedelta(hours=24))
+        self.assertLessEqual(purchase.expires_at, timezone.now() + timedelta(hours=24, seconds=1))
+        self.assertEqual(purchase.purchase_from['source'], 'slack')
+        self.assertEqual(purchase.purchase_from['slack_thread_ts'], '1712345678.000100')
+        self.assertEqual(str(purchase), '10 Top-up Roo Points for UTOPUP123 (pending)')
 
 
 class CoworkingServiceTests(TestCase):

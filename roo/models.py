@@ -1,7 +1,17 @@
+import uuid
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
-from django.conf import settings
-import uuid
+from django.utils import timezone
+
+
+POINTS_PURCHASE_EXPIRY_HOURS = 24
+
+
+def default_points_purchase_expires_at():
+    return timezone.now() + timedelta(hours=POINTS_PURCHASE_EXPIRY_HOURS)
 
 
 class PointsAdmin(models.Model):
@@ -74,6 +84,67 @@ class PointsAccount(models.Model):
 
     def __str__(self):
         return f"{self.user.email}: {self.balance} pts (earned: {self.lifetime_earned}, spent: {self.lifetime_spent})"
+
+
+class PointsPurchase(models.Model):
+    """
+    Pending and completed Top-up Roo Points purchases.
+    """
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+        ('cancelled', 'Cancelled'),
+        ('refunded', 'Refunded'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='points_purchases',
+    )
+    slack_user_id = models.CharField(max_length=50, db_index=True)
+    pack_id = models.CharField(max_length=50)
+    points_amount = models.PositiveIntegerField()
+    amount_cents = models.PositiveIntegerField()
+    currency = models.CharField(max_length=3, default='aud')
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
+    stripe_checkout_session_id = models.CharField(max_length=255, unique=True, blank=True, null=True)
+    stripe_payment_intent_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    stripe_customer_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    checkout_url = models.TextField(blank=True)
+    frontend_checkout_url = models.TextField(blank=True)
+    terms_version_accepted = models.CharField(max_length=100, blank=True, null=True)
+    terms_accepted_at = models.DateTimeField(blank=True, null=True)
+    privacy_version_accepted = models.CharField(max_length=100, blank=True, null=True)
+    privacy_accepted_at = models.DateTimeField(blank=True, null=True)
+    purchase_from = models.JSONField(default=dict, blank=True)
+    ledger_entry = models.ForeignKey(
+        'Ledger',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='points_purchases',
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(default=default_points_purchase_expires_at)
+    paid_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Points Purchase"
+        verbose_name_plural = "Points Purchases"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status'], name='roo_purchase_user_status_idx'),
+            models.Index(fields=['slack_user_id', 'status'], name='roo_purchase_slack_status_idx'),
+            models.Index(fields=['status', 'created_at'], name='roo_purchase_status_ct_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.points_amount} Top-up Roo Points for {self.slack_user_id} ({self.status})"
 
 
 class TaskTemplate(models.Model):
