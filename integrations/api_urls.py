@@ -2,6 +2,7 @@ from django.urls import path
 from . import api_views
 from . import api_views_bridge
 from . import api_views_connectors
+from . import api_views_luma
 from startup_updates import api_views as startup_update_api_views
 
 urlpatterns = [
@@ -14,6 +15,7 @@ urlpatterns = [
     path('github/scan', api_views.GithubScanView.as_view(), name='github_scan'),
     path('github/scaffold', api_views.GithubScaffoldView.as_view(), name='github_scaffold'),
     path('github/scaffold/decision', api_views.GithubScaffoldDecisionView.as_view(), name='github_scaffold_decision'),
+    path('luma/attendee-report', api_views_luma.LumaAttendeeReportView.as_view(), name='luma_attendee_report'),
     
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save
