@@ -1,4 +1,4 @@
-from datetime import datetime, timezone as datetime_timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,7 +14,7 @@ from content_factory.google_baseline import (
     collect_verified_google_metrics,
     google_baseline_connection_status,
 )
-from content_factory.models import OrganizationContentConfig, WebsiteBaselineSnapshot
+from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword, WebsiteBaselineSnapshot, WrittenArticle
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
@@ -723,6 +723,121 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(candidates[0]["title"], "What Australian Founders Need to Know Before Investing in AI Products")
         self.assertEqual(candidates[0]["opportunityScore"], 82)
         self.assertEqual(candidates[0]["sourceRunId"], "discovery-selection-1")
+
+    def test_bootstrap_returns_first_article_mode_without_domain(self):
+        self.company.domain = ""
+        self.company.organization = None
+        self.company.save(update_fields=["domain", "organization", "updated_at"])
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["startPageMode"], "first_article_setup")
+        self.assertFalse(response.data["hasCompletedArticleFlow"])
+
+    def test_bootstrap_returns_first_article_mode_before_first_article(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["startPageMode"], "first_article_setup")
+        self.assertFalse(response.data["hasCompletedArticleFlow"])
+
+    def test_bootstrap_returns_topic_picker_mode_after_written_article(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        WrittenArticle.objects.create(
+            organization=organization,
+            title="Founder SEO Automation",
+            slug="founder-seo-automation",
+            category="featured",
+            primary_keyword="founder seo automation",
+            article_url="https://acme.com/articles/founder-seo-automation",
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["startPageMode"], "topic_picker")
+        self.assertTrue(response.data["hasCompletedArticleFlow"])
+        self.assertEqual(response.data["writtenTopics"][0]["keyword"], "founder seo automation")
+
+    def test_bootstrap_merges_stored_keywords_and_excludes_unavailable_topics(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="best crm for ai startups",
+            volume=900,
+            difficulty=18,
+            opportunity_index=91,
+            status=KeywordStatus.PENDING,
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="startup launch checklist",
+            volume=1500,
+            difficulty=44,
+            opportunity_index=70,
+            status=KeywordStatus.IN_PROGRESS,
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="old written topic",
+            volume=500,
+            difficulty=20,
+            opportunity_index=88,
+            status=KeywordStatus.WRITTEN,
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="cooldown topic",
+            volume=700,
+            difficulty=22,
+            opportunity_index=86,
+            status=KeywordStatus.PENDING,
+            cooldown_until=timezone.now() + timedelta(days=3),
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        keywords = [candidate["keyword"] for candidate in response.data["topicCandidates"]]
+        self.assertEqual(keywords, ["best crm for ai startups"])
+        self.assertEqual(response.data["topicCandidates"][0]["source"], "researched_keyword")
+        self.assertEqual(response.data["topicCandidates"][0]["opportunityScore"], 91)
+
+    def test_article_start_rejects_duplicate_written_topic(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        WrittenArticle.objects.create(
+            organization=organization,
+            title="Founder SEO Automation",
+            slug="founder-seo-automation",
+            category="featured",
+            primary_keyword="founder seo automation",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {"topic": "Founder SEO Automation", "targetKeyword": "founder seo automation"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("already been written", response.data["detail"])
+        post.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_start_maps_selected_candidate_payload_to_content_factory_contract(self):
