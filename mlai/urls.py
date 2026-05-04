@@ -16,6 +16,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from .views import health_check, health_live, health_points, health_ready
+from startup_updates import data_views as startup_data_views
 
 urlpatterns = [
     path('', health_check, name='health_check'),
@@ -43,5 +44,15 @@ urlpatterns = [
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),
+    path(
+        'api/v1/startups/<int:organization_id>/data/status',
+        startup_data_views.StartupDataStatusView.as_view(),
+        name='startup_data_status',
+    ),
+    path(
+        'api/v1/startups/<int:organization_id>/data',
+        startup_data_views.StartupDataDeletionView.as_view(),
+        name='startup_data_delete',
+    ),
     path('api/v1/users/', include('core.urls_users')),
 ]

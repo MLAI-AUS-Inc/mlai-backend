@@ -20,6 +20,7 @@ from integrations.services.external_connectors import (
     update_linear_project_selections,
     update_slack_channel_selections,
 )
+from startup_updates.data_deletion import disconnect_gmail_for_user
 
 
 PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD = {
@@ -168,6 +169,21 @@ class GmailPreviewView(APIView):
             payload = serialize_gmail_preview(request.user, limit=limit)
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class GmailConnectionDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        raw_delete_derived = request.data.get("deleteDerivedData", request.data.get("delete_derived_data", False))
+        delete_derived_data = raw_delete_derived is True or str(raw_delete_derived).strip().lower() in {"1", "true", "yes"}
+        reason = str(request.data.get("reason") or "user_request").strip() or "user_request"
+        payload = disconnect_gmail_for_user(
+            request.user,
+            delete_derived_data=delete_derived_data,
+            reason=reason,
+        )
         return Response(payload, status=status.HTTP_200_OK)
 
 

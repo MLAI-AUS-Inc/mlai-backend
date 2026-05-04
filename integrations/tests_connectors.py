@@ -20,13 +20,19 @@ from integrations.models import (
     GoogleConnection,
 )
 from startup_updates.models import (
+    GmailAttachmentArtifact,
     GmailMessageArtifact,
     GmailRelevanceLabel,
     GmailSyncCursor,
+    GmailThreadArtifact,
+    MonthlyUpdateDraft,
+    StartupDataDeletionRequest,
+    StartupEvent,
     UserStartupBinding,
     StartupMetricObservation,
 )
 from startup_updates.services import publish_xero_metric_observations
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 User = get_user_model()
 
@@ -193,11 +199,210 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertEqual(sources["gmail"]["status"], "connected")
         self.assertEqual(sources["gmail"]["accountLabel"], "founder@gmail.com")
+        self.assertTrue(sources["gmail"]["canDisconnect"])
+        self.assertTrue(sources["gmail"]["canDeleteData"])
+        self.assertEqual(sources["gmail"]["googlePermissionsUrl"], "https://myaccount.google.com/permissions")
         self.assertEqual(sources["stripe"]["status"], "connected")
         self.assertEqual(sources["stripe"]["externalAccountId"], "acct_123")
         self.assertEqual(sources["xero"]["status"], "not_connected")
         self.assertFalse(sources["xero"]["canRequestReportScopes"])
         self.assertFalse(sources["xero"]["needsReportScopeConfiguration"])
+
+    def _create_gmail_startup_data(self, *, status=ContentFactoryRunStatus.COMPLETED):
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="google-refresh",
+            scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            is_default_for_gmail=True,
+        )
+        GmailSyncCursor.objects.create(
+            organization=organization,
+            google_connection=google_connection,
+            last_history_id="history-1",
+        )
+        message = GmailMessageArtifact.objects.create(
+            organization=organization,
+            google_connection=google_connection,
+            gmail_message_id="msg-1",
+            gmail_thread_id="thread-1",
+            internal_date=timezone.now(),
+            subject="Investor update signal",
+        )
+        GmailThreadArtifact.objects.create(
+            organization=organization,
+            google_connection=google_connection,
+            gmail_thread_id="thread-1",
+            source_message_ids=["msg-1"],
+            cleaned_text="A customer signed.",
+        )
+        GmailAttachmentArtifact.objects.create(
+            organization=organization,
+            message_artifact=message,
+            filename="contract.pdf",
+            mime_type="application/pdf",
+            part_id="1",
+            gmail_attachment_id="att-1",
+        )
+        run = ContentFactoryRun.objects.create(
+            run_id=f"startup-update-{status}",
+            workflow="startup_monthly_update",
+            domain=organization.domain,
+            status=status,
+            run_request={
+                "binding_id": binding.id,
+                "google_connection_id": google_connection.id,
+                "input_sources": ["gmail"],
+            },
+            result={"draft": "contains Gmail-derived content"},
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 4, 1),
+            status="draft",
+            structured_memo={"title": "April update"},
+        )
+        StartupEvent.objects.create(
+            organization=organization,
+            run=run,
+            canonical_key=f"event-{status}",
+            event_type="customer_win",
+            title="Customer signed",
+            month_bucket=date(2026, 4, 1),
+            evidence_message_ids=["msg-1"],
+            source_thread_ids=["thread-1"],
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            run=run,
+            metric_key="mrr",
+            metric_name="MRR",
+            value_text="$12,000",
+            period_month=date(2026, 4, 1),
+            source_provider="gmail",
+            evidence_message_ids=["msg-1"],
+        )
+        return organization, google_connection, run
+
+    def test_gmail_disconnect_is_idempotent_when_not_connected(self):
+        response = self.api_client.delete("/api/v1/integrations/gmail/connection", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "not_connected")
+        self.assertEqual(response.data["deleted"]["gmailMessages"], 0)
+
+    @patch("startup_updates.data_deletion.requests.post")
+    def test_gmail_disconnect_deletes_token_and_raw_gmail_but_keeps_derived_outputs(self, mock_revoke):
+        mock_revoke.return_value.status_code = 200
+        mock_revoke.return_value.text = ""
+        organization, google_connection, run = self._create_gmail_startup_data()
+
+        response = self.api_client.delete(
+            "/api/v1/integrations/gmail/connection",
+            {"deleteDerivedData": False, "reason": "user_request"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "disconnected")
+        self.assertEqual(response.data["googleAccount"], "founder@gmail.com")
+        self.assertTrue(response.data["googleRevocation"]["succeeded"])
+        self.assertFalse(GoogleConnection.objects.filter(id=google_connection.id).exists())
+        self.assertFalse(GmailMessageArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(GmailThreadArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(GmailAttachmentArtifact.objects.filter(organization=organization).exists())
+        self.assertTrue(MonthlyUpdateDraft.objects.filter(run=run).exists())
+        self.assertTrue(StartupEvent.objects.filter(run=run).exists())
+        self.assertTrue(StartupMetricObservation.objects.filter(run=run).exists())
+        self.assertTrue(StartupDataDeletionRequest.objects.filter(provider="gmail", delete_derived_data=False).exists())
+
+    @patch("startup_updates.data_deletion.cancel_valley_run")
+    @patch("startup_updates.data_deletion.requests.post")
+    def test_gmail_disconnect_with_derived_delete_deletes_outputs_and_cancels_open_runs(self, mock_revoke, mock_cancel_valley):
+        mock_revoke.return_value.status_code = 200
+        mock_revoke.return_value.text = ""
+        mock_cancel_valley.return_value = {
+            "run_id": "startup-update-running",
+            "revoke_requested": True,
+            "revoke_succeeded": True,
+            "revoked_job_ids": [],
+            "missing_job_ids": [],
+        }
+        organization, google_connection, run = self._create_gmail_startup_data(status=ContentFactoryRunStatus.RUNNING)
+
+        response = self.api_client.delete(
+            "/api/v1/integrations/gmail/connection",
+            {"deleteDerivedData": True, "reason": "user_request"},
+            format="json",
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertFalse(GoogleConnection.objects.filter(id=google_connection.id).exists())
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
+        self.assertFalse(StartupEvent.objects.filter(organization=organization).exists())
+        self.assertFalse(StartupMetricObservation.objects.filter(organization=organization).exists())
+        self.assertEqual(response.data["deleted"]["monthlyDrafts"], 1)
+        mock_cancel_valley.assert_called_once_with(run.run_id)
+
+    @patch("startup_updates.data_deletion.requests.post")
+    def test_gmail_disconnect_returns_manual_revoke_warning_when_google_revoke_fails(self, mock_revoke):
+        mock_revoke.return_value.status_code = 500
+        mock_revoke.return_value.text = "server error"
+        _organization, google_connection, _run = self._create_gmail_startup_data()
+
+        response = self.api_client.delete(
+            "/api/v1/integrations/gmail/connection",
+            {"deleteDerivedData": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["googleRevocation"]["succeeded"])
+        self.assertIn("Google Account permissions", response.data["googleRevocation"]["warning"])
+        self.assertEqual(response.data["googlePermissionsUrl"], "https://myaccount.google.com/permissions")
+        self.assertFalse(GoogleConnection.objects.filter(id=google_connection.id).exists())
+
+    def test_startup_data_status_and_delete_internal_endpoints(self):
+        organization, _google_connection, _run = self._create_gmail_startup_data()
+        internal_client = APIClient()
+
+        with self.settings(INTERNAL_API_KEY="internal-key"):
+            status_response = internal_client.get(
+                f"/api/v1/startups/{organization.id}/data/status",
+                HTTP_X_API_KEY="internal-key",
+            )
+            delete_response = internal_client.delete(
+                f"/api/v1/startups/{organization.id}/data",
+                {
+                    "requested_by_user_id": self.user.id,
+                    "reason": "user_request",
+                    "request_id": "delete-startup-acme",
+                },
+                format="json",
+                HTTP_X_API_KEY="internal-key",
+            )
+            final_status_response = internal_client.get(
+                f"/api/v1/startups/{organization.id}/data/status",
+                HTTP_X_API_KEY="internal-key",
+            )
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["deletion_status"], "active")
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(delete_response.data["deletion_status"], "deleted")
+        self.assertEqual(final_status_response.data["deletion_status"], "deleted")
+        self.assertFalse(GmailMessageArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
+        self.assertTrue(StartupDataDeletionRequest.objects.filter(request_id="delete-startup-acme").exists())
 
     def test_connector_connect_builds_oauth_redirect_and_stores_state(self):
         cases = {
