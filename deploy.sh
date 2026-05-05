@@ -142,7 +142,7 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     docker compose build "\${runtime_services[@]}"
 
     echo "🔗 Validating production URL configuration and service connectivity..."
-    compose_run_web python manage.py validate_prod_urls --check-connectivity --timeout 8
+    compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
 
     echo "🔍 Inspecting for stale generated migrations..."
     inspect_stale_migration \

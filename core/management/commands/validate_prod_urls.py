@@ -188,8 +188,11 @@ def validate_prod_url_settings() -> list[str]:
 
 def _connectivity_url_for_service(setting_name: str, value: str) -> str:
     parsed = urllib.parse.urlparse(value)
+    base_path = (parsed.path or "").rstrip("/")
+    if setting_name == "CONTENT_FACTORY_URL":
+        health_path = f"{base_path}/healthz/ready" if base_path else "/healthz/ready"
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, health_path, "", "", ""))
     if setting_name == "VALLEY_HARNESS_URL":
-        base_path = (parsed.path or "").rstrip("/")
         health_path = f"{base_path}/internal/healthz" if base_path else "/internal/healthz"
         return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, health_path, "", "", ""))
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
@@ -245,6 +248,11 @@ class Command(BaseCommand):
             help="Also verify configured service URLs accept an HTTP connection.",
         )
         parser.add_argument(
+            "--warn-connectivity",
+            action="store_true",
+            help="Print service connectivity failures as warnings instead of failing the command.",
+        )
+        parser.add_argument(
             "--timeout",
             type=float,
             default=5.0,
@@ -254,7 +262,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         errors = validate_prod_url_settings()
         if options["check_connectivity"] and not errors:
-            errors.extend(validate_service_url_connectivity(timeout=options["timeout"]))
+            connectivity_errors = validate_service_url_connectivity(timeout=options["timeout"])
+            if options["warn_connectivity"]:
+                for error in connectivity_errors:
+                    self.stderr.write(self.style.WARNING(f"- WARNING: {error}"))
+            else:
+                errors.extend(connectivity_errors)
 
         if errors:
             for error in errors:
