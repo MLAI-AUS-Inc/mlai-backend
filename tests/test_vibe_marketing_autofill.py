@@ -16,6 +16,7 @@ from content_factory.google_baseline import (
 )
 from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword, WebsiteBaselineSnapshot, WrittenArticle
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from integrations import http_client
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
 from startup_updates.models import StartupProfile
@@ -407,6 +408,31 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["field"], "companyLinkedInUrl")
 
+    @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
+    def test_autofill_returns_blocked_run_when_research_worker_is_unconfigured(self):
+        response = self.client.post(
+            "/api/v1/vibe-marketing/autofill/",
+            {
+                "companyName": "Acme",
+                "domain": "acme.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(
+            response.data["error"],
+            "AI fill is unavailable. Check the Content Factory backend and try again.",
+        )
+
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.workflow, "startup_autofill")
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.error, response.data["error"])
+        self.assertEqual(run.result["error"], response.data["error"])
+        self.assertIn("technical_error", run.result["diagnostics"])
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_run_polling_syncs_result_and_steps(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -561,6 +587,34 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
         self.assertTrue(ContentFactoryRunStep.objects.filter(run=run, step_key="resolve_company_identity").exists())
         self.assertTrue(ContentFactoryRunStep.objects.filter(run=run, step_key="generate_keyword_landscape").exists())
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_run_polling_marks_worker_timeout_as_blocked(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="autofill-timeout-1",
+            workflow="startup_autofill",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="research_public_web",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=http_client.RequestException("connect timeout")):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(
+            response.data["errors"][0],
+            "AI fill is unavailable. Check the Content Factory backend and try again.",
+        )
+        self.assertIn("connect timeout", response.data["diagnostics"]["technical_error"])
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.error, response.data["errors"][0])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_run_detail_retries_remote_step_sync_on_transient_sqlite_lock(self):

@@ -2135,6 +2135,34 @@ def _is_retryable_sqlite_lock(exc):
     return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
 
 
+def _friendly_content_factory_error(*, workflow, detail="", unavailable=False):
+    if workflow == "startup_autofill" and unavailable:
+        return "AI fill is unavailable. Check the Content Factory backend and try again."
+    if detail:
+        return str(detail)
+    return "Content Factory worker is unavailable. Please try again."
+
+
+def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_code=None, response_payload=None, retryable=True):
+    friendly = _friendly_content_factory_error(workflow=workflow, detail=detail, unavailable=True)
+    diagnostics = {
+        "technical_error": str(technical_error or detail or ""),
+        "retryable": retryable,
+    }
+    if status_code is not None:
+        diagnostics["content_factory_status_code"] = status_code
+    if response_payload is not None:
+        diagnostics["content_factory_response"] = response_payload
+    return {
+        "status": ContentFactoryRunStatus.BLOCKED,
+        "error": friendly,
+        "errors": [friendly],
+        "message": friendly,
+        "diagnostics": diagnostics,
+        "retryable": retryable,
+    }
+
+
 def _parse_remote_datetime(value):
     if not value:
         return None
@@ -2159,6 +2187,8 @@ def _run_result_from_remote(remote_data):
         "errors",
         "error",
         "message",
+        "diagnostics",
+        "retryable",
         "preview_url",
         "pr_url",
         "route_path",
@@ -2199,11 +2229,20 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
         run.github_repo = run.github_repo or github_repo or ""
         run.slack_user_id = run.slack_user_id or actor_id
         run.run_request = run.run_request or payload or {}
-        run.save(update_fields=["workflow", "domain", "github_repo", "slack_user_id", "run_request", "updated_at"])
+        update_fields = ["workflow", "domain", "github_repo", "slack_user_id", "run_request", "updated_at"]
+        if remote_data:
+            run.status = _normalize_remote_run_status(remote_data.get("status") or run.status)
+            run.current_step = remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued"
+            remote_result = _run_result_from_remote(remote_data)
+            if remote_result:
+                run.result = remote_result
+            run.error = str(remote_data.get("error") or "")
+            update_fields.extend(["status", "current_step", "result", "error"])
+        run.save(update_fields=list(dict.fromkeys(update_fields)))
     return run
 
 
-def _call_content_factory_run_status(run_id):
+def _call_content_factory_run_status(run_id, *, workflow=""):
     base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
     should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
     if not should_call_remote:
@@ -2216,6 +2255,8 @@ def _call_content_factory_run_status(run_id):
             timeout=(3, 15),
         )
     except http_client.RequestException as exc:
+        if workflow == "startup_autofill":
+            return _blocked_worker_payload(workflow=workflow, technical_error=str(exc), retryable=True)
         return {"error": str(exc), "errors": [str(exc)], "retryable": True}
 
     if response.status_code == 200:
@@ -2336,7 +2377,13 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
     remote_data = {}
     should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if should_call_remote:
+    if workflow == "startup_autofill" and not should_call_remote:
+        remote_data = _blocked_worker_payload(
+            workflow=workflow,
+            technical_error="CONTENT_FACTORY_URL is not configured or the local environment is not allowed to call it.",
+            retryable=True,
+        )
+    elif should_call_remote:
         url = f"{base_url}/api/runs/{endpoint}"
         try:
             response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
@@ -2363,12 +2410,15 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
                     "retryable": response.status_code >= 500,
                 }
         except http_client.RequestException as exc:
-            remote_data = {
-                "status": ContentFactoryRunStatus.BLOCKED,
-                "error": str(exc),
-                "errors": [str(exc)],
-                "retryable": True,
-            }
+            if workflow == "startup_autofill":
+                remote_data = _blocked_worker_payload(workflow=workflow, technical_error=str(exc), retryable=True)
+            else:
+                remote_data = {
+                    "status": ContentFactoryRunStatus.BLOCKED,
+                    "error": str(exc),
+                    "errors": [str(exc)],
+                    "retryable": True,
+                }
 
     return _create_local_run(
         workflow=workflow,
@@ -2867,7 +2917,18 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
-        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+        result = run.result or {}
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else ([run.error] if run.error else [])
+        return Response(
+            {
+                "run_id": run.run_id,
+                "runId": run.run_id,
+                "status": run.status,
+                "error": run.error or result.get("error") or "",
+                "errors": errors,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class VibeMarketingBaselineView(APIView):
@@ -3115,7 +3176,7 @@ class VibeMarketingRunView(APIView):
         run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
-        remote_data = _call_content_factory_run_status(run.run_id)
+        remote_data = _call_content_factory_run_status(run.run_id, workflow=run.workflow)
         if remote_data:
             max_attempts = 3 if connection.vendor == "sqlite" else 1
             for attempt in range(max_attempts):
