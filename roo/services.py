@@ -10,21 +10,81 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 from django.conf import settings
-from django.db import transaction, IntegrityError
-from django.db.models import Count
 from django.db import transaction, IntegrityError, models
+from django.db.models import Count
 from django.utils import timezone
 
 from .models import (
     PointsAccount, Ledger, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, PointsAdmin
+    RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
 from .permissions import (
     is_points_admin, require_admin, 
     PermissionDeniedError, InsufficientBalanceError
 )
 from core.models import User
+
+
+class PointsPurchaseService:
+    """Business rules for Top-up Roo Points purchases."""
+
+    MAX_POINTS_PER_PURCHASE = 25
+    MAX_POINTS_PER_ROLLING_YEAR = 50
+    MAX_SPENDABLE_BALANCE = 100
+    MIN_ACCOUNT_AGE_DAYS = 7
+    LOOKBACK_DAYS = 365
+
+    @staticmethod
+    def validate_purchase_limits(
+        user: Optional[User],
+        points_amount: int,
+        *,
+        now: Optional[datetime] = None,
+        manual_balance_approval: bool = False,
+    ) -> None:
+        """
+        Validate conservative purchase limits for the top-up MVP.
+
+        Raises:
+            PermissionDeniedError: when the caller is anonymous/guest-like.
+            ValueError: when a policy limit is violated.
+        """
+        if user is None or not getattr(user, "is_authenticated", False):
+            raise PermissionDeniedError("A linked user account is required for top-up purchases")
+
+        if not getattr(user, "slack_id", None):
+            raise PermissionDeniedError("Guest checkout is not supported for top-up purchases")
+
+        if points_amount <= 0:
+            raise ValueError("points_amount must be positive")
+        if points_amount > PointsPurchaseService.MAX_POINTS_PER_PURCHASE:
+            raise ValueError("Top-up purchase exceeds 25-point per-purchase limit")
+
+        reference_now = now or timezone.now()
+        account_age = reference_now - user.date_joined
+        if account_age < timedelta(days=PointsPurchaseService.MIN_ACCOUNT_AGE_DAYS):
+            raise ValueError("Top-up purchases require an account age of at least 7 days")
+
+        window_start = reference_now - timedelta(days=PointsPurchaseService.LOOKBACK_DAYS)
+        rolling_total = (
+            PointsPurchase.objects.filter(
+                user=user,
+                status='paid',
+                paid_at__gte=window_start,
+            ).aggregate(total=models.Sum('points_amount'))['total'] or 0
+        )
+        if rolling_total + points_amount > PointsPurchaseService.MAX_POINTS_PER_ROLLING_YEAR:
+            raise ValueError("Top-up purchases exceed the 50-point rolling 12-month limit")
+
+        try:
+            current_balance = user.points_account.balance
+        except PointsAccount.DoesNotExist:
+            current_balance = 0
+
+        projected_balance = current_balance + points_amount
+        if projected_balance > PointsPurchaseService.MAX_SPENDABLE_BALANCE and not manual_balance_approval:
+            raise ValueError("Top-up purchase would exceed the 100-point spendable balance cap")
 
 
 class PointsService:

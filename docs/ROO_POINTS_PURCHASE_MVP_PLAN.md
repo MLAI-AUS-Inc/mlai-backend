@@ -10,6 +10,8 @@ Current model decisions:
 - Purchase requests expire using `expires_at`, not an `expired` status.
 - The default request expiry is controlled by `POINTS_PURCHASE_EXPIRY_HOURS = 24`.
 - Creating a Stripe Checkout Session does not change the purchase status; the purchase remains `pending` until payment succeeds, fails, is cancelled, or is refunded.
+- Do not store checkout URLs on `PointsPurchase`; generate the MLAI frontend URL when responding, and return the Stripe Checkout URL from the Stripe Session creation response.
+- Store only `stripe_checkout_session_id` as a dedicated Stripe reference for webhook fallback/debugging; do not add separate `stripe_payment_intent_id` or `stripe_customer_id` fields for the MVP.
 
 ## Core Principle
 
@@ -219,6 +221,8 @@ pending | paid | failed | cancelled | refunded
 Do not add `checkout_created` for the MVP. After Stripe Checkout is created, keep the purchase as `pending` and use `stripe_checkout_session_id` to indicate that a Checkout Session exists.
 
 Do not add `expired` for the MVP. Use `expires_at` to decide whether a pending purchase is still usable.
+
+Keep the model lean. `frontend_checkout_page_url` and `checkout_session_url` are response values only, not database fields.
 
 `purchase_from` stores origin-specific details. For the MVP, purchases originate from Slack through Roo:
 

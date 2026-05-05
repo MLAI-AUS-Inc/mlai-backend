@@ -14,7 +14,7 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
-from .services import PointsService, CoworkingService, TaskService, RewardsService
+from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService
 from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
 
 
@@ -332,6 +332,121 @@ class PointsPurchaseModelTests(TestCase):
         self.assertEqual(purchase.purchase_from['source'], 'slack')
         self.assertEqual(purchase.purchase_from['slack_thread_ts'], '1712345678.000100')
         self.assertEqual(str(purchase), '10 Top-up Roo Points for UTOPUP123 (pending)')
+
+
+class PointsPurchaseLimitTests(TestCase):
+    """Task 3 purchase limit policy tests."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='limits@example.com',
+            slack_id='ULIMITS123',
+        )
+        self.user.date_joined = timezone.now() - timedelta(days=30)
+        self.user.save(update_fields=['date_joined'])
+
+    def _create_paid_purchase(
+        self,
+        points_amount: int,
+        days_ago: int,
+        *,
+        created_days_ago: int | None = None,
+    ) -> PointsPurchase:
+        paid_at = timezone.now() - timedelta(days=days_ago)
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.user.slack_id,
+            pack_id=f'topup_{points_amount}',
+            points_amount=points_amount,
+            amount_cents=points_amount * 100,
+            status='paid',
+            paid_at=paid_at,
+        )
+        PointsPurchase.objects.filter(id=purchase.id).update(
+            created_at=timezone.now() - timedelta(days=created_days_ago or days_ago)
+        )
+        return PointsPurchase.objects.get(id=purchase.id)
+
+    def test_rejects_anonymous_purchase(self):
+        with self.assertRaises(PermissionDeniedError):
+            PointsPurchaseService.validate_purchase_limits(None, points_amount=10)
+
+    def test_rejects_guest_checkout_without_slack_link(self):
+        guest_like_user = User.objects.create_user(
+            email='guest@example.com',
+            slack_id=None,
+        )
+        guest_like_user.date_joined = timezone.now() - timedelta(days=30)
+        guest_like_user.save(update_fields=['date_joined'])
+
+        with self.assertRaises(PermissionDeniedError):
+            PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
+
+    def test_rejects_purchase_above_25_points(self):
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
+        self.assertIn('25-point', str(ctx.exception))
+
+    def test_rejects_accounts_younger_than_7_days(self):
+        self.user.date_joined = timezone.now() - timedelta(days=3)
+        self.user.save(update_fields=['date_joined'])
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
+        self.assertIn('at least 7 days', str(ctx.exception))
+
+    def test_rejects_rolling_12_month_cap_above_50_points(self):
+        self._create_paid_purchase(points_amount=30, days_ago=20)
+        self._create_paid_purchase(points_amount=19, days_ago=10)
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
+        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+
+    def test_ignores_purchases_older_than_12_month_window(self):
+        self._create_paid_purchase(points_amount=50, days_ago=370)
+        # Should be allowed because the old purchase is outside the rolling window.
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
+
+    def test_rolling_12_month_cap_uses_paid_at_not_created_at(self):
+        self._create_paid_purchase(points_amount=50, days_ago=20, created_days_ago=370)
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
+        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+
+    def test_validation_does_not_create_points_account(self):
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
+
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+
+    def test_rejects_balance_cap_above_100_without_approval(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 90
+        account.save(update_fields=['balance'])
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
+        self.assertIn('100-point spendable balance cap', str(ctx.exception))
+
+    def test_allows_balance_cap_override_with_manual_approval(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 95
+        account.save(update_fields=['balance'])
+
+        PointsPurchaseService.validate_purchase_limits(
+            self.user,
+            points_amount=10,
+            manual_balance_approval=True,
+        )
+
+    def test_allows_purchase_when_all_limits_pass(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 20
+        account.save(update_fields=['balance'])
+        self._create_paid_purchase(points_amount=10, days_ago=40)
+
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
 
 
 class CoworkingServiceTests(TestCase):
