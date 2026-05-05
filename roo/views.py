@@ -55,6 +55,7 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+FIRST_CHANNEL_POST_POINTS = 4
 
 
 def clean_slack_id(value: Optional[str]) -> str:
@@ -164,7 +165,7 @@ def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple
         user = get_or_create_user_for_slack_id(slack_user_id)
         _, awarded = PointsService.award(
             user=user,
-            delta=2,
+            delta=FIRST_CHANNEL_POST_POINTS,
             source='EVENT',
             description='Completed quest: First Contact',
             created_by_slack_id='SYSTEM',
@@ -1748,6 +1749,7 @@ class FirstChannelPostAwardView(APIView):
         response_data = {'awarded': awarded}
         if awarded and new_balance is not None:
             response_data['new_balance'] = new_balance
+            response_data['points_awarded'] = FIRST_CHANNEL_POST_POINTS
         return Response(response_data, status=status.HTTP_200_OK)
 
 
