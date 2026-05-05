@@ -176,6 +176,109 @@ class SystemAwardViewTests(APITestCase):
         self.assertEqual(ledger.delta, 12)
 
     @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_system_award_uses_supplied_idempotency_key(self, mock_permission):
+        User.objects.create_user(
+            email='system-idempotent@example.com',
+            slack_id='USYSTEMIDEMPOTENT',
+        )
+        data = {
+            'created_by_slack_id': 'UROOBOT',
+            'target_slack_id': 'USYSTEMIDEMPOTENT',
+            'points': 12,
+            'reason': 'System award test',
+            'idempotency_key': 'link_love:CBOOST:111.000:USYSTEMIDEMPOTENT',
+        }
+
+        first_response = self.client.post(self.url, data, format='json')
+        second_response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data['ledger_id'], second_response.data['ledger_id'])
+        self.assertEqual(
+            Ledger.objects.filter(idempotency_key='link_love:CBOOST:111.000:USYSTEMIDEMPOTENT').count(),
+            1,
+        )
+        balance = PointsService.get_balance(User.objects.get(slack_id='USYSTEMIDEMPOTENT'))
+        self.assertEqual(balance['balance'], 12)
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_system_award_handles_empty_slack_profile_names(self, mock_profile, mock_permission):
+        mock_profile.return_value = {
+            'real_name': '',
+            'display_name': '',
+            'name': '',
+            'email': 'empty-profile@example.com',
+            'image_url': 'https://example.com/avatar.png',
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'created_by_slack_id': 'UROOBOT',
+                'target_slack_id': 'UEMPTYPROFILE',
+                'points': 2,
+                'reason': 'System award test',
+                'idempotency_key': 'system-empty-profile',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user = User.objects.get(slack_id='UEMPTYPROFILE')
+        self.assertEqual(user.first_name, 'Unknown')
+        self.assertEqual(user.last_name, 'Slack User')
+        self.assertEqual(user.email, 'empty-profile@example.com')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_system_award_uses_display_name_when_real_name_missing(self, mock_profile, mock_permission):
+        mock_profile.return_value = {
+            'real_name': None,
+            'display_name': 'Helpful Founder',
+            'name': 'helpful_founder',
+            'email': 'helpful-founder@example.com',
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'created_by_slack_id': 'UROOBOT',
+                'target_slack_id': '<@UDISPLAYNAME>',
+                'points': 2,
+                'reason': 'System award test',
+                'idempotency_key': 'system-display-name',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user = User.objects.get(slack_id='UDISPLAYNAME')
+        self.assertEqual(user.first_name, 'Helpful')
+        self.assertEqual(user.last_name, 'Founder')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value=None)
+    def test_system_award_creates_placeholder_when_slack_profile_missing(self, mock_profile, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'created_by_slack_id': 'UROOBOT',
+                'target_slack_id': 'UNOPROFILE',
+                'points': 2,
+                'reason': 'System award test',
+                'idempotency_key': 'system-no-profile',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user = User.objects.get(slack_id='UNOPROFILE')
+        self.assertEqual(user.email, 'UNOPROFILE@slack.placeholder.com')
+        self.assertEqual(user.first_name, 'Unknown Slack User')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
     def test_system_award_rejects_non_positive_points(self, mock_permission):
         response = self.client.post(
             self.url,
@@ -188,6 +291,20 @@ class SystemAwardViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['error'], 'System awards must be positive')
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_system_award_rejects_empty_slack_mention(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'target_slack_id': '<@>',
+                'points': 2,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['error'], 'target_slack_id and points are required')
 
 
 class PointsAdminManagementViewSetTests(APITestCase):
