@@ -12,6 +12,7 @@ Start here:
 Existing docs:
 
 - [Roo Integration Guide](./ROO_INTEGRATION_GUIDE.md)
+- [Jobs Daily Setup](./JOBS_DAILY_SETUP.md)
 - [Community Bridge Setup](./community_bridge_setup.md)
 - [Content Factory GitHub Reconnect](./CONTENT_FACTORY_GITHUB_RECONNECT.md)
 - [Local Live DB Docker](./local-live-db-docker.md)
