@@ -9,6 +9,7 @@ import calendar
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
+import requests
 from django.conf import settings
 from django.db import transaction, IntegrityError, models
 from django.db.models import Count
@@ -69,6 +70,10 @@ class PointsPurchaseService:
         return f"{frontend_base_url}/roo/topup/{purchase.id}"
 
     @staticmethod
+    def stripe_return_url(purchase: PointsPurchase, outcome: str) -> str:
+        return f"{PointsPurchaseService.frontend_checkout_page_url(purchase)}?checkout={outcome}"
+
+    @staticmethod
     @transaction.atomic
     def create_purchase(
         slack_user_id: str,
@@ -107,6 +112,96 @@ class PointsPurchaseService:
             currency=pack['currency'],
             purchase_from=origin,
         )
+
+    @staticmethod
+    @transaction.atomic
+    def create_checkout_session(
+        purchase: PointsPurchase,
+        terms_version_accepted: str,
+        privacy_version_accepted: str,
+    ) -> dict:
+        cleaned_terms_version = (terms_version_accepted or '').strip()
+        cleaned_privacy_version = (privacy_version_accepted or '').strip()
+        if not cleaned_terms_version or not cleaned_privacy_version:
+            raise ValueError("terms_version_accepted and privacy_version_accepted are required")
+
+        purchase = PointsPurchase.objects.select_for_update().get(pk=purchase.pk)
+        if purchase.status != 'pending':
+            raise ValueError(f"Points purchase is {purchase.status} and cannot start Checkout")
+        if purchase.expires_at <= timezone.now():
+            raise ValueError("Points purchase has expired")
+
+        PointsPurchaseService.validate_purchase_limits(purchase.user, purchase.points_amount)
+        pack = PointsPurchaseService.get_pack_config(purchase.pack_id)
+
+        stripe_secret_key = (getattr(settings, 'STRIPE_SECRET_KEY', '') or '').strip()
+        if not stripe_secret_key:
+            raise RuntimeError("Stripe is not configured for Roo Points top-ups")
+
+        metadata = {
+            'points_purchase_id': str(purchase.id),
+            'mlai_user_id': str(purchase.user_id),
+            'slack_user_id': purchase.slack_user_id,
+            'pack_id': purchase.pack_id,
+            'points_amount': str(purchase.points_amount),
+            'terms_version_accepted': cleaned_terms_version,
+            'privacy_version_accepted': cleaned_privacy_version,
+        }
+        data = {
+            'mode': 'payment',
+            'client_reference_id': str(purchase.id),
+            'success_url': PointsPurchaseService.stripe_return_url(purchase, 'success'),
+            'cancel_url': PointsPurchaseService.stripe_return_url(purchase, 'cancelled'),
+            'line_items[0][quantity]': '1',
+            'line_items[0][price_data][currency]': purchase.currency,
+            'line_items[0][price_data][unit_amount]': str(purchase.amount_cents),
+            'line_items[0][price_data][product_data][name]': pack['label'],
+        }
+        for key, value in metadata.items():
+            data[f'metadata[{key}]'] = value
+            data[f'payment_intent_data[metadata][{key}]'] = value
+
+        response = requests.post(
+            'https://api.stripe.com/v1/checkout/sessions',
+            auth=(stripe_secret_key, ''),
+            data=data,
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            try:
+                error_data = response.json()
+                message = error_data.get('error', {}).get('message') or response.text
+            except ValueError:
+                message = response.text
+            raise RuntimeError(f"Stripe Checkout Session creation failed: {message}")
+
+        session = response.json()
+        checkout_session_id = session.get('id')
+        checkout_session_url = session.get('url')
+        if not checkout_session_id or not checkout_session_url:
+            raise RuntimeError("Stripe Checkout Session response was missing id or url")
+
+        purchase.stripe_checkout_session_id = checkout_session_id
+        purchase.terms_version_accepted = cleaned_terms_version
+        purchase.terms_accepted_at = timezone.now()
+        purchase.privacy_version_accepted = cleaned_privacy_version
+        purchase.privacy_accepted_at = purchase.terms_accepted_at
+        purchase.save(
+            update_fields=[
+                'stripe_checkout_session_id',
+                'terms_version_accepted',
+                'terms_accepted_at',
+                'privacy_version_accepted',
+                'privacy_accepted_at',
+                'updated_at',
+            ]
+        )
+
+        return {
+            'purchase': purchase,
+            'checkout_session_id': checkout_session_id,
+            'checkout_session_url': checkout_session_url,
+        }
 
     @staticmethod
     def validate_purchase_limits(

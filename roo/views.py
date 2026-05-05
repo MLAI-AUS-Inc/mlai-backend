@@ -1,5 +1,6 @@
 import time
 
+from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
 from rest_framework.permissions import AllowAny
 # Removed mixins as they are not used in new code usually, but kept if needed for legacy.
@@ -19,7 +20,7 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
 )
 
 from .services import (
@@ -1447,6 +1448,25 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
     """Create pending Top-up Roo Points purchases for Roo."""
     permission_classes = [HasRooApiKey]
 
+    def get_permissions(self):
+        if self.action in ('retrieve', 'checkout'):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
+
+    def _response_data(self, purchase):
+        return {
+            'id': str(purchase.id),
+            'status': purchase.status,
+            'pack_id': purchase.pack_id,
+            'points_amount': purchase.points_amount,
+            'amount_cents': purchase.amount_cents,
+            'currency': purchase.currency,
+            'expires_at': purchase.expires_at.isoformat(),
+            'paid_at': purchase.paid_at.isoformat() if purchase.paid_at else None,
+            'created_at': purchase.created_at.isoformat(),
+            'frontend_checkout_page_url': PointsPurchaseService.frontend_checkout_page_url(purchase),
+        }
+
     def create(self, request):
         slack_user_id = (request.data.get('slack_user_id') or '').strip()
         pack_id = (request.data.get('pack_id') or '').strip()
@@ -1475,18 +1495,48 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
-            {
-                'id': str(purchase.id),
-                'status': purchase.status,
-                'slack_user_id': purchase.slack_user_id,
-                'pack_id': purchase.pack_id,
-                'points_amount': purchase.points_amount,
-                'amount_cents': purchase.amount_cents,
-                'currency': purchase.currency,
-                'expires_at': purchase.expires_at.isoformat(),
-                'frontend_checkout_page_url': PointsPurchaseService.frontend_checkout_page_url(purchase),
-            },
+            self._response_data(purchase),
             status=status.HTTP_201_CREATED,
+        )
+
+    def retrieve(self, request, pk=None):
+        try:
+            purchase = PointsPurchase.objects.get(pk=pk)
+        except (PointsPurchase.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(self._response_data(purchase))
+
+    @action(detail=True, methods=['post'], url_path='checkout')
+    def checkout(self, request, pk=None):
+        try:
+            purchase = PointsPurchase.objects.get(pk=pk)
+        except (PointsPurchase.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        terms_version_accepted = request.data.get('terms_version_accepted')
+        privacy_version_accepted = request.data.get('privacy_version_accepted')
+        try:
+            checkout_result = PointsPurchaseService.create_checkout_session(
+                purchase=purchase,
+                terms_version_accepted=terms_version_accepted,
+                privacy_version_accepted=privacy_version_accepted,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            response_status = status.HTTP_409_CONFLICT if 'cannot start Checkout' in message or 'expired' in message else status.HTTP_400_BAD_REQUEST
+            return Response({'error': message}, status=response_status)
+        except RuntimeError as exc:
+            logger.warning("Failed to create Stripe Checkout Session for PointsPurchase %s: %s", pk, exc)
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        purchase = checkout_result['purchase']
+        return Response(
+            {
+                **self._response_data(purchase),
+                'stripe_checkout_session_id': checkout_result['checkout_session_id'],
+                'checkout_session_url': checkout_result['checkout_session_url'],
+            }
         )
 
 
