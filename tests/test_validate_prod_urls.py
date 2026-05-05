@@ -130,9 +130,29 @@ class ValidateProdUrlsTests(SimpleTestCase):
             errors = validate_service_url_connectivity(timeout=8)
 
         self.assertEqual(errors, [])
+        content_factory_request = mock_urlopen.call_args_list[0].args[0]
+        self.assertEqual(content_factory_request.full_url, "http://10.126.0.4:8000/healthz/ready")
         valley_request = mock_urlopen.call_args_list[1].args[0]
         self.assertEqual(valley_request.full_url, "http://10.126.0.6:8080/internal/healthz")
         self.assertEqual(valley_request.headers["X-api-key"], "valley-key")
+
+    @patch("core.management.commands.validate_prod_urls.urllib.request.urlopen")
+    def test_command_can_warn_on_connectivity_failures(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+
+        out = StringIO()
+        err = StringIO()
+        with override_settings(**VALID_PROD_URL_SETTINGS):
+            call_command(
+                "validate_prod_urls",
+                "--check-connectivity",
+                "--warn-connectivity",
+                stdout=out,
+                stderr=err,
+            )
+
+        self.assertIn("Production URL settings are valid.", out.getvalue())
+        self.assertIn("WARNING: CONTENT_FACTORY_URL is not reachable", err.getvalue())
 
     def test_valley_connectivity_requires_service_key(self):
         settings = {**VALID_PROD_URL_SETTINGS, "VALLEY_HARNESS_API_KEY": "", "INTERNAL_API_KEY": "", "ROO_API_KEY": "", "MLAI_API_KEY": ""}
