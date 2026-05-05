@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date as calendar_date
 
 from django.core.management.base import BaseCommand, CommandError
@@ -8,6 +9,8 @@ from integrations.services.daily_discovery import (
     run_daily_discovery_scheduler,
 )
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -54,6 +57,20 @@ class Command(BaseCommand):
                 raise CommandError(result.get("error") or "Scheduled discovery enqueue failed.")
             return
 
-        result = run_daily_discovery_scheduler()
-        jobs_result = run_daily_jobs_scheduler()
-        self.stdout.write(json.dumps({"daily_discovery": result, "jobs": jobs_result}, sort_keys=True))
+        results = {}
+        failures = []
+
+        for name, runner in (
+            ("daily_discovery", run_daily_discovery_scheduler),
+            ("jobs", run_daily_jobs_scheduler),
+        ):
+            try:
+                results[name] = runner()
+            except Exception as exc:
+                logger.exception("Scheduled %s runner failed.", name)
+                results[name] = {"status": "failed", "error": str(exc)}
+                failures.append(name)
+
+        self.stdout.write(json.dumps(results, sort_keys=True))
+        if failures:
+            raise CommandError(f"Scheduled runner(s) failed: {', '.join(failures)}")

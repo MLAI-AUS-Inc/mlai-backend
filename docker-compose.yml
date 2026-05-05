@@ -31,11 +31,18 @@ services:
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 60; done"
     environment:
       APP_ENV: ${APP_ENV:-production}
+      JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-true}
+      JOBS_SCHEDULE_TIMEZONE: ${JOBS_SCHEDULE_TIMEZONE:-Australia/Melbourne}
+      JOBS_SCHEDULE_HOUR: ${JOBS_SCHEDULE_HOUR:-7}
+      JOBS_SCHEDULE_MINUTE: ${JOBS_SCHEDULE_MINUTE:-0}
+      JOBS_SCHEDULER_POST_TO_SLACK: ${JOBS_SCHEDULER_POST_TO_SLACK:-true}
+      JOBS_TOP_PICK_LIMIT: ${JOBS_TOP_PICK_LIMIT:-7}
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
     env_file:
       - .env
     depends_on:
       - db
+    restart: unless-stopped
     networks:
       default:
       mlai-shared:

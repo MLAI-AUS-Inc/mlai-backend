@@ -24,7 +24,7 @@ def format_slack_message(run_date: str, top_jobs: list[JobListing], full_list_ur
         "",
     ]
 
-    for job in top_jobs:
+    for job in top_jobs[: settings.jobs_top_pick_limit]:
         title = job.title or "Untitled role"
         company = job.company_name or "Unknown company"
         location = job.location or "Location not listed"
