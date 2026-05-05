@@ -1444,11 +1444,12 @@ class FirstChannelPostAwardViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['awarded'], True)
-        self.assertEqual(response.data['new_balance'], 2)
+        self.assertEqual(response.data['new_balance'], 4)
+        self.assertEqual(response.data['points_awarded'], 4)
         self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 1)
 
         ledger = Ledger.objects.get(idempotency_key='first_post_award:UINTRO:CSTART')
-        self.assertEqual(ledger.delta, 2)
+        self.assertEqual(ledger.delta, 4)
         self.assertEqual(ledger.description, 'Completed quest: First Contact')
         self.assertEqual(ledger.created_by_slack_id, 'SYSTEM')
 
@@ -1475,8 +1476,66 @@ class FirstChannelPostAwardViewTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(first_response.data['awarded'], True)
         self.assertEqual(second_response.data['awarded'], False)
+        self.assertEqual(first_response.data['points_awarded'], 4)
+        self.assertNotIn('points_awarded', second_response.data)
         self.assertEqual(ChannelFirstPost.objects.filter(slack_user_id='UINTRO', channel_id='CSTART').count(), 1)
         self.assertEqual(Ledger.objects.filter(idempotency_key='first_post_award:UINTRO:CSTART').count(), 1)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile')
+    def test_first_post_award_creates_missing_user_from_slack_profile(self, mock_profile, mock_permission):
+        mock_profile.return_value = {
+            'real_name': None,
+            'display_name': 'New Founder',
+            'name': 'new_founder',
+            'email': 'new-founder@example.com',
+            'image_url': 'https://example.com/avatar.png',
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UNEWINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['awarded'], True)
+        self.assertEqual(response.data['new_balance'], 4)
+        self.assertEqual(response.data['points_awarded'], 4)
+
+        user = User.objects.get(slack_id='UNEWINTRO')
+        self.assertEqual(user.email, 'new-founder@example.com')
+        self.assertEqual(user.first_name, 'New')
+        self.assertEqual(user.last_name, 'Founder')
+        self.assertEqual(user.avatar_url, 'https://example.com/avatar.png')
+
+        ledger = Ledger.objects.get(idempotency_key='first_post_award:UNEWINTRO:CSTART')
+        self.assertEqual(ledger.user, user)
+        self.assertEqual(ledger.delta, 4)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('roo.views.SlackService.get_user_profile', return_value=None)
+    def test_first_post_award_creates_placeholder_user_when_slack_profile_missing(self, mock_profile, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UNOPROFILEINTRO',
+                'channel_id': 'CSTART',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['awarded'], True)
+        self.assertEqual(response.data['new_balance'], 4)
+        self.assertEqual(response.data['points_awarded'], 4)
+
+        user = User.objects.get(slack_id='UNOPROFILEINTRO')
+        self.assertEqual(user.email, 'UNOPROFILEINTRO@slack.placeholder.com')
+        self.assertEqual(user.first_name, 'Unknown Slack User')
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     @patch('roo.views.PointsService.award', side_effect=RuntimeError('boom'))
@@ -1542,3 +1601,5 @@ class FirstChannelPostAwardConcurrencyTests(TransactionTestCase):
         self.assertEqual(Ledger.objects.filter(idempotency_key='first_post_award:UINTRO:CSTART').count(), 1)
         self.assertEqual(sum(1 for result in results if result.get('awarded') is True), 1)
         self.assertEqual(sum(1 for result in results if result.get('awarded') is False), 1)
+        awarded_results = [result for result in results if result.get('awarded') is True]
+        self.assertEqual(awarded_results[0].get('points_awarded'), 4)
