@@ -613,6 +613,14 @@ class VibeMarketingAutofillTests(TestCase):
                     "partial": True,
                     "brandName": "Acme",
                     "companyContext": "Short context that needs review.",
+                    "profileFields": {
+                        "shortDescription": "Acme helps founders automate startup workflows.",
+                        "problemSolved": "Startup teams lose time coordinating repeatable operating workflows manually.",
+                        "targetAudience": "Startup founders and operators.",
+                        "companyContext": "Short context that needs review.",
+                        "fieldConfidence": {"shortDescription": "high", "problemSolved": "medium"},
+                        "reviewNotes": ["Review problem wording before saving."],
+                    },
                     "directCompetitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
                     "competitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
                     "seedKeywords": [f"workflow automation {index}" for index in range(1, 21)],
@@ -643,10 +651,16 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertTrue(response.data["result"]["autofill"]["partial"])
         self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
         self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
+        self.assertEqual(
+            response.data["result"]["autofill"]["profileFields"]["shortDescription"],
+            "Acme helps founders automate startup workflows.",
+        )
+        self.assertEqual(response.data["result"]["autofill"]["profileFields"]["reviewNotes"][0], "Review problem wording before saving.")
 
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertTrue(run.result["autofill"]["partial"])
+        self.assertEqual(run.result["autofill"]["profileFields"]["targetAudience"], "Startup founders and operators.")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_run_polling_marks_worker_timeout_as_blocked(self):
