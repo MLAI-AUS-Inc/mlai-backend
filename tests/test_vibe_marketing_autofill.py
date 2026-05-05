@@ -589,6 +589,66 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertTrue(ContentFactoryRunStep.objects.filter(run=run, step_key="generate_keyword_landscape").exists())
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_run_polling_preserves_partial_blocked_result(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="autofill-partial-1",
+            workflow="startup_autofill",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+        remote_payload = {
+            "run_id": run.run_id,
+            "workflow": "startup_autofill",
+            "status": "blocked",
+            "current_step": "finalize",
+            "error": "Deep company research could not produce a complete company context with the required sections.",
+            "result": {
+                "status": "blocked",
+                "error": "Deep company research could not produce a complete company context with the required sections.",
+                "error_code": "COMPANY_CONTEXT_INCOMPLETE",
+                "autofill": {
+                    "partial": True,
+                    "brandName": "Acme",
+                    "companyContext": "Short context that needs review.",
+                    "directCompetitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
+                    "competitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
+                    "seedKeywords": [f"workflow automation {index}" for index in range(1, 21)],
+                    "sourceCount": 12,
+                    "competitorCount": 1,
+                    "seedKeywordCount": 20,
+                    "researchQuality": {"status": "partial", "errorCode": "COMPANY_CONTEXT_INCOMPLETE"},
+                },
+            },
+            "steps": {
+                "finalize": {
+                    "status": "blocked",
+                    "attempts": 1,
+                    "message": "Profile needs review.",
+                    "error": "Company context incomplete.",
+                }
+            },
+        }
+
+        with patch(
+            "content_factory.vibe_marketing_views.http_client.get",
+            return_value=_Response(status_code=200, payload=remote_payload),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(response.data["result"]["autofill"]["partial"])
+        self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
+        self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(run.result["autofill"]["partial"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_run_polling_marks_worker_timeout_as_blocked(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
