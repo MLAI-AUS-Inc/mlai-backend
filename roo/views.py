@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 import time
 
 from django.core.exceptions import ValidationError
@@ -58,6 +61,8 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300
 
 
 def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
@@ -164,6 +169,183 @@ class RateCardView(viewsets.ReadOnlyModelViewSet):
     serializer_class = TaskTemplateSerializer
     # Allow either API Key (for Roo/bots) or IsAuthenticated (for frontend users)
     permission_classes = [HasAPIKey | settings.REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'][0]]
+
+
+class StripeWebhookView(APIView):
+    permission_classes = [AllowAny]
+
+    def _parse_stripe_signature(self, signature_header):
+        parts = {}
+        for item in signature_header.split(','):
+            key, separator, value = item.partition('=')
+            if separator and key and value:
+                parts.setdefault(key, []).append(value)
+        timestamp_values = parts.get('t') or []
+        signatures = parts.get('v1') or []
+        if not timestamp_values or not signatures:
+            raise ValueError('Malformed Stripe signature header')
+        try:
+            timestamp = int(timestamp_values[0])
+        except ValueError as exc:
+            raise ValueError('Malformed Stripe signature timestamp') from exc
+        return timestamp, signatures
+
+    def _verify_stripe_signature(self, payload, signature_header):
+        webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', '')
+        if not webhook_secret:
+            raise RuntimeError('Stripe webhook secret is not configured')
+        if not signature_header:
+            raise ValueError('Missing Stripe signature header')
+
+        timestamp, signatures = self._parse_stripe_signature(signature_header)
+        if abs(time.time() - timestamp) > STRIPE_WEBHOOK_TOLERANCE_SECONDS:
+            raise ValueError('Stripe signature timestamp is outside the tolerance window')
+
+        signed_payload = f"{timestamp}.".encode('utf-8') + payload
+        expected_signature = hmac.new(
+            webhook_secret.encode('utf-8'),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        if not any(hmac.compare_digest(expected_signature, signature) for signature in signatures):
+            raise ValueError('Invalid Stripe signature')
+
+    def _find_purchase_for_session(self, session):
+        metadata = session.get('metadata') or {}
+        purchase_id = metadata.get('points_purchase_id')
+        queryset = PointsPurchase.objects.select_for_update()
+        if purchase_id:
+            return queryset.get(id=purchase_id)
+        return queryset.get(stripe_checkout_session_id=session.get('id'))
+
+    def _post_paid_slack_confirmation(self, purchase):
+        purchase_from = purchase.purchase_from or {}
+        if purchase_from.get('source') != 'slack':
+            return False
+
+        channel_id = str(purchase_from.get('slack_channel_id') or '').strip()
+        thread_ts = str(purchase_from.get('slack_thread_ts') or '').strip()
+        if not channel_id or not thread_ts:
+            return False
+
+        metadata = dict(purchase.metadata or {})
+        if metadata.get('slack_paid_confirmation_message_ts'):
+            return False
+
+        text = (
+            f"Top-up complete. {purchase.points_amount} Roo Points have been added. "
+            "These points can be used for eligible MLAI rewards, but they do not count "
+            "toward lifetime earned contribution."
+        )
+        sent, message_ts = SlackService.send_message(
+            channel_id,
+            text,
+            thread_ts=thread_ts,
+        )
+        if not sent:
+            logger.warning(
+                "Failed to post Roo Points paid confirmation for purchase %s",
+                purchase.id,
+            )
+            return False
+
+        metadata['slack_paid_confirmation_message_ts'] = message_ts
+        metadata['slack_paid_confirmation_sent_at'] = timezone.now().isoformat()
+        purchase.metadata = metadata
+        purchase.save(update_fields=['metadata', 'updated_at'])
+        return True
+
+    def _handle_checkout_completed(self, session):
+        if session.get('status') != 'complete' or session.get('payment_status') != 'paid':
+            return {'received': True, 'ignored': True, 'reason': 'checkout_session_not_paid'}
+
+        session_id = session.get('id')
+        if not session_id:
+            raise ValueError('Stripe checkout session id is required')
+
+        should_post_slack_confirmation = False
+        slack_confirmation_sent = False
+        with transaction.atomic():
+            purchase = self._find_purchase_for_session(session)
+
+            if purchase.stripe_checkout_session_id and purchase.stripe_checkout_session_id != session_id:
+                raise ValueError('Stripe checkout session does not match the purchase')
+
+            if purchase.status == 'paid' and purchase.ledger_entry_id:
+                return {
+                    'received': True,
+                    'purchase_id': str(purchase.id),
+                    'credited': False,
+                    'already_paid': True,
+                }
+
+            if purchase.status != 'pending':
+                return {
+                    'received': True,
+                    'purchase_id': str(purchase.id),
+                    'ignored': True,
+                    'reason': f'purchase_{purchase.status}',
+                }
+
+            ledger, credited = PointsService.credit_purchased_topup(
+                user=purchase.user,
+                delta=purchase.points_amount,
+                description=f"{purchase.points_amount} Top-up Roo Points purchase",
+                idempotency_key=f"stripe_checkout_session:{session_id}",
+                reference_type='POINTS_PURCHASE',
+                reference_id=str(purchase.id),
+                created_by_slack_id='STRIPE',
+            )
+
+            purchase.status = 'paid'
+            purchase.paid_at = timezone.now()
+            purchase.stripe_checkout_session_id = session_id
+            purchase.ledger_entry = ledger
+            purchase.save(update_fields=[
+                'status',
+                'paid_at',
+                'stripe_checkout_session_id',
+                'ledger_entry',
+                'updated_at',
+            ])
+            should_post_slack_confirmation = True
+
+        if should_post_slack_confirmation:
+            slack_confirmation_sent = self._post_paid_slack_confirmation(purchase)
+
+        return {
+            'received': True,
+            'purchase_id': str(purchase.id),
+            'credited': credited,
+            'slack_confirmation_sent': slack_confirmation_sent,
+        }
+
+    def post(self, request):
+        payload = request.body
+        signature_header = request.META.get('HTTP_STRIPE_SIGNATURE', '')
+
+        try:
+            self._verify_stripe_signature(payload, signature_header)
+            event = json.loads(payload.decode('utf-8'))
+        except RuntimeError as exc:
+            logger.warning('Stripe webhook is not configured: %s', exc)
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        event_type = event.get('type')
+        if event_type != 'checkout.session.completed':
+            return Response({'received': True, 'ignored': True})
+
+        session = (event.get('data') or {}).get('object') or {}
+        try:
+            result = self._handle_checkout_completed(session)
+        except (PointsPurchase.DoesNotExist, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet):

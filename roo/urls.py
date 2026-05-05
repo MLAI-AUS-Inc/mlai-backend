@@ -4,6 +4,7 @@ from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
+    StripeWebhookView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
@@ -20,6 +21,7 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('', include(router.urls)),
     
     # ============================================================
