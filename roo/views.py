@@ -57,12 +57,43 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+def clean_slack_id(value: Optional[str]) -> str:
+    """Normalize Slack IDs and mention strings to the raw Slack ID."""
+    cleaned = str(value or '').strip()
+    if cleaned.startswith('<@') and cleaned.endswith('>'):
+        cleaned = cleaned[2:-1].split('|', 1)[0]
+    if cleaned.startswith('@'):
+        cleaned = cleaned[1:]
+    return cleaned.strip()
+
+
+def split_slack_profile_name(profile: dict, slack_user_id: str) -> Tuple[str, str]:
+    """Return safe first/last names from Slack profile fields."""
+    candidates = (
+        profile.get('real_name'),
+        profile.get('display_name'),
+        profile.get('name'),
+        'Unknown Slack User',
+    )
+    display_name = ''
+    for candidate in candidates:
+        display_name = ' '.join(str(candidate or '').strip().split())
+        if display_name:
+            break
+
+    first_name, separator, last_name = display_name.partition(' ')
+    if not first_name:
+        first_name = 'Unknown'
+        last_name = 'Slack User'
+    return first_name, last_name
+
+
 def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
     """Resolve a Slack user to a local user, creating a placeholder when needed."""
+    slack_user_id = clean_slack_id(slack_user_id)
     if not slack_user_id:
         raise ValueError('target_slack_id is required')
 
-    slack_user_id = slack_user_id.strip()
     user = PointsService.get_user_by_slack_id(slack_user_id)
     if user:
         return user
@@ -70,7 +101,7 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
     profile = SlackService.get_user_profile(slack_user_id)
     if profile:
         email = profile.get('email') or f"{slack_user_id}@slack.placeholder.com"
-        real_name = profile.get('real_name', 'Unknown')
+        first_name, last_name = split_slack_profile_name(profile, slack_user_id)
 
         existing_user = User.objects.filter(email=email).first()
         if existing_user:
@@ -85,17 +116,15 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         return User.objects.create(
             email=email,
             slack_id=slack_user_id,
-            first_name=real_name.split()[0],
-            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+            first_name=first_name,
+            last_name=last_name,
             avatar_url=profile.get('image_url'),
-            role='participant',
         )
 
     return User.objects.create(
         email=f"{slack_user_id}@slack.placeholder.com",
         slack_id=slack_user_id,
         first_name="Unknown Slack User",
-        role='participant',
     )
 
 
@@ -1534,10 +1563,13 @@ class SystemAwardView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        created_by_slack_id = (request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM').strip()
-        target_slack_id = (request.data.get('target_slack_id') or '').strip()
+        created_by_slack_id = clean_slack_id(
+            request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM'
+        )
+        target_slack_id = clean_slack_id(request.data.get('target_slack_id') or '')
         points = request.data.get('points')
-        reason = request.data.get('reason', 'System award')
+        reason = str(request.data.get('reason') or 'System award')
+        idempotency_key = str(request.data.get('idempotency_key') or '').strip()
 
         if not target_slack_id or points is None:
             return Response(
@@ -1553,8 +1585,22 @@ class SystemAwardView(APIView):
         if points <= 0:
             return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = get_or_create_user_for_slack_id(target_slack_id)
-        idempotency_key = f"system:{created_by_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
+        try:
+            user = get_or_create_user_for_slack_id(target_slack_id)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(
+                "system_award_user_resolution_failed target_slack_id=%s",
+                target_slack_id,
+            )
+            return Response(
+                {'error': 'Internal error resolving target Slack user'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not idempotency_key:
+            idempotency_key = f"system:{created_by_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
 
         try:
             ledger, _ = PointsService.award(
@@ -1572,7 +1618,15 @@ class SystemAwardView(APIView):
                 'new_balance': balance['balance'],
                 'ledger_id': ledger.id,
             })
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
+            logger.exception(
+                "system_award_failed created_by_slack_id=%s target_slack_id=%s idempotency_key=%s",
+                created_by_slack_id,
+                target_slack_id,
+                idempotency_key,
+            )
             return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
