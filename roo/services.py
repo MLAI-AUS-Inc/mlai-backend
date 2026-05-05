@@ -356,7 +356,7 @@ class CoworkingService:
             day_capacity = CoworkingDayCapacity.objects.get(date=booking_date)
             return day_capacity.capacity
         except CoworkingDayCapacity.DoesNotExist:
-            return getattr(settings, 'DEFAULT_COWORKING_CAPACITY', 10)
+            return getattr(settings, 'DEFAULT_COWORKING_CAPACITY', 24)
     
     @staticmethod
     def get_booked_count(booking_date: date) -> int:
