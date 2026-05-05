@@ -22,7 +22,10 @@ from .models import (
     RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest
 )
 
-from .services import PointsService, CoworkingService, TaskService, RewardsService
+from .services import (
+    PointsService, PointsPurchaseService, CoworkingService,
+    TaskService, RewardsService,
+)
 from .permissions import (
     is_points_admin,
     is_points_super_admin,
@@ -1437,6 +1440,53 @@ class PointsRequestViewSet(viewsets.ViewSet):
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
             }
+        )
+
+
+class PointsPurchaseViewSet(viewsets.ViewSet):
+    """Create pending Top-up Roo Points purchases for Roo."""
+    permission_classes = [HasRooApiKey]
+
+    def create(self, request):
+        slack_user_id = (request.data.get('slack_user_id') or '').strip()
+        pack_id = (request.data.get('pack_id') or '').strip()
+        purchase_from = request.data.get('purchase_from') or {}
+
+        if not slack_user_id or not pack_id:
+            return Response(
+                {'error': 'slack_user_id and pack_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(purchase_from, dict):
+            return Response(
+                {'error': 'purchase_from must be an object when provided'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            purchase = PointsPurchaseService.create_purchase(
+                slack_user_id=slack_user_id,
+                pack_id=pack_id,
+                purchase_from=purchase_from,
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'id': str(purchase.id),
+                'status': purchase.status,
+                'slack_user_id': purchase.slack_user_id,
+                'pack_id': purchase.pack_id,
+                'points_amount': purchase.points_amount,
+                'amount_cents': purchase.amount_cents,
+                'currency': purchase.currency,
+                'expires_at': purchase.expires_at.isoformat(),
+                'frontend_checkout_page_url': PointsPurchaseService.frontend_checkout_page_url(purchase),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

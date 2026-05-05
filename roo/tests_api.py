@@ -2,8 +2,9 @@ from datetime import date, timedelta
 import threading
 
 from django.db import close_old_connections
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from .models import (
@@ -12,6 +13,7 @@ from .models import (
     Ledger,
     PointsAccount,
     PointsAdmin,
+    PointsPurchase,
     PointsRequest,
     Task,
     TaskAssignment,
@@ -22,6 +24,105 @@ from unittest.mock import patch
 from .services import PointsService
 
 User = get_user_model()
+
+
+class PointsPurchaseViewSetTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('points-purchase-list')
+        self.slack_user_id = 'UTOPUPAPI123'
+        self.user = User.objects.create_user(
+            email='topup-api@example.com',
+            slack_id=self.slack_user_id,
+        )
+        self.user.date_joined = timezone.now() - timedelta(days=30)
+        self.user.save(update_fields=['date_joined'])
+
+    @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test')
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_pending_purchase_success(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': f'  {self.slack_user_id} ',
+                'pack_id': 'topup_10',
+                'purchase_from': {
+                    'source': 'slack',
+                    'slack_channel_id': 'C123',
+                    'slack_thread_ts': '1712345678.000100',
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        purchase = PointsPurchase.objects.get()
+        self.assertEqual(response.data['id'], str(purchase.id))
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(response.data['pack_id'], 'topup_10')
+        self.assertEqual(response.data['points_amount'], 10)
+        self.assertEqual(response.data['amount_cents'], 3699)
+        self.assertEqual(response.data['currency'], 'aud')
+        self.assertEqual(
+            response.data['frontend_checkout_page_url'],
+            f'https://mlai.test/roo/topup/{purchase.id}',
+        )
+        self.assertEqual(purchase.user, self.user)
+        self.assertEqual(purchase.slack_user_id, self.slack_user_id)
+        self.assertEqual(purchase.purchase_from['source'], 'slack')
+        self.assertEqual(purchase.purchase_from['slack_user_id'], self.slack_user_id)
+        self.assertEqual(purchase.purchase_from['slack_channel_id'], 'C123')
+        self.assertIsNone(purchase.ledger_entry)
+        self.assertIsNone(purchase.stripe_checkout_session_id)
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_rejects_unlinked_slack_user(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UNLINKEDTOPUP',
+                'pack_id': 'topup_5',
+                'purchase_from': {'source': 'slack'},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('linked user account', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_rejects_invalid_pack(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.slack_user_id,
+                'pack_id': 'topup_50',
+                'purchase_from': {'source': 'slack'},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Unsupported top-up pack', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_requires_object_purchase_from(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.slack_user_id,
+                'pack_id': 'topup_5',
+                'purchase_from': 'slack',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('purchase_from must be an object', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
 
 class ManualAwardViewTests(APITestCase):
     def setUp(self):

@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
-    RateCardView, AdminAllowanceView, PointsRequestViewSet,
+    RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
@@ -17,6 +17,7 @@ router.register(r'minters', MinterViewSet, basename='minter')  # Backwards compa
 router.register(r'tasks', TaskViewSet)
 router.register(r'ledger', LedgerViewSet, basename='ledger')
 router.register(r'requests', PointsRequestViewSet, basename='points-request')
+router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
     path('', include(router.urls)),

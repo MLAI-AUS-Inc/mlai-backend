@@ -29,11 +29,84 @@ from core.models import User
 class PointsPurchaseService:
     """Business rules for Top-up Roo Points purchases."""
 
+    ROO_TOPUP_PACKS = {
+        'topup_5': {
+            'points': 5,
+            'amount_cents': 1999,
+            'currency': 'aud',
+            'label': '5 Top-up Roo Points',
+        },
+        'topup_10': {
+            'points': 10,
+            'amount_cents': 3699,
+            'currency': 'aud',
+            'label': '10 Top-up Roo Points',
+        },
+        'topup_25': {
+            'points': 25,
+            'amount_cents': 6399,
+            'currency': 'aud',
+            'label': '25 Top-up Roo Points',
+        },
+    }
     MAX_POINTS_PER_PURCHASE = 25
     MAX_POINTS_PER_ROLLING_YEAR = 50
     MAX_SPENDABLE_BALANCE = 100
     MIN_ACCOUNT_AGE_DAYS = 7
     LOOKBACK_DAYS = 365
+
+    @staticmethod
+    def get_pack_config(pack_id: str) -> dict:
+        cleaned_pack_id = (pack_id or '').strip()
+        if cleaned_pack_id not in PointsPurchaseService.ROO_TOPUP_PACKS:
+            allowed = ', '.join(PointsPurchaseService.ROO_TOPUP_PACKS.keys())
+            raise ValueError(f"Unsupported top-up pack. Allowed packs: {allowed}")
+        return PointsPurchaseService.ROO_TOPUP_PACKS[cleaned_pack_id]
+
+    @staticmethod
+    def frontend_checkout_page_url(purchase: PointsPurchase) -> str:
+        frontend_base_url = getattr(settings, 'DEFAULT_FRONTEND_URL', 'https://mlai.au').rstrip('/')
+        return f"{frontend_base_url}/roo/topup/{purchase.id}"
+
+    @staticmethod
+    @transaction.atomic
+    def create_purchase(
+        slack_user_id: str,
+        pack_id: str,
+        *,
+        purchase_from: Optional[dict] = None,
+        manual_balance_approval: bool = False,
+    ) -> PointsPurchase:
+        cleaned_slack_user_id = (slack_user_id or '').strip()
+        if not cleaned_slack_user_id:
+            raise ValueError("slack_user_id is required")
+
+        cleaned_pack_id = (pack_id or '').strip()
+        pack = PointsPurchaseService.get_pack_config(cleaned_pack_id)
+
+        user = PointsService.get_user_by_slack_id(cleaned_slack_user_id)
+        if not user:
+            raise PermissionDeniedError("A linked user account is required for top-up purchases")
+
+        PointsPurchaseService.validate_purchase_limits(
+            user,
+            pack['points'],
+            manual_balance_approval=manual_balance_approval,
+        )
+
+        origin = dict(purchase_from or {})
+        origin.setdefault('source', 'slack')
+        origin['slack_user_id'] = cleaned_slack_user_id
+
+        return PointsPurchase.objects.create(
+            user=user,
+            slack_user_id=cleaned_slack_user_id,
+            pack_id=cleaned_pack_id,
+            points_amount=pack['points'],
+            amount_cents=pack['amount_cents'],
+            currency=pack['currency'],
+            purchase_from=origin,
+        )
 
     @staticmethod
     def validate_purchase_limits(
