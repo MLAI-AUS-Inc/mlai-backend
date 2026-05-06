@@ -3,6 +3,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.permissions import HasRooApiKey
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     disconnect_external_connection,
@@ -20,6 +21,13 @@ from integrations.services.external_connectors import (
     update_linear_project_selections,
     update_slack_channel_selections,
 )
+from integrations.services.linear_meeting_actions import (
+    LinearMeetingConfigurationError,
+    LinearMeetingGraphQLError,
+    LinearMeetingRateLimitError,
+    create_linear_meeting_issue,
+    get_linear_meeting_context,
+)
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
 
@@ -27,6 +35,39 @@ PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD = {
     "detail": "Connector preview storage is not available. Run backend migrations before syncing financial records.",
     "code": "preview_storage_unavailable",
 }
+
+
+def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearMeetingConfigurationError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_not_configured",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, LinearMeetingRateLimitError):
+        response = Response(
+            {
+                "detail": str(exc),
+                "code": "linear_rate_limited",
+                "retryAfter": exc.retry_after_seconds,
+            },
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response["Retry-After"] = str(exc.retry_after_seconds)
+        return response
+    if isinstance(exc, LinearMeetingGraphQLError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_graphql_error",
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    if isinstance(exc, ValueError):
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    raise exc
 
 
 def _requested_providers(request):
@@ -319,3 +360,35 @@ class LinearPreviewView(APIView):
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingContextView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        try:
+            payload = get_linear_meeting_context()
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingIssueCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_issue(request.data)
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)

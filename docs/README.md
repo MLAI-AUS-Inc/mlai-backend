@@ -8,6 +8,7 @@ Start here:
 - [Roo Structured Task Capabilities](./ROO_TASK_CAPABILITIES.md): plain-language guide to what the volunteer task system can do
 - [Roo Task Operations Runbook](./ROO_TASK_OPERATIONS_RUNBOOK.md): how leads and reviewers should create, review, approve, and recover tasks
 - [Roo Task Engine Technical Notes](./ROO_TASK_ENGINE_TECHNICAL.md): the model/API/migration details for engineers
+- [Roo Linear Meeting Actions](./LINEAR_MEETING_ACTIONS.md): backend secret setup for Roo-created Linear issues from meeting notes
 
 Existing docs:
 
