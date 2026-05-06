@@ -18,6 +18,20 @@ from .serializers import DailyRunRequestSerializer, JobListingSerializer
 from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date
 from .services.slack import format_slack_message
 
+VALID_BUCKETS = {"australian_ai", "australian_startup", "remote_ai", "remote_startup"}
+
+
+def _bucket_filter(request) -> str | None:
+    bucket = str(request.query_params.get("bucket") or request.GET.get("bucket") or "").strip()
+    return bucket if bucket in VALID_BUCKETS else None
+
+
+def _jobs_for_run(run: JobRun, bucket: str | None = None):
+    rows = JobListing.objects.filter(run=run)
+    if bucket:
+        rows = rows.filter(bucket=bucket)
+    return rows.order_by("-is_top_pick", "rank", "-ranking_score")
+
 
 def _render_job_card(job: JobListing) -> str:
     rank = f"#{job.rank} top pick" if job.is_top_pick and job.rank else "Matched role"
@@ -118,7 +132,7 @@ class DailyJobsJsonView(APIView):
         run = latest_run_for_date(run_date)
         if not run:
             return Response([])
-        rows = JobListing.objects.filter(run=run).order_by("-is_top_pick", "rank", "-ranking_score")
+        rows = _jobs_for_run(run, _bucket_filter(request))
         return Response(JobListingSerializer(rows, many=True).data)
 
 
@@ -130,7 +144,8 @@ class DailyJobsHtmlView(APIView):
         if not run:
             return HttpResponse(f"<h1>Roo Jobs Daily</h1><p>No run found for {escape(run_date)} yet.</p>")
 
-        rows = list(JobListing.objects.filter(run=run).order_by("-is_top_pick", "rank", "-ranking_score"))
+        selected_bucket = _bucket_filter(request)
+        rows = list(_jobs_for_run(run, selected_bucket))
         if not rows:
             return HttpResponse(f"<h1>Roo Jobs Daily</h1><p>No matched jobs found for {escape(run_date)} yet.</p>")
 
@@ -169,11 +184,14 @@ class DailyJobsHtmlView(APIView):
               <h2>Filters</h2>
               <div class="filters">
                 <a href="#australian_ai">Australian AI</a>
-                <a href="#australian_startup">Australian Startup</a>
-                <a href="#remote_ai">Remote AI</a>
-                <a href="#remote_startup">Remote Startup</a>
+                <a href="/api/v1/jobs/daily/{escape(run_date)}">All</a>
+                <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_ai">Australian AI</a>
+                <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_startup">Australian Startup</a>
+                <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=remote_ai">Remote AI</a>
+                <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=remote_startup">Remote Startup</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}/json">JSON feed</a>
               </div>
+              <p class="meta">Showing: {escape(selected_bucket.replace("_", " ").title() if selected_bucket else "All matched jobs")}</p>
             </section>
             <section>
               <h2>Slack preview</h2>

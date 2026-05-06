@@ -3,6 +3,7 @@ Tests for the Points System.
 """
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Optional
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
@@ -15,7 +16,12 @@ from .models import (
     PointsPurchase,
 )
 from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService
-from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
+from .permissions import (
+    can_generate_coworking_reports,
+    is_points_admin,
+    InsufficientBalanceError,
+    PermissionDeniedError,
+)
 
 
 User = get_user_model()
@@ -350,7 +356,7 @@ class PointsPurchaseLimitTests(TestCase):
         points_amount: int,
         days_ago: int,
         *,
-        created_days_ago: int | None = None,
+        created_days_ago: Optional[int] = None,
     ) -> PointsPurchase:
         paid_at = timezone.now() - timedelta(days=days_ago)
         purchase = PointsPurchase.objects.create(
@@ -612,12 +618,33 @@ class PermissionTests(TestCase):
             is_active=False
         )
         self.assertFalse(is_points_admin('UINACTIVE'))
+
+    def test_partner_can_generate_reports_but_is_not_full_points_admin(self):
+        self.assertIn(('partner', 'Partner'), PointsAdmin.ROLE_CHOICES)
+        PointsAdmin.objects.create(
+            slack_user_id='UPARTNER',
+            role='partner',
+            is_active=True,
+        )
+
+        self.assertFalse(is_points_admin('UPARTNER'))
+        self.assertTrue(can_generate_coworking_reports('UPARTNER'))
+
+    def test_inactive_partner_cannot_generate_reports(self):
+        PointsAdmin.objects.create(
+            slack_user_id='UINACTIVEPARTNER',
+            role='partner',
+            is_active=False,
+        )
+
+        self.assertFalse(can_generate_coworking_reports('UINACTIVEPARTNER'))
     
     @patch('roo.permissions.settings')
     def test_bootstrap_admin_is_always_admin(self, mock_settings):
         """Test that bootstrap admins are always recognized."""
         mock_settings.POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = ['UBOOTSTRAP']
         self.assertTrue(is_points_admin('UBOOTSTRAP'))
+        self.assertTrue(can_generate_coworking_reports('UBOOTSTRAP'))
 
 
 class LedgerIntegrityTests(TestCase):

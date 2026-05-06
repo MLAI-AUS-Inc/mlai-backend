@@ -31,6 +31,7 @@ from .services import (
     TaskService, RewardsService,
 )
 from .permissions import (
+    can_generate_coworking_reports,
     is_points_admin,
     is_points_super_admin,
     InsufficientBalanceError,
@@ -61,16 +62,48 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+FIRST_CHANNEL_POST_POINTS = 4
+
+
+def clean_slack_id(value: Optional[str]) -> str:
+    """Normalize Slack IDs and mention strings to the raw Slack ID."""
+    cleaned = str(value or '').strip()
+    if cleaned.startswith('<@') and cleaned.endswith('>'):
+        cleaned = cleaned[2:-1].split('|', 1)[0]
+    if cleaned.startswith('@'):
+        cleaned = cleaned[1:]
+    return cleaned.strip()
+
+
+def split_slack_profile_name(profile: dict, slack_user_id: str) -> Tuple[str, str]:
+    """Return safe first/last names from Slack profile fields."""
+    candidates = (
+        profile.get('real_name'),
+        profile.get('display_name'),
+        profile.get('name'),
+        'Unknown Slack User',
+    )
+    display_name = ''
+    for candidate in candidates:
+        display_name = ' '.join(str(candidate or '').strip().split())
+        if display_name:
+            break
+
+    first_name, separator, last_name = display_name.partition(' ')
+    if not first_name:
+        first_name = 'Unknown'
+        last_name = 'Slack User'
+    return first_name, last_name
 
 STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300
 
 
 def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
     """Resolve a Slack user to a local user, creating a placeholder when needed."""
+    slack_user_id = clean_slack_id(slack_user_id)
     if not slack_user_id:
         raise ValueError('target_slack_id is required')
 
-    slack_user_id = slack_user_id.strip()
     user = PointsService.get_user_by_slack_id(slack_user_id)
     if user:
         return user
@@ -78,7 +111,7 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
     profile = SlackService.get_user_profile(slack_user_id)
     if profile:
         email = profile.get('email') or f"{slack_user_id}@slack.placeholder.com"
-        real_name = profile.get('real_name', 'Unknown')
+        first_name, last_name = split_slack_profile_name(profile, slack_user_id)
 
         existing_user = User.objects.filter(email=email).first()
         if existing_user:
@@ -93,17 +126,15 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
         return User.objects.create(
             email=email,
             slack_id=slack_user_id,
-            first_name=real_name.split()[0],
-            last_name=' '.join(real_name.split()[1:]) if ' ' in real_name else '',
+            first_name=first_name,
+            last_name=last_name,
             avatar_url=profile.get('image_url'),
-            role='participant',
         )
 
     return User.objects.create(
         email=f"{slack_user_id}@slack.placeholder.com",
         slack_id=slack_user_id,
         first_name="Unknown Slack User",
-        role='participant',
     )
 
 
@@ -143,7 +174,7 @@ def award_first_channel_post_bonus(slack_user_id: str, channel_id: str) -> Tuple
         user = get_or_create_user_for_slack_id(slack_user_id)
         _, awarded = PointsService.award(
             user=user,
-            delta=2,
+            delta=FIRST_CHANNEL_POST_POINTS,
             source='EVENT',
             description='Completed quest: First Contact',
             created_by_slack_id='SYSTEM',
@@ -1177,7 +1208,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 {'error': 'slack_user_id is required'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not is_points_admin(slack_user_id):
+        if not can_generate_coworking_reports(slack_user_id):
             return Response(
                 {'error': 'Only Roo Points Admins can generate coworking reports'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -1748,14 +1779,6 @@ class ManualAwardView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Bypass admin check if authenticated via API Key (Roo)
-        # The permission class has already passed at this point.
-        # But we still run the check for non-API-Key users (if any could get here)
-        # Since usage is restricted to HasRooApiKey, we technically know it's allowed.
-        # But if we want to support human users via session in future, we keep the check.
-        # For now, if HasRooApiKey is the ONLY permission, then everyone here is Roo.
-        # But let's be explicitly safe and check if it's NOT an admin AND NOT authorized via key (impossible here)
-        
         try:
             require_linked_points_admin(admin_slack_id, action_label='award points manually')
         except PermissionDeniedError as exc:
@@ -1818,6 +1841,80 @@ class ManualAwardView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
              return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SystemAwardView(APIView):
+    """
+    Roo-internal positive point award path for non-human system automations.
+    """
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        created_by_slack_id = clean_slack_id(
+            request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM'
+        )
+        target_slack_id = clean_slack_id(request.data.get('target_slack_id') or '')
+        points = request.data.get('points')
+        reason = str(request.data.get('reason') or 'System award')
+        idempotency_key = str(request.data.get('idempotency_key') or '').strip()
+
+        if not target_slack_id or points is None:
+            return Response(
+                {'error': 'target_slack_id and points are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            points = int(points)
+        except (ValueError, TypeError):
+            return Response({'error': 'Points must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if points <= 0:
+            return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = get_or_create_user_for_slack_id(target_slack_id)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(
+                "system_award_user_resolution_failed target_slack_id=%s",
+                target_slack_id,
+            )
+            return Response(
+                {'error': 'Internal error resolving target Slack user'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not idempotency_key:
+            idempotency_key = f"system:{created_by_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
+
+        try:
+            ledger, _ = PointsService.award(
+                user=user,
+                delta=points,
+                source='EVENT',
+                description=reason,
+                created_by_slack_id=created_by_slack_id,
+                idempotency_key=idempotency_key,
+            )
+            balance = PointsService.get_balance(user)
+            return Response({
+                'success': True,
+                'points_awarded': ledger.delta,
+                'new_balance': balance['balance'],
+                'ledger_id': ledger.id,
+            })
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception(
+                "system_award_failed created_by_slack_id=%s target_slack_id=%s idempotency_key=%s",
+                created_by_slack_id,
+                target_slack_id,
+                idempotency_key,
+            )
+            return Response({'error': f"Internal error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ============================================================
@@ -1938,6 +2035,7 @@ class FirstChannelPostAwardView(APIView):
         response_data = {'awarded': awarded}
         if awarded and new_balance is not None:
             response_data['new_balance'] = new_balance
+            response_data['points_awarded'] = FIRST_CHANNEL_POST_POINTS
         return Response(response_data, status=status.HTTP_200_OK)
 
 

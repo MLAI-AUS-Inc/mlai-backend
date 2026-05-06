@@ -23,6 +23,7 @@ class PointsAdmin(models.Model):
         ('committee', 'Committee'),
         ('portfolio_lead', 'Portfolio Lead'),
         ('admin', 'Admin'),
+        ('partner', 'Partner'),
     )
     PORTFOLIO_CHOICES = (
         ('events', 'Events'),

@@ -43,7 +43,7 @@ class JobsSettings:
 
     @property
     def jobs_scheduler_post_to_slack(self) -> bool:
-        return bool(getattr(django_settings, "JOBS_SCHEDULER_POST_TO_SLACK", False))
+        return bool(getattr(django_settings, "JOBS_SCHEDULER_POST_TO_SLACK", True))
 
     @property
     def jobs_scheduler_post_to_notion(self) -> bool:
@@ -75,7 +75,7 @@ class JobsSettings:
 
     @property
     def jobs_top_pick_limit(self) -> int:
-        return int(getattr(django_settings, "JOBS_TOP_PICK_LIMIT", 10))
+        return int(getattr(django_settings, "JOBS_TOP_PICK_LIMIT", 7))
 
     @property
     def notion_top_pick_limit(self) -> int:

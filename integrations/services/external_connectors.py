@@ -4491,6 +4491,12 @@ def _serialize_google_source(user) -> dict[str, Any]:
         "lastSyncedAt": None,
         "last_synced_at": None,
         "warning": warning,
+        "canDisconnect": bool(connection),
+        "can_disconnect": bool(connection),
+        "canDeleteData": bool(connection),
+        "can_delete_data": bool(connection),
+        "googlePermissionsUrl": "https://myaccount.google.com/permissions",
+        "google_permissions_url": "https://myaccount.google.com/permissions",
     }
 
 

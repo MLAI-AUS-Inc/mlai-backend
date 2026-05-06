@@ -1,9 +1,10 @@
 services:
   web:
     build: .
-    command: gunicorn --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --worker-class sync --keep-alive ${GUNICORN_KEEP_ALIVE:-2} --timeout ${GUNICORN_TIMEOUT:-30} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} --max-requests ${GUNICORN_MAX_REQUESTS:-300} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50} mlai.wsgi:application
+    command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: local
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-false}
     volumes:
       - .:/app

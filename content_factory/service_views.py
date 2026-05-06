@@ -5208,6 +5208,10 @@ class ContentFactoryRunView(APIView):
 
         response_payload = _serialize_content_factory_run(run)
         response_payload["sync_status"] = "created" if created else "updated"
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
+
+            _persist_completed_article_memory_if_possible(run)
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

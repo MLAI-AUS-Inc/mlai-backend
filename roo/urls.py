@@ -4,7 +4,7 @@ from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
-    StripeWebhookView,
+    StripeWebhookView, SystemAwardView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
@@ -59,6 +59,7 @@ urlpatterns = [
     # ============================================================
     path('admin/award/', ManualAwardView.as_view(), name='manual-award'),
     path('admin/allowance/', AdminAllowanceView.as_view(), name='admin-allowance'),
+    path('system/award/', SystemAwardView.as_view(), name='system-award'),
     
     # ============================================================
     # Activity Tracking

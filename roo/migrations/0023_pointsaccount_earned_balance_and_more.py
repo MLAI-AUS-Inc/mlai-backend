@@ -16,7 +16,7 @@ def clear_earned_balance(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('roo', '0021_alter_taskactivity_event_type'),
+        ('roo', '0022_add_partner_points_admin_role'),
     ]
 
     operations = [

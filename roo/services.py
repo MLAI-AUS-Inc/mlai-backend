@@ -348,6 +348,8 @@ class PointsService:
             admin = PointsAdmin.objects.get(slack_user_id=slack_id, is_active=True)
         except PointsAdmin.DoesNotExist:
             return {'error': 'Not a points admin'}
+        if not is_points_admin(slack_id):
+            return {'error': 'Not a points admin'}
         
         # Calculate start of current ISO week (Monday)
         today = timezone.now().date()
@@ -654,7 +656,7 @@ class CoworkingService:
             day_capacity = CoworkingDayCapacity.objects.get(date=booking_date)
             return day_capacity.capacity
         except CoworkingDayCapacity.DoesNotExist:
-            return getattr(settings, 'DEFAULT_COWORKING_CAPACITY', 10)
+            return getattr(settings, 'DEFAULT_COWORKING_CAPACITY', 24)
     
     @staticmethod
     def get_booked_count(booking_date: date) -> int:

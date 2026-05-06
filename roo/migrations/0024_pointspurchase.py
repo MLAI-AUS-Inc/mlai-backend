@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('roo', '0022_pointsaccount_earned_balance_and_more'),
+        ('roo', '0023_pointsaccount_earned_balance_and_more'),
     ]
 
     operations = [
