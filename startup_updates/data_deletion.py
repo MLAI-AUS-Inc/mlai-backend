@@ -10,7 +10,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 
 from integrations import http_client as requests
-from integrations.models import GoogleConnection
+from integrations.models import ExternalServiceConnection, ExternalServiceProvider, GoogleConnection
 from integrations.services.valley_harness import cancel_valley_run
 from organizations.models import Organization
 from startup_updates.models import (
@@ -18,7 +18,14 @@ from startup_updates.models import (
     GmailMessageArtifact,
     GmailSyncCursor,
     GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
+    SlackChannelSelection,
+    SlackMessageArtifact,
+    SlackThreadArtifact,
     StartupDataDeletionRequest,
     StartupDataDeletionStatus,
     StartupEvent,
@@ -47,6 +54,16 @@ DELETED_COUNT_KEYS = (
     "gmailThreads",
     "gmailAttachments",
     "gmailCursors",
+    "slackMessages",
+    "slackThreads",
+    "slackChannelSelections",
+    "linearProjects",
+    "linearIssues",
+    "linearProjectUpdates",
+    "linearProjectSelections",
+    "notionRunStores",
+    "externalConnectionCursors",
+    "startupRunsScrubbed",
     "startupEvents",
     "startupMetrics",
     "monthlyDrafts",
@@ -208,21 +225,25 @@ def _revoke_google_refresh_token(refresh_token: str) -> dict[str, Any]:
     }
 
 
+def _startup_update_runs_for_organizations(organizations: Iterable[Organization]) -> list[ContentFactoryRun]:
+    domains = [organization.domain for organization in organizations if organization.domain]
+    if not domains:
+        return []
+
+    return list(
+        ContentFactoryRun.objects.filter(workflow=STARTUP_UPDATE_WORKFLOW, domain__in=domains).order_by(
+            "-updated_at",
+            "-id",
+        )
+    )
+
+
 def _gmail_runs_for_organizations(
     organizations: Iterable[Organization],
     *,
     google_connection_id: int | None = None,
 ) -> list[ContentFactoryRun]:
-    domains = [organization.domain for organization in organizations if organization.domain]
-    if not domains:
-        return []
-
-    runs = list(
-        ContentFactoryRun.objects.filter(
-            workflow=STARTUP_UPDATE_WORKFLOW,
-            domain__in=domains,
-        ).order_by("-updated_at", "-id")
-    )
+    runs = _startup_update_runs_for_organizations(organizations)
     matched: list[ContentFactoryRun] = []
     for run in runs:
         if "gmail" not in set(startup_update_run_input_sources(run)):
@@ -232,6 +253,24 @@ def _gmail_runs_for_organizations(
             continue
         matched.append(run)
     return matched
+
+
+def _cancel_open_startup_runs(runs: Iterable[ContentFactoryRun]) -> list[dict[str, Any]]:
+    cancelled_runs: list[dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
+    for run in runs:
+        if run.run_id in seen_run_ids or run.status not in OPEN_RUN_STATUSES:
+            continue
+        seen_run_ids.add(run.run_id)
+        cancelled_runs.append(
+            {
+                "runId": run.run_id,
+                "run_id": run.run_id,
+                "status": run.status,
+                "valley": cancel_valley_run(run.run_id),
+            }
+        )
+    return cancelled_runs
 
 
 def _cancel_open_gmail_runs(*, user, connection: GoogleConnection, bindings: list[UserStartupBinding]) -> list[dict[str, Any]]:
@@ -314,6 +353,84 @@ def _delete_gmail_artifacts(
     return counts
 
 
+def _delete_slack_artifacts(*, organization_ids: list[int]) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    counts["slackThreads"] = _delete_count(SlackThreadArtifact.objects.filter(organization_id__in=organization_ids))
+    counts["slackMessages"] = _delete_count(SlackMessageArtifact.objects.filter(organization_id__in=organization_ids))
+    counts["slackChannelSelections"] = _delete_count(
+        SlackChannelSelection.objects.filter(organization_id__in=organization_ids)
+    )
+    return counts
+
+
+def _delete_linear_artifacts(*, organization_ids: list[int]) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    counts["linearProjectUpdates"] = _delete_count(
+        LinearProjectUpdateArtifact.objects.filter(organization_id__in=organization_ids)
+    )
+    counts["linearIssues"] = _delete_count(LinearIssueArtifact.objects.filter(organization_id__in=organization_ids))
+    counts["linearProjects"] = _delete_count(LinearProjectArtifact.objects.filter(organization_id__in=organization_ids))
+    counts["linearProjectSelections"] = _delete_count(
+        LinearProjectSelection.objects.filter(organization_id__in=organization_ids)
+    )
+    return counts
+
+
+def _scrub_external_connection_cursors(*, organization_ids: list[int], providers: Iterable[str]) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    provider_values = [str(provider) for provider in providers]
+    queryset = ExternalServiceConnection.objects.filter(
+        organization_id__in=organization_ids,
+        provider__in=provider_values,
+    )
+    for connection in queryset:
+        if not connection.sync_cursor and connection.last_synced_at is None:
+            continue
+        connection.sync_cursor = {}
+        connection.last_synced_at = None
+        connection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
+        counts["externalConnectionCursors"] += 1
+    return counts
+
+
+def _delete_notion_run_stores(*, organization_ids: list[int], run_ids: list[str] | None = None) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    queryset = ExternalServiceConnection.objects.filter(
+        organization_id__in=organization_ids,
+        provider=ExternalServiceProvider.NOTION,
+    )
+    run_id_set = set(run_ids or [])
+    for connection in queryset:
+        cursor = dict(connection.sync_cursor or {})
+        run_stores = cursor.get("startup_update_runs")
+        if not isinstance(run_stores, dict) or not run_stores:
+            continue
+
+        if run_id_set:
+            deleted_count = 0
+            next_run_stores = dict(run_stores)
+            for run_id in run_id_set:
+                if run_id in next_run_stores:
+                    deleted_count += 1
+                    next_run_stores.pop(run_id, None)
+        else:
+            deleted_count = len(run_stores)
+            next_run_stores = {}
+
+        if deleted_count <= 0:
+            continue
+        if next_run_stores:
+            cursor["startup_update_runs"] = next_run_stores
+        else:
+            cursor.pop("startup_update_runs", None)
+            cursor["startup_update_index_partial"] = False
+        connection.sync_cursor = cursor
+        connection.last_synced_at = None
+        connection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
+        counts["notionRunStores"] += deleted_count
+    return counts
+
+
 def _delete_gmail_derived_outputs(
     *,
     organization_ids: list[int],
@@ -383,6 +500,17 @@ def _scrub_runs(runs: Iterable[ContentFactoryRun], *, request_id: str, reason: s
         run.save(update_fields=update_fields)
         scrubbed += 1
     return scrubbed
+
+
+def _scrub_runs_with_counts(
+    runs: Iterable[ContentFactoryRun],
+    *,
+    request_id: str,
+    reason: str,
+) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    counts["startupRunsScrubbed"] = _scrub_runs(runs, request_id=request_id, reason=reason)
+    return counts
 
 
 def disconnect_gmail_for_user(
@@ -513,30 +641,36 @@ def delete_startup_data_for_organization(
     )
     deleted = _zero_deleted_counts()
     warnings: list[str] = []
-    gmail_runs = _gmail_runs_for_organizations([organization])
-    cancelled_runs = []
-    for run in gmail_runs:
-        if run.status in OPEN_RUN_STATUSES:
-            cancelled_runs.append(
-                {
-                    "runId": run.run_id,
-                    "run_id": run.run_id,
-                    "valley": cancel_valley_run(run.run_id),
-                }
-            )
+    organization_ids = [organization.id]
+    runs = _startup_update_runs_for_organizations([organization])
+    run_ids = [run.run_id for run in runs]
+    cancelled_runs = _cancel_open_startup_runs(runs)
 
     try:
         with transaction.atomic():
-            _add_counts(deleted, _delete_gmail_artifacts(organization_ids=[organization.id]))
+            _add_counts(deleted, _delete_gmail_artifacts(organization_ids=organization_ids))
+            _add_counts(deleted, _delete_slack_artifacts(organization_ids=organization_ids))
+            _add_counts(deleted, _delete_linear_artifacts(organization_ids=organization_ids))
+            _add_counts(
+                deleted,
+                _scrub_external_connection_cursors(
+                    organization_ids=organization_ids,
+                    providers=[ExternalServiceProvider.SLACK, ExternalServiceProvider.LINEAR],
+                ),
+            )
+            _add_counts(deleted, _delete_notion_run_stores(organization_ids=organization_ids, run_ids=run_ids))
             _add_counts(
                 deleted,
                 _delete_gmail_derived_outputs(
-                    organization_ids=[organization.id],
-                    gmail_runs=gmail_runs,
+                    organization_ids=organization_ids,
+                    gmail_runs=[],
                     gmail_only=False,
                 ),
             )
-            _scrub_runs(gmail_runs, request_id=deletion_request.request_id, reason=reason)
+            _add_counts(
+                deleted,
+                _scrub_runs_with_counts(runs, request_id=deletion_request.request_id, reason=reason),
+            )
     except Exception:
         _complete_deletion_requests(
             [deletion_request],
