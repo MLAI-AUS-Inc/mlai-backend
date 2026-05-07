@@ -64,10 +64,17 @@ from integrations.services.gmail import (
     default_backfill_window,
     ensure_thread_attachments_hydrated,
     hydrate_thread_artifact,
+    is_gmail_insufficient_permissions_error,
     StaleHistoryCursorError,
     six_month_backfill_window,
     sync_history_metadata_page,
     sync_message_metadata_page,
+)
+from integrations.services.gmail_scopes import (
+    GMAIL_INSUFFICIENT_SCOPE_CODE,
+    GMAIL_RECONNECT_WARNING,
+    gmail_scope_status_payload,
+    has_gmail_read_scope,
 )
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
@@ -85,6 +92,7 @@ from startup_updates.services import (
     compact_gmail_thread_bundle,
     compact_linear_project_bundle,
     compact_slack_thread_bundle,
+    coerce_startup_update_sources_for_gmail_scope,
     create_startup_update_run,
     DEFAULT_MAX_SOURCE_THREADS,
     get_default_binding_for_domain,
@@ -823,6 +831,57 @@ def _gmail_connection_required_response() -> Response:
     )
 
 
+def _gmail_source_unavailable_payload(
+    run: ContentFactoryRun,
+    request,
+    *,
+    connection=None,
+    warning: str = GMAIL_RECONNECT_WARNING,
+) -> dict:
+    scope_status = gmail_scope_status_payload(connection)
+    scope_status.update(
+        {
+            "hasGmailScope": False,
+            "has_gmail_scope": False,
+            "needsGmailReconnect": True,
+            "needs_gmail_reconnect": True,
+        }
+    )
+    return {
+        "run": _serialize_run(run, request),
+        "sourceUnavailable": True,
+        "source_unavailable": True,
+        "source": "gmail",
+        "code": GMAIL_INSUFFICIENT_SCOPE_CODE,
+        "retryable": False,
+        "warning": warning,
+        "mode": "backfill",
+        "ingested_count": 0,
+        "result_size_estimate": 0,
+        "next_page_token": None,
+        "history_id": "",
+        "cursor_reset": False,
+        "reused_existing_count": 0,
+        "relevance_counts": {
+            GmailRelevanceLabel.RELEVANT: 0,
+            GmailRelevanceLabel.UPDATE_WORTHY: 0,
+            GmailRelevanceLabel.BACKGROUND: 0,
+            GmailRelevanceLabel.IRRELEVANT: 0,
+            GmailRelevanceLabel.AMBIGUOUS: 0,
+            GmailRelevanceLabel.PENDING: 0,
+        },
+        "message_ids": [],
+        **scope_status,
+    }
+
+
+def _gmail_source_unavailable_response(run: ContentFactoryRun, request, *, connection=None) -> Response:
+    return Response(
+        _gmail_source_unavailable_payload(run, request, connection=connection),
+        status=status.HTTP_200_OK,
+    )
+
+
 def _update_run_step(run: ContentFactoryRun, *, step_key: str):
     if run.status == ContentFactoryRunStatus.CANCELLED:
         return
@@ -920,9 +979,24 @@ class StartupUpdateRunView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = binding.google_connection or getattr(user, "google_connection", None)
-        if gmail_required_for_sources(input_sources) and google_connection is None:
+        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+            input_sources,
+            google_connection,
+        )
+        if gmail_required_for_sources(input_sources) and (
+            google_connection is None or not has_gmail_read_scope(google_connection)
+        ):
             return Response(
-                {"error": "The bound user does not have a Gmail connection."},
+                {
+                    "error": "The bound user does not have a usable Gmail connection.",
+                    "code": GMAIL_INSUFFICIENT_SCOPE_CODE if google_connection else "gmail_connection_required",
+                    "sourceUnavailable": bool(google_connection),
+                    "source_unavailable": bool(google_connection),
+                    "source": "gmail",
+                    "retryable": False,
+                    "warning": GMAIL_RECONNECT_WARNING if google_connection else "Connect Gmail before selecting Gmail.",
+                    **gmail_scope_status_payload(google_connection),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -971,6 +1045,7 @@ class StartupUpdateRunView(APIView):
             binding=binding,
             window_months=data.get("window_months", DEFAULT_BACKFILL_MONTHS),
             input_sources=input_sources,
+            source_warnings=gmail_scope_warnings,
             target_month=target_month,
         )
         if google_connection is not None and gmail_required_for_sources(input_sources):
@@ -1056,6 +1131,8 @@ class StartupUpdateIngestNextPageView(APIView):
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
+        if not has_gmail_read_scope(google_connection):
+            return _gmail_source_unavailable_response(run, request, connection=google_connection)
         _update_run_step(run, step_key="gmail_backfill")
         cursor, _ = GmailSyncCursor.objects.get_or_create(
             organization=organization,
@@ -1080,22 +1157,37 @@ class StartupUpdateIngestNextPageView(APIView):
             )
 
         sync_result = None
-        if mode == "incremental":
-            start_history_id = data.get("start_history_id") or cursor.last_history_id
-            if start_history_id:
-                try:
-                    sync_result = sync_history_metadata_page(
-                        organization=organization,
-                        connection=google_connection,
-                        profile=profile,
-                        start_history_id=start_history_id,
-                        page_token=data.get("page_token"),
-                        max_results=data.get("max_results", 250),
-                    )
-                except StaleHistoryCursorError:
-                    cursor.last_history_id = ""
-                    cursor.backfill_completed_at = None
-                    cursor.save(update_fields=["last_history_id", "backfill_completed_at", "updated_at"])
+        try:
+            if mode == "incremental":
+                start_history_id = data.get("start_history_id") or cursor.last_history_id
+                if start_history_id:
+                    try:
+                        sync_result = sync_history_metadata_page(
+                            organization=organization,
+                            connection=google_connection,
+                            profile=profile,
+                            start_history_id=start_history_id,
+                            page_token=data.get("page_token"),
+                            max_results=data.get("max_results", 250),
+                        )
+                    except StaleHistoryCursorError:
+                        cursor.last_history_id = ""
+                        cursor.backfill_completed_at = None
+                        cursor.save(update_fields=["last_history_id", "backfill_completed_at", "updated_at"])
+                        after_dt, before_dt = default_backfill_window(
+                            window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
+                        )
+                        sync_result = sync_message_metadata_page(
+                            organization=organization,
+                            connection=google_connection,
+                            profile=profile,
+                            after_dt=after_dt,
+                            before_dt=before_dt,
+                            page_token=data.get("page_token"),
+                            max_results=data.get("max_results", 250),
+                        )
+                        sync_result["cursor_reset"] = True
+                else:
                     after_dt, before_dt = default_backfill_window(
                         window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
                     )
@@ -1108,11 +1200,8 @@ class StartupUpdateIngestNextPageView(APIView):
                         page_token=data.get("page_token"),
                         max_results=data.get("max_results", 250),
                     )
-                    sync_result["cursor_reset"] = True
+                    sync_result["mode"] = "backfill"
             else:
-                after_dt, before_dt = default_backfill_window(
-                    window_months=int(run_request.get("window_months") or DEFAULT_BACKFILL_MONTHS)
-                )
                 sync_result = sync_message_metadata_page(
                     organization=organization,
                     connection=google_connection,
@@ -1122,17 +1211,10 @@ class StartupUpdateIngestNextPageView(APIView):
                     page_token=data.get("page_token"),
                     max_results=data.get("max_results", 250),
                 )
-                sync_result["mode"] = "backfill"
-        else:
-            sync_result = sync_message_metadata_page(
-                organization=organization,
-                connection=google_connection,
-                profile=profile,
-                after_dt=after_dt,
-                before_dt=before_dt,
-                page_token=data.get("page_token"),
-                max_results=data.get("max_results", 250),
-            )
+        except Exception as exc:
+            if is_gmail_insufficient_permissions_error(exc):
+                return _gmail_source_unavailable_response(run, request, connection=google_connection)
+            raise
 
         cursor.backfill_window_start = after_dt
         cursor.backfill_window_end = before_dt
@@ -1192,6 +1274,10 @@ class StartupUpdateHydrateThreadsView(APIView):
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
+        if not has_gmail_read_scope(google_connection):
+            payload = _gmail_source_unavailable_payload(run, request, connection=google_connection)
+            payload.update({"hydrated_thread_ids": [], "hydrated_count": 0, "attachment_count": 0})
+            return Response(payload, status=status.HTTP_200_OK)
         _update_run_step(run, step_key="thread_hydration")
 
         thread_ids = set(data.get("thread_ids") or [])
@@ -1212,16 +1298,23 @@ class StartupUpdateHydrateThreadsView(APIView):
         hydrated = []
         attachment_count = 0
         fetch_attachments = bool(data.get("fetch_attachments", False))
-        for thread_id in sorted(thread_ids):
-            thread_artifact = hydrate_thread_artifact(
-                organization=organization,
-                connection=google_connection,
-                thread_id=thread_id,
-                profile=profile,
-                fetch_attachments=fetch_attachments,
-            )
-            attachment_count += len(thread_artifact.attachment_ids or [])
-            hydrated.append(thread_artifact.gmail_thread_id)
+        try:
+            for thread_id in sorted(thread_ids):
+                thread_artifact = hydrate_thread_artifact(
+                    organization=organization,
+                    connection=google_connection,
+                    thread_id=thread_id,
+                    profile=profile,
+                    fetch_attachments=fetch_attachments,
+                )
+                attachment_count += len(thread_artifact.attachment_ids or [])
+                hydrated.append(thread_artifact.gmail_thread_id)
+        except Exception as exc:
+            if is_gmail_insufficient_permissions_error(exc):
+                payload = _gmail_source_unavailable_payload(run, request, connection=google_connection)
+                payload.update({"hydrated_thread_ids": hydrated, "hydrated_count": len(hydrated), "attachment_count": attachment_count})
+                return Response(payload, status=status.HTTP_200_OK)
+            raise
 
         return Response(
             {
@@ -1441,6 +1534,10 @@ class StartupUpdateExtractionBatchView(APIView):
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         if google_connection is None:
             return _gmail_connection_required_response()
+        if not has_gmail_read_scope(google_connection):
+            payload = _gmail_source_unavailable_payload(run, request, connection=google_connection)
+            payload.update({"count": 0, "threads": []})
+            return Response(payload, status=status.HTTP_200_OK)
         _update_run_step(run, step_key="event_extraction")
         eligible_thread_ids = _get_prioritized_run_thread_ids(
             run=run,
@@ -1471,19 +1568,26 @@ class StartupUpdateExtractionBatchView(APIView):
         )[:limit]
 
         bundles = []
-        for thread_artifact in queryset:
-            attachments = ensure_thread_attachments_hydrated(
-                organization=organization,
-                connection=google_connection,
-                thread_artifact=thread_artifact,
-            )
-            bundles.append(
-                compact_gmail_thread_bundle(
-                    thread_artifact,
-                    profile=profile,
-                    attachments=[_serialize_attachment(attachment) for attachment in attachments],
+        try:
+            for thread_artifact in queryset:
+                attachments = ensure_thread_attachments_hydrated(
+                    organization=organization,
+                    connection=google_connection,
+                    thread_artifact=thread_artifact,
                 )
-            )
+                bundles.append(
+                    compact_gmail_thread_bundle(
+                        thread_artifact,
+                        profile=profile,
+                        attachments=[_serialize_attachment(attachment) for attachment in attachments],
+                    )
+                )
+        except Exception as exc:
+            if is_gmail_insufficient_permissions_error(exc):
+                payload = _gmail_source_unavailable_payload(run, request, connection=google_connection)
+                payload.update({"count": 0, "threads": []})
+                return Response(payload, status=status.HTTP_200_OK)
+            raise
 
         return Response(
             {

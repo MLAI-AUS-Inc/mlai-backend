@@ -46,6 +46,10 @@ from startup_updates.metric_catalog import (
     startup_update_metric_label,
 )
 from integrations.services.external_connectors import mark_sources_sync_requested
+from integrations.services.gmail_scopes import (
+    gmail_scope_status_payload,
+    has_gmail_read_scope,
+)
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
     MANUAL_DOCUMENTS_SOURCE,
@@ -53,6 +57,7 @@ from startup_updates.services import (
     RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
+    coerce_startup_update_sources_for_gmail_scope,
     cancel_startup_update_run,
     create_startup_update_run,
     get_default_binding_for_domain,
@@ -62,6 +67,7 @@ from startup_updates.services import (
     gmail_required_for_sources,
     build_startup_update_target_windows,
     merge_xero_metrics_into_structured_memo,
+    merge_source_warnings,
     normalize_startup_update_input_sources,
     parse_startup_update_target_month,
     publish_xero_metric_observations,
@@ -1515,6 +1521,7 @@ def _get_drafts_for_run(run):
 def _build_status_payload(*, user, company, domain):
     google_connection = getattr(user, "google_connection", None)
     google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
     google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
 
@@ -1522,6 +1529,7 @@ def _build_status_payload(*, user, company, domain):
         return {
             "state": "needs_domain",
             "googleConnected": google_connected,
+            **google_scope_status,
             "company": company_payload,
             "run": None,
             "draft": None,
@@ -1559,7 +1567,7 @@ def _build_status_payload(*, user, company, domain):
     )
 
     error = None
-    if latest_run_requires_gmail and not google_connected:
+    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
@@ -1583,6 +1591,7 @@ def _build_status_payload(*, user, company, domain):
     return {
         "state": state,
         "googleConnected": google_connected,
+        **google_scope_status,
         "company": company_payload,
         "run": _serialize_run_summary(open_run or latest_run),
         "draft": draft_payload,
@@ -1601,6 +1610,7 @@ def _build_email_draft_payload(
 ):
     google_connection = getattr(user, "google_connection", None)
     google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
     google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
     auth_url = _build_google_oauth_url(request)
@@ -1610,6 +1620,7 @@ def _build_email_draft_payload(
         return {
             "state": "needs_domain",
             "gmailConnected": google_connected,
+            **google_scope_status,
             "company": company_payload,
             "authUrl": auth_url,
             "run": None,
@@ -1675,7 +1686,7 @@ def _build_email_draft_payload(
     )
 
     error = None
-    if latest_run_requires_gmail and not google_connected:
+    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
@@ -1710,6 +1721,7 @@ def _build_email_draft_payload(
     return {
         "state": state,
         "gmailConnected": google_connected,
+        **google_scope_status,
         "company": company_payload,
         "binding": _serialize_binding_summary(binding),
         "authUrl": auth_url,
@@ -2283,6 +2295,7 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
         return Response(
             {
                 "googleConnected": bool(getattr(request.user, "google_connection", None)),
+                **gmail_scope_status_payload(getattr(request.user, "google_connection", None)),
                 "company": _serialize_company_summary(company),
                 "binding": _serialize_binding_summary(binding),
                 "oauthUrl": _build_google_oauth_url(request),
@@ -2328,15 +2341,22 @@ class VibeRaisingStartupUpdateRunView(APIView):
             manual_document_ids=manual_document_ids,
             manual_summary=manual_summary,
         )
-        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         try:
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = getattr(request.user, "google_connection", None)
-        if not gmail_required_for_sources(input_sources):
-            google_connection = None
-        if gmail_required_for_sources(input_sources) and google_connection is None:
+        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+            input_sources,
+            google_connection,
+        )
+        source_warnings = merge_source_warnings(
+            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            gmail_scope_warnings,
+        )
+        if gmail_required_for_sources(input_sources) and (
+            google_connection is None or not has_gmail_read_scope(google_connection)
+        ):
             return Response(
                 _build_status_payload(user=request.user, company=company, domain=domain),
                 status=status.HTTP_200_OK,
@@ -2481,11 +2501,18 @@ class VibeRaisingEmailDraftStartView(APIView):
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         google_connection = getattr(request.user, "google_connection", None)
-        if not gmail_required_for_sources(input_sources):
-            google_connection = None
-        if gmail_required_for_sources(input_sources) and google_connection is None:
+        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+            input_sources,
+            google_connection,
+        )
+        source_warnings = merge_source_warnings(
+            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            gmail_scope_warnings,
+        )
+        if gmail_required_for_sources(input_sources) and (
+            google_connection is None or not has_gmail_read_scope(google_connection)
+        ):
             return Response(
                 _build_email_draft_payload(
                     request=request,

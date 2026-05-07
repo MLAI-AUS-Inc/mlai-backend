@@ -206,6 +206,8 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertEqual(sources["gmail"]["status"], "connected")
         self.assertEqual(sources["gmail"]["accountLabel"], "founder@gmail.com")
+        self.assertTrue(sources["gmail"]["hasGmailScope"])
+        self.assertFalse(sources["gmail"]["needsGmailReconnect"])
         self.assertTrue(sources["gmail"]["canDisconnect"])
         self.assertTrue(sources["gmail"]["canDeleteData"])
         self.assertEqual(sources["gmail"]["googlePermissionsUrl"], "https://myaccount.google.com/permissions")
@@ -214,6 +216,24 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(sources["xero"]["status"], "not_connected")
         self.assertFalse(sources["xero"]["canRequestReportScopes"])
         self.assertFalse(sources["xero"]["needsReportScopeConfiguration"])
+
+    def test_sources_status_prompts_reconnect_when_gmail_scope_missing(self):
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="google-refresh",
+            scope="openid https://www.googleapis.com/auth/userinfo.email",
+        )
+
+        response = self.api_client.get("/api/v1/integrations/sources/status")
+
+        self.assertEqual(response.status_code, 200)
+        sources = {source["key"]: source for source in response.data["sources"]}
+        self.assertEqual(sources["gmail"]["status"], "error")
+        self.assertFalse(sources["gmail"]["selected"])
+        self.assertFalse(sources["gmail"]["hasGmailScope"])
+        self.assertTrue(sources["gmail"]["needsGmailReconnect"])
+        self.assertEqual(sources["gmail"]["warning"], "Reconnect Gmail to grant read access.")
 
     def _create_gmail_startup_data(self, *, status=ContentFactoryRunStatus.COMPLETED):
         organization = Organization.objects.create(name="Acme", domain="acme.com")
@@ -1323,6 +1343,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertIsNone(response.data["accountLabel"])
         self.assertEqual(response.data["messages"], [])
         self.assertIn("Gmail is not connected.", response.data["warnings"])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertFalse(response.data["needsGmailReconnect"])
 
     def test_gmail_preview_returns_cached_message_previews(self):
         organization = Organization.objects.create(name="Topline", domain="topline.com")
@@ -1361,6 +1383,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["accountLabel"], "founder@gmail.com")
         self.assertEqual(response.data["totalCachedMessages"], 1)
+        self.assertTrue(response.data["hasGmailScope"])
+        self.assertFalse(response.data["needsGmailReconnect"])
         self.assertEqual(response.data["messages"][0]["subject"], "April revenue update")
         self.assertEqual(response.data["messages"][0]["hasAttachments"], True)
         self.assertEqual(response.data["messages"][0]["relevanceLabel"], GmailRelevanceLabel.RELEVANT)
@@ -1399,6 +1423,25 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(response.data["messages"][0]["subject"], "Remote Gmail metadata")
         self.assertEqual(response.data["messages"][0]["hasAttachments"], True)
         self.assertEqual(GmailMessageArtifact.objects.count(), 0)
+
+    def test_gmail_preview_does_not_call_gmail_when_scope_missing(self):
+        GoogleConnection.objects.create(
+            user=self.user,
+            google_email="founder@gmail.com",
+            refresh_token="google-refresh",
+            scope="openid https://www.googleapis.com/auth/userinfo.email",
+        )
+
+        with patch("integrations.services.external_connectors.build_gmail_service") as mock_build:
+            response = self.api_client.get("/api/v1/integrations/gmail/preview", {"limit": 1})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["accountLabel"], "founder@gmail.com")
+        self.assertEqual(response.data["messages"], [])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertTrue(response.data["needsGmailReconnect"])
+        self.assertIn("Reconnect Gmail to grant read access.", response.data["warnings"])
+        mock_build.assert_not_called()
 
     def test_bank_feed_connect_creates_basiq_user_and_redirects_to_consent_ui(self):
         with patch(

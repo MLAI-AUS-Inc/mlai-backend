@@ -30,6 +30,10 @@ from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE,
     xero_has_report_scope,
 )
+from integrations.services.gmail_scopes import (
+    GMAIL_RECONNECT_WARNING,
+    has_gmail_read_scope,
+)
 from startup_updates.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
@@ -342,6 +346,41 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
 
 def gmail_required_for_sources(input_sources: Optional[list[str]]) -> bool:
     return "gmail" in normalize_startup_update_input_sources(input_sources)
+
+
+def merge_source_warnings(
+    *warning_groups: Optional[dict[str, list[str]]],
+) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for warning_group in warning_groups:
+        if not warning_group:
+            continue
+        for source, warnings in warning_group.items():
+            source_key = str(source or "").strip().lower().replace("-", "_")
+            if not source_key:
+                continue
+            for warning in warnings or []:
+                warning_text = str(warning or "").strip()
+                if warning_text and warning_text not in merged.setdefault(source_key, []):
+                    merged[source_key].append(warning_text)
+    return {source: warnings for source, warnings in merged.items() if warnings}
+
+
+def coerce_startup_update_sources_for_gmail_scope(
+    input_sources: Optional[list[str]],
+    google_connection=None,
+) -> tuple[list[str], object | None, dict[str, list[str]]]:
+    selected_input_sources = normalize_startup_update_input_sources(input_sources)
+    if "gmail" not in selected_input_sources:
+        return selected_input_sources, None, {}
+    if google_connection is None or has_gmail_read_scope(google_connection):
+        return selected_input_sources, google_connection, {}
+
+    fallback_sources = [source for source in selected_input_sources if source != "gmail"]
+    warnings = {"gmail": [GMAIL_RECONNECT_WARNING]}
+    if fallback_sources:
+        return fallback_sources, None, warnings
+    return selected_input_sources, google_connection, warnings
 
 
 def startup_update_run_input_sources(run: ContentFactoryRun) -> list[str]:
@@ -1806,6 +1845,12 @@ def build_external_context_for_sources(
             document_ids=manual_document_ids,
             summary=manual_summary,
         )
+    if warnings_by_source.get("gmail"):
+        context["gmail"] = {
+            "source_unavailable": True,
+            "needs_reconnect": True,
+            "warnings": list(warnings_by_source["gmail"]),
+        }
     return context
 
 
@@ -2567,10 +2612,13 @@ def create_startup_update_run(
     windows = build_startup_update_target_windows(target_month, reference=now)
     selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
-    selected_source_set = set(selected_input_sources)
     google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
-    if not gmail_required_for_sources(selected_input_sources):
-        google_connection = None
+    selected_input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+        selected_input_sources,
+        google_connection,
+    )
+    source_warnings = merge_source_warnings(source_warnings, gmail_scope_warnings)
+    selected_source_set = set(selected_input_sources)
     google_connection_id = google_connection.id if google_connection else None
     step_order = build_startup_update_step_order(selected_input_sources)
 

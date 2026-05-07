@@ -39,6 +39,11 @@ from startup_updates.models import (
     StartupMetricObservation,
 )
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
+from integrations.services.gmail_scopes import (
+    GMAIL_RECONNECT_WARNING,
+    gmail_scope_status_payload,
+    has_gmail_read_scope,
+)
 from startup_updates.services import bind_user_to_startup, get_default_gmail_binding, resolve_or_create_profile
 from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE_WARNING,
@@ -2575,10 +2580,12 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
             "total_cached_messages": 0,
             "messages": [],
             "warnings": ["Gmail is not connected."],
+            **gmail_scope_status_payload(None),
         }
 
     organization = binding.organization
     connection = binding.google_connection
+    scope_status = gmail_scope_status_payload(connection)
     base_queryset = GmailMessageArtifact.objects.none()
     cursor = None
     if organization:
@@ -2606,6 +2613,20 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
     )
     warnings: list[str] = []
     messages = [_serialize_gmail_artifact_preview(artifact) for artifact in artifacts]
+
+    if not scope_status["hasGmailScope"]:
+        warnings.append(GMAIL_RECONNECT_WARNING)
+        return {
+            "accountLabel": connection.google_email,
+            "account_label": connection.google_email,
+            "lastSyncedAt": last_synced_at.isoformat() if last_synced_at else None,
+            "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+            "totalCachedMessages": total_cached,
+            "total_cached_messages": total_cached,
+            "warnings": warnings,
+            "messages": messages,
+            **scope_status,
+        }
 
     if not messages:
         try:
@@ -2635,6 +2656,7 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
         "total_cached_messages": total_cached,
         "messages": messages,
         "warnings": warnings,
+        **scope_status,
     }
 
 
@@ -4461,15 +4483,20 @@ def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
         "total_cached_messages": total_cached,
         "warnings": warnings,
         "messages": messages,
+        **scope_status,
     }
 
 
 def _serialize_google_source(user) -> dict[str, Any]:
     connection = GoogleConnection.objects.filter(user=user).first()
     configured = is_provider_configured("gmail")
-    if connection:
+    scope_status = gmail_scope_status_payload(connection)
+    if connection and scope_status["hasGmailScope"]:
         status_value = "connected"
         warning = None
+    elif connection:
+        status_value = "error"
+        warning = GMAIL_RECONNECT_WARNING
     elif configured:
         status_value = "not_connected"
         warning = None
@@ -4482,7 +4509,7 @@ def _serialize_google_source(user) -> dict[str, Any]:
         "provider": "gmail",
         "label": CONNECTOR_DEFINITIONS["gmail"].label,
         "capabilities": list(CONNECTOR_DEFINITIONS["gmail"].capabilities),
-        "selected": status_value == "connected",
+        "selected": status_value == "connected" and has_gmail_read_scope(connection),
         "status": status_value,
         "connectionId": connection.id if connection else None,
         "connection_id": connection.id if connection else None,
@@ -4497,6 +4524,7 @@ def _serialize_google_source(user) -> dict[str, Any]:
         "can_delete_data": bool(connection),
         "googlePermissionsUrl": "https://myaccount.google.com/permissions",
         "google_permissions_url": "https://myaccount.google.com/permissions",
+        **scope_status,
     }
 
 

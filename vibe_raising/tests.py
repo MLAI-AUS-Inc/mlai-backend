@@ -59,12 +59,19 @@ class VibeRaisingApiTests(TestCase):
         profile.save(update_fields=["active_company", "updated_at"])
         return profile, company
 
-    def _create_google_connection(self, *, user=None, email="founder@gmail.com", refresh_token="refresh-token"):
+    def _create_google_connection(
+        self,
+        *,
+        user=None,
+        email="founder@gmail.com",
+        refresh_token="refresh-token",
+        scope="https://www.googleapis.com/auth/gmail.readonly",
+    ):
         return GoogleConnection.objects.create(
             user=user or self.user,
             google_email=email,
             refresh_token=refresh_token,
-            scope="https://www.googleapis.com/auth/gmail.readonly",
+            scope=scope,
         )
 
     def _create_manual_document(self, *, company=None, user=None, domain="acme.com", filename="memo.txt"):
@@ -631,6 +638,67 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(manual_context["documents"][0]["filename"], "memo.txt")
         self.assertIn("Pilot conversion improved", manual_context["documents"][0]["text_excerpt"])
         mock_notify.assert_called_once_with(run.run_id)
+
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_skips_gmail_when_scope_missing_and_other_sources_selected(self, mock_notify):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        document = self._create_manual_document(company=company)
+        self._create_google_connection(scope="openid https://www.googleapis.com/auth/userinfo.email")
+        organization, _startup_profile = resolve_or_create_profile(domain="acme.com")
+        ExternalServiceConnection.objects.create(
+            user=self.user,
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+            account_label="Acme Xero",
+            status="connected",
+            last_synced_at=timezone.now(),
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {
+                    "inputSources": ["gmail", "xero", "manual_documents"],
+                    "manualDocumentIds": [str(document.id)],
+                    "targetMonth": "2026-03-01",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["state"], "queued")
+        self.assertTrue(response.data["gmailConnected"])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertTrue(response.data["needsGmailReconnect"])
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["xero", "manual_documents"])
+        self.assertIsNone(run.run_request["google_connection_id"])
+        self.assertIn("xero", run.run_request["external_context"])
+        self.assertIn("manual_documents", run.run_request["external_context"])
+        self.assertEqual(
+            run.run_request["external_context"]["gmail"]["warnings"],
+            ["Reconnect Gmail to grant read access."],
+        )
+        mock_notify.assert_called_once_with(run.run_id)
+
+    def test_email_draft_start_requires_reconnect_when_gmail_only_scope_missing(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        self._create_google_connection(scope="openid https://www.googleapis.com/auth/userinfo.email")
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {"inputSources": ["gmail"], "targetMonth": "2026-03-01"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["state"], "auth_required")
+        self.assertTrue(response.data["gmailConnected"])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertTrue(response.data["needsGmailReconnect"])
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
 
     @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
     def test_signed_video_upload_session_rejects_oversized_video(self):
