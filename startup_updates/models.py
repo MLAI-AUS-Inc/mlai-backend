@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 
@@ -129,6 +131,54 @@ class UserStartupBinding(models.Model):
 
     def __str__(self):
         return f"{self.user_id} -> {self.organization.domain}"
+
+
+class StartupManualDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="manual_documents",
+    )
+    company = models.ForeignKey(
+        "founder_tools.VibeRaisingCompany",
+        on_delete=models.CASCADE,
+        related_name="manual_documents",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="startup_manual_documents",
+    )
+    original_filename = models.CharField(max_length=512)
+    content_type = models.CharField(max_length=255, blank=True, default="")
+    file_size_bytes = models.PositiveIntegerField(default=0)
+    storage_path = models.CharField(max_length=1024, unique=True)
+    extraction_status = models.CharField(
+        max_length=20,
+        choices=ArtifactProcessingStatus.choices,
+        default=ArtifactProcessingStatus.PENDING,
+        db_index=True,
+    )
+    extracted_text = models.TextField(blank=True, default="")
+    text_size_chars = models.PositiveIntegerField(default=0)
+    parse_notes = models.TextField(blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_startupmanualdocument"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "created_at"], name="manual_doc_org_created_idx"),
+            models.Index(fields=["company", "created_at"], name="manual_doc_company_created_idx"),
+            models.Index(fields=["created_by", "created_at"], name="manual_doc_user_created_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.original_filename}"
 
 
 class GmailSyncCursor(models.Model):

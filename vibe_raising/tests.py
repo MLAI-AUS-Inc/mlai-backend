@@ -19,6 +19,7 @@ from startup_updates.models import (
     MonthlyUpdateDraftStatus,
     SlackChannelSelection,
     StartupEvent,
+    StartupManualDocument,
     StartupMetricObservation,
     StartupProfile,
     UserStartupBinding,
@@ -64,6 +65,24 @@ class VibeRaisingApiTests(TestCase):
             google_email=email,
             refresh_token=refresh_token,
             scope="https://www.googleapis.com/auth/gmail.readonly",
+        )
+
+    def _create_manual_document(self, *, company=None, user=None, domain="acme.com", filename="memo.txt"):
+        if company is None:
+            _profile, company = self._create_founder_company(domain=domain, registered=True)
+        organization, _startup_profile = resolve_or_create_profile(domain=domain)
+        return StartupManualDocument.objects.create(
+            organization=organization,
+            company=company,
+            created_by=user or self.user,
+            original_filename=filename,
+            content_type="text/plain",
+            file_size_bytes=64,
+            storage_path=f"vibe-raising/manual-documents/org-{organization.id}/company-{company.id}/user-{(user or self.user).id}/memo.txt",
+            extraction_status="processed",
+            extracted_text="Pilot conversion improved and onboarding risk remains open.",
+            text_size_chars=56,
+            parse_notes="text_parsed",
         )
 
     def _create_active_gmail_run_with_slack_selection(self):
@@ -438,6 +457,180 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["detail"], "Uploaded file must be a supported video.")
+
+    @patch("vibe_raising.views.create_signed_upload_url")
+    def test_founder_can_create_signed_manual_document_upload_session(self, mock_signed_url):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_signed_url.return_value = "https://storage-upload.example.com/signed-put"
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/manual-documents/session/",
+            {
+                "originalFilename": "memo.pdf",
+                "contentType": "application/pdf",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["uploadUrl"], mock_signed_url.return_value)
+        self.assertEqual(response.data["contentType"], "application/pdf")
+        self.assertEqual(response.data["fileSizeBytes"], 12345)
+        self.assertEqual(response.data["maxUploadBytes"], 25 * 1024 * 1024)
+        self.assertEqual(response.data["requiredHeaders"]["Content-Type"], "application/pdf")
+        self.assertTrue(response.data["storagePath"].startswith("vibe-raising/manual-documents/org-"))
+        self.assertIn("/user-", response.data["storagePath"])
+
+    def test_signed_manual_document_upload_session_rejects_unsupported_documents(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/manual-documents/session/",
+            {
+                "originalFilename": "logo.png",
+                "contentType": "image/png",
+                "fileSizeBytes": 12345,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Uploaded file must be a supported document.")
+
+    @patch("vibe_raising.views.download_storage_object_bytes")
+    @patch("vibe_raising.views.finalize_private_uploaded_storage_object")
+    @patch("vibe_raising.views.create_signed_upload_url")
+    def test_founder_can_complete_manual_document_upload(self, mock_signed_url, mock_finalize, mock_download):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        mock_signed_url.return_value = "https://storage-upload.example.com/signed-put"
+
+        session_response = self.client.post(
+            "/api/v1/vibe-raising/uploads/manual-documents/session/",
+            {
+                "originalFilename": "memo.txt",
+                "contentType": "text/plain",
+                "fileSizeBytes": 33,
+            },
+            format="json",
+        )
+        storage_path = session_response.data["storagePath"]
+        mock_finalize.return_value = {"contentType": "text/plain", "fileSizeBytes": 33, "updated": None}
+        mock_download.return_value = b"Closed two pilots and reduced churn."
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/manual-documents/complete/",
+            {
+                "storagePath": storage_path,
+                "originalFilename": "memo.txt",
+                "contentType": "text/plain",
+                "fileSizeBytes": 33,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["document"]["originalFilename"], "memo.txt")
+        self.assertEqual(response.data["document"]["extractionStatus"], "processed")
+        self.assertNotIn("storagePath", response.data["document"])
+        document = StartupManualDocument.objects.get(id=response.data["document"]["id"])
+        self.assertEqual(document.extracted_text, "Closed two pilots and reduced churn.")
+        self.assertEqual(document.storage_path, storage_path)
+
+    @patch("vibe_raising.views.finalize_private_uploaded_storage_object")
+    def test_manual_document_complete_rejects_wrong_storage_prefix(self, mock_finalize):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/uploads/manual-documents/complete/",
+            {
+                "storagePath": "vibe-raising/manual-documents/org-999/company-other/user-999/memo.txt",
+                "originalFilename": "memo.txt",
+                "contentType": "text/plain",
+                "fileSizeBytes": 10,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "Invalid upload path.")
+        mock_finalize.assert_not_called()
+
+    @patch("vibe_raising.views.create_signed_read_url")
+    def test_manual_document_list_download_and_delete_are_owner_scoped(self, mock_read_url):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        document = self._create_manual_document(company=company)
+        mock_read_url.return_value = "https://storage.example.com/read"
+
+        list_response = self.client.get("/api/v1/vibe-raising/uploads/manual-documents/")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.data["documents"][0]["id"], str(document.id))
+        self.assertNotIn("storagePath", list_response.data["documents"][0])
+
+        download_response = self.client.get(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/download/")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.data["downloadUrl"], mock_read_url.return_value)
+
+        other_user = User.objects.create_user(email="other@example.com", password="password", role="participant")
+        other_profile = VibeRaisingProfile.objects.create(user=other_user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        other_company = VibeRaisingCompany.objects.create(
+            profile=other_profile,
+            name="Other Co",
+            domain="acme.com",
+            registered=True,
+        )
+        other_profile.active_company = other_company
+        other_profile.save(update_fields=["active_company", "updated_at"])
+        self.client.force_authenticate(user=other_user)
+        denied_response = self.client.get(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/download/")
+        self.assertEqual(denied_response.status_code, 404)
+
+        admin_user = User.objects.create_superuser(email="admin@example.com", password="password")
+        self.client.force_authenticate(user=admin_user)
+        admin_response = self.client.get(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/download/")
+        self.assertEqual(admin_response.status_code, 200)
+
+        self.client.force_authenticate(user=self.user)
+        with patch("vibe_raising.views.delete_storage_object") as mock_delete:
+            delete_response = self.client.delete(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/")
+        self.assertEqual(delete_response.status_code, 204)
+        mock_delete.assert_called_once_with(document.storage_path)
+        self.assertFalse(StartupManualDocument.objects.filter(id=document.id).exists())
+
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_accepts_manual_documents_without_gmail(self, mock_notify):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        document = self._create_manual_document(company=company)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/v1/vibe-raising/email-draft/start/",
+                {
+                    "inputSources": ["manual_documents"],
+                    "manualDocumentIds": [str(document.id)],
+                    "manualSummary": "Founder-added investor memo.",
+                    "targetMonth": "2026-03-01",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 201)
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["manual_documents"])
+        self.assertIsNone(run.run_request["google_connection_id"])
+        self.assertEqual(run.run_request["manual_document_ids"], [str(document.id)])
+        self.assertEqual(run.run_request["manual_summary"], "Founder-added investor memo.")
+        manual_context = run.run_request["external_context"]["manual_documents"]
+        self.assertEqual(manual_context["summary"], "Founder-added investor memo.")
+        self.assertEqual(manual_context["documents"][0]["filename"], "memo.txt")
+        self.assertIn("Pilot conversion improved", manual_context["documents"][0]["text_excerpt"])
+        mock_notify.assert_called_once_with(run.run_id)
 
     @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
     def test_signed_video_upload_session_rejects_oversized_video(self):

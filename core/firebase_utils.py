@@ -195,6 +195,61 @@ def finalize_uploaded_storage_object(destination_path, content_type=None):
     }
 
 
+def finalize_private_uploaded_storage_object(destination_path, content_type=None):
+    """Verify a private uploaded object exists without creating a download token."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    try:
+        blob.reload()
+    except NotFound as exc:
+        raise FileNotFoundError(destination_path) from exc
+
+    metadata = dict(blob.metadata or {})
+    metadata.pop("firebaseStorageDownloadTokens", None)
+    blob.metadata = metadata
+    if content_type:
+        blob.content_type = content_type
+    blob.patch()
+
+    return {
+        "contentType": blob.content_type or content_type or "",
+        "fileSizeBytes": int(blob.size or 0),
+        "updated": blob.updated.isoformat() if getattr(blob, "updated", None) else None,
+    }
+
+
+def create_signed_read_url(destination_path, expires_in=timedelta(minutes=5)):
+    """Create a short-lived signed GET URL for a private Firebase/GCS object."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=expires_in,
+        method="GET",
+    )
+
+
+def download_storage_object_bytes(destination_path):
+    """Download a private Firebase/GCS object as bytes."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    try:
+        return blob.download_as_bytes()
+    except NotFound as exc:
+        raise FileNotFoundError(destination_path) from exc
+
+
+def delete_storage_object(destination_path):
+    """Delete a Firebase/GCS object if it exists."""
+    bucket = get_storage_bucket()
+    blob = bucket.blob(destination_path)
+    try:
+        blob.delete()
+        return True
+    except NotFound:
+        return False
+
+
 def configure_storage_cors(origins=None):
     """Configure CORS for direct browser uploads to Firebase/GCS."""
     bucket = get_storage_bucket()
