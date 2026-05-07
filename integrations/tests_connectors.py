@@ -25,7 +25,14 @@ from startup_updates.models import (
     GmailRelevanceLabel,
     GmailSyncCursor,
     GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
+    SlackChannelSelection,
+    SlackMessageArtifact,
+    SlackThreadArtifact,
     StartupDataDeletionRequest,
     StartupEvent,
     UserStartupBinding,
@@ -291,6 +298,158 @@ class ConnectorEndpointTests(TestCase):
         )
         return organization, google_connection, run
 
+    def _create_non_gmail_startup_data(self, organization):
+        binding = UserStartupBinding.objects.get(user=self.user, organization=organization)
+        synced_at = timezone.now()
+        slack_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=organization,
+            access_token="slack-token",
+            account_label="Acme Slack",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+            sync_cursor={"latest_seen_by_channel": {"C123": "1770000000.000100"}},
+            last_synced_at=synced_at,
+        )
+        SlackChannelSelection.objects.create(
+            connection=slack_connection,
+            user=self.user,
+            organization=organization,
+            channel_id="C123",
+            channel_name="investor-updates",
+            selected=True,
+            sync_cursor={"history_cursor": "cursor-1"},
+            raw_payload={"name": "investor-updates"},
+        )
+        SlackMessageArtifact.objects.create(
+            organization=organization,
+            connection=slack_connection,
+            channel_id="C123",
+            channel_name="investor-updates",
+            slack_message_ts="1770000000.000100",
+            thread_ts="1770000000.000100",
+            posted_at=synced_at,
+            text="Customer launch is ready.",
+            cleaned_text="Customer launch is ready.",
+            raw_payload={"text": "Customer launch is ready."},
+        )
+        SlackThreadArtifact.objects.create(
+            organization=organization,
+            connection=slack_connection,
+            channel_id="C123",
+            channel_name="investor-updates",
+            thread_ts="1770000000.000100",
+            source_message_ids=["slack:C123:1770000000.000100"],
+            cleaned_text="Customer launch is ready.",
+            message_payloads=[{"text": "Customer launch is ready."}],
+        )
+        linear_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=organization,
+            access_token="linear-token",
+            account_label="Acme Linear",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+            sync_cursor={"startup_update_run_id": "startup-update-mixed-sources"},
+            last_synced_at=synced_at,
+        )
+        LinearProjectSelection.objects.create(
+            connection=linear_connection,
+            user=self.user,
+            organization=organization,
+            linear_project_id="proj-1",
+            project_name="Launch",
+            selected=True,
+            sync_cursor={"updated_after": "2026-04-01T00:00:00Z"},
+            raw_payload={"name": "Launch"},
+        )
+        project = LinearProjectArtifact.objects.create(
+            organization=organization,
+            connection=linear_connection,
+            linear_project_id="proj-1",
+            name="Launch",
+            description="Launch project context.",
+            raw_payload={"id": "proj-1"},
+        )
+        LinearIssueArtifact.objects.create(
+            organization=organization,
+            connection=linear_connection,
+            project=project,
+            linear_issue_id="issue-1",
+            identifier="ACME-1",
+            title="Ship launch",
+            raw_payload={"id": "issue-1"},
+        )
+        LinearProjectUpdateArtifact.objects.create(
+            organization=organization,
+            connection=linear_connection,
+            project=project,
+            linear_project_update_id="update-1",
+            body="Launch is green.",
+            raw_payload={"id": "update-1"},
+        )
+        notion_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.NOTION,
+            user=self.user,
+            organization=organization,
+            access_token="notion-token",
+            account_label="Acme Notion",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+            sync_cursor={
+                "startup_update_runs": {
+                    "startup-update-mixed-sources": {
+                        "pages": [{"notion_page_id": "page-1", "cleaned_text": "Board notes"}],
+                        "classifications": {"page-1:main": {"relevance_label": "relevant"}},
+                        "extracted_chunk_ids": ["page-1:main"],
+                    }
+                },
+                "startup_update_index_partial": True,
+                "workspace_cursor": "keep-non-run-metadata",
+            },
+            last_synced_at=synced_at,
+        )
+        run = ContentFactoryRun.objects.create(
+            run_id="startup-update-mixed-sources",
+            workflow="startup_monthly_update",
+            domain=organization.domain,
+            status=ContentFactoryRunStatus.RUNNING,
+            run_request={
+                "organization_id": organization.id,
+                "binding_id": binding.id,
+                "input_sources": ["slack", "linear", "notion"],
+                "startup_memory": {"facts": [{"title": "Prior ask"}]},
+                "external_context": {"slack": {"selected_channel_ids": ["C123"]}},
+            },
+            result={"draft": "contains Slack, Linear, and Notion context"},
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            run=run,
+            month=date(2026, 5, 1),
+            status="draft",
+            structured_memo={"title": "May update"},
+        )
+        StartupEvent.objects.create(
+            organization=organization,
+            run=run,
+            canonical_key="mixed-source-event",
+            event_type="product_milestone",
+            title="Launch shipped",
+            month_bucket=date(2026, 5, 1),
+            source_thread_ids=["slack:C123:1770000000.000100", "proj-1", "notion:page:page-1"],
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            run=run,
+            metric_key="launch_progress",
+            metric_name="Launch Progress",
+            value_text="90%",
+            period_month=date(2026, 5, 1),
+            source_provider=ExternalServiceProvider.LINEAR,
+            source_record_ids=["proj-1"],
+        )
+        return run, slack_connection, linear_connection, notion_connection
+
     def test_gmail_disconnect_is_idempotent_when_not_connected(self):
         response = self.api_client.delete("/api/v1/integrations/gmail/connection", {}, format="json")
 
@@ -403,6 +562,85 @@ class ConnectorEndpointTests(TestCase):
         self.assertFalse(GmailMessageArtifact.objects.filter(organization=organization).exists())
         self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
         self.assertTrue(StartupDataDeletionRequest.objects.filter(request_id="delete-startup-acme").exists())
+
+    @patch("startup_updates.data_deletion.cancel_valley_run")
+    def test_startup_data_delete_clears_all_source_artifacts_and_scrubs_runs(self, mock_cancel_valley):
+        mock_cancel_valley.return_value = {
+            "run_id": "startup-update",
+            "revoke_requested": True,
+            "revoke_succeeded": True,
+            "revoked_job_ids": [],
+            "missing_job_ids": [],
+        }
+        organization, _google_connection, gmail_run = self._create_gmail_startup_data(
+            status=ContentFactoryRunStatus.RUNNING
+        )
+        mixed_run, slack_connection, linear_connection, notion_connection = self._create_non_gmail_startup_data(
+            organization
+        )
+        internal_client = APIClient()
+
+        with self.settings(INTERNAL_API_KEY="internal-key"):
+            response = internal_client.delete(
+                f"/api/v1/startups/{organization.id}/data",
+                {"requested_by_user_id": self.user.id, "reason": "user_request", "request_id": "delete-all-acme"},
+                format="json",
+                HTTP_X_API_KEY="internal-key",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["deletion_status"], "deleted")
+        self.assertFalse(GmailMessageArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(GmailThreadArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(GmailAttachmentArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(GmailSyncCursor.objects.filter(organization=organization).exists())
+        self.assertFalse(SlackMessageArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(SlackThreadArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(SlackChannelSelection.objects.filter(organization=organization).exists())
+        self.assertFalse(LinearProjectUpdateArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(LinearIssueArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(LinearProjectArtifact.objects.filter(organization=organization).exists())
+        self.assertFalse(LinearProjectSelection.objects.filter(organization=organization).exists())
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(organization=organization).exists())
+        self.assertFalse(StartupEvent.objects.filter(organization=organization).exists())
+        self.assertFalse(StartupMetricObservation.objects.filter(organization=organization).exists())
+
+        slack_connection.refresh_from_db()
+        linear_connection.refresh_from_db()
+        notion_connection.refresh_from_db()
+        self.assertEqual(slack_connection.sync_cursor, {})
+        self.assertIsNone(slack_connection.last_synced_at)
+        self.assertEqual(linear_connection.sync_cursor, {})
+        self.assertIsNone(linear_connection.last_synced_at)
+        self.assertNotIn("startup_update_runs", notion_connection.sync_cursor)
+        self.assertFalse(notion_connection.sync_cursor.get("startup_update_index_partial"))
+        self.assertEqual(notion_connection.sync_cursor.get("workspace_cursor"), "keep-non-run-metadata")
+
+        gmail_run.refresh_from_db()
+        mixed_run.refresh_from_db()
+        self.assertEqual(gmail_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(mixed_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertTrue(gmail_run.run_request["data_deleted"])
+        self.assertTrue(mixed_run.run_request["data_deleted"])
+        self.assertNotIn("startup_memory", mixed_run.run_request)
+        self.assertNotIn("external_context", mixed_run.run_request)
+        self.assertFalse(gmail_run.resume_available)
+        self.assertFalse(mixed_run.resume_available)
+
+        deleted = response.data["deleted"]
+        self.assertEqual(deleted["slackMessages"], 1)
+        self.assertEqual(deleted["slackThreads"], 1)
+        self.assertEqual(deleted["slackChannelSelections"], 1)
+        self.assertEqual(deleted["linearProjects"], 1)
+        self.assertEqual(deleted["linearIssues"], 1)
+        self.assertEqual(deleted["linearProjectUpdates"], 1)
+        self.assertEqual(deleted["linearProjectSelections"], 1)
+        self.assertEqual(deleted["notionRunStores"], 1)
+        self.assertEqual(deleted["externalConnectionCursors"], 2)
+        self.assertEqual(deleted["startupRunsScrubbed"], 2)
+        cancelled_run_ids = {call.args[0] for call in mock_cancel_valley.call_args_list}
+        self.assertEqual(cancelled_run_ids, {gmail_run.run_id, mixed_run.run_id})
+        self.assertTrue(StartupDataDeletionRequest.objects.filter(request_id="delete-all-acme").exists())
 
     def test_connector_connect_builds_oauth_redirect_and_stores_state(self):
         cases = {
