@@ -123,7 +123,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertFalse(json["persist"])
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
-            self.assertEqual(json["min_direct_competitors"], 5)
+            self.assertEqual(json["min_direct_competitors"], 3)
             self.assertEqual(json["min_seed_keywords"], 20)
             return _Response(status_code=202, payload={"run_id": "autofill-run-1", "status": "queued"})
 
@@ -178,7 +178,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["existing_fields"]["seedKeywords"], ["ai events melbourne", "founder automation"])
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
-            self.assertEqual(json["min_direct_competitors"], 5)
+            self.assertEqual(json["min_direct_competitors"], 3)
             self.assertEqual(json["min_seed_keywords"], 20)
             self.assertEqual(json["min_public_sources"], 3)
             return _Response(status_code=202, payload={"run_id": "autofill-run-persist", "status": "queued"})
@@ -454,6 +454,13 @@ class VibeMarketingAutofillTests(TestCase):
                     "brandName": "Acme",
                     "companyLinkedInUrl": "https://www.linkedin.com/company/acme",
                     "companyContext": "## Positioning\nAcme builds workflow automation for founders.\n\n## Audience\nStartup founders and operators.\n\n## Product\nWorkflow automation for startup operations.",
+                    "offeringProfile": {
+                        "coreOffering": "Workflow automation for founders.",
+                        "targetUsers": "Startup founders and operators.",
+                        "market": "Australia",
+                        "categoryLanes": ["workflow automation", "startup operations"],
+                        "excludedMeanings": ["home equity"],
+                    },
                     "directCompetitors": [
                         {
                             "name": "Build Club",
@@ -515,6 +522,24 @@ class VibeMarketingAutofillTests(TestCase):
                         "adjacentOrganizations": [],
                     },
                     "seedKeywords": [f"workflow automation {index}" for index in range(1, 21)],
+                    "keywordCandidates": [
+                        {
+                            "keyword": "workflow automation for founders",
+                            "volume": 320,
+                            "difficulty": 28,
+                            "source": "current_ranking",
+                            "qualified": True,
+                            "relevanceTier": "current-ranking",
+                        },
+                        {
+                            "keyword": "home equity automation",
+                            "volume": 9900,
+                            "difficulty": 61,
+                            "source": "current_ranking",
+                            "qualified": False,
+                            "rejectReason": "ambiguous-unrelated-meaning",
+                        },
+                    ],
                     "keywordGroups": [{"group": "Pain point", "keywords": ["startup workflow automation"]}],
                     "sources": [
                         {"url": "https://acme.com", "title": "Home", "type": "website"},
@@ -579,6 +604,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["status"], "completed")
         self.assertIn("## Positioning", response.data["result"]["autofill"]["companyContext"])
         self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
+        self.assertEqual(response.data["result"]["autofill"]["offeringProfile"]["excludedMeanings"], ["home equity"])
+        self.assertEqual(response.data["result"]["autofill"]["keywordCandidates"][0]["keyword"], "workflow automation for founders")
         self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
         self.assertEqual(response.data["result"]["autofill"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
         self.assertEqual(response.data["result"]["autofill"]["researchDepth"]["linkedinSimilarSignals"], 1)
@@ -621,9 +648,17 @@ class VibeMarketingAutofillTests(TestCase):
                         "fieldConfidence": {"shortDescription": "high", "problemSolved": "medium"},
                         "reviewNotes": ["Review problem wording before saving."],
                     },
+                    "offeringProfile": {
+                        "coreOffering": "Workflow automation for founders.",
+                        "targetUsers": "Startup founders and operators.",
+                        "market": "Australia",
+                    },
                     "directCompetitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
+                    "seoCompetitors": [{"name": "Copy.ai", "domain": "copy.ai"}],
+                    "adjacentOrganizations": [{"name": "LaunchVic", "domain": "launchvic.org"}],
                     "competitors": [{"name": "Build Club", "domain": "buildclub.ai"}],
                     "seedKeywords": [f"workflow automation {index}" for index in range(1, 21)],
+                    "keywordCandidates": [{"keyword": "workflow automation", "qualified": True}],
                     "sourceCount": 12,
                     "competitorCount": 1,
                     "seedKeywordCount": 20,
@@ -650,6 +685,9 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
         self.assertTrue(response.data["result"]["autofill"]["partial"])
         self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
+        self.assertEqual(response.data["result"]["autofill"]["keywordCandidates"][0]["keyword"], "workflow automation")
+        self.assertEqual(response.data["result"]["autofill"]["seoCompetitors"][0]["domain"], "copy.ai")
+        self.assertEqual(response.data["result"]["autofill"]["adjacentOrganizations"][0]["domain"], "launchvic.org")
         self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
         self.assertEqual(
             response.data["result"]["autofill"]["profileFields"]["shortDescription"],
@@ -660,6 +698,8 @@ class VibeMarketingAutofillTests(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertTrue(run.result["autofill"]["partial"])
+        self.assertEqual(run.result["autofill"]["offeringProfile"]["targetUsers"], "Startup founders and operators.")
+        self.assertEqual(run.result["autofill"]["keywordCandidates"][0]["keyword"], "workflow automation")
         self.assertEqual(run.result["autofill"]["profileFields"]["targetAudience"], "Startup founders and operators.")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
