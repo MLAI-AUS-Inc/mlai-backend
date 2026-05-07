@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.conf import settings
@@ -9,6 +10,7 @@ from integrations import http_client as http_requests
 
 
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
+logger = logging.getLogger(__name__)
 
 
 class LinearMeetingConfigurationError(Exception):
@@ -16,7 +18,9 @@ class LinearMeetingConfigurationError(Exception):
 
 
 class LinearMeetingGraphQLError(Exception):
-    pass
+    def __init__(self, message: str, *, operation: str | None = None):
+        self.operation = operation
+        super().__init__(message)
 
 
 class LinearMeetingRateLimitError(Exception):
@@ -26,16 +30,54 @@ class LinearMeetingRateLimitError(Exception):
 
 
 def get_linear_meeting_context() -> dict[str, Any]:
+    teams = list_teams()
     return {
-        "teams": list_teams(),
+        "teams": teams,
         "users": list_users(),
-        "projects": list_active_projects(),
+        "projects": list_active_projects(teams=teams),
         "labels": list_issue_labels(),
         "recentIssues": list_recent_open_issues(),
     }
 
 
-def list_teams(limit: int = 100) -> list[dict[str, Any]]:
+def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]:
+    member_limit = max(min(int(member_limit or 50), 50), 1)
+    query = """
+    query LinearTeamsWithMembers($first: Int!, $memberFirst: Int!) {
+      teams(first: $first) {
+        nodes {
+          id
+          key
+          name
+          members(first: $memberFirst) {
+            nodes {
+              id
+              name
+              displayName
+              email
+              active
+            }
+          }
+        }
+      }
+    }
+    """
+    try:
+        data = _graphql(
+            query,
+            {"first": limit, "memberFirst": member_limit},
+            operation_name="LinearTeamsWithMembers",
+        )
+        return _nodes(data, "teams")
+    except LinearMeetingGraphQLError as exc:
+        if not _team_members_query_unsupported(exc):
+            raise
+        logger.warning(
+            "linear_meeting_actions_team_members_unavailable operation=%s detail=%s",
+            exc.operation,
+            str(exc),
+        )
+
     query = """
     query LinearTeams($first: Int!) {
       teams(first: $first) {
@@ -47,7 +89,7 @@ def list_teams(limit: int = 100) -> list[dict[str, Any]]:
       }
     }
     """
-    data = _graphql(query, {"first": limit})
+    data = _graphql(query, {"first": limit}, operation_name="LinearTeams")
     return _nodes(data, "teams")
 
 
@@ -65,11 +107,11 @@ def list_users(limit: int = 250) -> list[dict[str, Any]]:
       }
     }
     """
-    data = _graphql(query, {"first": limit})
+    data = _graphql(query, {"first": limit}, operation_name="LinearUsers")
     return [user for user in _nodes(data, "users") if user.get("active") is not False]
 
 
-def list_active_projects(limit: int = 100) -> list[dict[str, Any]]:
+def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     query = """
     query LinearProjects($first: Int!) {
       projects(first: $first) {
@@ -78,7 +120,12 @@ def list_active_projects(limit: int = 100) -> list[dict[str, Any]]:
           name
           slugId
           url
-          state
+          completedAt
+          canceledAt
+          status {
+            name
+            type
+          }
           lead {
             id
             name
@@ -92,25 +139,18 @@ def list_active_projects(limit: int = 100) -> list[dict[str, Any]]:
               name
             }
           }
-          members {
-            nodes {
-              id
-              name
-              displayName
-              email
-            }
-          }
         }
       }
     }
     """
-    data = _graphql(query, {"first": limit})
+    data = _graphql(query, {"first": limit}, operation_name="LinearProjects")
     inactive_states = {"completed", "canceled", "cancelled", "archived"}
-    return [
+    active_projects = [
         project
         for project in _nodes(data, "projects")
-        if str(project.get("state") or "").lower() not in inactive_states
+        if not _project_is_inactive(project, inactive_states)
     ]
+    return _enrich_projects_with_members(active_projects, teams or [])
 
 
 def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
@@ -124,7 +164,7 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
       }
     }
     """
-    data = _graphql(query, {"first": limit})
+    data = _graphql(query, {"first": limit}, operation_name="LinearIssueLabels")
     return _nodes(data, "issueLabels")
 
 
@@ -155,7 +195,7 @@ def list_recent_open_issues(limit: int = 100) -> list[dict[str, Any]]:
       }
     }
     """
-    data = _graphql(query, {"first": limit})
+    data = _graphql(query, {"first": limit}, operation_name="LinearRecentIssues")
     closed_types = {"completed", "canceled", "cancelled"}
     return [
         issue
@@ -212,10 +252,13 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
       }
     }
     """
-    data = _graphql(mutation, {"input": input_data})
+    data = _graphql(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
     result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
     if not result.get("success"):
-        raise LinearMeetingGraphQLError("Linear issueCreate returned success=false.")
+        raise LinearMeetingGraphQLError(
+            "Linear issueCreate returned success=false.",
+            operation="CreateLinearMeetingIssue",
+        )
     issue = result.get("issue")
     return issue if isinstance(issue, dict) else {}
 
@@ -226,7 +269,85 @@ def _copy_non_empty(source: dict[str, Any], target: dict[str, Any], source_key: 
         target[target_key] = value
 
 
-def _graphql(query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+def _team_members_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
+    message = str(exc).lower()
+    return (
+        "query too complex" in message
+        or (
+            "members" in message
+            and (
+                "cannot query field" in message
+                or "unknown argument" in message
+                or "field" in message
+            )
+        )
+    )
+
+
+def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> bool:
+    if project.get("completedAt") or project.get("canceledAt"):
+        return True
+    status_data = project.get("status") if isinstance(project.get("status"), dict) else {}
+    status_name = str(status_data.get("name") or "").lower()
+    status_type = str(status_data.get("type") or "").lower()
+    return status_name in inactive_states or status_type in inactive_states
+
+
+def _enrich_projects_with_members(
+    projects: list[dict[str, Any]],
+    teams: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    team_members = _team_members_by_id(teams)
+    enriched_projects: list[dict[str, Any]] = []
+    for project in projects:
+        enriched_project = dict(project)
+        members: list[dict[str, Any]] = []
+        project_teams = _nodes(project, "teams")
+        for team in project_teams:
+            members.extend(team_members.get(str(team.get("id") or ""), []))
+
+        lead = project.get("lead") if isinstance(project.get("lead"), dict) else None
+        if lead:
+            members.append(lead)
+        enriched_project["members"] = {"nodes": _dedupe_users(members)}
+        enriched_projects.append(enriched_project)
+    return enriched_projects
+
+
+def _team_members_by_id(teams: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    mapping: dict[str, list[dict[str, Any]]] = {}
+    for team in teams:
+        team_id = str(team.get("id") or "")
+        if not team_id:
+            continue
+        mapping[team_id] = [
+            member
+            for member in _nodes(team, "members")
+            if member.get("active") is not False
+        ]
+    return mapping
+
+
+def _dedupe_users(users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        key = str(user.get("id") or user.get("email") or user.get("name") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(user)
+    return deduped
+
+
+def _graphql(
+    query: str,
+    variables: dict[str, Any] | None = None,
+    *,
+    operation_name: str,
+) -> dict[str, Any]:
     api_key = _linear_api_key()
     connect_timeout = float(getattr(settings, "LINEAR_API_CONNECT_TIMEOUT_SECONDS", 3) or 3)
     read_timeout = float(getattr(settings, "LINEAR_API_READ_TIMEOUT_SECONDS", 20) or 20)
@@ -239,30 +360,57 @@ def _graphql(query: str, variables: dict[str, Any] | None = None) -> dict[str, A
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
-            json={"query": query, "variables": variables or {}},
+            json={
+                "query": query,
+                "variables": variables or {},
+                "operationName": operation_name,
+            },
             timeout=(connect_timeout, read_timeout),
         )
         if response.status_code == 429:
             raise LinearMeetingRateLimitError(_retry_after_seconds(response))
-        response.raise_for_status()
     except LinearMeetingRateLimitError:
         raise
     except http_requests.RequestException as exc:
-        raise LinearMeetingGraphQLError(f"Linear GraphQL request failed: {exc}") from exc
+        raise LinearMeetingGraphQLError(
+            f"Linear GraphQL request failed: {exc}",
+            operation=operation_name,
+        ) from exc
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise LinearMeetingGraphQLError("Linear GraphQL returned an invalid JSON response.") from exc
+        try:
+            response.raise_for_status()
+        except http_requests.RequestException as status_exc:
+            raise LinearMeetingGraphQLError(
+                f"Linear GraphQL request failed: {status_exc}",
+                operation=operation_name,
+            ) from status_exc
+        raise LinearMeetingGraphQLError(
+            "Linear GraphQL returned an invalid JSON response.",
+            operation=operation_name,
+        ) from exc
     if not isinstance(payload, dict):
-        raise LinearMeetingGraphQLError("Linear GraphQL returned an invalid response.")
+        raise LinearMeetingGraphQLError(
+            "Linear GraphQL returned an invalid response.",
+            operation=operation_name,
+        )
 
     errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
     if errors:
         message = _graphql_error_message(errors)
         if _graphql_errors_are_rate_limited(errors, message):
             raise LinearMeetingRateLimitError(1)
-        raise LinearMeetingGraphQLError(message)
+        raise LinearMeetingGraphQLError(message, operation=operation_name)
+
+    try:
+        response.raise_for_status()
+    except http_requests.RequestException as exc:
+        raise LinearMeetingGraphQLError(
+            f"Linear GraphQL request failed: {exc}",
+            operation=operation_name,
+        ) from exc
 
     data = payload.get("data")
     return data if isinstance(data, dict) else {}

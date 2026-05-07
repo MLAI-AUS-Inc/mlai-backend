@@ -1,3 +1,5 @@
+import logging
+
 from django.db import DatabaseError
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -35,6 +37,7 @@ PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD = {
     "detail": "Connector preview storage is not available. Run backend migrations before syncing financial records.",
     "code": "preview_storage_unavailable",
 }
+logger = logging.getLogger(__name__)
 
 
 def _linear_meeting_error_response(exc):
@@ -58,11 +61,20 @@ def _linear_meeting_error_response(exc):
         response["Retry-After"] = str(exc.retry_after_seconds)
         return response
     if isinstance(exc, LinearMeetingGraphQLError):
+        operation = getattr(exc, "operation", None)
+        logger.error(
+            "linear_meeting_actions_graphql_error operation=%s detail=%s",
+            operation,
+            str(exc),
+        )
+        payload = {
+            "detail": str(exc),
+            "code": "linear_graphql_error",
+        }
+        if operation:
+            payload["operation"] = operation
         return Response(
-            {
-                "detail": str(exc),
-                "code": "linear_graphql_error",
-            },
+            payload,
             status=status.HTTP_502_BAD_GATEWAY,
         )
     if isinstance(exc, ValueError):
