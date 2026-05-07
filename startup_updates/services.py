@@ -41,6 +41,7 @@ from startup_updates.models import (
     SlackChannelSelection,
     SlackThreadArtifact,
     StartupEvent,
+    StartupManualDocument,
     StartupMetricObservation,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
@@ -60,6 +61,9 @@ DEFAULT_CLASSIFICATION_BATCH_SIZE = 40
 DEFAULT_ATTACHMENT_BYTES_LIMIT = 10 * 1024 * 1024
 DEFAULT_MAX_SOURCE_THREADS = 40
 SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
+MANUAL_DOCUMENTS_SOURCE = "manual_documents"
+MAX_MANUAL_DOCUMENT_CONTEXT_CHARS = 40000
+MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT = 12000
 MERGEABLE_DRAFT_LIST_SECTIONS = (
     "financial_performance",
     "highlights",
@@ -321,6 +325,7 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.GOOGLE_DRIVE,
         ExternalServiceProvider.SLACK,
         ExternalServiceProvider.LINEAR,
+        MANUAL_DOCUMENTS_SOURCE,
     }
     if not input_sources:
         return ["gmail"]
@@ -1761,6 +1766,8 @@ def build_external_context_for_sources(
     start_date: date,
     end_date: date,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> dict[str, Any]:
     selected = set(input_sources or [])
     context: dict[str, Any] = {}
@@ -1793,6 +1800,96 @@ def build_external_context_for_sources(
         )
     if ExternalServiceProvider.NOTION in selected:
         context["notion"] = build_notion_run_context(organization=organization)
+    if MANUAL_DOCUMENTS_SOURCE in selected:
+        context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
+            organization=organization,
+            document_ids=manual_document_ids,
+            summary=manual_summary,
+        )
+    return context
+
+
+def _normalize_manual_document_id_list(document_ids: Optional[list[str]]) -> list[str]:
+    if not document_ids:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_id in document_ids:
+        value = str(raw_id or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _manual_document_context_excerpt(text: str, remaining_chars: int) -> tuple[str, int]:
+    limit = min(MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT, max(remaining_chars, 0))
+    if limit <= 0:
+        return "", 0
+    excerpt = str(text or "").strip()[:limit].strip()
+    return excerpt, len(excerpt)
+
+
+def build_manual_documents_run_context(
+    *,
+    organization: Organization,
+    document_ids: Optional[list[str]],
+    summary: Optional[str] = None,
+) -> dict[str, Any]:
+    normalized_ids = _normalize_manual_document_id_list(document_ids)
+    context: dict[str, Any] = {
+        "summary": str(summary or "").strip(),
+        "documents": [],
+        "warnings": [],
+    }
+    if not normalized_ids:
+        if not context["summary"]:
+            context["warnings"].append("Manual documents were selected but no uploaded documents or summary were provided.")
+        return context
+
+    documents_by_id = {
+        str(document.id): document
+        for document in StartupManualDocument.objects.filter(
+            organization=organization,
+            id__in=normalized_ids,
+        ).order_by("-created_at")
+    }
+    remaining_chars = MAX_MANUAL_DOCUMENT_CONTEXT_CHARS
+    for document_id in normalized_ids:
+        document = documents_by_id.get(document_id)
+        if document is None:
+            context["warnings"].append(f"Manual document {document_id} was not found for this startup.")
+            continue
+
+        text_excerpt = ""
+        excerpt_chars = 0
+        if document.extraction_status == "processed" and document.extracted_text.strip():
+            text_excerpt, excerpt_chars = _manual_document_context_excerpt(document.extracted_text, remaining_chars)
+            remaining_chars -= excerpt_chars
+        else:
+            context["warnings"].append(
+                f"{document.original_filename} could not be used as extracted text "
+                f"({document.extraction_status or 'unknown'})."
+            )
+
+        context["documents"].append(
+            {
+                "id": str(document.id),
+                "filename": document.original_filename,
+                "content_type": document.content_type,
+                "file_size_bytes": document.file_size_bytes,
+                "extraction_status": document.extraction_status,
+                "parse_notes": document.parse_notes,
+                "text_size_chars": document.text_size_chars,
+                "text_excerpt": text_excerpt,
+                "text_excerpt_chars": excerpt_chars,
+                "uploaded_at": document.created_at.isoformat() if document.created_at else None,
+            }
+        )
+
+    if remaining_chars <= 0:
+        context["warnings"].append("Manual document context was truncated before being sent to the draft generator.")
     return context
 
 
@@ -1804,12 +1901,30 @@ def refresh_startup_update_run_source_context(
     start_date: date,
     end_date: date,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> ContentFactoryRun:
     run_request = dict(run.run_request or {})
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
     if selected_input_sources:
         run_request["input_sources"] = list(selected_input_sources)
+    if MANUAL_DOCUMENTS_SOURCE in set(selected_input_sources):
+        document_ids = (
+            _normalize_manual_document_id_list(manual_document_ids)
+            if manual_document_ids is not None
+            else _normalize_manual_document_id_list(run_request.get("manual_document_ids"))
+        )
+        summary = str(
+            manual_summary
+            if manual_summary is not None
+            else run_request.get("manual_summary") or ""
+        ).strip()
+        run_request["manual_document_ids"] = document_ids
+        run_request["manual_summary"] = summary
+    else:
+        run_request.pop("manual_document_ids", None)
+        run_request.pop("manual_summary", None)
     if ExternalServiceProvider.SLACK in set(selected_input_sources):
         run_request["slack_channel_ids"] = [
             selection.channel_id
@@ -1853,6 +1968,8 @@ def refresh_startup_update_run_source_context(
         start_date=start_date,
         end_date=end_date,
         source_warnings=source_warnings,
+        manual_document_ids=run_request.get("manual_document_ids"),
+        manual_summary=run_request.get("manual_summary"),
     )
     if ExternalServiceProvider.XERO in set(selected_input_sources or []):
         xero_metrics = publish_xero_metric_observations(
@@ -2443,6 +2560,8 @@ def create_startup_update_run(
     input_sources: Optional[list[str]] = None,
     source_warnings: Optional[dict[str, list[str]]] = None,
     target_month: Optional[Union[str, date, datetime]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> ContentFactoryRun:
     now = timezone.now()
     windows = build_startup_update_target_windows(target_month, reference=now)
@@ -2476,6 +2595,8 @@ def create_startup_update_run(
             start_date=windows["financial_start_date"],
             end_date=windows["financial_end_date"],
             source_warnings=source_warnings,
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
         )
         supersede_conflicting_startup_update_runs(
             organization=organization,
@@ -2516,6 +2637,9 @@ def create_startup_update_run(
         "startup_context": startup_context,
     }
     run_request["input_sources"] = list(selected_input_sources)
+    if MANUAL_DOCUMENTS_SOURCE in selected_source_set:
+        run_request["manual_document_ids"] = _normalize_manual_document_id_list(manual_document_ids)
+        run_request["manual_summary"] = str(manual_summary or "").strip()
     if ExternalServiceProvider.NOTION in selected_source_set:
         notion_connection = latest_external_connection_for_startup(
             user=binding.user,
@@ -2553,6 +2677,8 @@ def create_startup_update_run(
         start_date=financial_start_date,
         end_date=windows["financial_end_date"],
         source_warnings=source_warnings,
+        manual_document_ids=run_request.get("manual_document_ids"),
+        manual_summary=run_request.get("manual_summary"),
     )
     if external_context:
         if ExternalServiceProvider.SLACK in external_context:

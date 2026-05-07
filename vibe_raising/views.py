@@ -19,7 +19,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.firebase_utils import (
+    create_signed_read_url,
     create_signed_upload_url,
+    delete_storage_object,
+    download_storage_object_bytes,
+    finalize_private_uploaded_storage_object,
     finalize_uploaded_storage_object,
     upload_file_to_storage,
 )
@@ -33,7 +37,9 @@ from integrations.models import (
 from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
+    StartupManualDocument,
 )
+from startup_updates.manual_documents import parse_manual_document
 from startup_updates.metric_catalog import (
     STARTUP_UPDATE_METRIC_LABELS,
     startup_update_metric_key,
@@ -42,6 +48,7 @@ from startup_updates.metric_catalog import (
 from integrations.services.external_connectors import mark_sources_sync_requested
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
+    MANUAL_DOCUMENTS_SOURCE,
     OPEN_RUN_STATUSES,
     RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
@@ -84,7 +91,9 @@ logger = logging.getLogger(__name__)
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 VALLEY_META_KEY = "_valley_meta"
 MAX_VIBE_RAISING_VIDEO_SIZE_BYTES = 250 * 1024 * 1024
+MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES = 25 * 1024 * 1024
 VIBE_RAISING_SIGNED_UPLOAD_TTL = timedelta(minutes=15)
+VIBE_RAISING_SIGNED_READ_TTL = timedelta(minutes=5)
 VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -99,6 +108,24 @@ VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".mkv": "video/x-matroska",
 }
 VIBE_RAISING_VIDEO_CONTENT_TYPES = set(VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES.values()) | {"video/mp4"}
+VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".rtf": "application/rtf",
+    ".odt": "application/vnd.oasis.opendocument.text",
+}
+VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES = set(VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES.values()) | {
+    "application/vnd.ms-excel",
+    "text/plain",
+}
 EMAIL_DRAFT_DISPLAY_STAGES = {
     "profile_resolution": "Preparing company context",
     "gmail_backfill": "Scanning recent Gmail messages",
@@ -120,6 +147,8 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "notion",
     "google_drive",
     "slack",
+    "linear",
+    MANUAL_DOCUMENTS_SOURCE,
 }
 XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
 
@@ -181,6 +210,9 @@ def _monthly_update_drafts_cover_input_sources(
     *,
     target_month: Optional[date] = None,
 ) -> bool:
+    if MANUAL_DOCUMENTS_SOURCE in set(normalize_startup_update_input_sources(input_sources)):
+        return False
+
     draft_queryset = organization.monthly_update_drafts.select_related("run")
     if target_month is not None:
         draft_queryset = draft_queryset.filter(month=target_month)
@@ -471,6 +503,61 @@ def _get_requested_input_sources(request):
     )
 
 
+def _get_requested_manual_document_ids(request):
+    raw_items = request.data.get("manualDocumentIds")
+    if raw_items is None:
+        raw_items = request.data.get("manual_document_ids")
+    if raw_items is None:
+        return []
+    if isinstance(raw_items, str):
+        raw_items = [item.strip() for item in raw_items.split(",")]
+    if not isinstance(raw_items, (list, tuple)):
+        return []
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def _get_requested_manual_summary(request):
+    return str(request.data.get("manualSummary") or request.data.get("manual_summary") or "").strip()
+
+
+def _include_manual_source_if_needed(input_sources, *, manual_document_ids, manual_summary):
+    selected = list(input_sources or [])
+    if (manual_document_ids or manual_summary) and MANUAL_DOCUMENTS_SOURCE not in selected:
+        selected.append(MANUAL_DOCUMENTS_SOURCE)
+    return normalize_startup_update_input_sources(selected)
+
+
+def _resolve_manual_documents_for_request(*, user, organization, company, document_ids):
+    if not document_ids:
+        return []
+
+    documents_by_id = {
+        str(document.id): document
+        for document in StartupManualDocument.objects.select_related("company", "company__profile")
+        .filter(organization=organization, company=company, id__in=document_ids)
+    }
+    documents = []
+    missing_ids = []
+    for document_id in document_ids:
+        document = documents_by_id.get(str(document_id))
+        if document is None or not _manual_document_access_allowed(user, document, active_company=company):
+            missing_ids.append(str(document_id))
+            continue
+        documents.append(document)
+
+    if missing_ids:
+        raise ValueError("One or more manual documents were not found for this startup.")
+    return documents
+
+
 def _join_text_items(value):
     items = _normalize_text_list(value)
     if not items:
@@ -566,6 +653,11 @@ def _structured_memo_section_text(structured_memo, key):
     return _join_text_items_with_newlines((structured_memo or {}).get(key))
 
 
+def _structured_memo_manual_documents(structured_memo):
+    documents = (structured_memo or {}).get("manual_documents") or (structured_memo or {}).get("manualDocuments") or []
+    return documents if isinstance(documents, list) else []
+
+
 def _structured_memo_with_xero_metrics(draft):
     structured_memo = draft.structured_memo or {}
     if not getattr(draft, "organization_id", None):
@@ -589,6 +681,7 @@ def _serialize_draft_for_form(draft):
         "year": month_value.year,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -679,6 +772,7 @@ def _build_manual_structured_memo(payload):
     }
 
     summary = _optional_text(payload.get("summary"))
+    manual_summary = _optional_text(payload.get("manualSummary"))
     source_url = _optional_text(payload.get("sourceUrl"))
     video_url = _optional_text(payload.get("videoUrl"))
     video_storage_path = _optional_text(payload.get("videoStoragePath"))
@@ -688,6 +782,10 @@ def _build_manual_structured_memo(payload):
 
     if summary:
         memo["summary"] = summary
+    elif manual_summary:
+        memo["summary"] = manual_summary
+    if manual_summary:
+        memo["manual_summary"] = manual_summary
     if source_url:
         memo["source_url"] = source_url
     if video_url:
@@ -707,6 +805,10 @@ def _build_manual_structured_memo(payload):
     if video:
         memo["video"] = video
 
+    manual_documents = payload.get("manualDocuments") or []
+    if manual_documents:
+        memo["manual_documents"] = list(manual_documents)
+
     return memo
 
 
@@ -723,6 +825,7 @@ def _serialize_monthly_update(draft):
         "status": draft.status,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -789,6 +892,7 @@ def _serialize_email_draft_month(draft):
         "year": month_value.year,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -1046,6 +1150,267 @@ def _complete_vibe_raising_signed_video_upload(
         "fileSizeBytes": actual_size,
         "originalFilename": filename or "update-video",
     }
+
+
+def _is_admin_user(user):
+    return bool(getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+
+
+def _normalize_vibe_raising_manual_document_content_type(*, content_type="", filename=""):
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
+        return content_type
+
+    filename = str(filename or "")
+    guessed_type, _encoding = mimetypes.guess_type(filename)
+    if guessed_type and guessed_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
+        return guessed_type
+
+    extension = Path(filename or "").suffix.lower()
+    return VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES.get(extension, "")
+
+
+def _parse_vibe_raising_manual_document_size(raw_size):
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _validate_vibe_raising_manual_document_metadata(*, filename, content_type, file_size_bytes):
+    resolved_content_type = _normalize_vibe_raising_manual_document_content_type(
+        content_type=content_type,
+        filename=filename,
+    )
+    if not resolved_content_type:
+        raise ValueError("Uploaded file must be a supported document.")
+
+    parsed_size = _parse_vibe_raising_manual_document_size(file_size_bytes)
+    if parsed_size is None:
+        raise ValueError("fileSizeBytes is required.")
+
+    if parsed_size > MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES:
+        raise ValueError(
+            f"Document exceeds maximum size of {MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+
+    return resolved_content_type, parsed_size
+
+
+def _vibe_raising_manual_document_storage_prefix(*, user, organization, company):
+    return os.path.join(
+        "vibe-raising",
+        "manual-documents",
+        f"org-{organization.id}",
+        f"company-{company.id}",
+        f"user-{user.id}",
+    )
+
+
+def _vibe_raising_manual_document_storage_path(*, user, organization, company, filename, content_type):
+    stem = slugify(Path(filename or "manual-document").stem) or "manual-document"
+    extension = Path(filename or "").suffix.lower()
+    if extension not in VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES:
+        extension = mimetypes.guess_extension(content_type) or ".txt"
+
+    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
+    return os.path.join(
+        _vibe_raising_manual_document_storage_prefix(user=user, organization=organization, company=company),
+        f"{timestamp}-{stem}-{uuid4().hex[:8]}{extension}",
+    )
+
+
+def _create_vibe_raising_signed_manual_document_upload(
+    *,
+    user,
+    organization,
+    company,
+    filename,
+    content_type,
+    file_size_bytes,
+):
+    resolved_content_type, parsed_size = _validate_vibe_raising_manual_document_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    storage_path = _vibe_raising_manual_document_storage_path(
+        user=user,
+        organization=organization,
+        company=company,
+        filename=filename,
+        content_type=resolved_content_type,
+    )
+    upload_url = create_signed_upload_url(
+        storage_path,
+        resolved_content_type,
+        expires_in=VIBE_RAISING_SIGNED_UPLOAD_TTL,
+    )
+    expires_at = timezone.now() + VIBE_RAISING_SIGNED_UPLOAD_TTL
+    return {
+        "uploadUrl": upload_url,
+        "storagePath": storage_path,
+        "contentType": resolved_content_type,
+        "fileSizeBytes": parsed_size,
+        "expiresAt": expires_at.isoformat(),
+        "maxUploadBytes": MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES,
+        "requiredHeaders": {"Content-Type": resolved_content_type},
+    }
+
+
+def _serialize_manual_document(document: StartupManualDocument):
+    return {
+        "id": str(document.id),
+        "originalFilename": document.original_filename,
+        "contentType": document.content_type,
+        "fileSizeBytes": document.file_size_bytes,
+        "extractionStatus": document.extraction_status,
+        "textSizeChars": document.text_size_chars,
+        "parseNotes": document.parse_notes,
+        "lastError": document.last_error,
+        "createdAt": document.created_at.isoformat() if document.created_at else None,
+        "updatedAt": document.updated_at.isoformat() if document.updated_at else None,
+    }
+
+
+def _serialize_manual_document_for_memo(document: StartupManualDocument):
+    return {
+        "id": str(document.id),
+        "original_filename": document.original_filename,
+        "content_type": document.content_type,
+        "file_size_bytes": document.file_size_bytes,
+        "extraction_status": document.extraction_status,
+        "text_size_chars": document.text_size_chars,
+        "created_at": document.created_at.isoformat() if document.created_at else None,
+    }
+
+
+def _get_manual_document_company_context_or_response(request):
+    requested_company_id = (
+        str(request.data.get("companyId") or request.data.get("company_id") or "").strip()
+        if hasattr(request, "data")
+        else ""
+    ) or str(request.query_params.get("companyId") or request.query_params.get("company_id") or "").strip()
+
+    if requested_company_id and _is_admin_user(request.user):
+        company = get_object_or_404(
+            VibeRaisingCompany.objects.select_related("profile", "profile__user", "organization"),
+            id=requested_company_id,
+        )
+        domain = normalize_domain(company.domain or "")
+        if not domain:
+            return None, Response(
+                {"detail": "Add a company domain before uploading documents."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        organization, _startup_profile, binding = _ensure_binding_for_company(
+            user=company.profile.user,
+            company=company,
+        )
+        return {
+            "profile": company.profile,
+            "company": company,
+            "domain": domain,
+            "organization": organization,
+            "binding": binding,
+        }, None
+
+    context, error_response = _get_founder_company_context_or_response(request.user)
+    if error_response:
+        return None, error_response
+    if not context["domain"]:
+        return None, Response(
+            {"detail": "Add a company domain before uploading documents."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    organization, _startup_profile, binding = _ensure_binding_for_company(
+        user=request.user,
+        company=context["company"],
+    )
+    return {
+        **context,
+        "organization": organization,
+        "binding": binding,
+    }, None
+
+
+def _manual_document_access_allowed(user, document: StartupManualDocument, *, active_company=None):
+    if _is_admin_user(user):
+        return True
+    if active_company is None or document.company_id != active_company.id:
+        return False
+    return document.created_by_id == user.id or document.company.profile.user_id == user.id
+
+
+def _get_accessible_manual_document_or_response(request, document_id):
+    document = get_object_or_404(
+        StartupManualDocument.objects.select_related("organization", "company", "company__profile"),
+        id=document_id,
+    )
+    if _is_admin_user(request.user):
+        return document, None
+
+    context, error_response = _get_founder_company_context_or_response(request.user)
+    if error_response:
+        return None, error_response
+    if not _manual_document_access_allowed(request.user, document, active_company=context["company"]):
+        return None, Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
+    return document, None
+
+
+def _complete_vibe_raising_signed_manual_document_upload(
+    *,
+    user,
+    organization,
+    company,
+    storage_path,
+    filename,
+    content_type,
+    file_size_bytes,
+):
+    expected_prefix = f"{_vibe_raising_manual_document_storage_prefix(user=user, organization=organization, company=company)}/"
+    if not str(storage_path or "").startswith(expected_prefix):
+        raise ValueError("Invalid upload path.")
+
+    resolved_content_type, parsed_size = _validate_vibe_raising_manual_document_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    finalized = finalize_private_uploaded_storage_object(storage_path, content_type=resolved_content_type)
+    actual_size = int(finalized.get("fileSizeBytes") or parsed_size)
+    if actual_size > MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES:
+        raise ValueError(
+            f"Document exceeds maximum size of {MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+    if parsed_size and actual_size and parsed_size != actual_size:
+        raise ValueError("Uploaded document size does not match the finalized object.")
+
+    raw_bytes = download_storage_object_bytes(storage_path)
+    parsed = parse_manual_document(
+        filename=filename or "manual-document",
+        content_type=finalized.get("contentType") or resolved_content_type,
+        raw_bytes=raw_bytes,
+    )
+    document = StartupManualDocument.objects.create(
+        organization=organization,
+        company=company,
+        created_by=user,
+        original_filename=filename or "manual-document",
+        content_type=finalized.get("contentType") or resolved_content_type,
+        file_size_bytes=actual_size,
+        storage_path=storage_path,
+        extraction_status=parsed.extraction_status,
+        extracted_text=parsed.extracted_text,
+        text_size_chars=len(parsed.extracted_text or ""),
+        parse_notes=parsed.parse_notes,
+        last_error=parsed.last_error,
+        metadata={
+            "storage_updated": finalized.get("updated"),
+        },
+    )
+    return document
 
 
 def _get_run_result_payload(run) -> dict:
@@ -1665,6 +2030,150 @@ class VibeRaisingVideoUploadCompleteView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class VibeRaisingManualDocumentListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        documents = StartupManualDocument.objects.filter(
+            organization=context["organization"],
+            company=context["company"],
+        ).order_by("-created_at")
+        return Response(
+            {"documents": [_serialize_manual_document(document) for document in documents]},
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingManualDocumentUploadSessionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "manual-document"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+
+        try:
+            payload = _create_vibe_raising_signed_manual_document_upload(
+                user=request.user,
+                organization=context["organization"],
+                company=context["company"],
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Failed to create Vibe Raising manual document upload session")
+            return Response(
+                {"detail": f"Failed to create upload session: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class VibeRaisingManualDocumentUploadCompleteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        storage_path = str(request.data.get("storagePath") or "").strip()
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "manual-document"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+        if not storage_path:
+            return Response({"detail": "storagePath is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            document = _complete_vibe_raising_signed_manual_document_upload(
+                user=request.user,
+                organization=context["organization"],
+                company=context["company"],
+                storage_path=storage_path,
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except FileNotFoundError:
+            return Response(
+                {"detail": "Uploaded document was not found in storage. Please upload it again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            logger.exception("Failed to finalize Vibe Raising manual document upload")
+            return Response(
+                {"detail": f"Failed to finalize document upload: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({"document": _serialize_manual_document(document)}, status=status.HTTP_200_OK)
+
+
+class VibeRaisingManualDocumentDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, document_id):
+        document, error_response = _get_accessible_manual_document_or_response(request, document_id)
+        if error_response:
+            return error_response
+
+        storage_path = document.storage_path
+        document.delete()
+        try:
+            delete_storage_object(storage_path)
+        except Exception:
+            logger.warning(
+                "Failed to delete Vibe Raising manual document from storage",
+                exc_info=True,
+                extra={"document_id": str(document_id), "storage_path": storage_path},
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VibeRaisingManualDocumentDownloadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, document_id):
+        document, error_response = _get_accessible_manual_document_or_response(request, document_id)
+        if error_response:
+            return error_response
+
+        try:
+            download_url = create_signed_read_url(
+                document.storage_path,
+                expires_in=VIBE_RAISING_SIGNED_READ_TTL,
+            )
+        except Exception as exc:
+            logger.exception("Failed to create Vibe Raising manual document download URL")
+            return Response(
+                {"detail": f"Failed to create download URL: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "downloadUrl": download_url,
+                "expiresAt": (timezone.now() + VIBE_RAISING_SIGNED_READ_TTL).isoformat(),
+                "document": _serialize_manual_document(document),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class VibeRaisingMonthlyUpdateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1707,6 +2216,23 @@ class VibeRaisingMonthlyUpdateView(APIView):
             user=request.user,
             company=company,
         )
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=serializer.validated_data.get("manualDocumentIds") or [],
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        structured_payload = {
+            **serializer.validated_data,
+            "manualDocuments": [
+                _serialize_manual_document_for_memo(document)
+                for document in manual_documents
+            ],
+        }
         month_bucket = date(
             serializer.validated_data["year"],
             serializer.validated_data["month_number"],
@@ -1719,7 +2245,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 "status": MonthlyUpdateDraftStatus.READY,
                 "title": f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update",
                 "model_name": "vibe-raising-manual",
-                "structured_memo": _build_manual_structured_memo(serializer.validated_data),
+                "structured_memo": _build_manual_structured_memo(structured_payload),
             },
         )
 
@@ -1785,13 +2311,31 @@ class VibeRaisingStartupUpdateRunView(APIView):
             user=request.user,
             company=company,
         )
-        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
+        requested_manual_document_ids = _get_requested_manual_document_ids(request)
+        manual_summary = _get_requested_manual_summary(request)
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=requested_manual_document_ids,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        manual_document_ids = [str(document.id) for document in manual_documents]
+        input_sources = _include_manual_source_if_needed(
+            _get_requested_input_sources(request),
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
+        )
         source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         try:
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = getattr(request.user, "google_connection", None)
+        if not gmail_required_for_sources(input_sources):
+            google_connection = None
         if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
                 _build_status_payload(user=request.user, company=company, domain=domain),
@@ -1802,10 +2346,12 @@ class VibeRaisingStartupUpdateRunView(APIView):
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
             target_month=target_month,
+            input_sources=input_sources,
         )
         conflicting_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            input_sources=input_sources,
         )
         if (
             existing_run is None
@@ -1827,6 +2373,8 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 input_sources=input_sources,
                 source_warnings=source_warnings,
                 target_month=target_month,
+                manual_document_ids=manual_document_ids,
+                manual_summary=manual_summary,
             )
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
@@ -1846,6 +2394,8 @@ class VibeRaisingStartupUpdateRunView(APIView):
                     start_date=windows["financial_start_date"],
                     end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             if _should_dispatch_existing_run(run):
                 logger.info(
@@ -1910,13 +2460,31 @@ class VibeRaisingEmailDraftStartView(APIView):
             user=request.user,
             company=company,
         )
-        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
+        requested_manual_document_ids = _get_requested_manual_document_ids(request)
+        manual_summary = _get_requested_manual_summary(request)
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=requested_manual_document_ids,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        manual_document_ids = [str(document.id) for document in manual_documents]
+        input_sources = _include_manual_source_if_needed(
+            _get_requested_input_sources(request),
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
+        )
         try:
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
         google_connection = getattr(request.user, "google_connection", None)
+        if not gmail_required_for_sources(input_sources):
+            google_connection = None
         if gmail_required_for_sources(input_sources) and google_connection is None:
             return Response(
                 _build_email_draft_payload(
@@ -1944,10 +2512,12 @@ class VibeRaisingEmailDraftStartView(APIView):
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
             target_month=target_month,
+            input_sources=input_sources,
         )
         conflicting_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            input_sources=input_sources,
         )
         if (
             existing_run is None
@@ -2016,6 +2586,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                 input_sources=input_sources,
                 source_warnings=source_warnings,
                 target_month=target_month,
+                manual_document_ids=manual_document_ids,
+                manual_summary=manual_summary,
             )
             created = True
             dispatch_result = _dispatch_run_to_valley(run)
@@ -2042,6 +2614,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                     start_date=windows["financial_start_date"],
                     end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             logger.info(
                 "Re-dispatching queued email draft run to Valley",
@@ -2071,6 +2645,8 @@ class VibeRaisingEmailDraftStartView(APIView):
                     start_date=windows["financial_start_date"],
                     end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because an open run is already active",

@@ -15,6 +15,7 @@ from .models import (
     SlackThreadArtifact,
     StartupDataDeletionRequest,
     StartupEvent,
+    StartupManualDocument,
     StartupMetricObservation,
     StartupProfile,
     UserStartupBinding,
@@ -33,6 +34,23 @@ class UserStartupBindingAdmin(admin.ModelAdmin):
     list_display = ("user", "organization", "google_connection", "role", "is_default_for_gmail", "updated_at")
     search_fields = ("user__email", "organization__domain", "role")
     list_filter = ("is_default_for_gmail", "updated_at")
+
+
+@admin.register(StartupManualDocument)
+class StartupManualDocumentAdmin(admin.ModelAdmin):
+    list_display = (
+        "organization",
+        "company",
+        "original_filename",
+        "content_type",
+        "file_size_bytes",
+        "extraction_status",
+        "created_by",
+        "created_at",
+    )
+    search_fields = ("organization__domain", "company__name", "original_filename", "created_by__email")
+    list_filter = ("extraction_status", "content_type", "created_at")
+    readonly_fields = ("storage_path", "parse_notes", "last_error", "metadata")
 
 
 @admin.register(GmailSyncCursor)

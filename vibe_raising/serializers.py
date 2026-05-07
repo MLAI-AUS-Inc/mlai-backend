@@ -149,6 +149,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "videoContentType": ("video_content_type",),
         "videoFileSizeBytes": ("video_file_size_bytes",),
         "videoOriginalFilename": ("video_original_filename",),
+        "manualDocumentIds": ("manual_document_ids",),
+        "manualSummary": ("manual_summary",),
         "metricSuggestions": ("metric_suggestions",),
         "next30Days": ("next_30_days",),
     }
@@ -162,6 +164,12 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     videoContentType = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     videoFileSizeBytes = serializers.IntegerField(min_value=0, required=False, allow_null=True)
     videoOriginalFilename = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    manualDocumentIds = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        default=list,
+    )
+    manualSummary = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     highlights = serializers.CharField(allow_blank=True, required=False, default="")
     challenges = serializers.CharField(allow_blank=True, required=False, default="")
     asks = serializers.CharField(allow_blank=True, required=False, default="")
@@ -202,9 +210,15 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
             "videoStoragePath",
             "videoContentType",
             "videoOriginalFilename",
+            "manualSummary",
         ):
             if field in attrs:
                 attrs[field] = _blank_to_none(attrs.get(field))
+
+        attrs["manualDocumentIds"] = [
+            str(item)
+            for item in attrs.get("manualDocumentIds") or []
+        ]
 
         normalized_metrics = {}
         for key, value in (attrs.get("metrics") or {}).items():
