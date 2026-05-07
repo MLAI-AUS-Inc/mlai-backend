@@ -2902,7 +2902,7 @@ class VibeMarketingAutofillView(APIView):
             "existing_fields": existing_fields,
             "research_depth": "deep",
             "strict_deep_research": True,
-            "min_direct_competitors": 5,
+            "min_direct_competitors": 3,
             "min_seed_keywords": 20,
             "min_public_sources": 3,
             "persist": False,
