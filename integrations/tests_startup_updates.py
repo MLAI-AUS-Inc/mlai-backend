@@ -10,6 +10,7 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from googleapiclient.errors import HttpError
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -613,6 +614,47 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertIsNotNone(cursor.backfill_completed_at)
         self.assertEqual(response.data["ingested_count"], 1)
         self.assertEqual(response.data["relevance_counts"]["relevant"], 1)
+
+    def test_ingest_next_page_returns_source_unavailable_when_gmail_scope_missing(self):
+        self.google_connection.scope = "openid https://www.googleapis.com/auth/userinfo.email"
+        self.google_connection.save(update_fields=["scope", "updated_at"])
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["sourceUnavailable"])
+        self.assertEqual(response.data["source"], "gmail")
+        self.assertEqual(response.data["code"], "gmail_insufficient_scope")
+        self.assertFalse(response.data["retryable"])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertTrue(response.data["needsGmailReconnect"])
+        self.assertEqual(response.data["ingested_count"], 0)
+
+    @patch("startup_updates.api_views.sync_message_metadata_page")
+    def test_ingest_next_page_converts_gmail_403_to_source_unavailable(self, mock_sync):
+        mock_sync.side_effect = HttpError(
+            resp=SimpleNamespace(status=403, reason="insufficientPermissions"),
+            content=b'{"error":{"message":"Request had insufficient authentication scopes."}}',
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["sourceUnavailable"])
+        self.assertEqual(response.data["code"], "gmail_insufficient_scope")
+        self.assertFalse(response.data["retryable"])
 
     @patch("startup_updates.api_views.sync_message_metadata_page")
     @patch("startup_updates.api_views.sync_history_metadata_page")

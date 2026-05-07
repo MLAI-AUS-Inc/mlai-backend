@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from integrations.models import GoogleConnection
+from integrations.services.gmail_scopes import normalize_google_scope_list
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -124,9 +125,38 @@ def get_refreshed_credentials(connection: GoogleConnection):
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_OAUTH_CLIENT_ID,
         client_secret=settings.GOOGLE_OAUTH_CLIENT_SECRET,
-        scopes=connection.scope.split(" ") if connection.scope else [],
+        scopes=normalize_google_scope_list(connection.scope),
     )
     return creds
+
+
+def is_gmail_insufficient_permissions_error(exc: Exception) -> bool:
+    if not isinstance(exc, HttpError):
+        return False
+    status_code = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code != 403:
+        return False
+
+    reason = str(getattr(getattr(exc, "resp", None), "reason", "") or "")
+    content = getattr(exc, "content", b"")
+    if isinstance(content, bytes):
+        content_text = content.decode("utf-8", errors="ignore")
+    else:
+        content_text = str(content or "")
+    message = f"{reason} {content_text}".lower()
+    return any(
+        marker in message
+        for marker in (
+            "insufficientpermissions",
+            "insufficient permission",
+            "insufficient authentication scopes",
+            "request had insufficient authentication scopes",
+        )
+    )
 
 
 def build_gmail_service(connection: GoogleConnection, *, cache_discovery: bool = False):
