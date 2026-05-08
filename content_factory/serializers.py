@@ -44,7 +44,7 @@ class ComponentMappingSerializer(serializers.ModelSerializer):
 
 from .models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, TopicMap, WrittenArticle, ResearchSession
+    SemanticCluster, TopicMap, WrittenArticle, ResearchSession, TopicFeedback
 )
 
 
@@ -277,6 +277,47 @@ class ResearchFeedbackSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
     )
+
+
+class TopicFeedbackRequestSerializer(serializers.Serializer):
+    """Serializer for explicit topic feedback such as a homepage thumbs-down."""
+    domain = serializers.CharField(required=False, allow_blank=True)
+    keyword = serializers.CharField()
+    session_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    feedback_type = serializers.CharField(required=False, allow_blank=True, default='declined')
+    reason_code = serializers.CharField(required=False, allow_blank=True, default='not_appropriate')
+    reason_text = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    decline_scope = serializers.CharField(required=False, allow_blank=True, default='similar')
+    source = serializers.CharField(required=False, allow_blank=True, default='homepage_topic_card')
+
+
+class TopicFeedbackSerializer(serializers.ModelSerializer):
+    """Serializer for stored topic feedback memory."""
+    domain = serializers.CharField(source='organization.domain', read_only=True)
+    active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TopicFeedback
+        fields = [
+            'id',
+            'domain',
+            'keyword',
+            'keyword_normalized',
+            'feedback_type',
+            'reason_code',
+            'reason_text',
+            'decline_scope',
+            'source',
+            'session_id',
+            'active',
+            'created_at',
+            'updated_at',
+            'restored_at',
+        ]
+        read_only_fields = fields
+
+    def get_active(self, obj):
+        return obj.restored_at is None
 
 
 class SEODashboardSerializer(serializers.Serializer):

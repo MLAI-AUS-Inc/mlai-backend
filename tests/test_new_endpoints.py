@@ -19,6 +19,7 @@ from content_factory.models import (
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
+    TopicFeedback,
     WrittenArticle,
 )
 from organizations.models import Organization
@@ -1140,7 +1141,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             status="generating",
             client_request_id="publish-target-request-1",
             billing_source_job_id="publish-target-run-1",
-            billing_amount=6,
+            billing_amount=4,
             billing_status="charged",
             request_meta={
                 "domain": "woofya.com.au",
@@ -1171,7 +1172,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("refunded automatically", message)
 
         user.points_account.refresh_from_db()
-        self.assertEqual(user.points_account.balance, 20)
+        self.assertEqual(user.points_account.balance, 18)
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
 
@@ -1235,7 +1236,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_user_id="U123",
             status="generating",
             billing_status="charged",
-            billing_amount=6,
+            billing_amount=4,
             request_meta={"domain": "mlai.au"},
         )
 
@@ -3367,6 +3368,51 @@ class SEOResearchMemoryTests(TestCase):
         self.assertEqual(self.keyword_b.times_shown, 1)
         self.assertEqual(self.keyword_b.times_rejected, 1)
         self.assertIsNotNone(self.keyword_b.cooldown_until)
+
+    def test_topic_feedback_persists_lists_and_restores_declines(self):
+        payload = {
+            "domain": self.organization.domain,
+            "session_id": "discovery-selection-1",
+            "keyword": "how to calculate equity in a house",
+            "feedback_type": "declined",
+            "reason_code": "not_appropriate",
+            "reason_text": None,
+            "decline_scope": "similar",
+            "source": "homepage_topic_card",
+        }
+
+        response = self.client.post("/api/seo/topic-feedback/", payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["keyword"], "how to calculate equity in a house")
+        self.assertTrue(response.data["active"])
+        feedback = TopicFeedback.objects.get(organization=self.organization)
+        self.assertEqual(feedback.keyword_normalized, "how to calculate equity in a house")
+
+        duplicate = self.client.post(
+            "/api/seo/topic-feedback/",
+            {**payload, "keyword": "How To Calculate Equity In A House", "reason_code": "off_topic"},
+            format='json',
+        )
+        self.assertEqual(duplicate.status_code, status.HTTP_200_OK)
+        self.assertEqual(TopicFeedback.objects.filter(organization=self.organization, restored_at__isnull=True).count(), 1)
+        feedback.refresh_from_db()
+        self.assertEqual(feedback.reason_code, "off_topic")
+
+        list_response = self.client.get(
+            f"/api/seo/topic-feedback/?domain={self.organization.domain}&feedback_type=declined"
+        )
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 1)
+        self.assertEqual(list_response.data["feedback"][0]["id"], str(feedback.id))
+
+        restore_response = self.client.post(f"/api/seo/topic-feedback/{feedback.id}/restore/")
+        self.assertEqual(restore_response.status_code, status.HTTP_200_OK)
+        feedback.refresh_from_db()
+        self.assertIsNotNone(feedback.restored_at)
+
+        active_response = self.client.get(f"/api/seo/topic-feedback/?domain={self.organization.domain}")
+        self.assertEqual(active_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_response.data["count"], 0)
 
     def test_keyword_list_supports_offset(self):
         response = self.client.get(

@@ -22,6 +22,8 @@ from .vibe_marketing_views import (
     VibeMarketingRunView,
     VibeMarketingScanView,
     VibeMarketingSettingsView,
+    VibeMarketingTopicFeedbackRestoreView,
+    VibeMarketingTopicFeedbackView,
 )
 
 
@@ -45,6 +47,18 @@ urlpatterns = [
     path("discovery/", VibeMarketingDiscoveryView.as_view(), name="vibe-marketing-discovery"),
     path("article", VibeMarketingArticleView.as_view(), name="vibe-marketing-article-no-slash"),
     path("article/", VibeMarketingArticleView.as_view(), name="vibe-marketing-article"),
+    path("topic-feedback", VibeMarketingTopicFeedbackView.as_view(), name="vibe-marketing-topic-feedback-no-slash"),
+    path("topic-feedback/", VibeMarketingTopicFeedbackView.as_view(), name="vibe-marketing-topic-feedback"),
+    path(
+        "topic-feedback/<uuid:feedback_id>/restore",
+        VibeMarketingTopicFeedbackRestoreView.as_view(),
+        name="vibe-marketing-topic-feedback-restore-no-slash",
+    ),
+    path(
+        "topic-feedback/<uuid:feedback_id>/restore/",
+        VibeMarketingTopicFeedbackRestoreView.as_view(),
+        name="vibe-marketing-topic-feedback-restore",
+    ),
     path("lookups/locations", VibeMarketingLocationLookupView.as_view(), name="vibe-marketing-location-lookup-no-slash"),
     path("lookups/locations/", VibeMarketingLocationLookupView.as_view(), name="vibe-marketing-location-lookup"),
     path("lookups/abns", VibeMarketingAbnLookupView.as_view(), name="vibe-marketing-abn-lookup-no-slash"),
