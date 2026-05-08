@@ -263,6 +263,52 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
     return issue if isinstance(issue, dict) else {}
 
 
+def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    body = str(payload.get("body") or "").strip()
+    if not project_id:
+        raise ValueError("project_id is required.")
+    if not body:
+        raise ValueError("body is required.")
+
+    health = str(payload.get("health") or "onTrack").strip()
+    valid_health_values = {"onTrack", "atRisk", "offTrack"}
+    if health not in valid_health_values:
+        raise ValueError("health must be one of: onTrack, atRisk, offTrack.")
+
+    mutation = """
+    mutation CreateLinearMeetingProjectUpdate($input: ProjectUpdateCreateInput!) {
+      projectUpdateCreate(input: $input) {
+        success
+        projectUpdate {
+          id
+          url
+          body
+          health
+          createdAt
+          project {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    data = _graphql(
+        mutation,
+        {"input": {"projectId": project_id, "body": body, "health": health}},
+        operation_name="CreateLinearMeetingProjectUpdate",
+    )
+    result = data.get("projectUpdateCreate") if isinstance(data.get("projectUpdateCreate"), dict) else {}
+    if not result.get("success"):
+        raise LinearMeetingGraphQLError(
+            "Linear projectUpdateCreate returned success=false.",
+            operation="CreateLinearMeetingProjectUpdate",
+        )
+    project_update = result.get("projectUpdate")
+    return project_update if isinstance(project_update, dict) else {}
+
+
 def _copy_non_empty(source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str) -> None:
     value = source.get(source_key)
     if value not in (None, ""):
