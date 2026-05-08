@@ -9,22 +9,250 @@ import calendar
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
+import requests
 from django.conf import settings
-from django.db import transaction, IntegrityError
-from django.db.models import Count
 from django.db import transaction, IntegrityError, models
+from django.db.models import Count
 from django.utils import timezone
 
 from .models import (
     PointsAccount, Ledger, Task, TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, PointsAdmin
+    RewardsCatalog, RewardRedemption, PointsAdmin, PointsPurchase
 )
 from .permissions import (
     is_points_admin, require_admin, 
     PermissionDeniedError, InsufficientBalanceError
 )
 from core.models import User
+
+
+class PointsPurchaseService:
+    """Business rules for Top-up Roo Points purchases."""
+
+    ROO_TOPUP_PACKS = {
+        'topup_5': {
+            'points': 5,
+            'amount_cents': 1999,
+            'currency': 'aud',
+            'label': '5 Top-up Roo Points',
+        },
+        'topup_10': {
+            'points': 10,
+            'amount_cents': 3699,
+            'currency': 'aud',
+            'label': '10 Top-up Roo Points',
+        },
+        'topup_25': {
+            'points': 25,
+            'amount_cents': 6399,
+            'currency': 'aud',
+            'label': '25 Top-up Roo Points',
+        },
+    }
+    MAX_POINTS_PER_PURCHASE = 25
+    MAX_POINTS_PER_ROLLING_YEAR = 50
+    MAX_SPENDABLE_BALANCE = 100
+    MIN_ACCOUNT_AGE_DAYS = 7
+    LOOKBACK_DAYS = 365
+
+    @staticmethod
+    def get_pack_config(pack_id: str) -> dict:
+        cleaned_pack_id = (pack_id or '').strip()
+        if cleaned_pack_id not in PointsPurchaseService.ROO_TOPUP_PACKS:
+            allowed = ', '.join(PointsPurchaseService.ROO_TOPUP_PACKS.keys())
+            raise ValueError(f"Unsupported top-up pack. Allowed packs: {allowed}")
+        return PointsPurchaseService.ROO_TOPUP_PACKS[cleaned_pack_id]
+
+    @staticmethod
+    def frontend_checkout_page_url(purchase: PointsPurchase) -> str:
+        frontend_base_url = getattr(settings, 'DEFAULT_FRONTEND_URL', 'https://mlai.au').rstrip('/')
+        return f"{frontend_base_url}/roo/topup/{purchase.id}"
+
+    @staticmethod
+    def stripe_return_url(purchase: PointsPurchase, outcome: str) -> str:
+        return f"{PointsPurchaseService.frontend_checkout_page_url(purchase)}?checkout={outcome}"
+
+    @staticmethod
+    @transaction.atomic
+    def create_purchase(
+        slack_user_id: str,
+        pack_id: str,
+        *,
+        purchase_from: Optional[dict] = None,
+        manual_balance_approval: bool = False,
+    ) -> PointsPurchase:
+        cleaned_slack_user_id = (slack_user_id or '').strip()
+        if not cleaned_slack_user_id:
+            raise ValueError("slack_user_id is required")
+
+        cleaned_pack_id = (pack_id or '').strip()
+        pack = PointsPurchaseService.get_pack_config(cleaned_pack_id)
+
+        user = PointsService.get_user_by_slack_id(cleaned_slack_user_id)
+        if not user:
+            raise PermissionDeniedError("A linked user account is required for top-up purchases")
+
+        PointsPurchaseService.validate_purchase_limits(
+            user,
+            pack['points'],
+            manual_balance_approval=manual_balance_approval,
+        )
+
+        origin = dict(purchase_from or {})
+        origin.setdefault('source', 'slack')
+        origin['slack_user_id'] = cleaned_slack_user_id
+
+        return PointsPurchase.objects.create(
+            user=user,
+            slack_user_id=cleaned_slack_user_id,
+            pack_id=cleaned_pack_id,
+            points_amount=pack['points'],
+            amount_cents=pack['amount_cents'],
+            currency=pack['currency'],
+            purchase_from=origin,
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def create_checkout_session(
+        purchase: PointsPurchase,
+        terms_version_accepted: str,
+        privacy_version_accepted: str,
+    ) -> dict:
+        cleaned_terms_version = (terms_version_accepted or '').strip()
+        cleaned_privacy_version = (privacy_version_accepted or '').strip()
+        if not cleaned_terms_version or not cleaned_privacy_version:
+            raise ValueError("terms_version_accepted and privacy_version_accepted are required")
+
+        purchase = PointsPurchase.objects.select_for_update().get(pk=purchase.pk)
+        if purchase.status != 'pending':
+            raise ValueError(f"Points purchase is {purchase.status} and cannot start Checkout")
+        if purchase.expires_at <= timezone.now():
+            raise ValueError("Points purchase has expired")
+
+        PointsPurchaseService.validate_purchase_limits(purchase.user, purchase.points_amount)
+        pack = PointsPurchaseService.get_pack_config(purchase.pack_id)
+
+        stripe_secret_key = (getattr(settings, 'STRIPE_SECRET_KEY', '') or '').strip()
+        if not stripe_secret_key:
+            raise RuntimeError("Stripe is not configured for Roo Points top-ups")
+
+        metadata = {
+            'points_purchase_id': str(purchase.id),
+            'mlai_user_id': str(purchase.user_id),
+            'slack_user_id': purchase.slack_user_id,
+            'pack_id': purchase.pack_id,
+            'points_amount': str(purchase.points_amount),
+            'terms_version_accepted': cleaned_terms_version,
+            'privacy_version_accepted': cleaned_privacy_version,
+        }
+        data = {
+            'mode': 'payment',
+            'client_reference_id': str(purchase.id),
+            'success_url': PointsPurchaseService.stripe_return_url(purchase, 'success'),
+            'cancel_url': PointsPurchaseService.stripe_return_url(purchase, 'cancelled'),
+            'line_items[0][quantity]': '1',
+            'line_items[0][price_data][currency]': purchase.currency,
+            'line_items[0][price_data][unit_amount]': str(purchase.amount_cents),
+            'line_items[0][price_data][product_data][name]': pack['label'],
+        }
+        for key, value in metadata.items():
+            data[f'metadata[{key}]'] = value
+            data[f'payment_intent_data[metadata][{key}]'] = value
+
+        response = requests.post(
+            'https://api.stripe.com/v1/checkout/sessions',
+            auth=(stripe_secret_key, ''),
+            data=data,
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            try:
+                error_data = response.json()
+                message = error_data.get('error', {}).get('message') or response.text
+            except ValueError:
+                message = response.text
+            raise RuntimeError(f"Stripe Checkout Session creation failed: {message}")
+
+        session = response.json()
+        checkout_session_id = session.get('id')
+        checkout_session_url = session.get('url')
+        if not checkout_session_id or not checkout_session_url:
+            raise RuntimeError("Stripe Checkout Session response was missing id or url")
+
+        purchase.stripe_checkout_session_id = checkout_session_id
+        purchase.terms_version_accepted = cleaned_terms_version
+        purchase.terms_accepted_at = timezone.now()
+        purchase.privacy_version_accepted = cleaned_privacy_version
+        purchase.privacy_accepted_at = purchase.terms_accepted_at
+        purchase.save(
+            update_fields=[
+                'stripe_checkout_session_id',
+                'terms_version_accepted',
+                'terms_accepted_at',
+                'privacy_version_accepted',
+                'privacy_accepted_at',
+                'updated_at',
+            ]
+        )
+
+        return {
+            'purchase': purchase,
+            'checkout_session_id': checkout_session_id,
+            'checkout_session_url': checkout_session_url,
+        }
+
+    @staticmethod
+    def validate_purchase_limits(
+        user: Optional[User],
+        points_amount: int,
+        *,
+        now: Optional[datetime] = None,
+        manual_balance_approval: bool = False,
+    ) -> None:
+        """
+        Validate conservative purchase limits for the top-up MVP.
+
+        Raises:
+            PermissionDeniedError: when the caller is anonymous/guest-like.
+            ValueError: when a policy limit is violated.
+        """
+        if user is None or not getattr(user, "is_authenticated", False):
+            raise PermissionDeniedError("A linked user account is required for top-up purchases")
+
+        if not getattr(user, "slack_id", None):
+            raise PermissionDeniedError("Guest checkout is not supported for top-up purchases")
+
+        if points_amount <= 0:
+            raise ValueError("points_amount must be positive")
+        if points_amount > PointsPurchaseService.MAX_POINTS_PER_PURCHASE:
+            raise ValueError("Top-up purchase exceeds 25-point per-purchase limit")
+
+        reference_now = now or timezone.now()
+        account_age = reference_now - user.date_joined
+        if account_age < timedelta(days=PointsPurchaseService.MIN_ACCOUNT_AGE_DAYS):
+            raise ValueError("Top-up purchases require an account age of at least 7 days")
+
+        window_start = reference_now - timedelta(days=PointsPurchaseService.LOOKBACK_DAYS)
+        rolling_total = (
+            PointsPurchase.objects.filter(
+                user=user,
+                status='paid',
+                paid_at__gte=window_start,
+            ).aggregate(total=models.Sum('points_amount'))['total'] or 0
+        )
+        if rolling_total + points_amount > PointsPurchaseService.MAX_POINTS_PER_ROLLING_YEAR:
+            raise ValueError("Top-up purchases exceed the 50-point rolling 12-month limit")
+
+        try:
+            current_balance = user.points_account.balance
+        except PointsAccount.DoesNotExist:
+            current_balance = 0
+
+        projected_balance = current_balance + points_amount
+        if projected_balance > PointsPurchaseService.MAX_SPENDABLE_BALANCE and not manual_balance_approval:
+            raise ValueError("Top-up purchase would exceed the 100-point spendable balance cap")
 
 
 class PointsService:
@@ -61,9 +289,29 @@ class PointsService:
         account = PointsService.get_or_create_account(user)
         return {
             'balance': account.balance,
+            'earned_balance': account.earned_balance,
+            'purchased_topup_balance': account.purchased_topup_balance,
             'lifetime_earned': account.lifetime_earned,
+            'lifetime_purchased_topup': account.lifetime_purchased_topup,
             'lifetime_spent': account.lifetime_spent,
+            'expired_or_reversed_points': account.expired_or_reversed_points,
         }
+
+    @staticmethod
+    def _debit_account_balances(account: PointsAccount, delta: int) -> None:
+        """
+        Deduct spendable points while keeping earned/top-up sub-balances coherent.
+
+        A full point-lot allocator can replace this when expiry-aware redemption
+        lands. For now, spend purchased top-up points first, then earned points.
+        """
+        remaining = delta
+        purchased_debit = min(account.purchased_topup_balance, remaining)
+        account.purchased_topup_balance -= purchased_debit
+        remaining -= purchased_debit
+
+        earned_debit = min(account.earned_balance, remaining)
+        account.earned_balance -= earned_debit
     
     @staticmethod
     def get_user_by_slack_id(slack_id: str) -> Optional[User]:
@@ -190,9 +438,59 @@ class PointsService:
         
         # Update account
         account.balance += delta
+        account.earned_balance += delta
         account.lifetime_earned += delta
         account.save()
         
+        return ledger, True
+
+    @staticmethod
+    @transaction.atomic
+    def credit_purchased_topup(
+        user: User,
+        delta: int,
+        description: str,
+        idempotency_key: str,
+        reference_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+        created_by_slack_id: str = "STRIPE",
+    ) -> Tuple[Ledger, bool]:
+        """
+        Credit purchased top-up points without increasing contribution metrics.
+        """
+        if delta <= 0:
+            raise ValueError("Top-up credit delta must be positive")
+
+        existing = Ledger.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            return existing, False
+
+        account = PointsAccount.objects.select_for_update().filter(user=user).first()
+        if not account:
+            account = PointsAccount.objects.create(user=user)
+            account = PointsAccount.objects.select_for_update().get(user=user)
+
+        try:
+            ledger = Ledger.objects.create(
+                user=user,
+                delta=delta,
+                kind='EARN',
+                source='purchased_topup',
+                reference_type=reference_type,
+                reference_id=reference_id,
+                description=description,
+                created_by_slack_id=created_by_slack_id,
+                idempotency_key=idempotency_key,
+            )
+        except IntegrityError:
+            existing = Ledger.objects.get(idempotency_key=idempotency_key)
+            return existing, False
+
+        account.balance += delta
+        account.purchased_topup_balance += delta
+        account.lifetime_purchased_topup += delta
+        account.save()
+
         return ledger, True
     
     @staticmethod
@@ -266,6 +564,7 @@ class PointsService:
         
         # Update account
         account.balance -= delta
+        PointsService._debit_account_balances(account, delta)
         account.lifetime_spent += delta
         account.save()
         
@@ -317,6 +616,7 @@ class PointsService:
             return existing, False
         
         account.balance += delta
+        account.earned_balance += delta
         # Note: Don't decrease lifetime_spent on refund - it's a historical record
         account.save()
         

@@ -1,9 +1,14 @@
+import hashlib
+import hmac
+import json
+import time
 from datetime import date, timedelta
 import threading
 
 from django.db import close_old_connections
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from .models import (
@@ -12,6 +17,7 @@ from .models import (
     Ledger,
     PointsAccount,
     PointsAdmin,
+    PointsPurchase,
     PointsRequest,
     RewardRedemption,
     RewardsCatalog,
@@ -20,10 +26,494 @@ from .models import (
     TaskSubmission,
 )
 from django.contrib.auth import get_user_model
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from .services import PointsService
 
 User = get_user_model()
+
+
+class PointsPurchaseViewSetTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('points-purchase-list')
+        self.slack_user_id = 'UTOPUPAPI123'
+        self.user = User.objects.create_user(
+            email='topup-api@example.com',
+            slack_id=self.slack_user_id,
+        )
+        self.user.date_joined = timezone.now() - timedelta(days=30)
+        self.user.save(update_fields=['date_joined'])
+
+    @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test')
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_pending_purchase_success(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': f'  {self.slack_user_id} ',
+                'pack_id': 'topup_10',
+                'purchase_from': {
+                    'source': 'slack',
+                    'slack_channel_id': 'C123',
+                    'slack_thread_ts': '1712345678.000100',
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        purchase = PointsPurchase.objects.get()
+        self.assertEqual(response.data['id'], str(purchase.id))
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(response.data['pack_id'], 'topup_10')
+        self.assertEqual(response.data['points_amount'], 10)
+        self.assertEqual(response.data['amount_cents'], 3699)
+        self.assertEqual(response.data['currency'], 'aud')
+        self.assertEqual(
+            response.data['frontend_checkout_page_url'],
+            f'https://mlai.test/roo/topup/{purchase.id}',
+        )
+        self.assertEqual(purchase.user, self.user)
+        self.assertEqual(purchase.slack_user_id, self.slack_user_id)
+        self.assertEqual(purchase.purchase_from['source'], 'slack')
+        self.assertEqual(purchase.purchase_from['slack_user_id'], self.slack_user_id)
+        self.assertEqual(purchase.purchase_from['slack_channel_id'], 'C123')
+        self.assertIsNone(purchase.ledger_entry)
+        self.assertIsNone(purchase.stripe_checkout_session_id)
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+
+    @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test')
+    def test_retrieve_pending_purchase_is_public(self):
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_5',
+            points_amount=5,
+            amount_cents=1999,
+        )
+
+        response = self.client.get(reverse('points-purchase-detail', kwargs={'pk': purchase.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], str(purchase.id))
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(response.data['pack_id'], 'topup_5')
+        self.assertEqual(response.data['points_amount'], 5)
+        self.assertEqual(response.data['amount_cents'], 1999)
+        self.assertEqual(response.data['currency'], 'aud')
+        self.assertEqual(
+            response.data['frontend_checkout_page_url'],
+            f'https://mlai.test/roo/topup/{purchase.id}',
+        )
+        self.assertNotIn('user', response.data)
+        self.assertNotIn('slack_user_id', response.data)
+
+    def test_retrieve_purchase_not_found(self):
+        response = self.client.get('/api/v1/points/purchases/00000000-0000-0000-0000-000000000000/')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('Points purchase not found', response.data['error'])
+
+    def test_retrieve_purchase_malformed_id_returns_not_found(self):
+        response = self.client.get('/api/v1/points/purchases/not-a-uuid/')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('Points purchase not found', response.data['error'])
+
+    @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test', STRIPE_SECRET_KEY='sk_test_roo')
+    @patch('roo.services.requests.post')
+    def test_checkout_creates_stripe_session_for_pending_purchase(self, mock_post):
+        mock_post.return_value = Mock(
+            status_code=200,
+            json=Mock(return_value={
+                'id': 'cs_test_roo_points',
+                'url': 'https://checkout.stripe.com/c/pay/cs_test_roo_points',
+            }),
+        )
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_10',
+            points_amount=10,
+            amount_cents=3699,
+        )
+
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {
+                'terms_version_accepted': 'roo-points-terms-2026-05-04',
+                'privacy_version_accepted': 'privacy-2026-05-04',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertEqual(response.data['stripe_checkout_session_id'], 'cs_test_roo_points')
+        self.assertEqual(response.data['checkout_session_url'], 'https://checkout.stripe.com/c/pay/cs_test_roo_points')
+
+        purchase.refresh_from_db()
+        self.assertEqual(purchase.stripe_checkout_session_id, 'cs_test_roo_points')
+        self.assertEqual(purchase.terms_version_accepted, 'roo-points-terms-2026-05-04')
+        self.assertIsNotNone(purchase.terms_accepted_at)
+        self.assertEqual(purchase.privacy_version_accepted, 'privacy-2026-05-04')
+        self.assertIsNotNone(purchase.privacy_accepted_at)
+        self.assertIsNone(purchase.ledger_entry)
+        self.assertFalse(Ledger.objects.exists())
+
+        mock_post.assert_called_once()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs['auth'], ('sk_test_roo', ''))
+        stripe_data = kwargs['data']
+        self.assertEqual(stripe_data['mode'], 'payment')
+        self.assertEqual(stripe_data['client_reference_id'], str(purchase.id))
+        self.assertEqual(stripe_data['success_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=success')
+        self.assertEqual(stripe_data['cancel_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=cancelled')
+        self.assertEqual(stripe_data['line_items[0][price_data][currency]'], 'aud')
+        self.assertEqual(stripe_data['line_items[0][price_data][unit_amount]'], '3699')
+        self.assertEqual(stripe_data['line_items[0][price_data][product_data][name]'], '10 Top-up Roo Points')
+        self.assertEqual(stripe_data['metadata[points_purchase_id]'], str(purchase.id))
+        self.assertEqual(stripe_data['metadata[mlai_user_id]'], str(self.user.id))
+        self.assertEqual(stripe_data['metadata[slack_user_id]'], self.slack_user_id)
+        self.assertEqual(stripe_data['metadata[pack_id]'], 'topup_10')
+        self.assertEqual(stripe_data['metadata[points_amount]'], '10')
+        self.assertEqual(stripe_data['metadata[terms_version_accepted]'], 'roo-points-terms-2026-05-04')
+        self.assertEqual(stripe_data['metadata[privacy_version_accepted]'], 'privacy-2026-05-04')
+
+    @override_settings(STRIPE_SECRET_KEY='sk_test_roo')
+    @patch('roo.services.requests.post')
+    def test_checkout_requires_terms_and_privacy_versions(self, mock_post):
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_5',
+            points_amount=5,
+            amount_cents=1999,
+        )
+
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {'terms_version_accepted': 'roo-points-terms-2026-05-04'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('terms_version_accepted and privacy_version_accepted are required', response.data['error'])
+        mock_post.assert_not_called()
+
+    @override_settings(STRIPE_SECRET_KEY='sk_test_roo')
+    @patch('roo.services.requests.post')
+    def test_checkout_rejects_expired_purchase(self, mock_post):
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_5',
+            points_amount=5,
+            amount_cents=1999,
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {
+                'terms_version_accepted': 'roo-points-terms-2026-05-04',
+                'privacy_version_accepted': 'privacy-2026-05-04',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('expired', response.data['error'])
+        mock_post.assert_not_called()
+
+    @override_settings(STRIPE_SECRET_KEY='sk_test_roo')
+    @patch('roo.services.requests.post')
+    def test_checkout_rejects_non_pending_purchase(self, mock_post):
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_5',
+            points_amount=5,
+            amount_cents=1999,
+            status='paid',
+            paid_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {
+                'terms_version_accepted': 'roo-points-terms-2026-05-04',
+                'privacy_version_accepted': 'privacy-2026-05-04',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('paid', response.data['error'])
+        mock_post.assert_not_called()
+
+    @override_settings(STRIPE_SECRET_KEY='')
+    def test_checkout_requires_stripe_configuration(self):
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_5',
+            points_amount=5,
+            amount_cents=1999,
+        )
+
+        response = self.client.post(
+            reverse('points-purchase-checkout', kwargs={'pk': purchase.id}),
+            {
+                'terms_version_accepted': 'roo-points-terms-2026-05-04',
+                'privacy_version_accepted': 'privacy-2026-05-04',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('Stripe is not configured', response.data['error'])
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_rejects_unlinked_slack_user(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': 'UNLINKEDTOPUP',
+                'pack_id': 'topup_5',
+                'purchase_from': {'source': 'slack'},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('linked user account', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_rejects_invalid_pack(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.slack_user_id,
+                'pack_id': 'topup_50',
+                'purchase_from': {'source': 'slack'},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Unsupported top-up pack', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_create_purchase_requires_object_purchase_from(self, mock_permission):
+        response = self.client.post(
+            self.url,
+            {
+                'slack_user_id': self.slack_user_id,
+                'pack_id': 'topup_5',
+                'purchase_from': 'slack',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('purchase_from must be an object', response.data['error'])
+        self.assertFalse(PointsPurchase.objects.exists())
+
+
+class StripeWebhookViewTests(APITestCase):
+    webhook_secret = 'whsec_roo_test'
+
+    def setUp(self):
+        self.url = reverse('points-stripe-webhook')
+        self.slack_user_id = 'USTRIPEWEBHOOK123'
+        self.user = User.objects.create_user(
+            email='stripe-webhook@example.com',
+            slack_id=self.slack_user_id,
+        )
+        self.purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.slack_user_id,
+            pack_id='topup_10',
+            points_amount=10,
+            amount_cents=3699,
+            stripe_checkout_session_id='cs_test_roo_paid',
+        )
+
+    def _payload(self, session=None, event_type='checkout.session.completed'):
+        session = session or {
+            'id': 'cs_test_roo_paid',
+            'status': 'complete',
+            'payment_status': 'paid',
+            'metadata': {'points_purchase_id': str(self.purchase.id)},
+        }
+        return json.dumps({
+            'id': 'evt_test_roo_points',
+            'type': event_type,
+            'data': {'object': session},
+        }).encode('utf-8')
+
+    def _signature(self, payload, secret=None, timestamp=None):
+        secret = secret or self.webhook_secret
+        timestamp = timestamp or int(time.time())
+        signed_payload = f"{timestamp}.".encode('utf-8') + payload
+        signature = hmac.new(
+            secret.encode('utf-8'),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return f't={timestamp},v1={signature}'
+
+    def _post_webhook(self, payload, signature=None):
+        return self.client.post(
+            self.url,
+            data=payload,
+            content_type='application/json',
+            HTTP_STRIPE_SIGNATURE=signature or self._signature(payload),
+        )
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_checkout_completed_webhook_credits_purchase(self):
+        payload = self._payload()
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['purchase_id'], str(self.purchase.id))
+        self.assertTrue(response.data['credited'])
+
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'paid')
+        self.assertIsNotNone(self.purchase.paid_at)
+        self.assertIsNotNone(self.purchase.ledger_entry)
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.earned_balance, 0)
+        self.assertEqual(account.purchased_topup_balance, 10)
+        self.assertEqual(account.lifetime_earned, 0)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+
+        ledger = self.purchase.ledger_entry
+        self.assertEqual(ledger.delta, 10)
+        self.assertEqual(ledger.kind, 'EARN')
+        self.assertEqual(ledger.source, 'purchased_topup')
+        self.assertEqual(ledger.reference_type, 'POINTS_PURCHASE')
+        self.assertEqual(ledger.reference_id, str(self.purchase.id))
+        self.assertEqual(ledger.idempotency_key, 'stripe_checkout_session:cs_test_roo_paid')
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_checkout_completed_webhook_is_idempotent(self):
+        payload = self._payload()
+
+        first_response = self._post_webhook(payload)
+        second_response = self._post_webhook(payload)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(first_response.data['credited'])
+        self.assertFalse(second_response.data['credited'])
+        self.assertTrue(second_response.data['already_paid'])
+        self.assertEqual(Ledger.objects.count(), 1)
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.purchased_topup_balance, 10)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_checkout_completed_webhook_falls_back_to_session_id(self):
+        payload = self._payload(session={
+            'id': 'cs_test_roo_paid',
+            'status': 'complete',
+            'payment_status': 'paid',
+            'metadata': {},
+        })
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'paid')
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 10)
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_checkout_completed_webhook_rejects_invalid_signature(self):
+        payload = self._payload()
+
+        response = self._post_webhook(payload, signature=self._signature(payload, secret='wrong'))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.purchase.refresh_from_db()
+        self.assertEqual(self.purchase.status, 'pending')
+        self.assertFalse(Ledger.objects.exists())
+
+    @override_settings(STRIPE_WEBHOOK_SECRET='')
+    def test_webhook_requires_webhook_secret(self):
+        payload = self._payload()
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('Stripe webhook secret is not configured', response.data['error'])
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    def test_webhook_ignores_unhandled_event_type(self):
+        payload = self._payload(event_type='payment_intent.payment_failed')
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['ignored'])
+        self.assertFalse(Ledger.objects.exists())
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    @patch('roo.views.SlackService.send_message', return_value=(True, '1712345678.000200'))
+    def test_checkout_completed_webhook_posts_paid_confirmation_to_slack_thread(self, mock_send_message):
+        self.purchase.purchase_from = {
+            'source': 'slack',
+            'slack_channel_id': 'C123',
+            'slack_thread_ts': '111.222',
+        }
+        self.purchase.save(update_fields=['purchase_from'])
+        payload = self._payload()
+
+        response = self._post_webhook(payload)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['slack_confirmation_sent'])
+        mock_send_message.assert_called_once()
+        args, kwargs = mock_send_message.call_args
+        self.assertEqual(args[0], 'C123')
+        self.assertIn('10 Roo Points have been added', args[1])
+        self.assertIn('do not count toward lifetime earned contribution', args[1])
+        self.assertEqual(kwargs['thread_ts'], '111.222')
+
+        self.purchase.refresh_from_db()
+        self.assertEqual(
+            self.purchase.metadata['slack_paid_confirmation_message_ts'],
+            '1712345678.000200',
+        )
+
+    @override_settings(STRIPE_WEBHOOK_SECRET=webhook_secret)
+    @patch('roo.views.SlackService.send_message', return_value=(True, '1712345678.000200'))
+    def test_duplicate_paid_webhook_does_not_post_duplicate_slack_confirmation(self, mock_send_message):
+        self.purchase.purchase_from = {
+            'source': 'slack',
+            'slack_channel_id': 'C123',
+            'slack_thread_ts': '111.222',
+        }
+        self.purchase.save(update_fields=['purchase_from'])
+        payload = self._payload()
+
+        first_response = self._post_webhook(payload)
+        second_response = self._post_webhook(payload)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        mock_send_message.assert_called_once()
+        self.assertTrue(second_response.data['already_paid'])
+
 
 class ManualAwardViewTests(APITestCase):
     def setUp(self):

@@ -1,5 +1,9 @@
+import hashlib
+import hmac
+import json
 import time
 
+from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
 from rest_framework.permissions import AllowAny
 # Removed mixins as they are not used in new code usually, but kept if needed for legacy.
@@ -19,10 +23,13 @@ from typing import Optional, Tuple
 from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase
 )
 
-from .services import PointsService, CoworkingService, TaskService, RewardsService
+from .services import (
+    PointsService, PointsPurchaseService, CoworkingService,
+    TaskService, RewardsService,
+)
 from .permissions import (
     can_generate_coworking_reports,
     is_points_admin,
@@ -87,6 +94,8 @@ def split_slack_profile_name(profile: dict, slack_user_id: str) -> Tuple[str, st
         first_name = 'Unknown'
         last_name = 'Slack User'
     return first_name, last_name
+
+STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300
 
 
 def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
@@ -191,6 +200,183 @@ class RateCardView(viewsets.ReadOnlyModelViewSet):
     serializer_class = TaskTemplateSerializer
     # Allow either API Key (for Roo/bots) or IsAuthenticated (for frontend users)
     permission_classes = [HasAPIKey | settings.REST_FRAMEWORK['DEFAULT_PERMISSION_CLASSES'][0]]
+
+
+class StripeWebhookView(APIView):
+    permission_classes = [AllowAny]
+
+    def _parse_stripe_signature(self, signature_header):
+        parts = {}
+        for item in signature_header.split(','):
+            key, separator, value = item.partition('=')
+            if separator and key and value:
+                parts.setdefault(key, []).append(value)
+        timestamp_values = parts.get('t') or []
+        signatures = parts.get('v1') or []
+        if not timestamp_values or not signatures:
+            raise ValueError('Malformed Stripe signature header')
+        try:
+            timestamp = int(timestamp_values[0])
+        except ValueError as exc:
+            raise ValueError('Malformed Stripe signature timestamp') from exc
+        return timestamp, signatures
+
+    def _verify_stripe_signature(self, payload, signature_header):
+        webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', '')
+        if not webhook_secret:
+            raise RuntimeError('Stripe webhook secret is not configured')
+        if not signature_header:
+            raise ValueError('Missing Stripe signature header')
+
+        timestamp, signatures = self._parse_stripe_signature(signature_header)
+        if abs(time.time() - timestamp) > STRIPE_WEBHOOK_TOLERANCE_SECONDS:
+            raise ValueError('Stripe signature timestamp is outside the tolerance window')
+
+        signed_payload = f"{timestamp}.".encode('utf-8') + payload
+        expected_signature = hmac.new(
+            webhook_secret.encode('utf-8'),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        if not any(hmac.compare_digest(expected_signature, signature) for signature in signatures):
+            raise ValueError('Invalid Stripe signature')
+
+    def _find_purchase_for_session(self, session):
+        metadata = session.get('metadata') or {}
+        purchase_id = metadata.get('points_purchase_id')
+        queryset = PointsPurchase.objects.select_for_update()
+        if purchase_id:
+            return queryset.get(id=purchase_id)
+        return queryset.get(stripe_checkout_session_id=session.get('id'))
+
+    def _post_paid_slack_confirmation(self, purchase):
+        purchase_from = purchase.purchase_from or {}
+        if purchase_from.get('source') != 'slack':
+            return False
+
+        channel_id = str(purchase_from.get('slack_channel_id') or '').strip()
+        thread_ts = str(purchase_from.get('slack_thread_ts') or '').strip()
+        if not channel_id or not thread_ts:
+            return False
+
+        metadata = dict(purchase.metadata or {})
+        if metadata.get('slack_paid_confirmation_message_ts'):
+            return False
+
+        text = (
+            f"Top-up complete. {purchase.points_amount} Roo Points have been added. "
+            "These points can be used for eligible MLAI rewards, but they do not count "
+            "toward lifetime earned contribution."
+        )
+        sent, message_ts = SlackService.send_message(
+            channel_id,
+            text,
+            thread_ts=thread_ts,
+        )
+        if not sent:
+            logger.warning(
+                "Failed to post Roo Points paid confirmation for purchase %s",
+                purchase.id,
+            )
+            return False
+
+        metadata['slack_paid_confirmation_message_ts'] = message_ts
+        metadata['slack_paid_confirmation_sent_at'] = timezone.now().isoformat()
+        purchase.metadata = metadata
+        purchase.save(update_fields=['metadata', 'updated_at'])
+        return True
+
+    def _handle_checkout_completed(self, session):
+        if session.get('status') != 'complete' or session.get('payment_status') != 'paid':
+            return {'received': True, 'ignored': True, 'reason': 'checkout_session_not_paid'}
+
+        session_id = session.get('id')
+        if not session_id:
+            raise ValueError('Stripe checkout session id is required')
+
+        should_post_slack_confirmation = False
+        slack_confirmation_sent = False
+        with transaction.atomic():
+            purchase = self._find_purchase_for_session(session)
+
+            if purchase.stripe_checkout_session_id and purchase.stripe_checkout_session_id != session_id:
+                raise ValueError('Stripe checkout session does not match the purchase')
+
+            if purchase.status == 'paid' and purchase.ledger_entry_id:
+                return {
+                    'received': True,
+                    'purchase_id': str(purchase.id),
+                    'credited': False,
+                    'already_paid': True,
+                }
+
+            if purchase.status != 'pending':
+                return {
+                    'received': True,
+                    'purchase_id': str(purchase.id),
+                    'ignored': True,
+                    'reason': f'purchase_{purchase.status}',
+                }
+
+            ledger, credited = PointsService.credit_purchased_topup(
+                user=purchase.user,
+                delta=purchase.points_amount,
+                description=f"{purchase.points_amount} Top-up Roo Points purchase",
+                idempotency_key=f"stripe_checkout_session:{session_id}",
+                reference_type='POINTS_PURCHASE',
+                reference_id=str(purchase.id),
+                created_by_slack_id='STRIPE',
+            )
+
+            purchase.status = 'paid'
+            purchase.paid_at = timezone.now()
+            purchase.stripe_checkout_session_id = session_id
+            purchase.ledger_entry = ledger
+            purchase.save(update_fields=[
+                'status',
+                'paid_at',
+                'stripe_checkout_session_id',
+                'ledger_entry',
+                'updated_at',
+            ])
+            should_post_slack_confirmation = True
+
+        if should_post_slack_confirmation:
+            slack_confirmation_sent = self._post_paid_slack_confirmation(purchase)
+
+        return {
+            'received': True,
+            'purchase_id': str(purchase.id),
+            'credited': credited,
+            'slack_confirmation_sent': slack_confirmation_sent,
+        }
+
+    def post(self, request):
+        payload = request.body
+        signature_header = request.META.get('HTTP_STRIPE_SIGNATURE', '')
+
+        try:
+            self._verify_stripe_signature(payload, signature_header)
+            event = json.loads(payload.decode('utf-8'))
+        except RuntimeError as exc:
+            logger.warning('Stripe webhook is not configured: %s', exc)
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        event_type = event.get('type')
+        if event_type != 'checkout.session.completed':
+            return Response({'received': True, 'ignored': True})
+
+        session = (event.get('data') or {}).get('object') or {}
+        try:
+            result = self._handle_checkout_completed(session)
+        except (PointsPurchase.DoesNotExist, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.ReadOnlyModelViewSet):
@@ -922,8 +1108,12 @@ class UserBalanceViewSet(viewsets.ViewSet):
                 'slack_user_id': slack_user_id,
                 'email': user.email,
                 'balance': balance_data['balance'],
+                'earned_balance': balance_data['earned_balance'],
+                'purchased_topup_balance': balance_data['purchased_topup_balance'],
                 'lifetime_earned': balance_data['lifetime_earned'],
+                'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
                 'lifetime_spent': balance_data['lifetime_spent'],
+                'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
                 'annual_balance': balance_data['lifetime_earned'],  # For backwards compat
                 'lifetime_balance': balance_data['lifetime_earned'],  # For backwards compat
             }
@@ -1463,6 +1653,102 @@ class PointsRequestViewSet(viewsets.ViewSet):
                 **PointsRequestSerializer(points_request).data,
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
+            }
+        )
+
+
+class PointsPurchaseViewSet(viewsets.ViewSet):
+    """Create pending Top-up Roo Points purchases for Roo."""
+    permission_classes = [HasRooApiKey]
+
+    def get_permissions(self):
+        if self.action in ('retrieve', 'checkout'):
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
+
+    def _response_data(self, purchase):
+        return {
+            'id': str(purchase.id),
+            'status': purchase.status,
+            'pack_id': purchase.pack_id,
+            'points_amount': purchase.points_amount,
+            'amount_cents': purchase.amount_cents,
+            'currency': purchase.currency,
+            'expires_at': purchase.expires_at.isoformat(),
+            'paid_at': purchase.paid_at.isoformat() if purchase.paid_at else None,
+            'created_at': purchase.created_at.isoformat(),
+            'frontend_checkout_page_url': PointsPurchaseService.frontend_checkout_page_url(purchase),
+        }
+
+    def create(self, request):
+        slack_user_id = (request.data.get('slack_user_id') or '').strip()
+        pack_id = (request.data.get('pack_id') or '').strip()
+        purchase_from = request.data.get('purchase_from') or {}
+
+        if not slack_user_id or not pack_id:
+            return Response(
+                {'error': 'slack_user_id and pack_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(purchase_from, dict):
+            return Response(
+                {'error': 'purchase_from must be an object when provided'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            purchase = PointsPurchaseService.create_purchase(
+                slack_user_id=slack_user_id,
+                pack_id=pack_id,
+                purchase_from=purchase_from,
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            self._response_data(purchase),
+            status=status.HTTP_201_CREATED,
+        )
+
+    def retrieve(self, request, pk=None):
+        try:
+            purchase = PointsPurchase.objects.get(pk=pk)
+        except (PointsPurchase.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(self._response_data(purchase))
+
+    @action(detail=True, methods=['post'], url_path='checkout')
+    def checkout(self, request, pk=None):
+        try:
+            purchase = PointsPurchase.objects.get(pk=pk)
+        except (PointsPurchase.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'Points purchase not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        terms_version_accepted = request.data.get('terms_version_accepted')
+        privacy_version_accepted = request.data.get('privacy_version_accepted')
+        try:
+            checkout_result = PointsPurchaseService.create_checkout_session(
+                purchase=purchase,
+                terms_version_accepted=terms_version_accepted,
+                privacy_version_accepted=privacy_version_accepted,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            response_status = status.HTTP_409_CONFLICT if 'cannot start Checkout' in message or 'expired' in message else status.HTTP_400_BAD_REQUEST
+            return Response({'error': message}, status=response_status)
+        except RuntimeError as exc:
+            logger.warning("Failed to create Stripe Checkout Session for PointsPurchase %s: %s", pk, exc)
+            return Response({'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        purchase = checkout_result['purchase']
+        return Response(
+            {
+                **self._response_data(purchase),
+                'stripe_checkout_session_id': checkout_result['checkout_session_id'],
+                'checkout_session_url': checkout_result['checkout_session_url'],
             }
         )
 

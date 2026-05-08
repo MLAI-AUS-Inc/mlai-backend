@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import (
-    PointsAdmin, Minter, Task, Ledger, PointsAccount,
+    PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase,
     TaskAssignment, TaskSubmission, TaskActivity,
     CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
@@ -24,7 +24,19 @@ class PointsAccountSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = PointsAccount
-        fields = ['user_id', 'email', 'slack_id', 'balance', 'lifetime_earned', 'lifetime_spent', 'updated_at']
+        fields = [
+            'user_id',
+            'email',
+            'slack_id',
+            'balance',
+            'earned_balance',
+            'purchased_topup_balance',
+            'lifetime_earned',
+            'lifetime_purchased_topup',
+            'lifetime_spent',
+            'expired_or_reversed_points',
+            'updated_at',
+        ]
 
 
 class LedgerSerializer(serializers.ModelSerializer):
@@ -38,6 +50,37 @@ class LedgerSerializer(serializers.ModelSerializer):
             'created_by_slack_id', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+
+class PointsPurchaseSerializer(serializers.ModelSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+
+    class Meta:
+        model = PointsPurchase
+        fields = [
+            'id',
+            'user',
+            'user_email',
+            'slack_user_id',
+            'pack_id',
+            'points_amount',
+            'amount_cents',
+            'currency',
+            'status',
+            'stripe_checkout_session_id',
+            'terms_version_accepted',
+            'terms_accepted_at',
+            'privacy_version_accepted',
+            'privacy_accepted_at',
+            'purchase_from',
+            'ledger_entry',
+            'metadata',
+            'expires_at',
+            'paid_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class TaskAssignmentSerializer(serializers.ModelSerializer):

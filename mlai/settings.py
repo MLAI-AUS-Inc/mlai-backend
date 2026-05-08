@@ -447,6 +447,7 @@ STRIPE_SECRET_KEY = _env_first(
     "STRIPE_API_SECRET_KEY",
     "STRIPE_API_KEY",
 )
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
     "STRIPE_OAUTH_REDIRECT_URI",
     f"{DEFAULT_BACKEND_URL}/integrations/callback/stripe",
