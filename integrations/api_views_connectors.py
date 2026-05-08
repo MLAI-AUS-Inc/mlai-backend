@@ -28,6 +28,7 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingGraphQLError,
     LinearMeetingRateLimitError,
     create_linear_meeting_issue,
+    create_linear_meeting_project_update,
     get_linear_meeting_context,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
@@ -396,6 +397,22 @@ class LinearMeetingIssueCreateView(APIView):
     def post(self, request):
         try:
             payload = create_linear_meeting_issue(request.data)
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearMeetingProjectUpdateCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_project_update(request.data)
         except (
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,

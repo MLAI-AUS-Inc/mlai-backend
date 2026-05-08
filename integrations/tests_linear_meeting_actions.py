@@ -272,6 +272,64 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         )
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_create_project_update_translates_payload_to_linear_input(self, mock_post):
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "projectUpdateCreate": {
+                        "success": True,
+                        "projectUpdate": {
+                            "id": "update-1",
+                            "url": "https://linear.app/acme/project-update/update-1",
+                            "body": "Meeting-derived update",
+                            "health": "onTrack",
+                            "createdAt": "2026-05-08T00:00:00Z",
+                            "project": {"id": "project-1", "name": "Mlai Core"},
+                        },
+                    }
+                }
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/project-updates",
+            {
+                "project_id": "project-1",
+                "body": "Meeting-derived update",
+                "health": "onTrack",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["id"], "update-1")
+        linear_input = mock_post.call_args.kwargs["json"]["variables"]["input"]
+        self.assertEqual(
+            linear_input,
+            {
+                "projectId": "project-1",
+                "body": "Meeting-derived update",
+                "health": "onTrack",
+            },
+        )
+
+    def test_create_project_update_rejects_invalid_health(self):
+        response = self.client.post(
+            "/api/v1/integrations/linear/project-updates",
+            {
+                "project_id": "project-1",
+                "body": "Meeting-derived update",
+                "health": "blocked",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("health", response.json()["detail"])
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_rate_limit_preserves_retry_after(self, mock_post):
         mock_post.return_value = FakeLinearResponse(
             {"errors": [{"message": "rate limited"}]},

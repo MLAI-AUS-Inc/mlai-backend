@@ -129,6 +129,11 @@ urlpatterns = [
         api_views_connectors.LinearMeetingIssueCreateView.as_view(),
         name='linear_meeting_issue_create',
     ),
+    path(
+        'linear/project-updates',
+        api_views_connectors.LinearMeetingProjectUpdateCreateView.as_view(),
+        name='linear_meeting_project_update_create',
+    ),
     # Startup updates / investor memo workflow
     path('startup-updates/profile', startup_update_api_views.StartupProfileView.as_view(), name='startup_updates_profile'),
     path('startup-updates/run', startup_update_api_views.StartupUpdateRunView.as_view(), name='startup_updates_run'),
