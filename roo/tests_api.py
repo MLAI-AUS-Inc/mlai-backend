@@ -32,6 +32,21 @@ from .services import PointsService
 User = get_user_model()
 
 
+class RewardsCatalogAPITests(APITestCase):
+    @patch('core.permissions.HasRooApiKey.has_permission', return_value=True)
+    def test_rewards_catalog_uses_current_pricing_and_hides_coffee(self, mock_permission):
+        response = self.client.get(reverse('rewards-list'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rewards_by_code = {reward['code']: reward for reward in response.data}
+
+        self.assertNotIn('COFFEE', rewards_by_code)
+        self.assertEqual(rewards_by_code['EVENT_TICKET']['cost_points'], 6)
+        self.assertEqual(rewards_by_code['WORKSHOP_50']['cost_points'], 24)
+        self.assertEqual(rewards_by_code['WORKSHOP_FREE']['cost_points'], 42)
+        self.assertEqual(rewards_by_code['WORKSHOP_FREE']['stock_remaining'], 5)
+
+
 class PointsPurchaseViewSetTests(APITestCase):
     def setUp(self):
         self.url = reverse('points-purchase-list')
