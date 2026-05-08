@@ -15,8 +15,10 @@ from integrations.services.article_generation import (
     ArticleGenerationError,
     ContentFactoryBackendUnavailableError,
     GitHubReconnectRequiredError,
+    _append_refund_instruction,
     check_generation_status,
     confirm_topic,
+    get_content_factory_article_cost_points,
     publish_article,
     publish_article_as_pr,
     promote_article_bundle,
@@ -143,6 +145,54 @@ class ArticleGenerationServiceTest(TestCase):
 
         job = ContentFactoryJob.objects.get(job_id="job_delegated_123")
         self.assertEqual(job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
+
+    def test_paid_article_cost_is_four_points(self):
+        self.assertEqual(get_content_factory_article_cost_points("example.com"), 4)
+        self.assertEqual(get_content_factory_article_cost_points("mlai.au"), 0)
+
+    def test_paid_article_refund_instruction_uses_four_points(self):
+        message = _append_refund_instruction("The article run failed.", "example.com")
+
+        self.assertIn("4 Roo points", message)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_paid_domain_charges_four_points(self, mock_post):
+        paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
+        OrganizationContentConfig.objects.create(
+            organization=paid_org,
+            github_repo=self.repo_name,
+            article_template="## Template Content",
+            github_token_encrypted="org-token",
+            github_token_expires_at=timezone.now() + timedelta(hours=1),
+            scan_summary="scan complete",
+            article_system={
+                "state": "existing",
+                "directory_name": "articles",
+                "directory_path": "app/articles/content",
+                "confidence": "high",
+                "source": "test",
+            },
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_paid_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = self._article_request(
+            domain="example.com",
+            client_request_id="content-factory-paid-request",
+        )
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_paid_123")
+        job = ContentFactoryJob.objects.get(job_id="job_paid_123")
+        self.assertEqual(job.billing_status, "charged")
+        self.assertEqual(job.billing_amount, 4)
+        self.assertEqual(job.billing_ledger.delta, -4)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 16)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):
