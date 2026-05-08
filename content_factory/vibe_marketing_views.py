@@ -28,10 +28,18 @@ from content_factory.models import (
     KeywordStatus,
     OrganizationContentConfig,
     ResearchedKeyword,
+    TopicFeedback,
     VibeMarketingComponentComment,
     VibeMarketingComponentCommentStatus,
     WebsiteBaselineSnapshot,
     WrittenArticle,
+)
+from content_factory.topic_feedback import (
+    list_topic_feedback,
+    normalize_topic_feedback_keyword,
+    record_topic_feedback,
+    restore_topic_feedback,
+    serialize_topic_feedback,
 )
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
@@ -525,7 +533,8 @@ def _topic_candidate_from_keyword(keyword):
     }
 
 
-def _stored_keyword_topic_candidates(organization, *, include_written=False, limit=50):
+def _stored_keyword_topic_candidates(organization, *, include_written=False, limit=50, declined_keyword_keys=None):
+    declined_keyword_keys = declined_keyword_keys or set()
     keywords = (
         ResearchedKeyword.objects.filter(organization=organization)
         .select_related("written_article")
@@ -536,11 +545,12 @@ def _stored_keyword_topic_candidates(organization, *, include_written=False, lim
         _topic_candidate_from_keyword(keyword)
         for keyword in keywords
         if _keyword_is_available_for_topic_picker(keyword, include_written=include_written)
+        and normalize_topic_feedback_keyword(keyword.keyword) not in declined_keyword_keys
     ]
 
 
 def _normalize_keyword_memory(value) -> str:
-    return str(value or "").strip().lower()
+    return normalize_topic_feedback_keyword(value)
 
 
 def _serialize_written_article(article):
@@ -584,11 +594,14 @@ def _candidate_written_article(candidate, memory):
     return memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
 
 
-def _enrich_topic_candidates(organization, candidates, *, include_written=False):
+def _enrich_topic_candidates(organization, candidates, *, include_written=False, declined_keyword_keys=None):
+    declined_keyword_keys = declined_keyword_keys or set()
     memory = _written_topic_memory(organization)
     enriched = []
     for candidate in candidates:
         keyword_key = _normalize_keyword_memory(candidate.get("keyword"))
+        if keyword_key in declined_keyword_keys:
+            continue
         keyword = memory["keywords"].get(keyword_key)
         written_article = _candidate_written_article(candidate, memory)
         already_written = bool(written_article or (keyword and keyword.status == KeywordStatus.WRITTEN))
@@ -611,7 +624,7 @@ def _enrich_topic_candidates(organization, candidates, *, include_written=False)
     return enriched
 
 
-def _topic_candidates_from_runs(runs, *, organization=None, include_written=False):
+def _topic_candidates_from_runs(runs, *, organization=None, include_written=False, declined_keyword_keys=None):
     run_candidates = []
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
@@ -625,11 +638,17 @@ def _topic_candidates_from_runs(runs, *, organization=None, include_written=Fals
     if organization is None:
         return run_candidates
 
-    stored_candidates = _stored_keyword_topic_candidates(organization, include_written=include_written)
+    declined_keyword_keys = declined_keyword_keys or set()
+    stored_candidates = _stored_keyword_topic_candidates(
+        organization,
+        include_written=include_written,
+        declined_keyword_keys=declined_keyword_keys,
+    )
     enriched_run_candidates = _enrich_topic_candidates(
         organization,
         run_candidates,
         include_written=include_written,
+        declined_keyword_keys=declined_keyword_keys,
     )
     merged = {}
     for candidate in [*stored_candidates, *enriched_run_candidates]:
@@ -1907,6 +1926,12 @@ def _serialize_bootstrap(context, request=None):
     latest_runs = _latest_runs_for_org(context.organization)
     for run in latest_runs:
         _persist_completed_article_memory_if_possible(run)
+    declined_topic_feedback = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
+    declined_keyword_keys = {
+        normalize_topic_feedback_keyword(item.keyword)
+        for item in declined_topic_feedback
+        if normalize_topic_feedback_keyword(item.keyword)
+    }
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
@@ -1955,12 +1980,18 @@ def _serialize_bootstrap(context, request=None):
         "checks": checks,
         "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
-        "topicCandidates": _topic_candidates_from_runs(latest_runs, organization=context.organization),
+        "topicCandidates": _topic_candidates_from_runs(
+            latest_runs,
+            organization=context.organization,
+            declined_keyword_keys=declined_keyword_keys,
+        ),
         "hiddenTopicCandidates": _topic_candidates_from_runs(
             latest_runs,
             organization=context.organization,
             include_written=True,
+            declined_keyword_keys=declined_keyword_keys,
         ),
+        "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run),
         "guidedSteps": guided_steps,
@@ -2033,6 +2064,7 @@ def _serialize_bootstrap_without_domain(company):
         "latestRunsByWorkflow": {},
         "topicCandidates": [],
         "hiddenTopicCandidates": [],
+        "declinedTopicFeedback": [],
         "writtenTopics": [],
         "publishEvidence": {},
         "guidedSteps": guided_steps,
@@ -2748,6 +2780,82 @@ class VibeMarketingBootstrapView(APIView):
         if error_response:
             return error_response
         return Response(_serialize_bootstrap(context, request=request), status=status.HTTP_200_OK)
+
+
+class VibeMarketingTopicFeedbackView(APIView):
+    def get(self, request):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        feedback_type = str(request.query_params.get("feedback_type") or "declined").strip() or "declined"
+        include_restored = str(request.query_params.get("include_restored") or "").strip().lower() in {"1", "true", "yes"}
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", 100)), 500))
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(0, int(request.query_params.get("offset", 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        feedback = list_topic_feedback(
+            context.organization,
+            feedback_type=feedback_type,
+            include_restored=include_restored,
+            limit=limit,
+            offset=offset,
+        )
+        return Response(
+            {
+                "domain": context.organization.domain,
+                "count": len(feedback),
+                "feedback": [serialize_topic_feedback(item) for item in feedback],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        keyword = str(request.data.get("keyword") or "").strip()
+        if not keyword:
+            return Response({"detail": "keyword is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        feedback, created = record_topic_feedback(
+            context.organization,
+            keyword=keyword,
+            feedback_type=str(request.data.get("feedback_type") or request.data.get("feedbackType") or "declined"),
+            reason_code=str(request.data.get("reason_code") or request.data.get("reasonCode") or "not_appropriate"),
+            reason_text=request.data.get("reason_text") or request.data.get("reasonText") or None,
+            decline_scope=str(request.data.get("decline_scope") or request.data.get("declineScope") or "similar"),
+            source=str(request.data.get("source") or "homepage_topic_card"),
+            session_id=request.data.get("session_id") or request.data.get("sessionId") or None,
+        )
+        return Response(
+            {**serialize_topic_feedback(feedback), "created": created},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class VibeMarketingTopicFeedbackRestoreView(APIView):
+    def post(self, request, feedback_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        try:
+            feedback = TopicFeedback.objects.select_related("organization").get(
+                pk=feedback_id,
+                organization=context.organization,
+            )
+        except TopicFeedback.DoesNotExist:
+            return Response({"detail": "Topic feedback not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        restored = restore_topic_feedback(feedback)
+        return Response({**serialize_topic_feedback(restored), "restored": True}, status=status.HTTP_200_OK)
 
 
 class VibeMarketingSettingsView(APIView):

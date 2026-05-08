@@ -14,7 +14,14 @@ from content_factory.google_baseline import (
     collect_verified_google_metrics,
     google_baseline_connection_status,
 )
-from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword, WebsiteBaselineSnapshot, WrittenArticle
+from content_factory.models import (
+    KeywordStatus,
+    OrganizationContentConfig,
+    ResearchedKeyword,
+    TopicFeedback,
+    WebsiteBaselineSnapshot,
+    WrittenArticle,
+)
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from integrations import http_client
 from integrations.models import GoogleConnection, UserIntegration
@@ -971,6 +978,22 @@ class VibeMarketingAutofillTests(TestCase):
             status=KeywordStatus.PENDING,
             cooldown_until=timezone.now() + timedelta(days=3),
         )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="how to calculate equity in a house",
+            volume=1200,
+            difficulty=25,
+            opportunity_index=95,
+            status=KeywordStatus.PENDING,
+        )
+        TopicFeedback.objects.create(
+            organization=organization,
+            keyword="how to calculate equity in a house",
+            feedback_type="declined",
+            reason_code="not_appropriate",
+            decline_scope="similar",
+            source="homepage_topic_card",
+        )
 
         response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
 
@@ -979,6 +1002,51 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(keywords, ["best crm for ai startups"])
         self.assertEqual(response.data["topicCandidates"][0]["source"], "researched_keyword")
         self.assertEqual(response.data["topicCandidates"][0]["opportunityScore"], 91)
+        self.assertEqual(response.data["declinedTopicFeedback"][0]["keyword"], "how to calculate equity in a house")
+
+    def test_topic_feedback_endpoint_declines_and_restores_topic(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/topic-feedback/",
+            {
+                "keyword": "how to calculate equity in a house",
+                "sessionId": "discovery-selection-1",
+                "feedbackType": "declined",
+                "reasonCode": "not_appropriate",
+                "declineScope": "similar",
+                "source": "homepage_topic_card",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        feedback = TopicFeedback.objects.get(organization=organization)
+        self.assertEqual(feedback.keyword_normalized, "how to calculate equity in a house")
+        self.assertEqual(feedback.session_id, "discovery-selection-1")
+        self.assertEqual(feedback.reason_code, "not_appropriate")
+        self.assertIsNone(feedback.restored_at)
+
+        duplicate = self.client.post(
+            "/api/v1/vibe-marketing/topic-feedback/",
+            {"keyword": "How   To Calculate Equity In A House", "reasonCode": "off_topic"},
+            format="json",
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(TopicFeedback.objects.filter(organization=organization, restored_at__isnull=True).count(), 1)
+        feedback.refresh_from_db()
+        self.assertEqual(feedback.reason_code, "off_topic")
+
+        list_response = self.client.get("/api/v1/vibe-marketing/topic-feedback/")
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.data["count"], 1)
+
+        restore_response = self.client.post(f"/api/v1/vibe-marketing/topic-feedback/{feedback.id}/restore/")
+        self.assertEqual(restore_response.status_code, 200)
+        feedback.refresh_from_db()
+        self.assertIsNotNone(feedback.restored_at)
 
     def test_article_start_rejects_duplicate_written_topic(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

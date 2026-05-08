@@ -681,6 +681,49 @@ class ResearchedKeyword(models.Model):
         return f"{self.keyword} ({self.organization.domain}) - {self.tier}"
 
 
+class TopicFeedback(models.Model):
+    """
+    Explicit topic-level research memory captured from product UX.
+
+    This is separate from ResearchedKeyword lifecycle status: a declined topic
+    means "do not recommend this or close variants again for this organization"
+    until restored.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='topic_feedback',
+        db_index=True,
+    )
+    keyword = models.CharField(max_length=500)
+    keyword_normalized = models.CharField(max_length=500, db_index=True)
+    feedback_type = models.CharField(max_length=32, default='declined', db_index=True)
+    reason_code = models.CharField(max_length=64, default='not_appropriate')
+    reason_text = models.TextField(blank=True, null=True)
+    decline_scope = models.CharField(max_length=32, default='similar')
+    source = models.CharField(max_length=80, default='homepage_topic_card')
+    session_id = models.CharField(max_length=120, blank=True, null=True, db_index=True)
+    restored_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_topic_feedback'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['organization', 'feedback_type', 'restored_at'], name='seo_tf_org_type_active_idx'),
+            models.Index(fields=['organization', 'keyword_normalized'], name='seo_tf_org_keyword_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.keyword_normalized = " ".join(str(self.keyword or "").lower().strip().split())
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.feedback_type}: {self.keyword} ({self.organization.domain})"
+
+
 class KeywordVelocity(models.Model):
     """
     Trend velocity metrics for a keyword.

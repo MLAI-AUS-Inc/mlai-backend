@@ -4374,7 +4374,7 @@ class ContentFactoryCallbackView(APIView):
 from content_factory.models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
     SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession,
-    KeywordStatus
+    KeywordStatus, TopicFeedback
 )
 from content_factory.serializers import (
     ResearchedKeywordListSerializer, ResearchedKeywordDetailSerializer,
@@ -4382,7 +4382,13 @@ from content_factory.serializers import (
     ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
     WrittenArticleCreateSerializer, ResearchSessionSerializer,
     KeywordStatusUpdateSerializer, SEODashboardSerializer,
-    ResearchFeedbackSerializer,
+    ResearchFeedbackSerializer, TopicFeedbackRequestSerializer,
+)
+from content_factory.topic_feedback import (
+    list_topic_feedback,
+    record_topic_feedback,
+    restore_topic_feedback,
+    serialize_topic_feedback,
 )
 
 
@@ -4719,6 +4725,102 @@ class SEOKeywordResearchFeedbackView(APIView):
             'rejected_updated': rejected_count,
             'cooldown_days': cooldown_days,
         }, status=status.HTTP_200_OK)
+
+
+class SEOTopicFeedbackView(APIView):
+    """
+    GET/POST /api/seo/topic-feedback/
+
+    Persist explicit startup/domain-scoped topic feedback independently from
+    researched keyword lifecycle status.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = str(request.query_params.get('domain') or '').strip()
+        if not domain:
+            return Response({'error': 'domain query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response({'error': f'Organization not found for domain: {domain}'}, status=status.HTTP_404_NOT_FOUND)
+
+        feedback_type = str(request.query_params.get('feedback_type') or 'declined').strip() or 'declined'
+        include_restored = str(request.query_params.get('include_restored') or '').lower() in {'1', 'true', 'yes'}
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 100)), 500))
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        feedback = list_topic_feedback(
+            org,
+            feedback_type=feedback_type,
+            include_restored=include_restored,
+            limit=limit,
+            offset=offset,
+        )
+        return Response(
+            {
+                'domain': domain,
+                'count': len(feedback),
+                'feedback': [serialize_topic_feedback(item) for item in feedback],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        serializer = TopicFeedbackRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = str(serializer.validated_data.get('domain') or '').strip()
+        if not domain:
+            return Response({'error': 'domain is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        keyword = str(serializer.validated_data['keyword'] or '').strip()
+        if not keyword:
+            return Response({'error': 'keyword is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response({'error': f'Organization not found for domain: {domain}'}, status=status.HTTP_404_NOT_FOUND)
+
+        feedback, created = record_topic_feedback(
+            org,
+            keyword=keyword,
+            feedback_type=serializer.validated_data.get('feedback_type') or 'declined',
+            reason_code=serializer.validated_data.get('reason_code') or 'not_appropriate',
+            reason_text=serializer.validated_data.get('reason_text'),
+            decline_scope=serializer.validated_data.get('decline_scope') or 'similar',
+            source=serializer.validated_data.get('source') or 'homepage_topic_card',
+            session_id=serializer.validated_data.get('session_id'),
+        )
+        return Response(
+            {**serialize_topic_feedback(feedback), 'created': created},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class SEOTopicFeedbackRestoreView(APIView):
+    """POST /api/seo/topic-feedback/<uuid>/restore/"""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, pk):
+        try:
+            feedback = TopicFeedback.objects.select_related('organization').get(pk=pk)
+        except TopicFeedback.DoesNotExist:
+            return Response({'error': 'Topic feedback not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        restored = restore_topic_feedback(feedback)
+        return Response({**serialize_topic_feedback(restored), 'restored': True}, status=status.HTTP_200_OK)
 
 
 class SEOClusterListView(APIView):
