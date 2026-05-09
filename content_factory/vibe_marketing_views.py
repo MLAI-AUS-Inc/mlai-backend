@@ -41,6 +41,7 @@ from content_factory.topic_feedback import (
     restore_topic_feedback,
     serialize_topic_feedback,
 )
+from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     apply_shared_startup_details,
@@ -487,7 +488,7 @@ def _latest_keyword_saturation(keyword):
     }
 
 
-def _keyword_is_available_for_topic_picker(keyword, *, include_written=False):
+def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, coverage_memory=None):
     if include_written:
         return True
     if keyword.status in {KeywordStatus.WRITTEN, KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}:
@@ -495,6 +496,8 @@ def _keyword_is_available_for_topic_picker(keyword, *, include_written=False):
     if keyword.written_article_id:
         return False
     if keyword.cooldown_until and keyword.cooldown_until > timezone.now():
+        return False
+    if coverage_memory and match_covered_topic(keyword=keyword.keyword, memory=coverage_memory):
         return False
     return True
 
@@ -533,20 +536,60 @@ def _topic_candidate_from_keyword(keyword):
     }
 
 
+def _serialize_topic_coverage_match(match):
+    if not match:
+        return None
+    article = match.article
+    keyword = match.keyword
+    return {
+        "source": match.source,
+        "reason": match.reason,
+        "matchType": match.match_type,
+        "similarity": match.similarity,
+        "keyword": keyword.keyword if keyword else match.record.text,
+        "status": keyword.status if keyword else None,
+        "writtenArticle": _serialize_written_article(article) if article else None,
+    }
+
+
+def _apply_topic_coverage_to_candidate(candidate, match):
+    if not match:
+        return candidate
+    covered_topic = _serialize_topic_coverage_match(match)
+    article = match.article
+    return {
+        **candidate,
+        "alreadyWritten": bool(candidate.get("alreadyWritten") or article),
+        "writtenArticle": candidate.get("writtenArticle") or (_serialize_written_article(article) if article else None),
+        "coveredTopic": covered_topic,
+    }
+
+
 def _stored_keyword_topic_candidates(organization, *, include_written=False, limit=50, declined_keyword_keys=None):
     declined_keyword_keys = declined_keyword_keys or set()
+    coverage_memory = build_topic_coverage_memory(organization)
+    fetch_limit = max(limit * 4, limit)
     keywords = (
         ResearchedKeyword.objects.filter(organization=organization)
         .select_related("written_article")
         .prefetch_related("velocity_snapshots", "ai_saturation_snapshots")
-        .order_by("-opportunity_index", "-volume", "difficulty", "-metrics_updated_at")[:limit]
+        .order_by("-opportunity_index", "-volume", "difficulty", "-metrics_updated_at")[:fetch_limit]
     )
-    return [
-        _topic_candidate_from_keyword(keyword)
-        for keyword in keywords
-        if _keyword_is_available_for_topic_picker(keyword, include_written=include_written)
-        and normalize_topic_feedback_keyword(keyword.keyword) not in declined_keyword_keys
-    ]
+    candidates = []
+    for keyword in keywords:
+        if normalize_topic_feedback_keyword(keyword.keyword) in declined_keyword_keys:
+            continue
+        coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
+        if not _keyword_is_available_for_topic_picker(
+            keyword,
+            include_written=include_written,
+            coverage_memory=coverage_memory,
+        ):
+            continue
+        candidates.append(_apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match))
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 def _normalize_keyword_memory(value) -> str:
@@ -597,6 +640,7 @@ def _candidate_written_article(candidate, memory):
 def _enrich_topic_candidates(organization, candidates, *, include_written=False, declined_keyword_keys=None):
     declined_keyword_keys = declined_keyword_keys or set()
     memory = _written_topic_memory(organization)
+    coverage_memory = build_topic_coverage_memory(organization)
     enriched = []
     for candidate in candidates:
         keyword_key = _normalize_keyword_memory(candidate.get("keyword"))
@@ -604,21 +648,33 @@ def _enrich_topic_candidates(organization, candidates, *, include_written=False,
             continue
         keyword = memory["keywords"].get(keyword_key)
         written_article = _candidate_written_article(candidate, memory)
+        coverage_match = match_covered_topic(
+            keyword=candidate.get("keyword") or "",
+            title=candidate.get("title") or "",
+            memory=coverage_memory,
+        )
+        if coverage_match and coverage_match.article and not written_article:
+            written_article = coverage_match.article
         already_written = bool(written_article or (keyword and keyword.status == KeywordStatus.WRITTEN))
         unavailable = bool(
-            keyword
-            and not include_written
+            not include_written
             and (
-                keyword.status in {KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}
-                or (keyword.cooldown_until and keyword.cooldown_until > timezone.now())
+                bool(
+                    keyword
+                    and (
+                        keyword.status in {KeywordStatus.IN_PROGRESS, KeywordStatus.SKIPPED}
+                        or (keyword.cooldown_until and keyword.cooldown_until > timezone.now())
+                    )
+                )
+                or bool(coverage_match)
             )
         )
-        enriched_candidate = {
+        enriched_candidate = _apply_topic_coverage_to_candidate({
             **candidate,
             "status": KeywordStatus.WRITTEN if already_written else (keyword.status if keyword else KeywordStatus.PENDING),
             "alreadyWritten": already_written,
             "writtenArticle": _serialize_written_article(written_article) if written_article else None,
-        }
+        }, coverage_match)
         if include_written or (not already_written and not unavailable):
             enriched.append(enriched_candidate)
     return enriched
@@ -712,7 +768,11 @@ def _topic_is_already_written(organization, *, keyword: str, title: str = ""):
     keyword_row = memory["keywords"].get(keyword_key)
     if keyword_row and (keyword_row.status == KeywordStatus.WRITTEN or keyword_row.written_article_id):
         return keyword_row.written_article or memory["written_by_keyword"].get(keyword_key)
-    return memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
+    exact_article = memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
+    if exact_article:
+        return exact_article
+    coverage_match = match_covered_topic(keyword=keyword, title=title, organization=organization)
+    return coverage_match.article if coverage_match and coverage_match.article else None
 
 
 def _mark_keyword_in_progress(organization, keyword_text: str):
@@ -3228,17 +3288,23 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        written_article = _topic_is_already_written(
-            context.organization,
+        coverage_match = match_covered_topic(
+            organization=context.organization,
             keyword=target_keyword or topic,
             title=selected_title or custom_title or topic,
         )
-        if written_article:
+        if coverage_match:
+            written_article = coverage_match.article
             return Response(
                 {
-                    "detail": "This topic has already been written. Choose a pending topic or enter a new custom article.",
+                    "detail": (
+                        "This topic has already been written. Choose a pending topic or enter a new custom article."
+                        if written_article
+                        else "This topic is not available because it matches a previously skipped or covered topic."
+                    ),
                     "field": "topicCandidateId",
-                    "writtenArticle": _serialize_written_article(written_article),
+                    "writtenArticle": _serialize_written_article(written_article) if written_article else None,
+                    "coveredTopic": _serialize_topic_coverage_match(coverage_match),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

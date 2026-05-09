@@ -2907,6 +2907,24 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(article.article_url, "https://mlai.au/articles/how-to-find-a-technical-cofounder")
         self.assertEqual(article.pr_url, "https://github.com/example/repo/pull/12")
 
+    def test_seo_written_article_list_returns_written_article_records(self):
+        org = Organization.objects.create(name="MLAI", domain="mlai.au")
+        WrittenArticle.objects.create(
+            organization=org,
+            title="What Is Artificial Intelligence With Example",
+            slug="what-is-artificial-intelligence-with-example",
+            category="featured",
+            primary_keyword="what is artificial intelligence with example",
+            article_url="https://mlai.au/articles/what-is-artificial-intelligence-with-example",
+        )
+
+        response = self.client.get("/api/seo/articles/?domain=mlai.au")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["articles"][0]["primary_keyword"], "what is artificial intelligence with example")
+        self.assertEqual(response.data["articles"][0]["title"], "What Is Artificial Intelligence With Example")
+
     def test_content_preview_route_renders_signed_article_html(self):
         self._create_content_factory_run("run-preview-1")
         signature = build_content_factory_preview_signature("run-preview-1")
