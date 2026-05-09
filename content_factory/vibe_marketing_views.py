@@ -1239,7 +1239,26 @@ def _article_preview_should_auto_prepare(run):
     return True
 
 
+def _article_preview_should_refresh(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    if run.status != ContentFactoryRunStatus.COMPLETED:
+        return False
+    if not _component_manifest_from_run(run):
+        return False
+    live_preview = _live_preview_from_run(run)
+    if live_preview.get("available") and live_preview.get("previewUrl"):
+        return False
+    if live_preview.get("error"):
+        return False
+    preview_status = str(live_preview.get("status") or "").strip().lower()
+    return preview_status in {"running", "starting"}
+
+
 def _ensure_article_live_preview(run):
+    if _article_preview_should_refresh(run):
+        payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
+        return _persist_live_preview_payload(run, payload)
     if not _article_preview_should_auto_prepare(run):
         return run
     logger.info(
@@ -1948,6 +1967,16 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     package_can_promote = _run_can_promote_package(article_run, config=config)
     publish_complete = bool(publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     publish_running = bool(publish_child_run and publish_child_run.status in RUNNING_RUN_STATUSES)
+    review_surface_ready = bool(content_package_ready and article_run and _component_manifest_from_run(article_run))
+    review_is_finished = bool(
+        publish_complete
+        or publish_running
+        or draft_comment_count
+        or submitted_revision_pending
+        or revision_running
+        or revision_needs_acceptance
+        or latest_batch.get("status") == "accepted"
+    )
 
     status_by_id = {}
     action_by_id = {}
@@ -2028,7 +2057,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         run_by_id["review"] = article_run.run_id
         href_by_id["review"] = _run_url(article_run)
     if content_package_ready:
-        status_by_id["review"] = "complete"
+        status_by_id["review"] = "complete" if not review_surface_ready or review_is_finished else "ready"
         action_by_id["review"] = _workflow_step_action("Open live preview", href=_run_url(article_run))
     elif article_run and article_run.status in RUNNING_RUN_STATUSES:
         status_by_id["review"] = "locked"
