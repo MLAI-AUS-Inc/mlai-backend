@@ -146,6 +146,44 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_not_called()
         self.assertEqual(response.data["livePreview"]["previewUrl"], preview_url)
 
+    def test_completed_article_run_refreshes_running_live_preview(self):
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            },
+            "livePreview": {
+                "available": False,
+                "status": "running",
+                "previewUrl": "",
+                "exactRender": True,
+            },
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+        preview_payload = {
+            "available": True,
+            "status": "ready",
+            "previewUrl": "http://127.0.0.1:4321/articles/featured/generated?cfInspector=1",
+            "exactRender": True,
+            "inspectorProtocolVersion": 2,
+            "inspectorMode": "comment",
+        }
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(run_id=self.run.run_id, method="GET")
+        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+
     def test_comment_crud_serializes_anchor(self):
         response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments",
@@ -463,6 +501,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         config.company_context = "MLAI helps Australian founders adopt AI."
         config.article_delivery_mode = "content_only"
         config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
         config.save(
             update_fields=[
                 "github_token_encrypted",
@@ -470,11 +510,21 @@ class VibeMarketingComponentCommentTests(TestCase):
                 "company_context",
                 "article_delivery_mode",
                 "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
                 "updated_at",
             ]
         )
         self.organization.seed_keywords = ["australian founders"]
         self.organization.save(update_fields=["seed_keywords"])
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
         self.run.run_request = {"delivery_mode": "content_only"}
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
@@ -488,7 +538,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         }
         self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
 
-        response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
 
         self.assertEqual(response.status_code, 200)
         progress = response.data["workflowProgress"]
@@ -498,12 +549,109 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertNotEqual(steps["publish"]["status"], "complete")
 
+    def test_workflow_progress_keeps_completed_article_on_review_step(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
+        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "promote_bundle_url": f"/api/runs/{self.run.run_id}/promote-bundle",
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            },
+            "livePreview": {
+                "available": True,
+                "status": "ready",
+                "previewUrl": "http://127.0.0.1:4321/articles/featured/generated?cfInspector=1",
+                "exactRender": True,
+            },
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "target_keyword": "australian founders",
+                "article_markdown": "steps/package_content_delivery/attempt-01/artifacts/article.md",
+            },
+        }
+        self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(progress["currentStepId"], "review")
+        self.assertEqual(steps["generate"]["status"], "complete")
+        self.assertEqual(steps["review"]["status"], "ready")
+        self.assertEqual(steps["publish"]["status"], "ready")
+        self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_creates_local_publish_child_run(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "encrypted-token"
         config.github_repo = "MLAI-AUS-Inc/mlai-au"
-        config.save(update_fields=["github_token_encrypted", "github_repo", "updated_at"])
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
         self.run.run_request = {
             "domain": "mlai.au",
             "topic": "Australian founders",
@@ -513,6 +661,15 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
             "delivery_mode": "content_only",
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            },
             "delivery_package": {
                 "title": "Australian Founders and What the Term Means Today",
                 "article_markdown": "article.md",
@@ -535,4 +692,5 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-1")
         steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(response.data["workflowProgress"]["currentStepId"], "publish")
         self.assertEqual(steps["publish"]["status"], "running")
