@@ -441,6 +441,7 @@ def _extract_topic_candidates_from_result(result):
                 "source": str(raw.get("source") or "discovery"),
                 "intent": raw.get("intent"),
                 "difficulty": raw.get("difficulty"),
+                "difficultySource": raw.get("difficulty_source") or raw.get("difficultySource") or "missing",
                 "opportunityScore": opportunity_score,
                 "volume": raw.get("volume"),
                 "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
@@ -502,13 +503,16 @@ def _keyword_is_available_for_topic_picker(keyword, *, include_written=False):
 def _topic_candidate_from_keyword(keyword):
     title = keyword.keyword
     intent = str(keyword.intent or "").replace("_", " ").strip()
+    difficulty_source = keyword.difficulty_source or "legacy_default"
     reason_parts = []
     if keyword.opportunity_index:
         reason_parts.append(f"Opportunity score {keyword.opportunity_index:g}")
     if keyword.volume:
         reason_parts.append(f"{keyword.volume:,} monthly searches")
-    if keyword.difficulty is not None:
+    if keyword.difficulty is not None and difficulty_source in {"dataforseo_labs", "dataforseo_bulk"}:
         reason_parts.append(f"difficulty {keyword.difficulty}/100")
+    elif keyword.difficulty is not None:
+        reason_parts.append("difficulty pending")
     if intent:
         reason_parts.append(f"{intent} intent")
     reason = ". ".join(reason_parts) or "Recommended from stored topic research."
@@ -522,6 +526,7 @@ def _topic_candidate_from_keyword(keyword):
         "source": "researched_keyword",
         "intent": keyword.intent,
         "difficulty": keyword.difficulty,
+        "difficultySource": difficulty_source,
         "opportunityScore": keyword.opportunity_index,
         "volume": keyword.volume,
         "tier": keyword.tier,
@@ -624,6 +629,20 @@ def _enrich_topic_candidates(organization, candidates, *, include_written=False,
     return enriched
 
 
+VERIFIED_DIFFICULTY_SOURCES = {"dataforseo_labs", "dataforseo_bulk"}
+
+
+def _prefer_topic_difficulty(existing, candidate):
+    existing_source = existing.get("difficultySource") or existing.get("difficulty_source") or "missing"
+    candidate_source = candidate.get("difficultySource") or candidate.get("difficulty_source") or "missing"
+    if existing_source not in VERIFIED_DIFFICULTY_SOURCES and candidate_source in VERIFIED_DIFFICULTY_SOURCES:
+        return candidate.get("difficulty"), candidate_source
+    return (
+        existing.get("difficulty") if existing.get("difficulty") is not None else candidate.get("difficulty"),
+        existing_source or candidate_source or "missing",
+    )
+
+
 def _topic_candidates_from_runs(runs, *, organization=None, include_written=False, declined_keyword_keys=None):
     run_candidates = []
     for run in runs:
@@ -657,11 +676,13 @@ def _topic_candidates_from_runs(runs, *, organization=None, include_written=Fals
             continue
         existing = merged.get(key)
         if existing:
+            difficulty, difficulty_source = _prefer_topic_difficulty(existing, candidate)
             merged[key] = {
                 **existing,
                 **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
                 "volume": existing.get("volume") or candidate.get("volume"),
-                "difficulty": existing.get("difficulty") if existing.get("difficulty") is not None else candidate.get("difficulty"),
+                "difficulty": difficulty,
+                "difficultySource": difficulty_source,
                 "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
                 "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
                 "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),

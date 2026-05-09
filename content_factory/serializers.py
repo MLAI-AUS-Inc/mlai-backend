@@ -98,7 +98,7 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResearchedKeyword
         fields = [
-            'id', 'keyword', 'volume', 'difficulty', 'intent',
+            'id', 'keyword', 'volume', 'difficulty', 'difficulty_source', 'intent',
             'tier', 'opportunity_index', 'source', 'status',
             'times_shown', 'last_shown_at', 'times_rejected', 'last_rejected_at',
             'cooldown_until', 'times_selected', 'last_selected_at',
@@ -144,7 +144,7 @@ class ResearchedKeywordDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResearchedKeyword
         fields = [
-            'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty',
+            'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty', 'difficulty_source',
             'intent', 'tier', 'opportunity_index', 'source', 'source_detail',
             'competitor_urls', 'status', 'times_shown', 'last_shown_at',
             'times_rejected', 'last_rejected_at', 'cooldown_until',
