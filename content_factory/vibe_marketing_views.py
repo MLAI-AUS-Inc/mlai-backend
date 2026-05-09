@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 import time
@@ -69,6 +70,9 @@ from workflow_runs.models import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 VIBE_MARKETING_WORKFLOWS = {
     "repo_scan",
     "content_factory_scan",
@@ -76,6 +80,8 @@ VIBE_MARKETING_WORKFLOWS = {
     "content_factory_discovery",
     "article_generation",
     "content_factory_article",
+    "direct_generate",
+    "confirmed_topic",
     "article_revision",
     "daily_discovery",
     "startup_autofill",
@@ -84,8 +90,20 @@ VIBE_MARKETING_WORKFLOWS = {
 }
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
-ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "article_revision"}
+ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
 BASELINE_WORKFLOWS = {"website_baseline"}
+REMOTE_REQUIRED_WORKFLOWS = {
+    "article_generation",
+    "content_factory_article",
+    "direct_generate",
+    "confirmed_topic",
+    "repo_scan",
+    "content_factory_scan",
+    "auto_discovery",
+    "content_factory_discovery",
+    "daily_discovery",
+    "website_baseline",
+}
 BASELINE_FRESH_DAYS = 30
 WORKFLOW_STEP_DEFS = [
     {
@@ -339,6 +357,7 @@ def _run_belongs_to_context(run, context) -> bool:
 def _latest_runs_for_org(organization, limit=6):
     return list(
         ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS)
+        .exclude(status=ContentFactoryRunStatus.CANCELLED)
         .prefetch_related("steps")
         .order_by("-updated_at")[:limit]
     )
@@ -1360,6 +1379,100 @@ def _publish_evidence_from_run(run):
     }
 
 
+def _run_has_external_publish_evidence(run):
+    result = _run_mapping(run.result)
+    evidence = _publish_evidence_from_run(run)
+    return bool(
+        evidence.get("prUrl")
+        or result.get("draft_pr_url")
+        or result.get("draftPrUrl")
+        or result.get("draft_pr_number")
+        or result.get("pull_request_url")
+        or result.get("pullRequestUrl")
+    )
+
+
+def _article_keyword_from_run(run):
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    package = _content_package_from_run(run) or {}
+    return str(
+        run_request.get("target_keyword")
+        or run_request.get("targetKeyword")
+        or result.get("target_keyword")
+        or result.get("targetKeyword")
+        or package.get("targetKeyword")
+        or ""
+    ).strip()
+
+
+def _release_cancelled_article_keyword(organization, run):
+    keyword_text = _article_keyword_from_run(run)
+    keyword_key = _normalize_keyword_memory(keyword_text)
+    if not keyword_key:
+        return None
+    keyword = ResearchedKeyword.objects.filter(
+        organization=organization,
+        keyword_normalized=keyword_key,
+        status=KeywordStatus.IN_PROGRESS,
+    ).first()
+    if not keyword or keyword.written_article_id:
+        return None
+    keyword.status = KeywordStatus.PENDING
+    keyword.status_changed_at = timezone.now()
+    keyword.save(update_fields=["status", "status_changed_at"])
+    return keyword
+
+
+def _cancel_local_article_run(*, run, organization, remote_data=None):
+    remote_data = remote_data if isinstance(remote_data, dict) else {}
+    now = timezone.now()
+    warnings = []
+    if remote_data.get("error") and remote_data.get("retryable"):
+        warnings.append(str(remote_data.get("error")))
+    cleanup = remote_data.get("cleanup") if isinstance(remote_data.get("cleanup"), dict) else {}
+
+    _release_cancelled_article_keyword(organization, run)
+
+    with transaction.atomic():
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        VibeMarketingComponentComment.objects.filter(run=locked_run).delete()
+        locked_run.steps.update(
+            status=ContentFactoryStepStatus.CANCELLED,
+            message="Cancelled by user.",
+            error="",
+            artifacts=[],
+        )
+        locked_run.status = ContentFactoryRunStatus.CANCELLED
+        locked_run.current_step = "cancelled"
+        locked_run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        locked_run.resume_available = False
+        locked_run.acceptance_summary = {}
+        locked_run.verification_summary = {}
+        locked_run.error = ""
+        locked_run.result = {
+            "status": ContentFactoryRunStatus.CANCELLED,
+            "cancelled": True,
+            "cancelled_at": now.isoformat(),
+            "cleanup": cleanup,
+            "warnings": warnings,
+        }
+        locked_run.save(
+            update_fields=[
+                "status",
+                "current_step",
+                "approval_state",
+                "resume_available",
+                "acceptance_summary",
+                "verification_summary",
+                "error",
+                "result",
+                "updated_at",
+            ]
+        )
+        return locked_run
+
+
 def _latest_baseline_snapshot(organization):
     return WebsiteBaselineSnapshot.objects.filter(organization=organization).order_by("-collected_at", "-created_at").first()
 
@@ -2196,6 +2309,42 @@ def _content_factory_headers():
     return headers
 
 
+def _content_factory_remote_config():
+    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    api_key_configured = bool(getattr(settings, "CONTENT_FACTORY_API_KEY", None))
+    is_local_env = bool(getattr(settings, "IS_LOCAL_ENV", False))
+    enabled = bool(base_url and (api_key_configured or not is_local_env))
+    return {
+        "base_url": base_url,
+        "api_key_configured": api_key_configured,
+        "is_local_env": is_local_env,
+        "enabled": enabled,
+    }
+
+
+def _remote_required_for_workflow(workflow):
+    return str(workflow or "").strip() in REMOTE_REQUIRED_WORKFLOWS
+
+
+def _content_factory_unavailable_message(config):
+    if not config["base_url"]:
+        return "CONTENT_FACTORY_URL is not configured."
+    if config["is_local_env"] and not config["api_key_configured"]:
+        return "CONTENT_FACTORY_API_KEY is not configured for this local environment."
+    return "Content Factory remote calls are not enabled."
+
+
+def _content_factory_diagnostics(config, **extra):
+    diagnostics = {
+        "content_factory_url_configured": bool(config["base_url"]),
+        "content_factory_api_key_configured": bool(config["api_key_configured"]),
+        "content_factory_remote_enabled": bool(config["enabled"]),
+        "is_local_env": bool(config["is_local_env"]),
+    }
+    diagnostics.update({key: value for key, value in extra.items() if value is not None})
+    return diagnostics
+
+
 def _normalize_remote_run_status(value):
     normalized = str(value or "").strip().lower()
     mapping = {
@@ -2235,22 +2384,24 @@ def _friendly_content_factory_error(*, workflow, detail="", unavailable=False):
     return "Content Factory worker is unavailable. Please try again."
 
 
-def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_code=None, response_payload=None, retryable=True):
+def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_code=None, response_payload=None, retryable=True, diagnostics=None):
     friendly = _friendly_content_factory_error(workflow=workflow, detail=detail, unavailable=True)
-    diagnostics = {
+    payload_diagnostics = {
         "technical_error": str(technical_error or detail or ""),
         "retryable": retryable,
     }
+    if isinstance(diagnostics, dict):
+        payload_diagnostics.update(diagnostics)
     if status_code is not None:
-        diagnostics["content_factory_status_code"] = status_code
+        payload_diagnostics["content_factory_status_code"] = status_code
     if response_payload is not None:
-        diagnostics["content_factory_response"] = response_payload
+        payload_diagnostics["content_factory_response"] = response_payload
     return {
         "status": ContentFactoryRunStatus.BLOCKED,
         "error": friendly,
         "errors": [friendly],
         "message": friendly,
-        "diagnostics": diagnostics,
+        "diagnostics": payload_diagnostics,
         "retryable": retryable,
     }
 
@@ -2335,25 +2486,67 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
 
 
 def _call_content_factory_run_status(run_id, *, workflow=""):
-    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
-    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if not should_call_remote:
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
+            technical_error = _content_factory_unavailable_message(remote_config)
+            logger.warning(
+                "content_factory_status_poll_blocked run_id=%s workflow=%s reason=%s url_configured=%s api_key_configured=%s is_local_env=%s",
+                run_id,
+                workflow,
+                technical_error,
+                bool(remote_config["base_url"]),
+                bool(remote_config["api_key_configured"]),
+                bool(remote_config["is_local_env"]),
+            )
+            return _blocked_worker_payload(
+                workflow=workflow,
+                technical_error=technical_error,
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+                retryable=True,
+            )
         return {}
 
     try:
         response = http_client.get(
-            f"{base_url}/api/runs/{run_id}",
+            f"{remote_config['base_url']}/api/runs/{run_id}",
             headers=_content_factory_headers(),
             timeout=(3, 15),
         )
     except http_client.RequestException as exc:
-        if workflow == "startup_autofill":
-            return _blocked_worker_payload(workflow=workflow, technical_error=str(exc), retryable=True)
+        if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
+            logger.warning(
+                "content_factory_status_poll_blocked run_id=%s workflow=%s reason=request_exception error=%s",
+                run_id,
+                workflow,
+                exc,
+            )
+            return _blocked_worker_payload(
+                workflow=workflow,
+                technical_error=str(exc),
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+                retryable=True,
+            )
         return {"error": str(exc), "errors": [str(exc)], "retryable": True}
 
     if response.status_code == 200:
         return response.json() if response.content else {}
     if response.status_code == 404:
+        if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
+            detail = f"Content Factory run {run_id} was not found."
+            logger.warning(
+                "content_factory_status_poll_blocked run_id=%s workflow=%s status_code=404",
+                run_id,
+                workflow,
+            )
+            return _blocked_worker_payload(
+                workflow=workflow,
+                detail=detail,
+                technical_error=detail,
+                status_code=response.status_code,
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+                retryable=False,
+            )
         return {}
 
     try:
@@ -2361,6 +2554,22 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
     except Exception:
         response_payload = {}
     detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
+        logger.warning(
+            "content_factory_status_poll_blocked run_id=%s workflow=%s status_code=%s",
+            run_id,
+            workflow,
+            response.status_code,
+        )
+        return _blocked_worker_payload(
+            workflow=workflow,
+            detail=str(detail or f"Content Factory returned {response.status_code}."),
+            technical_error=str(detail or f"Content Factory returned {response.status_code}."),
+            status_code=response.status_code,
+            response_payload=response_payload,
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+            retryable=response.status_code >= 500,
+        )
     return {
         "error": str(detail or f"Content Factory returned {response.status_code}."),
         "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
@@ -2424,7 +2633,13 @@ def _sync_local_run_from_remote(run, remote_data):
         return run
 
     result = _run_result_from_remote(remote_data)
-    run.status = _normalize_remote_run_status(remote_data.get("status") or result.get("status") or run.status)
+    remote_status = _normalize_remote_run_status(remote_data.get("status") or result.get("status") or run.status)
+    if run.status == ContentFactoryRunStatus.CANCELLED and remote_status != ContentFactoryRunStatus.CANCELLED:
+        return run
+    if run.status in FAILED_RUN_STATUSES and remote_status in RUNNING_RUN_STATUSES:
+        return run
+
+    run.status = remote_status
     run.current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "")
     run.artifact_root = str(remote_data.get("artifact_root") or run.artifact_root or "")
     if isinstance(remote_data.get("acceptance_summary"), dict):
@@ -2466,21 +2681,57 @@ def _sync_local_run_from_remote(run, remote_data):
 
 def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     actor_id = founder_actor_id_for_user(context.profile.user)
-    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
+    remote_config = _content_factory_remote_config()
     remote_data = {}
-    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if workflow == "startup_autofill" and not should_call_remote:
+    requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
+    if requires_remote and not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning(
+            "content_factory_dispatch_blocked workflow=%s endpoint=%s reason=%s url_configured=%s api_key_configured=%s is_local_env=%s",
+            workflow,
+            endpoint,
+            technical_error,
+            bool(remote_config["base_url"]),
+            bool(remote_config["api_key_configured"]),
+            bool(remote_config["is_local_env"]),
+        )
         remote_data = _blocked_worker_payload(
             workflow=workflow,
-            technical_error="CONTENT_FACTORY_URL is not configured or the local environment is not allowed to call it.",
+            technical_error=technical_error,
+            diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
             retryable=True,
         )
-    elif should_call_remote:
-        url = f"{base_url}/api/runs/{endpoint}"
+    elif remote_config["enabled"]:
+        url = f"{remote_config['base_url']}/api/runs/{endpoint}"
+        logger.info(
+            "content_factory_dispatch_start workflow=%s endpoint=%s url_configured=%s api_key_configured=%s",
+            workflow,
+            endpoint,
+            bool(remote_config["base_url"]),
+            bool(remote_config["api_key_configured"]),
+        )
         try:
             response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
             if response.status_code in (200, 202):
                 remote_data = response.json() if response.content else {}
+                run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
+                logger.info(
+                    "content_factory_dispatch_result workflow=%s endpoint=%s status_code=%s run_id=%s",
+                    workflow,
+                    endpoint,
+                    response.status_code,
+                    run_id,
+                )
+                if requires_remote and not run_id:
+                    remote_data = _blocked_worker_payload(
+                        workflow=workflow,
+                        detail="Content Factory did not return a run id.",
+                        technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
+                        status_code=response.status_code,
+                        response_payload=remote_data,
+                        diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                        retryable=True,
+                    )
             else:
                 try:
                     response_payload = response.json()
@@ -2493,24 +2744,34 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
                     or response.text
                     or f"Content Factory returned {response.status_code}."
                 )
-                remote_data = {
-                    "status": ContentFactoryRunStatus.BLOCKED,
-                    "error": str(detail),
-                    "errors": [str(detail)],
-                    "content_factory_status_code": response.status_code,
-                    "content_factory_response": response_payload,
-                    "retryable": response.status_code >= 500,
-                }
+                logger.warning(
+                    "content_factory_dispatch_blocked workflow=%s endpoint=%s status_code=%s",
+                    workflow,
+                    endpoint,
+                    response.status_code,
+                )
+                remote_data = _blocked_worker_payload(
+                    workflow=workflow,
+                    detail=str(detail),
+                    technical_error=str(detail),
+                    status_code=response.status_code,
+                    response_payload=response_payload,
+                    diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                    retryable=response.status_code >= 500,
+                )
         except http_client.RequestException as exc:
-            if workflow == "startup_autofill":
-                remote_data = _blocked_worker_payload(workflow=workflow, technical_error=str(exc), retryable=True)
-            else:
-                remote_data = {
-                    "status": ContentFactoryRunStatus.BLOCKED,
-                    "error": str(exc),
-                    "errors": [str(exc)],
-                    "retryable": True,
-                }
+            logger.warning(
+                "content_factory_dispatch_blocked workflow=%s endpoint=%s reason=request_exception error=%s",
+                workflow,
+                endpoint,
+                exc,
+            )
+            remote_data = _blocked_worker_payload(
+                workflow=workflow,
+                technical_error=str(exc),
+                diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                retryable=True,
+            )
 
     return _create_local_run(
         workflow=workflow,
@@ -2522,21 +2783,38 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     )
 
 
-def _call_content_factory_run_action(*, run_id, action, payload):
-    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
-    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if not should_call_remote:
-        return {}
+def _call_content_factory_run_action(*, run_id, action, payload, workflow="article_generation"):
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning(
+            "content_factory_action_blocked run_id=%s workflow=%s action=%s reason=%s",
+            run_id,
+            workflow,
+            action,
+            technical_error,
+        )
+        return _blocked_worker_payload(
+            workflow=workflow,
+            technical_error=technical_error,
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow, action=action),
+            retryable=True,
+        )
 
     try:
         response = http_client.post(
-            f"{base_url}/api/runs/{run_id}/{action}",
+            f"{remote_config['base_url']}/api/runs/{run_id}/{action}",
             json=payload or {},
             headers=_content_factory_headers(),
             timeout=(3, 15),
         )
     except http_client.RequestException as exc:
-        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+        return _blocked_worker_payload(
+            workflow=workflow,
+            technical_error=str(exc),
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow, action=action),
+            retryable=True,
+        )
 
     if response.status_code in (200, 202):
         return response.json() if response.content else {}
@@ -2556,20 +2834,31 @@ def _call_content_factory_run_action(*, run_id, action, payload):
 
 
 def _call_content_factory_component_revision(*, run_id, payload):
-    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
-    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if not should_call_remote:
-        return {}
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning("content_factory_component_revision_blocked run_id=%s reason=%s", run_id, technical_error)
+        return _blocked_worker_payload(
+            workflow="article_revision",
+            technical_error=technical_error,
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_revision"),
+            retryable=True,
+        )
 
     try:
         response = http_client.post(
-            f"{base_url}/api/runs/{run_id}/component-revisions",
+            f"{remote_config['base_url']}/api/runs/{run_id}/component-revisions",
             json=payload or {},
             headers=_content_factory_headers(),
             timeout=(5, 90),
         )
     except http_client.RequestException as exc:
-        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+        return _blocked_worker_payload(
+            workflow="article_revision",
+            technical_error=str(exc),
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_revision"),
+            retryable=True,
+        )
 
     if response.status_code in (200, 202):
         return response.json() if response.content else {}
@@ -2589,12 +2878,21 @@ def _call_content_factory_component_revision(*, run_id, payload):
 
 
 def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
-    base_url = str(getattr(settings, "CONTENT_FACTORY_URL", "") or "").strip().rstrip("/")
-    should_call_remote = bool(base_url and (getattr(settings, "CONTENT_FACTORY_API_KEY", None) or not getattr(settings, "IS_LOCAL_ENV", False)))
-    if not should_call_remote:
-        return {}
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning("content_factory_live_preview_blocked run_id=%s method=%s reason=%s", run_id, method, technical_error)
+        return {
+            **_blocked_worker_payload(
+                workflow="article_generation",
+                technical_error=technical_error,
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_generation", method=method),
+                retryable=True,
+            ),
+            "available": False,
+        }
 
-    url = f"{base_url}/api/runs/{run_id}/live-preview"
+    url = f"{remote_config['base_url']}/api/runs/{run_id}/live-preview"
     try:
         if method == "POST":
             response = http_client.post(url, json=payload or {}, headers=_content_factory_headers(), timeout=(3, 75))
@@ -3331,7 +3629,6 @@ class VibeMarketingArticleView(APIView):
             "custom_title": selected_title or custom_title or None,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
-        _mark_keyword_in_progress(context.organization, payload["target_keyword"])
         run = _queue_content_factory_run(
             endpoint="article",
             workflow="article_generation",
@@ -3339,6 +3636,8 @@ class VibeMarketingArticleView(APIView):
             config=config,
             payload=payload,
         )
+        if run.status not in FAILED_RUN_STATUSES:
+            _mark_keyword_in_progress(context.organization, payload["target_keyword"])
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
 
 
@@ -3712,7 +4011,26 @@ class VibeMarketingRunControlView(APIView):
         payload = dict(request.data or {})
         payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
         payload.setdefault("slack_user_id", founder_actor_id_for_user(request.user))
-        remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload)
+
+        if action == "cancel":
+            if run.workflow not in ARTICLE_WORKFLOWS:
+                return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
+            if _run_has_external_publish_evidence(run):
+                return Response(
+                    {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
+            if int(remote_data.get("content_factory_status_code") or 0) == 409:
+                detail = remote_data.get("error") or "Content Factory rejected cancellation for this run."
+                return Response({"detail": detail}, status=status.HTTP_409_CONFLICT)
+
+            run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
 
         if action == "revise":
             new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
