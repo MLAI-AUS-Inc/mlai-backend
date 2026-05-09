@@ -3976,7 +3976,8 @@ class ContentFactoryCallbackView(APIView):
     def _generate_topic_explanation(self, option_data, company_context=None, competitors=None):
         """Generate a user-friendly explanation for why this topic was chosen."""
         volume = option_data.get('volume', 0)
-        difficulty = option_data.get('difficulty', 50)
+        difficulty = option_data.get('difficulty')
+        difficulty_source = option_data.get('difficulty_source') or option_data.get('difficultySource') or 'missing'
         tier = option_data.get('tier', 'tier_4_discard')
         opportunity_index = option_data.get('opportunity_index', 0.0)
         
@@ -3995,18 +3996,24 @@ class ContentFactoryCallbackView(APIView):
         else:
             parts.append(f"Niche search volume ({volume_val:,}/mo)")
         
-        # Difficulty assessment  
+        # Difficulty assessment
         try:
             diff_val = int(difficulty)
         except (ValueError, TypeError):
-            diff_val = 50
-            
-        if diff_val <= 35:
-            parts.append("with low competition.")
+            diff_val = None
+
+        if difficulty_source not in {'dataforseo_labs', 'dataforseo_bulk'} or diff_val is None:
+            parts.append("Difficulty is still being verified.")
+        elif diff_val <= 20:
+            parts.append("Very approachable; strong content could start getting traction in a few months.")
+        elif diff_val <= 40:
+            parts.append("Achievable with strong content and a realistic 4-6 month ranking window.")
         elif diff_val <= 60:
-            parts.append("with moderate competition.")
+            parts.append("Moderate difficulty; likely needs a strong article, internal links, and time, often 6-9+ months.")
+        elif diff_val <= 80:
+            parts.append("Hard difficulty; usually needs authority, supporting content, and backlinks.")
         else:
-            parts.append("but highly competitive.")
+            parts.append("Very hard difficulty; treat this as a long-term authority play.")
         
         # Tier-based reasoning
         tier_reasons = {
@@ -4631,6 +4638,7 @@ class SEOKeywordBulkUpsertView(APIView):
                     'keyword': keyword_text,
                     'volume': kw_data.get('volume', 0),
                     'difficulty': kw_data.get('difficulty', 50),
+                    'difficulty_source': kw_data.get('difficulty_source') or kw_data.get('difficultySource') or 'legacy_default',
                     'intent': kw_data.get('intent', 'informational'),
                     'tier': kw_data.get('tier', 'tier_4_discard'),
                     'opportunity_index': kw_data.get('opportunity_index', 0.0),
