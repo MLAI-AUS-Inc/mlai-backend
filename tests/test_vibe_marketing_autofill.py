@@ -1249,6 +1249,143 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(package["imageErrorCount"], 0)
         self.assertEqual(package["artifactPaths"]["article.md"], "/tmp/run/article.md")
 
+    @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
+    def test_article_start_blocks_when_content_factory_is_unconfigured_without_marking_keyword(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {"topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        post.assert_not_called()
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertIn("content_factory_url_configured", run.result["diagnostics"])
+        self.assertFalse(
+            ResearchedKeyword.objects.filter(
+                organization=organization,
+                keyword_normalized="founder workflow automation",
+                status=KeywordStatus.IN_PROGRESS,
+            ).exists()
+        )
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_marks_keyword_in_progress_after_successful_content_factory_dispatch(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+
+        with patch(
+            "content_factory.vibe_marketing_views.http_client.post",
+            return_value=_Response(status_code=202, payload={"run_id": "article-queued-1", "status": "queued"}),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {"topic": "Founder workflow automation", "targetKeyword": "founder workflow automation"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.QUEUED)
+        self.assertTrue(
+            ResearchedKeyword.objects.filter(
+                organization=organization,
+                keyword_normalized="founder workflow automation",
+                status=KeywordStatus.IN_PROGRESS,
+            ).exists()
+        )
+
+    @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
+    def test_article_run_status_blocks_when_content_factory_is_unconfigured(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-unconfigured-status-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="fetch_org_config",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.get") as get:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertIn("Content Factory worker is unavailable", response.data["errors"][0])
+        get.assert_not_called()
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.current_step, "fetch_org_config")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_blocks_when_content_factory_run_is_missing(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-missing-remote-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="fetch_org_config",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=404, payload={})):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertIn(run.run_id, response.data["errors"][0])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_does_not_downgrade_terminal_local_state(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-terminal-local-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="synthesize_repository_contract",
+            error="Task failed with unhandled exception: TimeLimitExceeded(5600)",
+        )
+
+        remote_payload = {
+            "run_id": run.run_id,
+            "workflow": "article_generation",
+            "status": ContentFactoryRunStatus.RUNNING,
+            "current_step": "synthesize_repository_contract",
+        }
+        with patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=200, payload=remote_payload)):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.FAILED)
+        self.assertIn("TimeLimitExceeded", response.data["errors"][0])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(run.current_step, "synthesize_repository_contract")
+
     def test_article_generation_requires_baseline_or_skip(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization

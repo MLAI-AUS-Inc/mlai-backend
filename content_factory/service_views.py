@@ -1387,6 +1387,98 @@ def _load_content_package_for_callback(run_id: str, *, attempts: int = 3, delay_
     return run, package
 
 
+TERMINAL_RUN_STATUSES = {
+    ContentFactoryRunStatus.FAILED,
+    ContentFactoryRunStatus.BLOCKED,
+    ContentFactoryRunStatus.DENIED,
+    ContentFactoryRunStatus.CANCELLED,
+}
+
+
+def _is_terminal_run_status(value: str) -> bool:
+    return str(value or "").strip() in TERMINAL_RUN_STATUSES
+
+
+def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status: str) -> Optional[ContentFactoryRun]:
+    run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
+    if not run_id:
+        return None
+
+    step_key = str(
+        data.get("failed_step")
+        or data.get("blocked_step")
+        or data.get("current_step")
+        or data.get("step")
+        or ""
+    ).strip()
+    workflow = str(data.get("workflow") or "direct_generate").strip() or "direct_generate"
+    error_message = str(data.get("error") or data.get("error_message") or "").strip()
+    error_code = str(data.get("error_code") or "").strip()
+    existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    result = dict((existing_run.result if existing_run else None) or {})
+    result.update(
+        {
+            "status": run_status,
+            "run_id": run_id,
+            "job_id": str(data.get("job_id") or run_id),
+            "workflow": workflow,
+            "current_step": step_key,
+            "step": step_key,
+            "error": error_message,
+            "error_code": error_code,
+            "retry_after_seconds": data.get("retry_after_seconds"),
+            "next_step": data.get("next_step"),
+            "rerunnable_step": data.get("rerunnable_step"),
+        }
+    )
+    diagnostics = data.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        result["diagnostics"] = diagnostics
+
+    step_order = list((existing_run.step_order if existing_run else None) or [])
+    if step_key and step_key not in step_order:
+        step_order.append(step_key)
+
+    run, _created = ContentFactoryRun.objects.update_or_create(
+        run_id=run_id,
+        defaults={
+            "workflow": workflow,
+            "domain": str(data.get("domain") or (existing_run.domain if existing_run else "") or ""),
+            "github_repo": str(data.get("github_repo") or (existing_run.github_repo if existing_run else "") or ""),
+            "slack_user_id": str(data.get("slack_user_id") or (existing_run.slack_user_id if existing_run else "") or ""),
+            "status": run_status,
+            "current_step": step_key or (existing_run.current_step if existing_run else ""),
+            "approval_state": (existing_run.approval_state if existing_run else ContentFactoryApprovalState.NOT_REQUIRED),
+            "artifact_root": (existing_run.artifact_root if existing_run else ""),
+            "step_order": step_order,
+            "acceptance_summary": (existing_run.acceptance_summary if existing_run else {}),
+            "verification_summary": diagnostics if isinstance(diagnostics, dict) else (existing_run.verification_summary if existing_run else {}),
+            "run_request": (existing_run.run_request if existing_run else {}),
+            "result": result,
+            "error": error_message,
+            "resume_available": True,
+        },
+    )
+
+    if step_key:
+        display_order = step_order.index(step_key) if step_key in step_order else len(step_order)
+        ContentFactoryRunStep.objects.update_or_create(
+            run=run,
+            step_key=step_key,
+            defaults={
+                "display_order": display_order,
+                "required": True,
+                "status": step_status,
+                "attempts": 1,
+                "message": error_message,
+                "completed_at": timezone.now(),
+                "error": error_message,
+                "artifacts": data.get("failure_artifacts") or [],
+            },
+        )
+    return run
+
+
 class ContentFactoryCallbackView(APIView):
     """
     Receives callbacks from content-factory for various pipeline events.
@@ -3437,6 +3529,11 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
+        _sync_generation_callback_to_run(
+            data=data,
+            run_status=ContentFactoryRunStatus.FAILED,
+            step_status=ContentFactoryStepStatus.FAILED,
+        )
         scheduled_daily_job = is_scheduled_daily_job(job)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
@@ -3617,6 +3714,11 @@ class ContentFactoryCallbackView(APIView):
                 'status': 'blocked',
                 'error_message': f"[{error_code}] {error_message}",
             }
+        )
+        _sync_generation_callback_to_run(
+            data=data,
+            run_status=ContentFactoryRunStatus.BLOCKED,
+            step_status=ContentFactoryStepStatus.BLOCKED,
         )
         sync_blocked_job_state(job, data, update_card=True, allow_visible_notification=True)
 
@@ -5307,6 +5409,7 @@ class ContentFactoryRunView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         step_states = request.data.get("step_states", {}) or {}
+        incoming_status = str(data.get("status") or "").strip()
 
         if (
             existing_run is not None
@@ -5322,6 +5425,21 @@ class ContentFactoryRunView(APIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
+
+        if (
+            existing_run is not None
+            and _is_terminal_run_status(existing_run.status)
+            and incoming_status not in {
+                ContentFactoryRunStatus.COMPLETED,
+                ContentFactoryRunStatus.FAILED,
+                ContentFactoryRunStatus.BLOCKED,
+                ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.CANCELLED,
+            }
+        ):
+            response_payload = _serialize_content_factory_run(existing_run)
+            response_payload["sync_status"] = "ignored_terminal_state"
+            return Response(response_payload, status=status.HTTP_200_OK)
 
         max_attempts = 3 if connection.vendor == "sqlite" else 1
         for attempt_number in range(1, max_attempts + 1):

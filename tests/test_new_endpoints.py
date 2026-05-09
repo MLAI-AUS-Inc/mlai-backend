@@ -23,7 +23,7 @@ from content_factory.models import (
     WrittenArticle,
 )
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryRunStep, ContentFactoryStepStatus
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
@@ -1266,7 +1266,61 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.billing_status, "charged")
         self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
         self.assertEqual(job.request_meta.get("blocked_preferred_queue"), "build-verifier")
-        mock_upsert_live_progress_card.assert_called_once()
+        run = ContentFactoryRun.objects.get(run_id="blocked-run-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.current_step, "verify_build")
+        self.assertIn("Dedicated verifier worker", run.error)
+        step = ContentFactoryRunStep.objects.get(run=run, step_key="verify_build")
+        self.assertEqual(step.status, ContentFactoryStepStatus.BLOCKED)
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_updates_durable_run_state(
+        self,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
+        ContentFactoryJob.objects.create(
+            job_id="failed-run-1",
+            domain="mlai.au",
+            status="generating",
+            request_meta={"domain": "mlai.au"},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="failed-run-1",
+            workflow="direct_generate",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="synthesize_repository_contract",
+            step_order=["fetch_org_config", "synthesize_repository_contract"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "failed-run-1",
+                "run_id": "failed-run-1",
+                "workflow": "direct_generate",
+                "domain": "mlai.au",
+                "failed_step": "synthesize_repository_contract",
+                "error_code": "INTERNAL_ERROR",
+                "error": "Task failed with unhandled exception: TimeLimitExceeded(5600)",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="failed-run-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(run.current_step, "synthesize_repository_contract")
+        self.assertIn("TimeLimitExceeded", run.error)
+        step = ContentFactoryRunStep.objects.get(run=run, step_key="synthesize_repository_contract")
+        self.assertEqual(step.status, ContentFactoryStepStatus.FAILED)
         mock_send_dm.assert_not_called()
         mock_send_message.assert_not_called()
 
