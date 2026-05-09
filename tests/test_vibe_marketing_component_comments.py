@@ -6,10 +6,10 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from integrations import http_client
-from content_factory.models import OrganizationContentConfig, VibeMarketingComponentComment
+from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 
 
 User = get_user_model()
@@ -53,6 +53,98 @@ class VibeMarketingComponentCommentTests(TestCase):
             result={},
         )
         self.client.force_authenticate(user=self.user)
+
+    def test_completed_article_run_auto_prepares_live_preview(self):
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                        "selector": '[data-cf-component-id="title"]',
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        preview_payload = {
+            "available": True,
+            "status": "running",
+            "previewUrl": "http://127.0.0.1:4321/articles/featured/generated?cfInspector=1",
+            "exactRender": True,
+            "inspectorProtocolVersion": 2,
+            "inspectorMode": "comment",
+        }
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
+        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+
+    def test_running_article_run_does_not_auto_prepare_live_preview(self):
+        self.run.status = ContentFactoryRunStatus.RUNNING
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["status", "result", "updated_at"])
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview") as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_not_called()
+        self.assertFalse(response.data["livePreview"]["previewUrl"])
+
+    def test_completed_article_run_with_ready_preview_does_not_restart_preview(self):
+        preview_url = "http://127.0.0.1:4321/articles/featured/generated?cfInspector=1"
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            },
+            "livePreview": {
+                "available": True,
+                "status": "running",
+                "previewUrl": preview_url,
+                "exactRender": True,
+            },
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview") as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_not_called()
+        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_url)
 
     def test_comment_crud_serializes_anchor(self):
         response = self.client.post(
@@ -123,6 +215,70 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["latestBatch"]["sourceRunId"], self.run.run_id)
         self.assertEqual(response.data["latestBatch"]["revisionRunId"], revision_run.run_id)
         self.assertEqual(response.data["latestBatch"]["status"], "completed")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_article_run_marks_tombstone_and_hides_from_bootstrap(self):
+        self.run.status = ContentFactoryRunStatus.RUNNING
+        self.run.current_step = "draft_article"
+        self.run.run_request = {"target_keyword": "ai marketing"}
+        self.run.result = {
+            "target_keyword": "ai marketing",
+            "delivery_package": {
+                "title": "AI Marketing",
+                "target_keyword": "ai marketing",
+                "article_markdown": "steps/package/article.md",
+            },
+        }
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.save(update_fields=["status", "current_step", "run_request", "result", "acceptance_summary", "updated_at"])
+        ContentFactoryRunStep.objects.create(
+            run=self.run,
+            step_key="draft_article",
+            display_order=1,
+            status="running",
+            artifacts=["steps/draft_article/attempt-01/artifacts/article.md"],
+        )
+        VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Tighten this title.",
+        )
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="ai marketing",
+            keyword_normalized="ai marketing",
+            status=KeywordStatus.IN_PROGRESS,
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertTrue(url.endswith(f"/api/runs/{self.run.run_id}/cancel"))
+            return _Response(
+                status_code=202,
+                payload={"run_id": self.run.run_id, "status": "cancelled", "cleanup": {"artifacts": {"deleted_paths": ["article.md"]}}},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/cancel", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.CANCELLED)
+        self.assertFalse(response.data["contentPackage"])
+        self.assertFalse(VibeMarketingComponentComment.objects.filter(run=self.run).exists())
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(self.run.current_step, "cancelled")
+        self.assertTrue(self.run.result["cancelled"])
+        self.assertEqual(self.run.steps.get(step_key="draft_article").status, "cancelled")
+        keyword = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized="ai marketing")
+        self.assertEqual(keyword.status, KeywordStatus.PENDING)
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        self.assertEqual(bootstrap.status_code, 200)
+        self.assertNotIn(self.run.run_id, [item["runId"] for item in bootstrap.data["latestRuns"]])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):
