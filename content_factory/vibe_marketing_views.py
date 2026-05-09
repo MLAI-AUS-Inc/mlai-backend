@@ -1079,6 +1079,53 @@ def _live_preview_from_run(run):
     }
 
 
+def _persist_live_preview_payload(run, payload):
+    if isinstance(payload, dict) and payload:
+        result = dict(run.result or {})
+        result["livePreview"] = payload
+        run.result = result
+        run.save(update_fields=["result", "updated_at"])
+    return run
+
+
+def _article_preview_should_auto_prepare(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    if run.status != ContentFactoryRunStatus.COMPLETED:
+        return False
+    if not _component_manifest_from_run(run):
+        return False
+
+    live_preview = _live_preview_from_run(run)
+    if live_preview.get("available") and live_preview.get("previewUrl"):
+        return False
+    preview_status = str(live_preview.get("status") or "").strip().lower()
+    if preview_status in {"running", "starting"}:
+        return False
+    if preview_status in {"failed", "blocked"} or live_preview.get("error"):
+        return False
+    return True
+
+
+def _ensure_article_live_preview(run):
+    if not _article_preview_should_auto_prepare(run):
+        return run
+    logger.info(
+        "content_factory_live_preview_auto_start run_id=%s workflow=%s",
+        run.run_id,
+        run.workflow,
+    )
+    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
+    if isinstance(payload, dict) and payload.get("error"):
+        logger.warning(
+            "content_factory_live_preview_auto_start_failed run_id=%s workflow=%s error=%s",
+            run.run_id,
+            run.workflow,
+            payload.get("error"),
+        )
+    return _persist_live_preview_payload(run, payload)
+
+
 def _serialize_component_comment(comment):
     return {
         "id": str(comment.id),
@@ -3665,6 +3712,9 @@ class VibeMarketingRunView(APIView):
             if run.workflow in ARTICLE_WORKFLOWS and run.status == ContentFactoryRunStatus.COMPLETED:
                 _persist_article_memory_from_run(organization=context.organization, run=run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+        if run.workflow in ARTICLE_WORKFLOWS:
+            run = _ensure_article_live_preview(run)
+            run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
@@ -3962,12 +4012,7 @@ class VibeMarketingRunLivePreviewView(APIView):
         return context, run, None
 
     def _persist_preview(self, run, payload):
-        if isinstance(payload, dict) and payload:
-            result = run.result or {}
-            result["livePreview"] = payload
-            run.result = result
-            run.save(update_fields=["result", "updated_at"])
-        return run
+        return _persist_live_preview_payload(run, payload)
 
     def get(self, request, run_id):
         context, run, error_response = self._resolve_run(request, run_id)
