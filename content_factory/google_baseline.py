@@ -99,6 +99,13 @@ def collect_verified_google_metrics(
     measured_sources = [value for value in source_status.values() if value == "measured"]
     if not measured_sources:
         metrics["status"] = "needs_connection" if "needs_connection" in source_status.values() else "error"
+        metrics["message"] = (
+            gsc.get("message")
+            or metrics.get("googleAnalytics", {}).get("message")
+            or "No verified Google traffic source returned data for this baseline."
+        )
+    else:
+        metrics["message"] = "Verified Google traffic data was added to this baseline."
     metrics["sourceStatus"] = source_status
     metrics["score"] = _traffic_score(metrics)
     return {"traffic": metrics, "sourceStatus": source_status}
