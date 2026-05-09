@@ -1023,6 +1023,8 @@ class VibeMarketingAutofillTests(TestCase):
             difficulty=18,
             opportunity_index=91,
             status=KeywordStatus.PENDING,
+            related_keywords=["startup crm tools"],
+            monthly_searches=[400, 520, 610, 760, 920],
         )
         related_keyword = ResearchedKeyword.objects.create(
             organization=organization,
@@ -1075,7 +1077,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(candidate["keyword"], "best crm for ai startups")
         self.assertEqual(candidate["velocity"]["dailyVolumes"], [400, 520, 610, 760, 920])
         self.assertEqual(candidate["velocity"]["trendStatus"], "rising")
-        self.assertEqual(candidate["relatedKeywords"], ["startup crm comparison"])
+        self.assertEqual(candidate["monthlySearches"], [400, 520, 610, 760, 920])
+        self.assertEqual(candidate["trendStatus"], "rising")
+        self.assertEqual(candidate["trendPercent"], 28)
+        self.assertEqual(candidate["relatedKeywords"], ["startup crm tools", "startup crm comparison"])
         self.assertEqual(candidate["paaQuestions"][0]["question"], "What CRM should an AI startup use?")
         self.assertTrue(candidate["paaQuestions"][0]["hasAiOverview"])
         self.assertTrue(candidate["aiSaturation"]["aiOverviewPresent"])

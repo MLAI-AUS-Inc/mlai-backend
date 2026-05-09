@@ -32,6 +32,8 @@ class TopicDifficultyMetricsTests(TestCase):
                         "volume": 320,
                         "difficulty": 31,
                         "difficulty_source": "dataforseo_bulk",
+                        "related_keywords": ["startup equity guide"],
+                        "monthly_searches": [120, 160, 220, 320],
                     }
                 ],
             },
@@ -42,6 +44,8 @@ class TopicDifficultyMetricsTests(TestCase):
         keyword = ResearchedKeyword.objects.get(organization=self.org, keyword_normalized="startup equity")
         self.assertEqual(keyword.difficulty, 31)
         self.assertEqual(keyword.difficulty_source, "dataforseo_bulk")
+        self.assertEqual(keyword.related_keywords, ["startup equity guide"])
+        self.assertEqual(keyword.monthly_searches, [120, 160, 220, 320])
 
     def test_bulk_upsert_marks_missing_source_as_legacy_default(self):
         response = self.client.post(
@@ -81,9 +85,13 @@ class TopicDifficultyMetricsTests(TestCase):
             volume=100,
             difficulty=50,
             difficulty_source="dataforseo_labs",
+            related_keywords=["verified difficulty examples"],
+            monthly_searches=[80, 90, 100],
         )
 
         candidate = _topic_candidate_from_keyword(keyword)
 
         self.assertEqual(candidate["difficultySource"], "dataforseo_labs")
         self.assertIn("difficulty 50/100", candidate["reason"])
+        self.assertEqual(candidate["relatedKeywords"], ["verified difficulty examples"])
+        self.assertEqual(candidate["monthlySearches"], [80, 90, 100])
