@@ -1590,6 +1590,7 @@ class VibeMarketingAutofillTests(TestCase):
 
         self.assertEqual(result["traffic"]["status"], "needs_connection")
         self.assertEqual(result["sourceStatus"]["googleSearchConsole"], "needs_connection")
+        self.assertIn("No verified Search Console property", result["traffic"]["message"])
         self.assertIn("No verified Search Console property", result["traffic"]["googleSearchConsole"]["message"])
 
     def test_baseline_google_refresh_merges_search_console_metrics_into_snapshot(self):
