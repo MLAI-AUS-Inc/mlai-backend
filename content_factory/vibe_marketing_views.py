@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
+from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
 from django.utils.dateparse import parse_datetime
@@ -26,8 +27,12 @@ from content_factory.google_baseline import collect_verified_google_metrics, goo
 from content_factory.models import (
     ContentFactoryHealingPromotionState,
     ContentFactoryHealingRecord,
+    AISaturation,
+    ClusterMembership,
     KeywordStatus,
+    KeywordVelocity,
     OrganizationContentConfig,
+    PAQuestion,
     ResearchedKeyword,
     TopicFeedback,
     VibeMarketingComponentComment,
@@ -461,8 +466,19 @@ def _extract_topic_candidates_from_result(result):
                 "source": str(raw.get("source") or "discovery"),
                 "intent": raw.get("intent"),
                 "difficulty": raw.get("difficulty"),
+                "difficultySource": raw.get("difficulty_source") or raw.get("difficultySource"),
                 "opportunityScore": opportunity_score,
                 "volume": raw.get("volume"),
+                "volumeDisplay": raw.get("volume_display") or raw.get("volumeDisplay"),
+                "trend": raw.get("trending_status") or raw.get("trend") or raw.get("trend_status"),
+                "trendLabel": raw.get("trending_label") or raw.get("trendLabel"),
+                "statsMeaning": raw.get("stats_meaning") or raw.get("statsMeaning"),
+                "whyRecommended": raw.get("why_recommended") or raw.get("whyRecommended"),
+                "recommendationReason": raw.get("recommendation_reason") or raw.get("recommendationReason"),
+                "aiSearches": raw.get("ai_search_volume") or raw.get("aiSearches") or raw.get("ai_searches"),
+                "aiVolumeDisplay": raw.get("ai_volume_display") or raw.get("aiVolumeDisplay"),
+                "relatedKeywords": raw.get("related_keywords") or raw.get("relatedKeywords") or [],
+                "paaQuestions": raw.get("paa_questions") or raw.get("paaQuestions") or [],
                 "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
             }
         )
@@ -489,6 +505,7 @@ def _latest_keyword_velocity(keyword):
         "velocityScore": snapshot.velocity_score,
         "trendStatus": snapshot.trend_status,
         "absoluteVolume": snapshot.absolute_volume,
+        "dailyVolumes": snapshot.daily_volumes or [],
     }
 
 
@@ -502,9 +519,56 @@ def _latest_keyword_saturation(keyword):
     return {
         "saturationScore": snapshot.saturation_score,
         "aiOverviewPresent": snapshot.ai_overview_present,
+        "aiOverviewQuality": snapshot.ai_overview_quality,
+        "featuredSnippetPresent": snapshot.featured_snippet_present,
+        "videoCarouselPresent": snapshot.video_carousel_present,
+        "knowledgePanelPresent": snapshot.knowledge_panel_present,
         "hostilityScore": snapshot.hostility_score,
         "hostilityRecommendation": snapshot.hostility_recommendation,
+        "serpFeatures": snapshot.serp_features or [],
     }
+
+
+def _keyword_related_keywords(keyword, *, limit=6):
+    related = []
+    seen = {keyword.keyword_normalized}
+    try:
+        memberships = keyword.cluster_memberships.all()
+    except Exception:
+        memberships = []
+    for membership in memberships:
+        try:
+            member_keywords = membership.cluster.member_keywords.all()
+        except Exception:
+            member_keywords = []
+        for member in member_keywords:
+            member_keyword = getattr(member, "keyword", None)
+            if member_keyword is None:
+                continue
+            normalized = getattr(member_keyword, "keyword_normalized", "") or member_keyword.keyword.lower().strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            related.append(member_keyword.keyword)
+            if len(related) >= limit:
+                return related
+    return related
+
+
+def _keyword_paa_questions(keyword, *, limit=4):
+    try:
+        questions = keyword.paa_questions.all()
+    except Exception:
+        questions = []
+    return [
+        {
+            "question": question.question,
+            "answerSnippet": question.answer_snippet,
+            "depth": question.depth,
+            "hasAiOverview": question.has_ai_overview,
+        }
+        for question in list(questions)[:limit]
+    ]
 
 
 def _keyword_is_available_for_topic_picker(keyword, *, include_written=False, coverage_memory=None):
@@ -552,6 +616,8 @@ def _topic_candidate_from_keyword(keyword):
         "writtenArticle": _serialize_written_article(written_article) if written_article else None,
         "velocity": _latest_keyword_velocity(keyword),
         "aiSaturation": _latest_keyword_saturation(keyword),
+        "relatedKeywords": _keyword_related_keywords(keyword),
+        "paaQuestions": _keyword_paa_questions(keyword),
     }
 
 
@@ -599,7 +665,24 @@ def _stored_keyword_topic_candidates(
     keywords = (
         ResearchedKeyword.objects.filter(organization=organization)
         .select_related("written_article")
-        .prefetch_related("velocity_snapshots", "ai_saturation_snapshots")
+        .prefetch_related(
+            Prefetch("velocity_snapshots", queryset=KeywordVelocity.objects.order_by("-captured_at")),
+            Prefetch("ai_saturation_snapshots", queryset=AISaturation.objects.order_by("-captured_at")),
+            Prefetch("paa_questions", queryset=PAQuestion.objects.order_by("depth", "order")),
+            Prefetch(
+                "cluster_memberships",
+                queryset=ClusterMembership.objects.select_related("cluster").prefetch_related(
+                    Prefetch(
+                        "cluster__member_keywords",
+                        queryset=ClusterMembership.objects.select_related("keyword").order_by(
+                            "-keyword__opportunity_index",
+                            "-keyword__volume",
+                            "keyword__keyword",
+                        ),
+                    ),
+                ),
+            ),
+        )
         .order_by("-opportunity_index", "-volume", "difficulty", "-metrics_updated_at")[:fetch_limit]
     )
     candidates = []

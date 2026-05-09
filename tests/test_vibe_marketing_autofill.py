@@ -16,9 +16,14 @@ from content_factory.google_baseline import (
     google_baseline_connection_status,
 )
 from content_factory.models import (
+    AISaturation,
+    ClusterMembership,
+    KeywordVelocity,
     KeywordStatus,
     OrganizationContentConfig,
+    PAQuestion,
     ResearchedKeyword,
+    SemanticCluster,
     TopicFeedback,
     WebsiteBaselineSnapshot,
     WrittenArticle,
@@ -1003,7 +1008,78 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(keywords, ["best crm for ai startups"])
         self.assertEqual(response.data["topicCandidates"][0]["source"], "researched_keyword")
         self.assertEqual(response.data["topicCandidates"][0]["opportunityScore"], 91)
+        self.assertEqual(response.data["topicCandidates"][0]["relatedKeywords"], [])
+        self.assertEqual(response.data["topicCandidates"][0]["paaQuestions"], [])
         self.assertEqual(response.data["declinedTopicFeedback"][0]["keyword"], "how to calculate equity in a house")
+
+    def test_bootstrap_returns_rich_topic_selection_fields_for_stored_keywords(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        keyword = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="best crm for ai startups",
+            volume=900,
+            difficulty=18,
+            opportunity_index=91,
+            status=KeywordStatus.PENDING,
+        )
+        related_keyword = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="startup crm comparison",
+            volume=700,
+            difficulty=24,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
+        cluster = SemanticCluster.objects.create(
+            organization=organization,
+            cluster_id=1,
+            pillar_keyword="best crm for ai startups",
+            total_volume=1600,
+        )
+        ClusterMembership.objects.create(keyword=keyword, cluster=cluster, is_pillar=True, similarity_score=1)
+        ClusterMembership.objects.create(keyword=related_keyword, cluster=cluster, similarity_score=0.91)
+        KeywordVelocity.objects.create(
+            keyword=keyword,
+            absolute_volume=920,
+            velocity_score=0.28,
+            trend_status="rising",
+            daily_volumes=[400, 520, 610, 760, 920],
+        )
+        AISaturation.objects.create(
+            keyword=keyword,
+            domain="acme.com",
+            ai_overview_present=True,
+            ai_overview_quality="partial",
+            featured_snippet_present=True,
+            saturation_score=0.3,
+            hostility_score=0.2,
+            hostility_recommendation="high_priority",
+            serp_features=["featured_snippet"],
+        )
+        PAQuestion.objects.create(
+            keyword=keyword,
+            domain="acme.com",
+            question="What CRM should an AI startup use?",
+            answer_snippet="A practical CRM depends on sales motion and founder capacity.",
+            depth=1,
+            order=0,
+            has_ai_overview=True,
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        candidate = response.data["topicCandidates"][0]
+        self.assertEqual(candidate["keyword"], "best crm for ai startups")
+        self.assertEqual(candidate["velocity"]["dailyVolumes"], [400, 520, 610, 760, 920])
+        self.assertEqual(candidate["velocity"]["trendStatus"], "rising")
+        self.assertEqual(candidate["relatedKeywords"], ["startup crm comparison"])
+        self.assertEqual(candidate["paaQuestions"][0]["question"], "What CRM should an AI startup use?")
+        self.assertTrue(candidate["paaQuestions"][0]["hasAiOverview"])
+        self.assertTrue(candidate["aiSaturation"]["aiOverviewPresent"])
+        self.assertEqual(candidate["aiSaturation"]["serpFeatures"], ["featured_snippet"])
 
     def test_bootstrap_excludes_close_variants_of_written_topics(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
