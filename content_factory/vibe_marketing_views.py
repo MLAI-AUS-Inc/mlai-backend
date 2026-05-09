@@ -584,9 +584,17 @@ def _apply_topic_coverage_to_candidate(candidate, match):
     }
 
 
-def _stored_keyword_topic_candidates(organization, *, include_written=False, limit=50, declined_keyword_keys=None):
+def _stored_keyword_topic_candidates(
+    organization,
+    *,
+    include_written=False,
+    limit=50,
+    declined_keyword_keys=None,
+    coverage_memory=None,
+):
     declined_keyword_keys = declined_keyword_keys or set()
-    coverage_memory = build_topic_coverage_memory(organization)
+    if coverage_memory is None:
+        coverage_memory = build_topic_coverage_memory(organization)
     fetch_limit = max(limit * 4, limit)
     keywords = (
         ResearchedKeyword.objects.filter(organization=organization)
@@ -656,17 +664,27 @@ def _candidate_written_article(candidate, memory):
     return memory["written_by_keyword"].get(keyword_key) or memory["written_by_slug"].get(title_slug)
 
 
-def _enrich_topic_candidates(organization, candidates, *, include_written=False, declined_keyword_keys=None):
+def _enrich_topic_candidates(
+    organization,
+    candidates,
+    *,
+    include_written=False,
+    declined_keyword_keys=None,
+    coverage_memory=None,
+    written_memory=None,
+):
     declined_keyword_keys = declined_keyword_keys or set()
-    memory = _written_topic_memory(organization)
-    coverage_memory = build_topic_coverage_memory(organization)
+    if written_memory is None:
+        written_memory = _written_topic_memory(organization)
+    if coverage_memory is None:
+        coverage_memory = build_topic_coverage_memory(organization)
     enriched = []
     for candidate in candidates:
         keyword_key = _normalize_keyword_memory(candidate.get("keyword"))
         if keyword_key in declined_keyword_keys:
             continue
-        keyword = memory["keywords"].get(keyword_key)
-        written_article = _candidate_written_article(candidate, memory)
+        keyword = written_memory["keywords"].get(keyword_key)
+        written_article = _candidate_written_article(candidate, written_memory)
         coverage_match = match_covered_topic(
             keyword=candidate.get("keyword") or "",
             title=candidate.get("title") or "",
@@ -699,7 +717,15 @@ def _enrich_topic_candidates(organization, candidates, *, include_written=False,
     return enriched
 
 
-def _topic_candidates_from_runs(runs, *, organization=None, include_written=False, declined_keyword_keys=None):
+def _topic_candidates_from_runs(
+    runs,
+    *,
+    organization=None,
+    include_written=False,
+    declined_keyword_keys=None,
+    coverage_memory=None,
+    written_memory=None,
+):
     run_candidates = []
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
@@ -718,12 +744,15 @@ def _topic_candidates_from_runs(runs, *, organization=None, include_written=Fals
         organization,
         include_written=include_written,
         declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
     )
     enriched_run_candidates = _enrich_topic_candidates(
         organization,
         run_candidates,
         include_written=include_written,
         declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
+        written_memory=written_memory,
     )
     merged = {}
     for candidate in [*stored_candidates, *enriched_run_candidates]:
@@ -1764,7 +1793,7 @@ def _workflow_progress_context(*, context=None, run=None, latest_runs=None, chec
     return organization, config, latest_runs, checks or {}
 
 
-def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None):
+def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
     organization, config, latest_runs, checks = _workflow_progress_context(
         context=context,
         run=run,
@@ -1869,7 +1898,8 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None)
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
-    topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
+    if topic_candidates is None:
+        topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
     if article_run:
         status_by_id["choose_topic"] = "complete"
         run_by_id["choose_topic"] = article_run.run_id
@@ -2144,14 +2174,29 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
 def _serialize_bootstrap(context, request=None):
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    for run in latest_runs:
-        _persist_completed_article_memory_if_possible(run)
     declined_topic_feedback = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
     declined_keyword_keys = {
         normalize_topic_feedback_keyword(item.keyword)
         for item in declined_topic_feedback
         if normalize_topic_feedback_keyword(item.keyword)
     }
+    coverage_memory = build_topic_coverage_memory(context.organization)
+    written_memory = _written_topic_memory(context.organization)
+    topic_candidates = _topic_candidates_from_runs(
+        latest_runs,
+        organization=context.organization,
+        declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
+        written_memory=written_memory,
+    )
+    hidden_topic_candidates = _topic_candidates_from_runs(
+        latest_runs,
+        organization=context.organization,
+        include_written=True,
+        declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
+        written_memory=written_memory,
+    )
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
@@ -2200,24 +2245,20 @@ def _serialize_bootstrap(context, request=None):
         "checks": checks,
         "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
-        "topicCandidates": _topic_candidates_from_runs(
-            latest_runs,
-            organization=context.organization,
-            declined_keyword_keys=declined_keyword_keys,
-        ),
-        "hiddenTopicCandidates": _topic_candidates_from_runs(
-            latest_runs,
-            organization=context.organization,
-            include_written=True,
-            declined_keyword_keys=declined_keyword_keys,
-        ),
+        "topicCandidates": topic_candidates,
+        "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run),
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": _recommended_next_action(checks),
-        "workflowProgress": _workflow_progress(context=context, latest_runs=latest_runs, checks=checks),
+        "workflowProgress": _workflow_progress(
+            context=context,
+            latest_runs=latest_runs,
+            checks=checks,
+            topic_candidates=topic_candidates,
+        ),
         "hasCompletedArticleFlow": has_completed_article_flow,
         "startPageMode": "topic_picker" if has_completed_article_flow else "first_article_setup",
     }

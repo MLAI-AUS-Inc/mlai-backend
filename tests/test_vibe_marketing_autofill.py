@@ -3,8 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.db import OperationalError
+from django.db import OperationalError, connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -1248,6 +1249,40 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(package["generatedInlineImageCount"], 4)
         self.assertEqual(package["imageErrorCount"], 0)
         self.assertEqual(package["artifactPaths"]["article.md"], "/tmp/run/article.md")
+
+    def test_bootstrap_read_does_not_persist_completed_article_memory(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="article-read-only-bootstrap",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            acceptance_summary={
+                "content_packaged": True,
+                "evidence_summary": {
+                    "content_package_title": "Read Only Bootstrap Article",
+                    "content_package_slug": "read-only-bootstrap-article",
+                    "content_package_target_keyword": "read only bootstrap",
+                },
+            },
+            result={"delivery_mode": "content_only"},
+        )
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(WrittenArticle.objects.filter(organization=organization).count(), 0)
+        write_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].lstrip().upper().startswith(("INSERT ", "UPDATE ", "DELETE "))
+        ]
+        self.assertEqual(write_queries, [])
 
     @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
     def test_article_start_blocks_when_content_factory_is_unconfigured_without_marking_keyword(self):
