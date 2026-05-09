@@ -604,6 +604,11 @@ class ResearchedKeyword(models.Model):
     # Core metrics (refreshable)
     volume = models.IntegerField(default=0, help_text="Monthly search volume")
     difficulty = models.IntegerField(default=50, help_text="SEO difficulty 0-100")
+    difficulty_source = models.CharField(
+        max_length=30,
+        default="legacy_default",
+        help_text="Source for difficulty: dataforseo_labs, dataforseo_bulk, missing, or legacy_default",
+    )
     intent = models.CharField(max_length=50, default="informational")
 
     # GEO metrics

@@ -327,10 +327,10 @@ class PAQuestionInline(admin.TabularInline):
 class ResearchedKeywordAdmin(admin.ModelAdmin):
     """Admin for researched keywords - the core SEO research table."""
     list_display = (
-        'keyword', 'organization_domain', 'volume', 'difficulty',
+        'keyword', 'organization_domain', 'volume', 'difficulty', 'difficulty_source',
         'tier_badge', 'opportunity_index', 'status_badge', 'source', 'discovered_at'
     )
-    list_filter = ('status', 'tier', 'source', 'organization', 'discovered_at')
+    list_filter = ('status', 'tier', 'source', 'difficulty_source', 'organization', 'discovered_at')
     search_fields = ('keyword', 'organization__domain', 'organization__name')
     list_select_related = ('organization', 'written_article')
     ordering = ('-opportunity_index',)
@@ -342,7 +342,7 @@ class ResearchedKeywordAdmin(admin.ModelAdmin):
             'fields': ('organization', 'keyword', 'keyword_normalized')
         }),
         ('Metrics', {
-            'fields': ('volume', 'difficulty', 'intent', 'tier', 'opportunity_index')
+            'fields': ('volume', 'difficulty', 'difficulty_source', 'intent', 'tier', 'opportunity_index')
         }),
         ('Provenance', {
             'fields': ('source', 'source_detail', 'competitor_urls')
