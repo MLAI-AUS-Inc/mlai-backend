@@ -128,8 +128,10 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
     if not normalized_domain:
         return None
 
+    company_update_fields = []
     if company.domain != normalized_domain:
         company.domain = normalized_domain
+        company_update_fields.append("domain")
 
     organization, created = Organization.objects.get_or_create(
         domain=normalized_domain,
@@ -141,9 +143,10 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
 
     if company.organization_id != organization.id:
         company.organization = organization
-        company.save(update_fields=["domain", "organization", "updated_at"])
-    elif company.domain == normalized_domain:
-        company.save(update_fields=["domain", "updated_at"])
+        company_update_fields.append("organization")
+
+    if company_update_fields:
+        company.save(update_fields=[*company_update_fields, "updated_at"])
 
     return organization
 

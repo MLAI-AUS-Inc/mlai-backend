@@ -1,8 +1,12 @@
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
+from .services import ensure_company_organization
+from organizations.models import Organization
 
 
 User = get_user_model()
@@ -103,3 +107,25 @@ class FounderToolsCompanyApiTests(TestCase):
         self.assertTrue(company.registered)
         self.assertEqual(company.organization.domain, "second.example")
         self.assertEqual(company.organization.company_linkedin_url, "https://www.linkedin.com/company/acme-second")
+
+    def test_ensure_company_organization_skips_unchanged_company_save(self):
+        profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company = VibeRaisingCompany.objects.create(
+            profile=profile,
+            organization=organization,
+            name="Acme Inc.",
+            domain="acme.com",
+            registered=True,
+        )
+
+        with CaptureQueriesContext(connection) as captured:
+            resolved = ensure_company_organization(company)
+
+        self.assertEqual(resolved, organization)
+        company_updates = [
+            query["sql"]
+            for query in captured.captured_queries
+            if 'UPDATE "vibe_raising_viberaisingcompany"' in query["sql"]
+        ]
+        self.assertEqual(company_updates, [])
