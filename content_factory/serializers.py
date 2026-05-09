@@ -102,7 +102,7 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
             'tier', 'opportunity_index', 'source', 'status',
             'times_shown', 'last_shown_at', 'times_rejected', 'last_rejected_at',
             'cooldown_until', 'times_selected', 'last_selected_at',
-            'cluster_fingerprint',
+            'cluster_fingerprint', 'related_keywords', 'monthly_searches',
             'latest_velocity', 'latest_saturation', 'paa_count',
             'discovered_at', 'metrics_updated_at'
         ]
@@ -146,7 +146,8 @@ class ResearchedKeywordDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty', 'difficulty_source',
             'intent', 'tier', 'opportunity_index', 'source', 'source_detail',
-            'competitor_urls', 'status', 'times_shown', 'last_shown_at',
+            'competitor_urls', 'related_keywords', 'monthly_searches',
+            'status', 'times_shown', 'last_shown_at',
             'times_rejected', 'last_rejected_at', 'cooldown_until',
             'times_selected', 'last_selected_at', 'cluster_fingerprint',
             'discovered_at', 'metrics_updated_at',

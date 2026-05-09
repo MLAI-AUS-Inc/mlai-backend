@@ -632,6 +632,8 @@ class ResearchedKeyword(models.Model):
         help_text="E.g., competitor domain or seed keyword"
     )
     competitor_urls = models.JSONField(default=list, blank=True)
+    related_keywords = models.JSONField(default=list, blank=True)
+    monthly_searches = models.JSONField(default=list, blank=True)
 
     # Writing status
     status = models.CharField(

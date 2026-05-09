@@ -4633,6 +4633,15 @@ class SEOKeywordBulkUpsertView(APIView):
                     continue
 
                 keyword_normalized = keyword_text.lower().strip()
+                velocity = kw_data.get('velocity_data') or kw_data.get('velocity') or {}
+                related_keywords = kw_data.get('related_keywords') or kw_data.get('relatedKeywords') or []
+                monthly_searches = (
+                    kw_data.get('monthly_searches')
+                    or kw_data.get('monthlySearches')
+                    or velocity.get('daily_volumes')
+                    or velocity.get('dailyVolumes')
+                    or []
+                )
 
                 defaults = {
                     'keyword': keyword_text,
@@ -4645,6 +4654,8 @@ class SEOKeywordBulkUpsertView(APIView):
                     'source': kw_data.get('source', 'seed'),
                     'source_detail': kw_data.get('source_detail'),
                     'competitor_urls': kw_data.get('competitor_urls', []),
+                    'related_keywords': related_keywords if isinstance(related_keywords, list) else [],
+                    'monthly_searches': monthly_searches if isinstance(monthly_searches, list) else [],
                     'cluster_fingerprint': kw_data.get('cluster_fingerprint', ''),
                 }
 
@@ -4660,7 +4671,6 @@ class SEOKeywordBulkUpsertView(APIView):
                     updated_count += 1
 
                 # Create velocity snapshot if provided
-                velocity = kw_data.get('velocity_data') or kw_data.get('velocity')
                 if velocity:
                     KeywordVelocity.objects.create(
                         keyword=keyword_obj,

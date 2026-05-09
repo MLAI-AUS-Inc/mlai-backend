@@ -471,12 +471,16 @@ def _extract_topic_candidates_from_result(result):
                 "volume": raw.get("volume"),
                 "volumeDisplay": raw.get("volume_display") or raw.get("volumeDisplay"),
                 "trend": raw.get("trending_status") or raw.get("trend") or raw.get("trend_status"),
+                "trendStatus": raw.get("trend_status") or raw.get("trendStatus") or raw.get("trending_status") or raw.get("trend"),
+                "trendPercent": raw.get("trend_percent") or raw.get("trendPercent"),
+                "trendDescription": raw.get("trend_description") or raw.get("trendDescription") or raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "trendLabel": raw.get("trending_label") or raw.get("trendLabel"),
                 "statsMeaning": raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "whyRecommended": raw.get("why_recommended") or raw.get("whyRecommended"),
                 "recommendationReason": raw.get("recommendation_reason") or raw.get("recommendationReason"),
                 "aiSearches": raw.get("ai_search_volume") or raw.get("aiSearches") or raw.get("ai_searches"),
                 "aiVolumeDisplay": raw.get("ai_volume_display") or raw.get("aiVolumeDisplay"),
+                "monthlySearches": raw.get("monthly_searches") or raw.get("monthlySearches") or raw.get("daily_volumes") or raw.get("dailyVolumes") or [],
                 "relatedKeywords": raw.get("related_keywords") or raw.get("relatedKeywords") or [],
                 "paaQuestions": raw.get("paa_questions") or raw.get("paaQuestions") or [],
                 "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
@@ -492,6 +496,35 @@ def _safe_number(value, default=0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _json_list(value):
+    return value if isinstance(value, list) else []
+
+
+def _trend_percent_from_velocity(velocity):
+    if not velocity:
+        return None
+    score = velocity.get("velocityScore")
+    if score is None:
+        score = velocity.get("velocity_score")
+    if score is None:
+        return None
+    try:
+        return round(float(score) * 100)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trend_description(status):
+    status = str(status or "").lower()
+    if status in {"breakout", "rising", "growing"}:
+        return "Interest is growing and more people are searching for this topic."
+    if status == "declining":
+        return "Interest is declining slightly over recent searches."
+    if status == "stable":
+        return "Steady interest with consistent search volume over time."
+    return "Trend data is not available yet."
 
 
 def _latest_keyword_velocity(keyword):
@@ -532,6 +565,15 @@ def _latest_keyword_saturation(keyword):
 def _keyword_related_keywords(keyword, *, limit=6):
     related = []
     seen = {keyword.keyword_normalized}
+    for value in _json_list(getattr(keyword, "related_keywords", None)):
+        value = str(value or "").strip()
+        normalized = value.lower().strip()
+        if not value or normalized in seen:
+            continue
+        seen.add(normalized)
+        related.append(value)
+        if len(related) >= limit:
+            return related
     try:
         memberships = keyword.cluster_memberships.all()
     except Exception:
@@ -603,6 +645,10 @@ def _topic_candidate_from_keyword(keyword):
     reason = ". ".join(reason_parts) or "Recommended from stored topic research."
     written_article = keyword.written_article
     already_written = bool(keyword.status == KeywordStatus.WRITTEN or written_article)
+    velocity = _latest_keyword_velocity(keyword)
+    monthly_searches = _json_list(getattr(keyword, "monthly_searches", None)) or (velocity or {}).get("dailyVolumes") or []
+    trend_status = (velocity or {}).get("trendStatus")
+    trend_percent = _trend_percent_from_velocity(velocity)
     return {
         "id": f"keyword:{keyword.id}",
         "keyword": keyword.keyword,
@@ -618,7 +664,11 @@ def _topic_candidate_from_keyword(keyword):
         "status": keyword.status,
         "alreadyWritten": already_written,
         "writtenArticle": _serialize_written_article(written_article) if written_article else None,
-        "velocity": _latest_keyword_velocity(keyword),
+        "velocity": velocity,
+        "monthlySearches": monthly_searches,
+        "trendStatus": trend_status,
+        "trendPercent": trend_percent,
+        "trendDescription": _trend_description(trend_status),
         "aiSaturation": _latest_keyword_saturation(keyword),
         "relatedKeywords": _keyword_related_keywords(keyword),
         "paaQuestions": _keyword_paa_questions(keyword),
