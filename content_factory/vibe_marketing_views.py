@@ -1309,22 +1309,7 @@ def _ensure_article_live_preview(run):
     if _article_preview_should_refresh(run):
         payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
         return _persist_live_preview_payload(run, payload)
-    if not _article_preview_should_auto_prepare(run):
-        return run
-    logger.info(
-        "content_factory_live_preview_auto_start run_id=%s workflow=%s",
-        run.run_id,
-        run.workflow,
-    )
-    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
-    if isinstance(payload, dict) and payload.get("error"):
-        logger.warning(
-            "content_factory_live_preview_auto_start_failed run_id=%s workflow=%s error=%s",
-            run.run_id,
-            run.workflow,
-            payload.get("error"),
-        )
-    return _persist_live_preview_payload(run, payload)
+    return run
 
 
 def _serialize_component_comment(comment):
@@ -2717,6 +2702,40 @@ def _run_result_from_remote(remote_data):
     return merged
 
 
+def _preview_payload_from_result(result):
+    if not isinstance(result, dict):
+        return {}
+    payload = result.get("livePreview") or result.get("live_preview") or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _empty_preview_payload(payload):
+    if not isinstance(payload, dict) or not payload:
+        return True
+    status_value = str(payload.get("status") or "").strip().lower()
+    return (
+        status_value in {"", "not_started"}
+        and not payload.get("available")
+        and not (payload.get("previewUrl") or payload.get("preview_url"))
+        and not payload.get("error")
+    )
+
+
+def _merge_preserved_live_preview(local_result, remote_result):
+    if not isinstance(remote_result, dict):
+        return remote_result
+    local_preview = _preview_payload_from_result(local_result)
+    if _empty_preview_payload(local_preview):
+        return remote_result
+    remote_preview = _preview_payload_from_result(remote_result)
+    if not _empty_preview_payload(remote_preview):
+        return remote_result
+    merged = dict(remote_result)
+    merged["livePreview"] = local_preview
+    merged.pop("live_preview", None)
+    return merged
+
+
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
     remote_data = remote_data or {}
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
@@ -2927,6 +2946,7 @@ def _sync_local_run_from_remote(run, remote_data):
     elif run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED}:
         run.error = ""
     if result:
+        result = _merge_preserved_live_preview(run.result or {}, result)
         run.result = result
     _sync_steps_from_remote(run, remote_data)
     run.save(

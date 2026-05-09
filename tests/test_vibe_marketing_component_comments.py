@@ -54,7 +54,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    def test_completed_article_run_auto_prepares_live_preview(self):
+    def test_completed_article_run_does_not_auto_prepare_live_preview_on_get(self):
         self.run.result = {
             "componentManifest": {
                 "components": [
@@ -85,10 +85,10 @@ class VibeMarketingComponentCommentTests(TestCase):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
 
         self.assertEqual(response.status_code, 200)
-        preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
-        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        preview_call.assert_not_called()
+        self.assertFalse(response.data["livePreview"]["previewUrl"])
         self.run.refresh_from_db()
-        self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        self.assertNotIn("livePreview", self.run.result)
 
     def test_running_article_run_does_not_auto_prepare_live_preview(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
@@ -183,6 +183,77 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.status_code, 200)
         preview_call.assert_called_once_with(run_id=self.run.run_id, method="GET")
         self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+
+    def test_remote_not_started_preview_does_not_overwrite_local_failed_preview(self):
+        manifest = {
+            "components": [
+                {
+                    "id": "title",
+                    "type": "title",
+                    "label": "Title",
+                }
+            ]
+        }
+        self.run.result = {
+            "componentManifest": manifest,
+            "livePreview": {
+                "available": False,
+                "status": "failed",
+                "previewUrl": "",
+                "error": "Missing required mlai.au featured components in catalog.",
+            },
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+        remote_data = {
+            "run_id": self.run.run_id,
+            "workflow": self.run.workflow,
+            "status": ContentFactoryRunStatus.COMPLETED,
+            "result": {
+                "componentManifest": manifest,
+                "livePreview": {
+                    "available": False,
+                    "status": "not_started",
+                    "previewUrl": "",
+                    "error": "",
+                },
+            },
+        }
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value=remote_data),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview") as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_not_called()
+        self.assertEqual(response.data["livePreview"]["status"], "failed")
+        self.assertIn("Missing required", response.data["livePreview"]["error"])
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["livePreview"]["status"], "failed")
+
+    def test_live_preview_retry_posts_force_restart(self):
+        preview_payload = {
+            "available": False,
+            "status": "failed",
+            "previewUrl": "",
+            "error": "Preview failed.",
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview",
+                {"force": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={"force": True, "local_repo_path": ""},
+        )
+        self.assertEqual(response.data["livePreview"]["status"], "failed")
 
     def test_comment_crud_serializes_anchor(self):
         response = self.client.post(
