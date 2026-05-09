@@ -4945,12 +4945,47 @@ class SEOClusterBulkUpsertView(APIView):
 
 class SEOWrittenArticleCreateView(APIView):
     """
-    POST /api/seo/articles/
+    GET/POST /api/seo/articles/
 
-    Create a written article record and update keyword status.
+    List or create written article records and update keyword status.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 100)), 1000))
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        qs = WrittenArticle.objects.filter(organization=org).order_by('-created_at')
+        total_count = qs.count()
+        serializer = WrittenArticleSerializer(qs[offset:offset + limit], many=True)
+        return Response({
+            'domain': domain,
+            'count': len(serializer.data),
+            'total_count': total_count,
+            'articles': serializer.data,
+        }, status=status.HTTP_200_OK)
 
     def post(self, request):
         serializer = WrittenArticleCreateSerializer(data=request.data)

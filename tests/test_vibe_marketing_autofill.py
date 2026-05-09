@@ -1004,6 +1004,54 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["topicCandidates"][0]["opportunityScore"], 91)
         self.assertEqual(response.data["declinedTopicFeedback"][0]["keyword"], "how to calculate equity in a house")
 
+    def test_bootstrap_excludes_close_variants_of_written_topics(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        WrittenArticle.objects.create(
+            organization=organization,
+            title="What Is Artificial Intelligence With Example",
+            slug="what-is-artificial-intelligence-with-example",
+            category="featured",
+            primary_keyword="what is artificial intelligence with example",
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="what artificial intelligence is",
+            volume=1000,
+            difficulty=30,
+            opportunity_index=95,
+            status=KeywordStatus.PENDING,
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="how does artificial intelligence works",
+            volume=900,
+            difficulty=30,
+            opportunity_index=94,
+            status=KeywordStatus.PENDING,
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="artificial intelligence for startups",
+            volume=700,
+            difficulty=36,
+            opportunity_index=91,
+            status=KeywordStatus.PENDING,
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        keywords = [candidate["keyword"] for candidate in response.data["topicCandidates"]]
+        self.assertEqual(keywords, ["artificial intelligence for startups"])
+        hidden = {
+            candidate["keyword"]: candidate
+            for candidate in response.data["hiddenTopicCandidates"]
+        }
+        self.assertTrue(hidden["what artificial intelligence is"]["alreadyWritten"])
+        self.assertEqual(hidden["what artificial intelligence is"]["coveredTopic"]["matchType"], "lexical_variant")
+
     def test_topic_feedback_endpoint_declines_and_restores_topic(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
@@ -1073,6 +1121,35 @@ class VibeMarketingAutofillTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("already been written", response.data["detail"])
+        post.assert_not_called()
+
+    def test_article_start_rejects_close_variant_of_written_topic(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        WrittenArticle.objects.create(
+            organization=organization,
+            title="What Is Artificial Intelligence With Example",
+            slug="what-is-artificial-intelligence-with-example",
+            category="featured",
+            primary_keyword="what is artificial intelligence with example",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {"topic": "What Artificial Intelligence Is", "targetKeyword": "what artificial intelligence is"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("already been written", response.data["detail"])
+        self.assertEqual(response.data["coveredTopic"]["matchType"], "lexical_variant")
+        self.assertEqual(response.data["writtenArticle"]["keyword"], "what is artificial intelligence with example")
         post.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
