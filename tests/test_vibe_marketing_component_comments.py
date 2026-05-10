@@ -81,6 +81,10 @@ class VibeMarketingComponentCommentTests(TestCase):
             "failedPhase": "verify",
             "failedCommand": "bun run typecheck",
             "logExcerpt": "[verify] command: bun run typecheck\nerror: script exited",
+            "proofWarnings": ["Vite optimized dependencies during preview proof."],
+            "browserWarnings": ["Failed to fetch dynamically imported module: /app/entry.client.tsx"],
+            "assetWarnings": ["http://127.0.0.1:4321/node_modules/.vite/deps/react-dom_client.js"],
+            "proofAttempts": [{"attempt": 1, "exact": True}],
         }
 
         with (
@@ -96,6 +100,10 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["failedPhase"], "verify")
         self.assertEqual(response.data["livePreview"]["failedCommand"], "bun run typecheck")
         self.assertIn("script exited", response.data["livePreview"]["logExcerpt"])
+        self.assertEqual(response.data["livePreview"]["proofWarnings"], preview_payload["proofWarnings"])
+        self.assertEqual(response.data["livePreview"]["browserWarnings"], preview_payload["browserWarnings"])
+        self.assertEqual(response.data["livePreview"]["assetWarnings"], preview_payload["assetWarnings"])
+        self.assertEqual(response.data["livePreview"]["proofAttempts"], preview_payload["proofAttempts"])
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
@@ -131,6 +139,54 @@ class VibeMarketingComponentCommentTests(TestCase):
             method="POST",
             payload={"force": False, "github_token": "org-live-preview-token"},
         )
+
+    def test_completed_article_run_refreshes_starting_preview_failure(self):
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            },
+            "livePreview": {
+                "available": False,
+                "status": "starting",
+                "previewUrl": "",
+                "error": "",
+                "errorCode": "preview_start_timeout",
+                "retryable": True,
+            },
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        preview_payload = {
+            "available": False,
+            "status": "failed",
+            "previewUrl": "",
+            "error": "Preview process was terminated by SIGKILL. This often indicates the container ran out of memory.",
+            "errorCode": "dev_server_startup_failed",
+            "retryable": True,
+            "failedPhase": "preview",
+            "failedCommand": "bun run dev -- --host 127.0.0.1 --port 40547",
+            "logExcerpt": 'error: script "dev" was terminated by signal SIGKILL',
+        }
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(run_id=self.run.run_id, method="GET")
+        self.assertEqual(response.data["livePreview"]["status"], "failed")
+        self.assertEqual(response.data["livePreview"]["errorCode"], "dev_server_startup_failed")
+        self.assertIn("SIGKILL", response.data["livePreview"]["logExcerpt"])
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["livePreview"]["status"], "failed")
 
     def test_running_article_run_does_not_auto_prepare_live_preview(self):
         self.run.status = ContentFactoryRunStatus.RUNNING

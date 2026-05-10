@@ -1300,6 +1300,10 @@ def _live_preview_from_run(run):
         "failedPhase": payload.get("failedPhase") or payload.get("failed_phase") or "",
         "failedCommand": payload.get("failedCommand") or payload.get("failed_command") or "",
         "logExcerpt": payload.get("logExcerpt") or payload.get("log_excerpt") or "",
+        "proofWarnings": payload.get("proofWarnings") or payload.get("proof_warnings") or [],
+        "browserWarnings": payload.get("browserWarnings") or payload.get("browser_warnings") or [],
+        "assetWarnings": payload.get("assetWarnings") or payload.get("asset_warnings") or [],
+        "proofAttempts": payload.get("proofAttempts") or payload.get("proof_attempts") or [],
         "verificationSkippedForPreview": bool(
             payload.get("verificationSkippedForPreview")
             or payload.get("verification_skipped_for_preview")
