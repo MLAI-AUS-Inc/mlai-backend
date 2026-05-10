@@ -7,17 +7,19 @@ import re
 import uuid
 import time
 from datetime import timedelta, timezone as datetime_timezone
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
 from django.db.models import Prefetch
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -76,6 +78,17 @@ from workflow_runs.models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class _AnyContentRenderer(BaseRenderer):
+    media_type = "*/*"
+    format = "proxy"
+    charset = None
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if isinstance(data, bytes):
+            return data
+        return json.dumps(data or {}).encode("utf-8")
 
 
 VIBE_MARKETING_WORKFLOWS = {
@@ -1284,10 +1297,14 @@ def _live_preview_from_run(run):
     payload = result.get("livePreview") or result.get("live_preview") or {}
     if not isinstance(payload, dict):
         payload = {}
+    if run and payload:
+        payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
     return {
         "available": bool(payload.get("available")),
         "status": payload.get("status") or "not_started",
         "previewUrl": payload.get("previewUrl") or payload.get("preview_url") or "",
+        "internalPreviewUrl": payload.get("internalPreviewUrl") or payload.get("internal_preview_url") or "",
+        "proxyPath": payload.get("proxyPath") or payload.get("proxy_path") or "",
         "routePath": payload.get("routePath") or payload.get("route_path") or "",
         "exactRender": bool(payload.get("exactRender") or payload.get("exact_render")),
         "inspectorProtocolVersion": payload.get("inspectorProtocolVersion") or payload.get("inspector_protocol_version"),
@@ -1313,8 +1330,75 @@ def _live_preview_from_run(run):
     }
 
 
+def _content_factory_live_preview_proxy_prefix(run_id):
+    return f"/api/runs/{run_id}/live-preview/proxy"
+
+
+def _backend_live_preview_proxy_prefix(run_id):
+    return f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/proxy"
+
+
+def _backend_public_base_url():
+    base_url = str(getattr(settings, "DEFAULT_BACKEND_URL", "") or "").strip().rstrip("/")
+    if base_url.startswith(("http://", "https://")):
+        return base_url
+    return ""
+
+
+def _proxy_suffix_from_content_factory_payload(run_id, payload):
+    proxy_path = str(payload.get("proxyPath") or payload.get("proxy_path") or "").strip()
+    if not proxy_path:
+        preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+        if preview_url:
+            parsed = urlsplit(preview_url)
+            proxy_path = parsed.path
+            if parsed.query:
+                proxy_path = f"{proxy_path}?{parsed.query}"
+    if not proxy_path:
+        return ""
+    path_part, _, query_part = proxy_path.partition("?")
+    suffix = ""
+    for prefix in (_content_factory_live_preview_proxy_prefix(run_id), _backend_live_preview_proxy_prefix(run_id)):
+        if path_part.startswith(prefix):
+            suffix = path_part[len(prefix):] or "/"
+            break
+    if not suffix:
+        suffix = path_part if path_part.startswith("/") else f"/{path_part}"
+    if query_part:
+        suffix = f"{suffix}?{query_part}"
+    return suffix
+
+
+def _browser_live_preview_url(run_id, payload):
+    suffix = _proxy_suffix_from_content_factory_payload(run_id, payload)
+    if not suffix:
+        return ""
+    base_url = _backend_public_base_url()
+    return f"{base_url}{_backend_live_preview_proxy_prefix(run_id)}{suffix}"
+
+
+def _rewrite_live_preview_payload_for_browser(run_id, payload):
+    if not isinstance(payload, dict):
+        return payload
+    rewritten = dict(payload)
+    internal_preview_url = (
+        rewritten.get("internalPreviewUrl")
+        or rewritten.get("internal_preview_url")
+        or rewritten.get("previewUrl")
+        or rewritten.get("preview_url")
+        or ""
+    )
+    browser_url = _browser_live_preview_url(run_id, rewritten)
+    if browser_url:
+        rewritten["internalPreviewUrl"] = internal_preview_url
+        rewritten["previewUrl"] = browser_url
+        rewritten["proxyPath"] = _proxy_suffix_from_content_factory_payload(run_id, rewritten)
+    return rewritten
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
+        payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         result = dict(run.result or {})
         result["livePreview"] = payload
         run.result = result
@@ -4459,6 +4543,76 @@ class VibeMarketingRunLivePreviewView(APIView):
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="DELETE")
         run = self._persist_preview(run, remote_data)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+
+class VibeMarketingRunLivePreviewProxyView(APIView):
+    http_method_names = ["get", "head", "options"]
+    renderer_classes = [_AnyContentRenderer]
+
+    def _resolve_run(self, request, run_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=False)
+        if error_response:
+            return None, None, error_response
+        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        if not _run_belongs_to_context(run, context):
+            return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return context, run, None
+
+    def _proxy(self, request, run_id, proxy_path):
+        _context, _run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        remote_config = _content_factory_remote_config()
+        if not remote_config["enabled"]:
+            return Response({"detail": _content_factory_unavailable_message(remote_config)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        safe_path = quote(str(proxy_path or "").lstrip("/"), safe="/:@!$&'()*+,;=-._~")
+        remote_url = f"{remote_config['base_url']}/api/runs/{run_id}/live-preview/proxy/{safe_path}"
+        query_string = request.META.get("QUERY_STRING") or ""
+        if query_string:
+            remote_url = f"{remote_url}?{query_string}"
+        forwarded_headers = {
+            "Accept": request.headers.get("Accept", "*/*"),
+            "User-Agent": request.headers.get("User-Agent", "mlai-backend-live-preview-proxy"),
+        }
+        try:
+            response = http_client.request(
+                request.method,
+                remote_url,
+                headers={**_content_factory_headers(), **forwarded_headers},
+                timeout=(3, 45),
+            )
+        except http_client.RequestException as exc:
+            return HttpResponse(
+                f"Preview proxy failed: {exc}",
+                status=502,
+                content_type="text/plain; charset=utf-8",
+            )
+
+        django_response = HttpResponse(
+            response.content if request.method != "HEAD" else b"",
+            status=response.status_code,
+            content_type=response.headers.get("Content-Type") or "application/octet-stream",
+        )
+        for header, value in response.headers.items():
+            lowered = header.lower()
+            if lowered in {
+                "content-type",
+                "content-length",
+                "connection",
+                "transfer-encoding",
+                "content-encoding",
+                "content-security-policy",
+            }:
+                continue
+            django_response[header] = value
+        return django_response
+
+    def get(self, request, run_id, proxy_path=""):
+        return self._proxy(request, run_id, proxy_path)
+
+    def head(self, request, run_id, proxy_path=""):
+        return self._proxy(request, run_id, proxy_path)
 
 
 def _accepted_component_revision_for_publish(run, context):
