@@ -369,8 +369,8 @@ class ContentFactoryAppSettingsView(APIView):
         competitors = _list_from_payload(data.get("competitors"))
         seed_keywords = _list_from_payload(data.get("seed_keywords"))
         daily_enabled = bool(data.get("daily_discovery_enabled"))
-        article_delivery_mode = str(data.get("article_delivery_mode") or "publish_code").strip()
-        if article_delivery_mode not in {"publish_code", "content_only", "publish_webflow"}:
+        article_delivery_mode = str(data.get("article_delivery_mode") or "review_draft").strip()
+        if article_delivery_mode not in {"review_draft", "publish_code", "content_only", "publish_webflow"}:
             return Response({"error": "Invalid article_delivery_mode"}, status=status.HTTP_400_BAD_REQUEST)
         if daily_enabled and not (competitors or seed_keywords):
             return Response(
@@ -608,7 +608,7 @@ class ContentFactoryAppArticleView(APIView):
             return Response({"error": "target_keyword is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         source_run_id = str(data.get("source_run_id") or "").strip()
-        delivery_mode = str(data.get("delivery_mode") or "publish_code").strip()
+        delivery_mode = str(data.get("delivery_mode") or "review_draft").strip()
         try:
             if source_run_id:
                 result = confirm_topic(

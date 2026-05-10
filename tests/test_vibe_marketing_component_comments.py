@@ -765,3 +765,48 @@ class VibeMarketingComponentCommentTests(TestCase):
         steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
         self.assertEqual(response.data["workflowProgress"]["currentStepId"], "publish")
         self.assertEqual(steps["publish"]["status"], "running")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_targets_accepted_component_revision(self):
+        revision_run = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-revision-accepted",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            run_request={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-accepted"},
+            result={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-accepted"},
+        )
+        self.run.run_request = {"delivery_mode": "review_draft"}
+        self.run.result = {
+            "delivery_mode": "review_draft",
+            "component_feedback_latest_batch": {
+                "id": "batch-accepted",
+                "sourceRunId": self.run.run_id,
+                "revisionRunId": revision_run.run_id,
+                "status": "accepted",
+            },
+        }
+        self.run.save(update_fields=["run_request", "result", "updated_at"])
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": "article-publish-child-from-revision", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            captured["url"],
+            "https://content-factory.test/api/runs/article-run-comments-revision-accepted/promote-bundle",
+        )
+        publish_run = ContentFactoryRun.objects.get(run_id="article-publish-child-from-revision")
+        self.assertEqual(publish_run.run_request["source_run_id"], revision_run.run_id)
+        self.assertEqual(publish_run.run_request["review_source_run_id"], self.run.run_id)
+        self.run.refresh_from_db()
+        revision_run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-from-revision")
+        self.assertEqual(revision_run.result["publish_child_run_id"], "article-publish-child-from-revision")
