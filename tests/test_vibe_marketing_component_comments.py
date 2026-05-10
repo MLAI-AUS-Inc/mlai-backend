@@ -303,7 +303,14 @@ class VibeMarketingComponentCommentTests(TestCase):
         remote_response = SimpleNamespace(
             status_code=200,
             content=b"console.log('preview')",
-            headers={"Content-Type": "text/javascript", "Content-Length": "999", "X-Preview": "ok"},
+            headers={
+                "Content-Type": "text/javascript",
+                "Content-Length": "999",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+                "Content-Security-Policy-Report-Only": "frame-ancestors 'none'",
+                "X-Frame-Options": "DENY",
+                "X-Preview": "ok",
+            },
         )
 
         with (
@@ -324,6 +331,9 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.content, b"console.log('preview')")
         self.assertEqual(response["Content-Type"], "text/javascript")
         self.assertEqual(response["X-Preview"], "ok")
+        self.assertFalse(response.has_header("X-Frame-Options"))
+        self.assertFalse(response.has_header("Content-Security-Policy"))
+        self.assertFalse(response.has_header("Content-Security-Policy-Report-Only"))
         request_call.assert_called_once()
         args, kwargs = request_call.call_args
         self.assertEqual(args[0], "GET")
