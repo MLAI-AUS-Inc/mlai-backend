@@ -10,6 +10,7 @@ from content_factory.models import KeywordStatus, OrganizationContentConfig, Res
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
+from content_factory.vibe_marketing_views import _call_content_factory_live_preview
 
 
 User = get_user_model()
@@ -89,6 +90,38 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+
+    def test_completed_article_run_auto_prepare_forwards_org_github_token(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "org-live-preview-token"
+        config.save(update_fields=["github_token_encrypted", "updated_at"])
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        preview_payload = {"available": False, "status": "starting", "previewUrl": ""}
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={"force": False, "github_token": "org-live-preview-token"},
+        )
 
     def test_running_article_run_does_not_auto_prepare_live_preview(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
@@ -254,6 +287,47 @@ class VibeMarketingComponentCommentTests(TestCase):
             payload={"force": True, "local_repo_path": ""},
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
+
+    def test_live_preview_retry_forwards_org_github_token(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "org-live-preview-token"
+        config.save(update_fields=["github_token_encrypted", "updated_at"])
+        preview_payload = {
+            "available": False,
+            "status": "starting",
+            "previewUrl": "",
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call:
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview",
+                {"force": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={"force": True, "local_repo_path": "", "github_token": "org-live-preview-token"},
+        )
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_live_preview_post_timeout_stays_starting(self):
+        def fake_post(url, json=None, headers=None, timeout=None):
+            raise http_client.exceptions.ReadTimeout("Read timed out.")
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            payload = _call_content_factory_live_preview(
+                run_id=self.run.run_id,
+                method="POST",
+                payload={"force": False},
+            )
+
+        self.assertEqual(payload["status"], "starting")
+        self.assertEqual(payload["errorCode"], "preview_start_timeout")
+        self.assertEqual(payload["error"], "")
+        self.assertTrue(payload["retryable"])
 
     def test_comment_crud_serializes_anchor(self):
         response = self.client.post(

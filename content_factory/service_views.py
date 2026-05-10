@@ -1553,6 +1553,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_content_ready(data)
             elif event_type == 'publish_bundle_ready':
                 return self._handle_publish_bundle_ready(data)
+            elif event_type == 'article_review_ready':
+                return self._handle_article_review_ready(data)
             elif event_type == 'discovery_progress':
                 return self._handle_discovery_progress(data)
             elif event_type == 'article_progress':
@@ -2862,6 +2864,44 @@ class ContentFactoryCallbackView(APIView):
             {
                 'status': 'received',
                 'message': 'Publish bundle ready callback processed',
+                'job_id': job_id,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def _handle_article_review_ready(self, data):
+        data = self._enrich_review_preview_payload(data)
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='completed',
+            error_message='',
+        )
+        request_meta = dict(job.request_meta or {})
+        request_meta['publish_stage'] = 'article_review_ready'
+        for field in (
+            'live_preview_url',
+            'component_manifest_path',
+            'article_component_manifest_path',
+            'route_path',
+            'primary_artifact_path',
+        ):
+            if data.get(field):
+                request_meta[field] = data.get(field)
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
+
+        logger.info("Article review draft ready for job %s (%s)", job_id, domain)
+        return Response(
+            {
+                'status': 'received',
+                'message': 'Article review ready callback processed',
                 'job_id': job_id,
             },
             status=status.HTTP_200_OK,
