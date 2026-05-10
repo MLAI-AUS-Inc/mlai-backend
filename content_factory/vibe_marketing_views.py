@@ -1898,6 +1898,11 @@ def _run_url(run):
 def _latest_publish_child_run(latest_runs, article_run):
     if not article_run:
         return None
+    explicit_child_run_id = str(_run_mapping(article_run.result).get("publish_child_run_id") or "").strip()
+    if explicit_child_run_id:
+        for candidate in latest_runs or []:
+            if candidate.run_id == explicit_child_run_id:
+                return candidate
     candidates = []
     for candidate in latest_runs or []:
         if candidate.run_id == article_run.run_id or candidate.workflow not in ARTICLE_WORKFLOWS:
@@ -1920,7 +1925,7 @@ def _run_can_promote_package(run, config=None):
     if result.get("promote_bundle_url") or result.get("publish_pr_url"):
         return True
     delivery_mode = _run_delivery_mode(run)
-    if delivery_mode == "content_only":
+    if delivery_mode in {"content_only", "review_draft"} or run.workflow == "article_revision":
         return bool(config and config.github_connection_state == "connected" and config.github_repo)
     return False
 
@@ -4287,6 +4292,27 @@ class VibeMarketingRunLivePreviewView(APIView):
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
+def _accepted_component_revision_for_publish(run, context):
+    result = _run_mapping(run.result)
+    latest_batch = result.get("component_feedback_latest_batch")
+    if not isinstance(latest_batch, dict) or latest_batch.get("status") != "accepted":
+        return None
+    revision_run_id = str(
+        latest_batch.get("revisionRunId")
+        or latest_batch.get("revision_run_id")
+        or result.get("component_feedback_revision_run_id")
+        or ""
+    ).strip()
+    if not revision_run_id:
+        return None
+    revision_run = ContentFactoryRun.objects.filter(run_id=revision_run_id).first()
+    if not revision_run or not _run_belongs_to_context(revision_run, context):
+        return None
+    if revision_run.status != ContentFactoryRunStatus.COMPLETED:
+        return None
+    return revision_run
+
+
 class VibeMarketingRunControlView(APIView):
     def post(self, request, run_id, action):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
@@ -4318,7 +4344,19 @@ class VibeMarketingRunControlView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
-        remote_data = _call_content_factory_run_action(run_id=run_id, action=action, payload=payload, workflow=run.workflow)
+        remote_run = run
+        if action in {"promote-bundle", "publish-pr"}:
+            accepted_revision = _accepted_component_revision_for_publish(run, context)
+            if accepted_revision is not None:
+                remote_run = accepted_revision
+                payload.setdefault("review_source_run_id", run.run_id)
+                payload.setdefault("source_run_id", accepted_revision.run_id)
+        remote_data = _call_content_factory_run_action(
+            run_id=remote_run.run_id,
+            action=action,
+            payload=payload,
+            workflow=remote_run.workflow,
+        )
 
         if action == "revise":
             new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
@@ -4362,10 +4400,12 @@ class VibeMarketingRunControlView(APIView):
                 config = _get_config(context.organization)
                 publish_payload = {
                     **payload,
-                    "source_run_id": run.run_id,
+                    "source_run_id": remote_run.run_id,
                     "delivery_mode": "publish_code",
                     "delivery_mode_confirmed": True,
                 }
+                if remote_run.run_id != run.run_id:
+                    publish_payload["review_source_run_id"] = run.run_id
                 publish_run = _create_local_run(
                     workflow="article_generation",
                     domain=context.organization.domain,
@@ -4380,6 +4420,13 @@ class VibeMarketingRunControlView(APIView):
                 result["promote_bundle_requested_at"] = timezone.now().isoformat()
                 run.result = result
                 run.save(update_fields=["result", "updated_at"])
+                if remote_run.run_id != run.run_id:
+                    remote_result = remote_run.result or {}
+                    remote_result["publish_child_run_id"] = publish_run.run_id
+                    remote_result["latest_control_response"] = remote_data
+                    remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
+                    remote_run.result = remote_result
+                    remote_run.save(update_fields=["result", "updated_at"])
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":

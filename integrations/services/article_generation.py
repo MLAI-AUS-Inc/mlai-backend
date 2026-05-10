@@ -22,8 +22,8 @@ from integrations import http_client as http_requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ARTICLE_DELIVERY_MODE = "publish_code"
-VALID_ARTICLE_DELIVERY_MODES = {"publish_code", "content_only"}
+DEFAULT_ARTICLE_DELIVERY_MODE = "review_draft"
+VALID_ARTICLE_DELIVERY_MODES = {"review_draft", "publish_code", "content_only"}
 FAILURE_RUN_STATUSES = {"failed", "error", "denied"}
 BLOCKED_RUN_STATUSES = {"blocked", "blocked_verification"}
 REVIEWABLE_RUN_STATUSES = {"pr_opened", "needs_review"}
