@@ -1,4 +1,5 @@
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -108,7 +109,7 @@ class AuthContractTests(TestCase):
 
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=vibe')
-    def test_create_user_includes_vibe_raising_contract(self, mock_generate, mock_send):
+    def test_create_user_normalizes_vibe_raising_to_founder_tools_contract(self, mock_generate, mock_send):
         response = self.client.post(
             '/api/v1/auth/create-user/',
             {
@@ -122,7 +123,7 @@ class AuthContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertIn('app=vibe-raising', response.data['magic_link'])
+        self.assertIn('app=founder-tools', response.data['magic_link'])
         self.assertIn('next=/vibe-raising', response.data['magic_link'])
         mock_generate.assert_called_once()
         mock_send.assert_called_once()
@@ -195,6 +196,39 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.data['message'], 'User does not exist.')
         mock_send.assert_not_called()
 
+    @override_settings(VIBE_RAISING_URL='http://localhost:5173')
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify-email?token=next-query')
+    def test_send_magic_link_encodes_nested_next_query(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='nested-next@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {
+                'email': 'nested-next@example.com',
+                'app': 'founder-tools',
+                'next': '/founder-tools/marketing/create?step=baseline&googleBaseline=refresh',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['magic_link_sent'])
+        magic_link = mock_send.call_args.args[1]
+        self.assertIn(
+            'next=/founder-tools/marketing/create%3Fstep%3Dbaseline%26googleBaseline%3Drefresh',
+            magic_link,
+        )
+        parsed_params = parse_qs(urlparse(magic_link).query)
+        self.assertEqual(parsed_params['token'], ['next-query'])
+        self.assertEqual(parsed_params['app'], ['founder-tools'])
+        self.assertEqual(
+            parsed_params['next'],
+            ['/founder-tools/marketing/create?step=baseline&googleBaseline=refresh'],
+        )
+        mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
+        mock_send.assert_called_once()
+
     @override_settings(INNOVATE_CONNECT_ALLIANCE_URL='http://localhost:4100')
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link')
@@ -261,7 +295,7 @@ class AuthContractTests(TestCase):
         mock_verify.assert_called_once_with('test-token')
 
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'vibe-verify@example.com'})
-    def test_verify_magic_link_defaults_to_vibe_raising_redirect(self, mock_verify):
+    def test_verify_magic_link_defaults_to_founder_tools_for_vibe_raising_alias(self, mock_verify):
         user = User.objects.create_user(
             email='vibe-verify@example.com',
             role='participant',
@@ -277,8 +311,8 @@ class AuthContractTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['user']['id'], user.id)
-        self.assertEqual(response.data['redirect'], '/vibe-raising')
-        self.assertTrue(response.data['next_url'].endswith('/vibe-raising'))
+        self.assertEqual(response.data['redirect'], '/founder-tools')
+        self.assertTrue(response.data['next_url'].endswith('/founder-tools'))
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
 

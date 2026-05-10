@@ -1,5 +1,5 @@
 import logging
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 from django.contrib.auth import get_user_model, login as auth_login
 from django.db import transaction
 from django.urls import reverse
@@ -80,11 +80,12 @@ def _normalize_next_path(next_path):
 
 
 def _append_auth_query_params(magic_link, app, next_path=None):
-    separator = '&' if '?' in magic_link else '?'
-    magic_link = f"{magic_link}{separator}app={app}"
+    parsed = urlparse(str(magic_link))
+    query_params = parse_qsl(parsed.query, keep_blank_values=True)
+    query_params.append(("app", app))
     if next_path:
-        magic_link += f"&next={next_path}"
-    return magic_link
+        query_params.append(("next", next_path))
+    return parsed._replace(query=urlencode(query_params, safe="/")).geturl()
 
 
 def _origin_from_url(url, fallback):
