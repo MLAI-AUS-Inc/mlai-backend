@@ -927,6 +927,27 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["startPageMode"], "first_article_setup")
         self.assertFalse(response.data["hasCompletedArticleFlow"])
 
+    def test_bootstrap_returns_effective_review_draft_for_connected_legacy_content_only_config(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "github_token_encrypted": "token",
+                "github_token_expires_at": timezone.now() + timezone.timedelta(hours=1),
+                "article_delivery_mode": "content_only",
+                "publish_targets": [{"id": "react_article_system", "state": "ready"}],
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["settings"]["articleDeliveryMode"], "content_only")
+        self.assertEqual(response.data["settings"]["articleDeliveryModeEffective"], "review_draft")
+
     def test_bootstrap_returns_topic_picker_mode_after_written_article(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
@@ -1268,6 +1289,95 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["custom_title"], "What Australian Founders Need to Know Before Investing in AI Products")
         self.assertEqual(captured["source_run_id"], "discovery-selection-1")
         self.assertNotIn("source_discovery_run_id", captured)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_uses_review_draft_when_connected_config_is_legacy_content_only(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.github_token_encrypted = "token"
+        config.github_token_expires_at = timezone.now() + timezone.timedelta(hours=1)
+        config.article_delivery_mode = "content_only"
+        config.publish_targets = [{"id": "react_article_system", "state": "ready"}]
+        config.baseline_skipped_at = timezone.now()
+        config.save(
+            update_fields=[
+                "github_repo",
+                "github_token_encrypted",
+                "github_token_expires_at",
+                "article_delivery_mode",
+                "publish_targets",
+                "baseline_skipped_at",
+                "updated_at",
+            ]
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-review-draft-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {
+                    "topic": "Founder workflow automation",
+                    "targetKeyword": "founder workflow automation",
+                    "deliveryMode": "content_only",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["delivery_mode"], "review_draft")
+        self.assertFalse(captured["delivery_mode_explicit"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_honours_explicit_advanced_content_only(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.github_token_encrypted = "token"
+        config.github_token_expires_at = timezone.now() + timezone.timedelta(hours=1)
+        config.article_delivery_mode = "content_only"
+        config.publish_targets = [{"id": "react_article_system", "state": "ready"}]
+        config.baseline_skipped_at = timezone.now()
+        config.save(
+            update_fields=[
+                "github_repo",
+                "github_token_encrypted",
+                "github_token_expires_at",
+                "article_delivery_mode",
+                "publish_targets",
+                "baseline_skipped_at",
+                "updated_at",
+            ]
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-content-only-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {
+                    "topic": "Founder workflow automation",
+                    "targetKeyword": "founder workflow automation",
+                    "deliveryMode": "content_only",
+                    "deliveryModeExplicit": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["delivery_mode"], "content_only")
+        self.assertTrue(captured["delivery_mode_explicit"])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_blank_article_start_returns_validation_error_without_local_blocked_run(self):
