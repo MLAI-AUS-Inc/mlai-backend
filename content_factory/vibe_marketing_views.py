@@ -1297,6 +1297,15 @@ def _live_preview_from_run(run):
         "retryable": bool(payload.get("retryable", True)),
         "workspacePath": payload.get("workspacePath") or payload.get("workspace_path") or "",
         "logPath": payload.get("logPath") or payload.get("log_path") or "",
+        "failedPhase": payload.get("failedPhase") or payload.get("failed_phase") or "",
+        "failedCommand": payload.get("failedCommand") or payload.get("failed_command") or "",
+        "logExcerpt": payload.get("logExcerpt") or payload.get("log_excerpt") or "",
+        "verificationSkippedForPreview": bool(
+            payload.get("verificationSkippedForPreview")
+            or payload.get("verification_skipped_for_preview")
+        ),
+        "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
+        "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
     }
 
 
