@@ -19,7 +19,6 @@ VALID_PROD_URL_SETTINGS = {
     "DEFAULT_FRONTEND_URL": "https://mlai.au",
     "MEDHACK_URL": "https://mlai.au",
     "ESAFETY_URL": "https://mlai.au",
-    "INNOVATE_CONNECT_ALLIANCE_URL": "https://mlai.au",
     "VIBE_RAISING_URL": "https://mlai.au",
     "FOUNDER_TOOLS_URL": "https://mlai.au",
     "GOOGLE_OAUTH_REDIRECT_URI": "https://api.mlai.au/integrations/callback/google",

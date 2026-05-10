@@ -2,7 +2,6 @@ DEFAULT_USER_ROLE = "participant"
 USER_TEAM_RELATION_NAMES = (
     "hospital_teams",
     "esafety_teams",
-    "innovate_connect_alliance_teams",
 )
 
 
