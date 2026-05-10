@@ -15,9 +15,11 @@ from django.db import OperationalError, connection, transaction
 from django.db.models import Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
 from django.utils.text import slugify
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
+from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import status
 from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
@@ -4545,6 +4547,7 @@ class VibeMarketingRunLivePreviewView(APIView):
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
+@method_decorator(xframe_options_exempt, name="dispatch")
 class VibeMarketingRunLivePreviewProxyView(APIView):
     http_method_names = ["get", "head", "options"]
     renderer_classes = [_AnyContentRenderer]
@@ -4602,7 +4605,9 @@ class VibeMarketingRunLivePreviewProxyView(APIView):
                 "connection",
                 "transfer-encoding",
                 "content-encoding",
+                "content-security-policy-report-only",
                 "content-security-policy",
+                "x-frame-options",
             }:
                 continue
             django_response[header] = value
