@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -95,7 +96,12 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
-        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        expected_preview_url = (
+            f"{settings.DEFAULT_BACKEND_URL}/api/v1/vibe-marketing/runs/{self.run.run_id}"
+            "/live-preview/proxy/articles/featured/generated?cfInspector=1"
+        )
+        self.assertEqual(response.data["livePreview"]["previewUrl"], expected_preview_url)
+        self.assertEqual(response.data["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
         self.assertTrue(response.data["livePreview"]["verificationSkippedForPreview"])
         self.assertEqual(response.data["livePreview"]["failedPhase"], "verify")
         self.assertEqual(response.data["livePreview"]["failedCommand"], "bun run typecheck")
@@ -105,7 +111,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["assetWarnings"], preview_payload["assetWarnings"])
         self.assertEqual(response.data["livePreview"]["proofAttempts"], preview_payload["proofAttempts"])
         self.run.refresh_from_db()
-        self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        self.assertEqual(self.run.result["livePreview"]["previewUrl"], expected_preview_url)
+        self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
 
     def test_completed_article_run_auto_prepare_forwards_org_github_token(self):
@@ -242,7 +249,12 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         preview_call.assert_not_called()
-        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_url)
+        expected_preview_url = (
+            f"{settings.DEFAULT_BACKEND_URL}/api/v1/vibe-marketing/runs/{self.run.run_id}"
+            "/live-preview/proxy/articles/featured/generated?cfInspector=1"
+        )
+        self.assertEqual(response.data["livePreview"]["previewUrl"], expected_preview_url)
+        self.assertEqual(response.data["livePreview"]["internalPreviewUrl"], preview_url)
 
     def test_completed_article_run_refreshes_running_live_preview(self):
         self.run.result = {
@@ -280,7 +292,47 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         preview_call.assert_called_once_with(run_id=self.run.run_id, method="GET")
-        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        expected_preview_url = (
+            f"{settings.DEFAULT_BACKEND_URL}/api/v1/vibe-marketing/runs/{self.run.run_id}"
+            "/live-preview/proxy/articles/featured/generated?cfInspector=1"
+        )
+        self.assertEqual(response.data["livePreview"]["previewUrl"], expected_preview_url)
+        self.assertEqual(response.data["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
+
+    def test_live_preview_proxy_forwards_authenticated_run_asset_request(self):
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=b"console.log('preview')",
+            headers={"Content-Type": "text/javascript", "Content-Length": "999", "X-Preview": "ok"},
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response) as request_call,
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}"
+                "/live-preview/proxy/node_modules/.vite/deps/react-dom_client.js?v=test",
+                HTTP_ACCEPT="text/javascript",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"console.log('preview')")
+        self.assertEqual(response["Content-Type"], "text/javascript")
+        self.assertEqual(response["X-Preview"], "ok")
+        request_call.assert_called_once()
+        args, kwargs = request_call.call_args
+        self.assertEqual(args[0], "GET")
+        self.assertEqual(
+            args[1],
+            f"http://content-factory-web:8000/api/runs/{self.run.run_id}"
+            "/live-preview/proxy/node_modules/.vite/deps/react-dom_client.js?v=test",
+        )
+        self.assertEqual(kwargs["headers"]["X-API-Key"], "test-key")
 
     def test_remote_not_started_preview_does_not_overwrite_local_failed_preview(self):
         manifest = {
