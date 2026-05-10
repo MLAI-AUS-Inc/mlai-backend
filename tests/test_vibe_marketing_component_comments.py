@@ -321,9 +321,17 @@ class VibeMarketingComponentCommentTests(TestCase):
             payload={"force": True, "local_repo_path": "", "github_token": "org-live-preview-token"},
         )
 
-    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    @override_settings(
+        CONTENT_FACTORY_URL="https://content-factory.test",
+        CONTENT_FACTORY_API_KEY="secret-key",
+        CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS=12,
+        IS_LOCAL_ENV=False,
+    )
     def test_live_preview_post_timeout_stays_starting(self):
+        captured = {}
+
         def fake_post(url, json=None, headers=None, timeout=None):
+            captured["timeout"] = timeout
             raise http_client.exceptions.ReadTimeout("Read timed out.")
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
@@ -337,6 +345,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(payload["errorCode"], "preview_start_timeout")
         self.assertEqual(payload["error"], "")
         self.assertTrue(payload["retryable"])
+        self.assertEqual(captured["timeout"], (3, 12))
 
     def test_comment_crud_serializes_anchor(self):
         response = self.client.post(
