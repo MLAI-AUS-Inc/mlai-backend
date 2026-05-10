@@ -1309,7 +1309,22 @@ def _ensure_article_live_preview(run):
     if _article_preview_should_refresh(run):
         payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
         return _persist_live_preview_payload(run, payload)
-    return run
+    if not _article_preview_should_auto_prepare(run):
+        return run
+    logger.info(
+        "content_factory_live_preview_auto_start run_id=%s workflow=%s",
+        run.run_id,
+        run.workflow,
+    )
+    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
+    if isinstance(payload, dict) and payload.get("error"):
+        logger.warning(
+            "content_factory_live_preview_auto_start_failed run_id=%s workflow=%s error=%s",
+            run.run_id,
+            run.workflow,
+            payload.get("error"),
+        )
+    return _persist_live_preview_payload(run, payload)
 
 
 def _serialize_component_comment(comment):
