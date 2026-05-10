@@ -208,6 +208,8 @@ WORKFLOW_STEP_DEFS = [
 WORKFLOW_STEP_IDS = [step["id"] for step in WORKFLOW_STEP_DEFS]
 RUNNING_RUN_STATUSES = {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}
 FAILED_RUN_STATUSES = {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}
+ARTICLE_DELIVERY_MODES = {"content_only", "review_draft", "publish_code"}
+LEGACY_REVIEW_BLOCKING_DELIVERY_MODES = {"content_only", "publish_code"}
 
 
 def _camel_list(value):
@@ -229,6 +231,41 @@ def _bool_from_request(value):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _stored_article_delivery_mode(config) -> str:
+    mode = str(
+        config.article_delivery_mode
+        or getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "")
+        or ""
+    ).strip()
+    return mode if mode in ARTICLE_DELIVERY_MODES else ""
+
+
+def _article_repo_is_review_capable(config, *, github_ready=None, article_ready=None) -> bool:
+    if github_ready is None:
+        github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
+    if article_ready is None:
+        article_system = resolve_article_system(config)
+        article_ready = article_system.get("state") in {
+            "ready",
+            "detected",
+            "registry_driven_seo_ready",
+            "article_system_ready",
+        } or bool(config.publish_targets)
+    return bool(github_ready and article_ready)
+
+
+def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=False, github_ready=None, article_ready=None) -> str:
+    requested = str(requested_mode or "").strip()
+    if explicit and requested in ARTICLE_DELIVERY_MODES:
+        return requested
+
+    stored = _stored_article_delivery_mode(config)
+    if _article_repo_is_review_capable(config, github_ready=github_ready, article_ready=article_ready):
+        if stored in LEGACY_REVIEW_BLOCKING_DELIVERY_MODES or not stored:
+            return "review_draft"
+    return stored or "content_only"
 
 
 def _company_id_from_request(request):
@@ -1309,7 +1346,22 @@ def _ensure_article_live_preview(run):
     if _article_preview_should_refresh(run):
         payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
         return _persist_live_preview_payload(run, payload)
-    return run
+    if not _article_preview_should_auto_prepare(run):
+        return run
+    logger.info(
+        "content_factory_live_preview_auto_start run_id=%s workflow=%s",
+        run.run_id,
+        run.workflow,
+    )
+    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
+    if isinstance(payload, dict) and payload.get("error"):
+        logger.warning(
+            "content_factory_live_preview_auto_start_failed run_id=%s workflow=%s error=%s",
+            run.run_id,
+            run.workflow,
+            payload.get("error"),
+        )
+    return _persist_live_preview_payload(run, payload)
 
 
 def _serialize_component_comment(comment):
@@ -2299,7 +2351,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         )
         and (publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     )
-    delivery_mode = config.article_delivery_mode or getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "publish_code")
+    delivery_mode = _effective_article_delivery_mode(config, github_ready=github_ready, article_ready=article_ready)
     daily_ready = (
         domain_ok
         and context_ok
@@ -2403,8 +2455,8 @@ def _serialize_bootstrap(context, request=None):
         "settings": {
             "brandName": config.brand_name,
             "companyContext": config.company_context,
-            "articleDeliveryMode": config.article_delivery_mode
-            or getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "publish_code"),
+            "articleDeliveryMode": _stored_article_delivery_mode(config) or "content_only",
+            "articleDeliveryModeEffective": _effective_article_delivery_mode(config),
             "githubRepo": config.github_repo,
             "dailyDiscoveryEnabled": config.daily_discovery_enabled,
             "dailyDiscoveryPriority": config.daily_discovery_priority,
@@ -2475,7 +2527,8 @@ def _serialize_bootstrap_without_domain(company):
         "settings": {
             "brandName": company.name,
             "companyContext": "",
-            "articleDeliveryMode": getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "publish_code"),
+            "articleDeliveryMode": getattr(settings, "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE", "content_only"),
+            "articleDeliveryModeEffective": "content_only",
             "githubRepo": "",
             "dailyDiscoveryEnabled": False,
             "dailyDiscoveryPriority": 0,
@@ -3189,6 +3242,7 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
 
     url = f"{remote_config['base_url']}/api/runs/{run_id}/live-preview"
     try:
+        logger.info("content_factory_live_preview_request run_id=%s method=%s url=%s", run_id, method, url)
         if method == "POST":
             response = http_client.post(url, json=payload or {}, headers=_content_factory_headers(), timeout=(3, 75))
         elif method == "DELETE":
@@ -3196,16 +3250,41 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
         else:
             response = http_client.get(url, headers=_content_factory_headers(), timeout=(3, 15))
     except http_client.RequestException as exc:
+        logger.warning(
+            "content_factory_live_preview_transport_error run_id=%s method=%s error=%s",
+            run_id,
+            method,
+            exc,
+        )
         return {"available": False, "status": "failed", "error": str(exc), "errors": [str(exc)], "retryable": True}
 
     if response.status_code in (200, 202):
-        return response.json() if response.content else {}
+        response_payload = response.json() if response.content else {}
+        logger.info(
+            "content_factory_live_preview_response run_id=%s method=%s status_code=%s remote_status=%s error_code=%s available=%s",
+            run_id,
+            method,
+            response.status_code,
+            response_payload.get("status"),
+            response_payload.get("errorCode") or response_payload.get("error_code"),
+            response_payload.get("available"),
+        )
+        return response_payload
 
     try:
         response_payload = response.json()
     except Exception:
         response_payload = {}
     detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    logger.warning(
+        "content_factory_live_preview_response run_id=%s method=%s status_code=%s remote_status=%s error_code=%s detail=%s",
+        run_id,
+        method,
+        response.status_code,
+        response_payload.get("status"),
+        response_payload.get("errorCode") or response_payload.get("error_code"),
+        str(detail or "")[:300],
+    )
     return {
         "available": False,
         "status": "failed",
@@ -3909,6 +3988,20 @@ class VibeMarketingArticleView(APIView):
             "sourceDiscoveryRunId",
             default=None,
         )
+        requested_delivery_mode = _request_value(request.data, "delivery_mode", "deliveryMode", default=None)
+        delivery_mode_explicit = _bool_from_request(
+            _request_value(
+                request.data,
+                "delivery_mode_explicit",
+                "deliveryModeExplicit",
+                default=False,
+            )
+        )
+        delivery_mode = _effective_article_delivery_mode(
+            config,
+            requested_mode=requested_delivery_mode,
+            explicit=delivery_mode_explicit,
+        )
         payload = {
             "domain": context.organization.domain,
             "slack_user_id": founder_actor_id_for_user(request.user),
@@ -3916,10 +4009,11 @@ class VibeMarketingArticleView(APIView):
             "target_keyword": target_keyword or topic,
             "context": str(request.data.get("context") or ""),
             "github_repo": config.github_repo,
-            "delivery_mode": request.data.get("delivery_mode") or request.data.get("deliveryMode") or config.article_delivery_mode,
+            "delivery_mode": delivery_mode,
             "delivery_mode_confirmed": _bool_from_request(
                 request.data.get("delivery_mode_confirmed", request.data.get("deliveryModeConfirmed", True))
             ),
+            "delivery_mode_explicit": delivery_mode_explicit,
             "source_run_id": source_run_id,
             "custom_title": selected_title or custom_title or None,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,

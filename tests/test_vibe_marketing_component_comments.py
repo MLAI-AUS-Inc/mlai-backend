@@ -54,7 +54,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.client.force_authenticate(user=self.user)
 
-    def test_completed_article_run_does_not_auto_prepare_live_preview_on_get(self):
+    def test_completed_article_run_auto_prepares_live_preview(self):
         self.run.result = {
             "componentManifest": {
                 "components": [
@@ -85,10 +85,10 @@ class VibeMarketingComponentCommentTests(TestCase):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
 
         self.assertEqual(response.status_code, 200)
-        preview_call.assert_not_called()
-        self.assertFalse(response.data["livePreview"]["previewUrl"])
+        preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
+        self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
         self.run.refresh_from_db()
-        self.assertNotIn("livePreview", self.run.result)
+        self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
 
     def test_running_article_run_does_not_auto_prepare_live_preview(self):
         self.run.status = ContentFactoryRunStatus.RUNNING
