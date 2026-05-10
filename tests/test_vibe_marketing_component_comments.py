@@ -77,6 +77,10 @@ class VibeMarketingComponentCommentTests(TestCase):
             "exactRender": True,
             "inspectorProtocolVersion": 2,
             "inspectorMode": "comment",
+            "verificationSkippedForPreview": True,
+            "failedPhase": "verify",
+            "failedCommand": "bun run typecheck",
+            "logExcerpt": "[verify] command: bun run typecheck\nerror: script exited",
         }
 
         with (
@@ -88,8 +92,13 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.status_code, 200)
         preview_call.assert_called_once_with(run_id=self.run.run_id, method="POST", payload={"force": False})
         self.assertEqual(response.data["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        self.assertTrue(response.data["livePreview"]["verificationSkippedForPreview"])
+        self.assertEqual(response.data["livePreview"]["failedPhase"], "verify")
+        self.assertEqual(response.data["livePreview"]["failedCommand"], "bun run typecheck")
+        self.assertIn("script exited", response.data["livePreview"]["logExcerpt"])
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], preview_payload["previewUrl"])
+        self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
 
     def test_completed_article_run_auto_prepare_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
