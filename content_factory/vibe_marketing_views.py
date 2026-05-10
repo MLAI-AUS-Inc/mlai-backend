@@ -1293,6 +1293,8 @@ def _live_preview_from_run(run):
         "inspectorProtocolVersion": payload.get("inspectorProtocolVersion") or payload.get("inspector_protocol_version"),
         "inspectorMode": payload.get("inspectorMode") or payload.get("inspector_mode") or "",
         "error": payload.get("error") or "",
+        "errorCode": payload.get("errorCode") or payload.get("error_code") or "",
+        "retryable": bool(payload.get("retryable", True)),
         "workspacePath": payload.get("workspacePath") or payload.get("workspace_path") or "",
         "logPath": payload.get("logPath") or payload.get("log_path") or "",
     }
