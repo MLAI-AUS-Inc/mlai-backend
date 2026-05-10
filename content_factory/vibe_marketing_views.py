@@ -3279,7 +3279,12 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
     try:
         logger.info("content_factory_live_preview_request run_id=%s method=%s url=%s", run_id, method, url)
         if method == "POST":
-            response = http_client.post(url, json=payload or {}, headers=_content_factory_headers(), timeout=(3, 75))
+            response = http_client.post(
+                url,
+                json=payload or {},
+                headers=_content_factory_headers(),
+                timeout=(3, _content_factory_live_preview_start_timeout_seconds()),
+            )
         elif method == "DELETE":
             response = http_client.delete(url, headers=_content_factory_headers(), timeout=(3, 15))
         else:
@@ -3340,6 +3345,14 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
         "content_factory_response": response_payload,
         "retryable": response.status_code >= 500,
     }
+
+
+def _content_factory_live_preview_start_timeout_seconds():
+    raw_value = getattr(settings, "CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS", 20)
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return 20
 
 
 def _is_live_preview_start_timeout(exc) -> bool:
