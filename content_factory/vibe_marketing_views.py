@@ -1344,6 +1344,26 @@ def _article_preview_should_refresh(run):
     return preview_status in {"running", "starting"}
 
 
+def _live_preview_github_token_payload(run):
+    domain = normalize_company_domain(getattr(run, "domain", "") or "")
+    github_repo = str(getattr(run, "github_repo", "") or "").strip()
+    if not domain or not github_repo:
+        return {}
+    try:
+        github_token = ensure_valid_org_token(domain)
+    except (ArticleGenerationError, TokenRefreshError) as exc:
+        logger.warning(
+            "content_factory_live_preview_token_unavailable run_id=%s domain=%s github_repo=%s error=%s",
+            getattr(run, "run_id", ""),
+            domain,
+            github_repo,
+            exc,
+        )
+        return {}
+    github_token = str(github_token or "").strip()
+    return {"github_token": github_token} if github_token else {}
+
+
 def _ensure_article_live_preview(run):
     if _article_preview_should_refresh(run):
         payload = _call_content_factory_live_preview(run_id=run.run_id, method="GET")
@@ -1355,7 +1375,11 @@ def _ensure_article_live_preview(run):
         run.run_id,
         run.workflow,
     )
-    payload = _call_content_factory_live_preview(run_id=run.run_id, method="POST", payload={"force": False})
+    payload = _call_content_factory_live_preview(
+        run_id=run.run_id,
+        method="POST",
+        payload={"force": False, **_live_preview_github_token_payload(run)},
+    )
     if isinstance(payload, dict) and payload.get("error"):
         logger.warning(
             "content_factory_live_preview_auto_start_failed run_id=%s workflow=%s error=%s",
@@ -3258,6 +3282,17 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
             method,
             exc,
         )
+        if method == "POST" and _is_live_preview_start_timeout(exc):
+            return {
+                "available": False,
+                "status": "starting",
+                "previewUrl": "",
+                "error": "",
+                "errors": [],
+                "errorCode": "preview_start_timeout",
+                "error_code": "preview_start_timeout",
+                "retryable": True,
+            }
         return {"available": False, "status": "failed", "error": str(exc), "errors": [str(exc)], "retryable": True}
 
     if response.status_code in (200, 202):
@@ -3296,6 +3331,17 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
         "content_factory_response": response_payload,
         "retryable": response.status_code >= 500,
     }
+
+
+def _is_live_preview_start_timeout(exc) -> bool:
+    timeout_classes = (
+        getattr(http_client.exceptions, "Timeout", ()),
+        getattr(http_client.exceptions, "ReadTimeout", ()),
+    )
+    if isinstance(exc, timeout_classes):
+        return True
+    message = str(exc or "").casefold()
+    return "timed out" in message or "timeout" in message
 
 
 def _lookup_query(request) -> str:
@@ -4375,6 +4421,7 @@ class VibeMarketingRunLivePreviewView(APIView):
             "force": _bool_from_request(request.data.get("force")),
             "local_repo_path": request.data.get("local_repo_path") or request.data.get("localRepoPath") or "",
         }
+        payload.update(_live_preview_github_token_payload(run))
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
         run = self._persist_preview(run, remote_data)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)

@@ -3089,6 +3089,33 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
         self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
 
+    def test_article_review_ready_callback_is_processed(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-review-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_review_ready",
+                "job_id": "job-review-ready",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "live_preview_url": "/api/runs/job-review-ready/live-preview",
+                "component_manifest_path": "steps/render_article/artifacts/article_component_manifest.json",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-review-ready")
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.request_meta["publish_stage"], "article_review_ready")
+        self.assertEqual(job.request_meta["live_preview_url"], "/api/runs/job-review-ready/live-preview")
+
 
 class ArticleGenerationStatusTests(TestCase):
     @patch('integrations.services.article_generation.upsert_live_progress_card')
