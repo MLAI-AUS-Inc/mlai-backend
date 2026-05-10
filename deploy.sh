@@ -72,7 +72,6 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value DEFAULT_FRONTEND_URL "https://mlai.au"
     upsert_env_value MEDHACK_URL "https://mlai.au"
     upsert_env_value ESAFETY_URL "https://mlai.au"
-    upsert_env_value INNOVATE_CONNECT_ALLIANCE_URL "https://mlai.au"
     upsert_env_value VIBE_RAISING_URL "https://mlai.au"
     upsert_env_value FOUNDER_TOOLS_URL "https://mlai.au"
     upsert_env_value GOOGLE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google"
