@@ -128,14 +128,14 @@ class VibeMarketingComponentCommentTests(TestCase):
             "livePreview": {
                 "available": True,
                 "status": "running",
-                "previewUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1",
+                "previewUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1&cfPreviewMode=platform_deployment",
                 "internalPreviewUrl": "https://abc.pages.dev",
                 "routePath": "/articles/generated",
                 "previewMode": "platform_deployment",
                 "platformProvider": "cloudflare",
                 "platformStatus": "ready",
                 "deploymentUrl": "https://abc.pages.dev",
-                "routeUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1",
+                "routeUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1&cfPreviewMode=platform_deployment",
                 "logsUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123",
                 "commitSha": "abc123",
                 "branchName": "cf-review/article-run-comments",
@@ -144,7 +144,7 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         preview = _live_preview_from_run(self.run)
 
-        self.assertEqual(preview["previewUrl"], "https://run-123.mlai-previews.com/articles/generated?cfInspector=1")
+        self.assertEqual(preview["previewUrl"], "https://run-123.mlai-previews.com/articles/generated?cfInspector=1&cfPreviewMode=platform_deployment")
         self.assertEqual(preview["internalPreviewUrl"], "https://abc.pages.dev")
         self.assertEqual(preview["previewMode"], "platform_deployment")
         self.assertEqual(preview["platformProvider"], "cloudflare")
