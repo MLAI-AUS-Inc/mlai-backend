@@ -86,6 +86,8 @@ class VibeMarketingComponentCommentTests(TestCase):
             "browserWarnings": ["Failed to fetch dynamically imported module: /app/entry.client.tsx"],
             "assetWarnings": ["http://127.0.0.1:4321/node_modules/.vite/deps/react-dom_client.js"],
             "proofAttempts": [{"attempt": 1, "exact": True}],
+            "proofAcceptedWithWarnings": True,
+            "previewMode": "local_runtime",
         }
 
         with (
@@ -110,6 +112,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["browserWarnings"], preview_payload["browserWarnings"])
         self.assertEqual(response.data["livePreview"]["assetWarnings"], preview_payload["assetWarnings"])
         self.assertEqual(response.data["livePreview"]["proofAttempts"], preview_payload["proofAttempts"])
+        self.assertTrue(response.data["livePreview"]["proofAcceptedWithWarnings"])
+        self.assertEqual(response.data["livePreview"]["previewMode"], "local_runtime")
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], expected_preview_url)
         self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])

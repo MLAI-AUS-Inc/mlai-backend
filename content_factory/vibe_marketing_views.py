@@ -1323,10 +1323,15 @@ def _live_preview_from_run(run):
         "browserWarnings": payload.get("browserWarnings") or payload.get("browser_warnings") or [],
         "assetWarnings": payload.get("assetWarnings") or payload.get("asset_warnings") or [],
         "proofAttempts": payload.get("proofAttempts") or payload.get("proof_attempts") or [],
+        "proofAcceptedWithWarnings": bool(
+            payload.get("proofAcceptedWithWarnings")
+            or payload.get("proof_accepted_with_warnings")
+        ),
         "verificationSkippedForPreview": bool(
             payload.get("verificationSkippedForPreview")
             or payload.get("verification_skipped_for_preview")
         ),
+        "previewMode": payload.get("previewMode") or payload.get("preview_mode") or "",
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
     }
