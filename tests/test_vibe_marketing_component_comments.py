@@ -152,6 +152,36 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(preview["logsUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123")
         self.assertEqual(preview["commitSha"], "abc123")
 
+    def test_failed_platform_preview_payload_is_normalized(self):
+        self.run.result = {
+            "livePreview": {
+                "available": False,
+                "status": "running",
+                "previewMode": "platform_deployment",
+                "platformProvider": "cloudflare",
+                "platformStatus": "failed",
+                "nativePreviewFailure": {
+                    "error": "Hosted preview dispatch failed: Not Found",
+                    "errorCode": "platform_preview_dispatch_failed",
+                    "retryable": True,
+                    "failedPhase": "platform_deployment",
+                    "failedCommand": "MLAI-AUS-Inc/content-factory/preview-builder.yml@main",
+                    "logExcerpt": "GitHub workflow dispatch returned 404.",
+                },
+            }
+        }
+
+        preview = _live_preview_from_run(self.run)
+
+        self.assertEqual(preview["status"], "failed")
+        self.assertEqual(preview["previewMode"], "platform_deployment")
+        self.assertEqual(preview["platformStatus"], "failed")
+        self.assertEqual(preview["errorCode"], "platform_preview_dispatch_failed")
+        self.assertEqual(preview["failedPhase"], "platform_deployment")
+        self.assertIn("dispatch failed", preview["error"])
+        self.assertIn("workflow dispatch", preview["logExcerpt"])
+        self.assertTrue(preview["retryable"])
+
     def test_live_preview_serializes_visual_fallback_metadata(self):
         self.run.result = {
             "livePreview": {

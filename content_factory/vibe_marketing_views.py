@@ -1297,11 +1297,46 @@ def _component_manifest_from_run(run):
     }
 
 
+def _normalize_live_preview_payload(payload):
+    if not isinstance(payload, dict):
+        return {}
+    normalized = dict(payload)
+    platform_status = str(normalized.get("platformStatus") or normalized.get("platform_status") or "").strip().lower()
+    available = bool(normalized.get("available"))
+    native_failure = normalized.get("nativePreviewFailure") or normalized.get("native_preview_failure") or {}
+    if platform_status == "failed" and not available:
+        normalized["status"] = "failed"
+        if isinstance(native_failure, dict):
+            native_error = native_failure.get("error") or ""
+            native_code = native_failure.get("errorCode") or native_failure.get("error_code") or ""
+            native_phase = native_failure.get("failedPhase") or native_failure.get("failed_phase") or ""
+            native_command = native_failure.get("failedCommand") or native_failure.get("failed_command") or ""
+            native_excerpt = native_failure.get("logExcerpt") or native_failure.get("log_excerpt") or ""
+            if native_error and not normalized.get("error"):
+                normalized["error"] = native_error
+            if native_code and not (normalized.get("errorCode") or normalized.get("error_code")):
+                normalized["errorCode"] = native_code
+            if native_phase and not (normalized.get("failedPhase") or normalized.get("failed_phase")):
+                normalized["failedPhase"] = native_phase
+            if native_command and not (normalized.get("failedCommand") or normalized.get("failed_command")):
+                normalized["failedCommand"] = native_command
+            if native_excerpt and not (normalized.get("logExcerpt") or normalized.get("log_excerpt")):
+                normalized["logExcerpt"] = native_excerpt
+            if "retryable" in native_failure and "retryable" not in normalized:
+                normalized["retryable"] = bool(native_failure.get("retryable"))
+        if not (normalized.get("errorCode") or normalized.get("error_code")):
+            normalized["errorCode"] = "platform_preview_failed"
+        if not normalized.get("error"):
+            normalized["error"] = "Hosted preview failed."
+        if "retryable" not in normalized:
+            normalized["retryable"] = True
+    return normalized
+
+
 def _live_preview_from_run(run):
     result = (run.result or {}) if run else {}
     payload = result.get("livePreview") or result.get("live_preview") or {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _normalize_live_preview_payload(payload)
     if run and payload:
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
     return {
@@ -1768,6 +1803,7 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
 
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
+        payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         result = dict(run.result or {})
         result["livePreview"] = payload
