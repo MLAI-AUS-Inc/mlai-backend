@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import re
+import socket
 import uuid
 import time
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
+from bs4 import BeautifulSoup
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
 from django.db.models import Prefetch
@@ -1339,6 +1342,9 @@ def _live_preview_from_run(run):
         ),
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
+        "fallbackReason": payload.get("fallbackReason") or payload.get("fallback_reason") or "",
+        "nativePreviewFailure": payload.get("nativePreviewFailure") or payload.get("native_preview_failure") or {},
+        "visualFallback": payload.get("visualFallback") or payload.get("visual_fallback") or {},
     }
 
 
@@ -1348,6 +1354,14 @@ def _content_factory_live_preview_proxy_prefix(run_id):
 
 def _backend_live_preview_proxy_prefix(run_id):
     return f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/proxy"
+
+
+def _content_factory_live_preview_resource_prefix(run_id):
+    return f"/api/runs/{run_id}/live-preview/resource"
+
+
+def _backend_live_preview_resource_prefix(run_id):
+    return f"/api/v1/vibe-marketing/runs/{run_id}/live-preview/resource"
 
 
 def _backend_public_base_url():
@@ -1413,9 +1427,13 @@ _LIVE_PREVIEW_PROXY_ASSET_PREFIXES = (
     "@vite/",
     "@id/",
     "@fs/",
+    "__cf-preview/",
+    "__cf-resource",
     "app/",
     "node_modules/",
     "assets/",
+    "public/",
+    "static/",
     "src/",
 )
 _LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN = "|".join(re.escape(prefix) for prefix in _LIVE_PREVIEW_PROXY_ASSET_PREFIXES)
@@ -1426,10 +1444,41 @@ _LIVE_PREVIEW_CSS_URL_ASSET_RE = re.compile(
     rf"(?P<prefix>url\(\s*)(?P<quote>['\"]?)/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^'\"\s)]*)(?P=quote)(?P<suffix>\s*\))",
     re.IGNORECASE,
 )
+_LIVE_PREVIEW_CSS_EXTERNAL_URL_RE = re.compile(
+    r"(?P<prefix>url\(\s*)(?P<quote>['\"]?)(?P<url>https?://[^'\"\s)]+)(?P=quote)(?P<suffix>\s*\))",
+    re.IGNORECASE,
+)
+_LIVE_PREVIEW_CSS_IMPORT_ASSET_RE = re.compile(
+    rf"(?P<prefix>@import\s+)(?P<quote>['\"])/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^'\"]+)(?P=quote)",
+    re.IGNORECASE,
+)
+_LIVE_PREVIEW_CSS_EXTERNAL_IMPORT_RE = re.compile(
+    r"(?P<prefix>@import\s+)(?P<quote>['\"])(?P<url>https?://[^'\"]+)(?P=quote)",
+    re.IGNORECASE,
+)
 _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE = re.compile(
     rf"(?P<prefix>\b(?:src|href|action|poster)=)/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^\s>]+)",
     re.IGNORECASE,
 )
+_LIVE_PREVIEW_JS_IMPORT_ASSET_RE = re.compile(
+    rf"(?P<prefix>\bimport(?:\s+[^'\"\n]+?\s+from\s+|\s*)\(?\s*['\"])/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^'\"]+)(?P<suffix>['\"]\s*\)?)",
+    re.IGNORECASE,
+)
+_VISUAL_ASSET_EXTENSIONS = {
+    ".avif",
+    ".css",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".mjs",
+    ".mp4",
+    ".png",
+    ".svg",
+    ".webp",
+    ".woff",
+    ".woff2",
+}
 _LIVE_PREVIEW_CLIENT_RUNTIME_MARKERS = (
     "app/entry.client",
     "@vite/client",
@@ -1471,6 +1520,123 @@ def _should_rewrite_live_preview_body(content_type):
 def _live_preview_proxy_asset_url(run_id, path):
     clean_path = str(path or "").lstrip("/")
     return f"{_backend_live_preview_proxy_prefix(run_id)}/{clean_path}"
+
+
+def _live_preview_resource_url(run_id, url):
+    return f"{_backend_live_preview_resource_prefix(run_id)}?{urlencode({'url': str(url or '')})}"
+
+
+def _is_probable_visual_asset_url(url):
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    path = parsed.path.lower()
+    if any(path.endswith(extension) for extension in _VISUAL_ASSET_EXTENSIONS):
+        return True
+    host = str(parsed.netloc or "").lower()
+    return any(marker in host for marker in ("firebasestorage.googleapis.com", "storage.googleapis.com", "cloudfront.net"))
+
+
+def _is_live_preview_root_asset_path(value):
+    text = str(value or "")
+    path = urlsplit(text).path.lstrip("/")
+    return any(path.startswith(prefix) for prefix in _LIVE_PREVIEW_PROXY_ASSET_PREFIXES)
+
+
+def _rewrite_root_asset_reference(run_id, value):
+    text = str(value or "")
+    parsed = urlsplit(text)
+    if parsed.scheme or parsed.netloc or not text.startswith("/") or not _is_live_preview_root_asset_path(text):
+        return text
+    return _live_preview_proxy_asset_url(run_id, text.lstrip("/"))
+
+
+def _rewrite_external_visual_reference(run_id, value):
+    text = str(value or "")
+    if _is_probable_visual_asset_url(text):
+        return _live_preview_resource_url(run_id, text)
+    return text
+
+
+def _is_blocked_live_preview_resource_host(host):
+    normalized = str(host or "").strip().lower().strip("[]")
+    if not normalized or normalized in {"localhost", "0.0.0.0"} or normalized.endswith(".local"):
+        return True
+    try:
+        addresses = [ipaddress.ip_address(normalized)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM)
+            addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+        except Exception:
+            return True
+    return any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+        for address in addresses
+    )
+
+
+def _is_allowed_live_preview_resource_url(url):
+    parsed = urlsplit(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return not _is_blocked_live_preview_resource_host(parsed.hostname or "")
+
+
+def _rewrite_srcset_reference(run_id, value):
+    candidates = []
+    for candidate in str(value or "").split(","):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        pieces = candidate.split()
+        if pieces:
+            pieces[0] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, pieces[0]))
+        candidates.append(" ".join(pieces))
+    return ", ".join(candidates)
+
+
+def _rewrite_css_asset_references(run_id, text):
+    def replace_css_url(match):
+        quote_char = match.group("quote") or ""
+        return (
+            f"{match.group('prefix')}{quote_char}"
+            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{quote_char}{match.group('suffix')}"
+        )
+
+    def replace_css_external_url(match):
+        quote_char = match.group("quote") or ""
+        return (
+            f"{match.group('prefix')}{quote_char}"
+            f"{_live_preview_resource_url(run_id, match.group('url'))}"
+            f"{quote_char}{match.group('suffix')}"
+        )
+
+    def replace_css_import(match):
+        return (
+            f"{match.group('prefix')}{match.group('quote')}"
+            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{match.group('quote')}"
+        )
+
+    def replace_css_external_import(match):
+        return (
+            f"{match.group('prefix')}{match.group('quote')}"
+            f"{_live_preview_resource_url(run_id, match.group('url'))}"
+            f"{match.group('quote')}"
+        )
+
+    rewritten = _LIVE_PREVIEW_CSS_URL_ASSET_RE.sub(replace_css_url, str(text or ""))
+    rewritten = _LIVE_PREVIEW_CSS_IMPORT_ASSET_RE.sub(replace_css_import, rewritten)
+    rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_URL_RE.sub(replace_css_external_url, rewritten)
+    rewritten = _LIVE_PREVIEW_CSS_EXTERNAL_IMPORT_RE.sub(replace_css_external_import, rewritten)
+    return rewritten
 
 
 def _has_live_preview_client_runtime_marker(value):
@@ -1524,24 +1690,51 @@ def _strip_live_preview_client_runtime(text):
     return stripped
 
 
-def _rewrite_live_preview_proxy_text(run_id, text):
+def _rewrite_live_preview_html_assets(run_id, text):
+    soup = BeautifulSoup(str(text or ""), "html.parser")
+    for base in soup.find_all("base"):
+        base.decompose()
+    for tag in soup.find_all(True):
+        tag_name = str(tag.name or "").lower()
+        for attr in ("src", "poster"):
+            if tag.has_attr(attr):
+                tag[attr] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, tag.get(attr)))
+        if tag.has_attr("action"):
+            tag["action"] = _rewrite_root_asset_reference(run_id, tag.get("action"))
+        if tag.has_attr("srcset"):
+            tag["srcset"] = _rewrite_srcset_reference(run_id, tag.get("srcset"))
+        if tag.has_attr("style"):
+            tag["style"] = _rewrite_css_asset_references(run_id, str(tag.get("style") or ""))
+        if tag.has_attr("href"):
+            href = str(tag.get("href") or "")
+            rel = " ".join(str(item).lower() for item in (tag.get("rel") or []))
+            should_rewrite_href = (
+                _is_live_preview_root_asset_path(href)
+                or tag_name == "link"
+                and any(token in rel for token in ("stylesheet", "preload", "icon", "apple-touch-icon"))
+            )
+            if should_rewrite_href:
+                tag["href"] = _rewrite_external_visual_reference(run_id, _rewrite_root_asset_reference(run_id, href))
+    return str(soup)
+
+
+def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
     def replace_quoted(match):
         return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
-
-    def replace_css_url(match):
-        quote_char = match.group("quote") or ""
-        return (
-            f"{match.group('prefix')}{quote_char}"
-            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
-            f"{quote_char}{match.group('suffix')}"
-        )
 
     def replace_unquoted_attr(match):
         return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
 
-    rewritten = _LIVE_PREVIEW_CSS_URL_ASSET_RE.sub(replace_css_url, str(text or ""))
+    def replace_js_import(match):
+        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}{match.group('suffix')}"
+
+    content_type_lower = str(content_type or "").lower()
+    rewritten = _rewrite_css_asset_references(run_id, str(text or ""))
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
+    rewritten = _LIVE_PREVIEW_JS_IMPORT_ASSET_RE.sub(replace_js_import, rewritten)
+    if "text/html" in content_type_lower or "application/xhtml+xml" in content_type_lower:
+        rewritten = _rewrite_live_preview_html_assets(run_id, rewritten)
     return rewritten
 
 
@@ -1552,7 +1745,7 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return body
-    rewritten = _rewrite_live_preview_proxy_text(run_id, text)
+    rewritten = _rewrite_live_preview_proxy_text(run_id, text, content_type)
     if "text/html" in str(content_type or "").lower():
         rewritten = _strip_live_preview_client_runtime(rewritten)
     if rewritten == text:
@@ -4785,6 +4978,84 @@ class VibeMarketingRunLivePreviewProxyView(APIView):
 
     def head(self, request, run_id, proxy_path=""):
         return self._proxy(request, run_id, proxy_path)
+
+
+@method_decorator(xframe_options_exempt, name="dispatch")
+class VibeMarketingRunLivePreviewResourceView(APIView):
+    http_method_names = ["get", "head", "options"]
+    renderer_classes = [_AnyContentRenderer]
+
+    def _resolve_run(self, request, run_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=False)
+        if error_response:
+            return None, None, error_response
+        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        if not _run_belongs_to_context(run, context):
+            return None, None, Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return context, run, None
+
+    def _proxy(self, request, run_id):
+        _context, _run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        resource_url = str(request.query_params.get("url") or "").strip()
+        if not _is_allowed_live_preview_resource_url(resource_url):
+            return HttpResponse(
+                "External preview resource is not allowed.",
+                status=403,
+                content_type="text/plain; charset=utf-8",
+            )
+        remote_config = _content_factory_remote_config()
+        if not remote_config["enabled"]:
+            return Response({"detail": _content_factory_unavailable_message(remote_config)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        remote_url = (
+            f"{remote_config['base_url']}/api/runs/{run_id}/live-preview/resource"
+            f"?{urlencode({'url': resource_url})}"
+        )
+        forwarded_headers = {
+            "Accept": request.headers.get("Accept", "*/*"),
+            "User-Agent": request.headers.get("User-Agent", "mlai-backend-live-preview-resource-proxy"),
+        }
+        try:
+            response = http_client.request(
+                request.method,
+                remote_url,
+                headers={**_content_factory_headers(), **forwarded_headers},
+                timeout=(3, 45),
+            )
+        except http_client.RequestException as exc:
+            return HttpResponse(
+                f"Preview resource proxy failed: {exc}",
+                status=502,
+                content_type="text/plain; charset=utf-8",
+            )
+        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+        django_response = HttpResponse(
+            response.content if request.method != "HEAD" else b"",
+            status=response.status_code,
+            content_type=content_type,
+        )
+        for header, value in response.headers.items():
+            lowered = header.lower()
+            if lowered in {
+                "content-type",
+                "content-length",
+                "connection",
+                "transfer-encoding",
+                "content-encoding",
+                "content-security-policy-report-only",
+                "content-security-policy",
+                "x-frame-options",
+            }:
+                continue
+            django_response[header] = value
+        return django_response
+
+    def get(self, request, run_id):
+        return self._proxy(request, run_id)
+
+    def head(self, request, run_id):
+        return self._proxy(request, run_id)
 
 
 def _accepted_component_revision_for_publish(run, context):

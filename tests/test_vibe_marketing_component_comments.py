@@ -123,6 +123,36 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
 
+    def test_live_preview_serializes_visual_fallback_metadata(self):
+        self.run.result = {
+            "livePreview": {
+                "available": True,
+                "status": "running",
+                "previewUrl": "/api/runs/article-run-comments/live-preview/proxy/articles/generated?cfInspector=1",
+                "previewMode": "visual_static_fallback",
+                "renderConfidence": "visual",
+                "fallbackReason": "preview_proof_failed",
+                "nativePreviewFailure": {"error": "Native failed.", "errorCode": "preview_proof_failed"},
+                "visualFallback": {
+                    "cssSources": ["fallback.css", "app/globals.css"],
+                    "cssWarnings": ["Tailwind CSS source was included without compilation."],
+                    "assetProxyEnabled": True,
+                    "mockedRoutes": ["/api/article"],
+                },
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.data["livePreview"]
+        self.assertEqual(preview["previewMode"], "visual_static_fallback")
+        self.assertEqual(preview["renderConfidence"], "visual")
+        self.assertEqual(preview["fallbackReason"], "preview_proof_failed")
+        self.assertEqual(preview["nativePreviewFailure"]["errorCode"], "preview_proof_failed")
+        self.assertEqual(preview["visualFallback"]["cssSources"], ["fallback.css", "app/globals.css"])
+
     def test_completed_article_run_auto_prepare_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
@@ -364,6 +394,7 @@ class VibeMarketingComponentCommentTests(TestCase):
                 b'<script type="module" src="/@id/__x00__virtual:react-router/inject-hmr-runtime"></script>'
                 b"<script>window.__cfArticleInspectorInstalled = true;</script>"
                 b'<script src=//@cdn.example.com/skip.js></script>'
+                b'<img srcset="/assets/small.png 1x, https://cdn.example.com/hero.webp 2x" style="background-image:url(/assets/bg.png)">'
                 b'</head><body><a href="/api/v1/auth/me/">api</a></body></html>'
             ),
             headers={
@@ -392,8 +423,10 @@ class VibeMarketingComponentCommentTests(TestCase):
         text = response.content.decode("utf-8")
         proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
         self.assertIn(f'href="{proxy_prefix}/@react-router/critical.css?pathname=/articles/featured/generated"', text)
+        self.assertIn(f'srcset="{proxy_prefix}/assets/small.png 1x, /api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource?url=https%3A%2F%2Fcdn.example.com%2Fhero.webp 2x"', text)
+        self.assertIn(f"background-image:url({proxy_prefix}/assets/bg.png)", text)
         self.assertIn("window.__cfArticleInspectorInstalled", text)
-        self.assertIn("src=//@cdn.example.com/skip.js", text)
+        self.assertIn("//@cdn.example.com/skip.js", text)
         self.assertIn('href="/api/v1/auth/me/"', text)
         self.assertNotIn("app/entry.client", text)
         self.assertNotIn("@vite/client", text)
@@ -481,12 +514,67 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         text = response.content.decode("utf-8")
         proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
+        resource_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource"
         self.assertIn(f'@import "{proxy_prefix}/@vite/client";', text)
         self.assertIn(f"url({proxy_prefix}/assets/hero.png)", text)
         self.assertIn(f"url('{proxy_prefix}/src/fonts/site.woff2')", text)
-        self.assertIn("url(https://cdn.example.com/bg.png)", text)
+        self.assertIn(f"url({resource_prefix}?url=https%3A%2F%2Fcdn.example.com%2Fbg.png)", text)
         self.assertEqual(response["Content-Type"], "text/css")
         self.assertFalse(response.has_header("X-Frame-Options"))
+
+    def test_live_preview_resource_proxy_forwards_external_assets_and_strips_frame_headers(self):
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=b"image-bytes",
+            headers={
+                "Content-Type": "image/png",
+                "Content-Length": "999",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+                "X-Frame-Options": "DENY",
+                "Cache-Control": "public, max-age=60",
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._is_allowed_live_preview_resource_url", return_value=True),
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response) as request_call,
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource",
+                {"url": "https://cdn.example.com/hero.png"},
+                HTTP_ACCEPT="image/png",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"image-bytes")
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertEqual(response["Cache-Control"], "public, max-age=60")
+        self.assertFalse(response.has_header("X-Frame-Options"))
+        self.assertFalse(response.has_header("Content-Security-Policy"))
+        args, kwargs = request_call.call_args
+        self.assertEqual(args[0], "GET")
+        self.assertEqual(
+            args[1],
+            f"http://content-factory-web:8000/api/runs/{self.run.run_id}"
+            "/live-preview/resource?url=https%3A%2F%2Fcdn.example.com%2Fhero.png",
+        )
+        self.assertEqual(kwargs["headers"]["X-API-Key"], "test-key")
+
+    def test_live_preview_resource_proxy_blocks_private_external_targets(self):
+        with patch("content_factory.vibe_marketing_views._content_factory_remote_config") as remote_config:
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource",
+                {"url": "http://169.254.169.254/latest/meta-data"},
+            )
+
+        remote_config.assert_not_called()
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"not allowed", response.content)
 
     def test_remote_not_started_preview_does_not_overwrite_local_failed_preview(self):
         manifest = {
