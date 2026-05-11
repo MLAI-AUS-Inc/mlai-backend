@@ -348,6 +348,120 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.assertEqual(kwargs["headers"]["X-API-Key"], "test-key")
 
+    def test_live_preview_proxy_rewrites_root_relative_html_assets(self):
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=(
+                b'<html><head><link rel="stylesheet" href="/@react-router/critical.css?pathname=/articles/featured/generated">'
+                b'<script type="module" src="/app/entry.client.tsx"></script>'
+                b'<script src=//@cdn.example.com/skip.js></script>'
+                b'</head><body><a href="/api/v1/auth/me/">api</a></body></html>'
+            ),
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Length": "999",
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+                "Content-Security-Policy-Report-Only": "default-src 'none'",
+            },
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response),
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}"
+                "/live-preview/proxy/articles/featured/generated?cfInspector=1",
+                HTTP_ACCEPT="text/html",
+            )
+
+        text = response.content.decode("utf-8")
+        proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
+        self.assertIn(f'href="{proxy_prefix}/@react-router/critical.css?pathname=/articles/featured/generated"', text)
+        self.assertIn(f'src="{proxy_prefix}/app/entry.client.tsx"', text)
+        self.assertIn("src=//@cdn.example.com/skip.js", text)
+        self.assertIn('href="/api/v1/auth/me/"', text)
+        self.assertEqual(response["Content-Type"], "text/html; charset=utf-8")
+        self.assertFalse(response.has_header("X-Frame-Options"))
+        self.assertFalse(response.has_header("Content-Security-Policy"))
+        self.assertFalse(response.has_header("Content-Security-Policy-Report-Only"))
+
+    def test_live_preview_proxy_rewrites_root_relative_js_modules(self):
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=(
+                b'import "/app/root.tsx";\n'
+                b'import route from "/app/routes/articles.slug.tsx";\n'
+                b'import("/@id/__x00__virtual:react-router/inject-hmr-runtime");\n'
+                b'import("/node_modules/.vite/deps/react-dom_client.js?v=test");\n'
+                b'fetch("/api/v1/auth/me/");\n'
+                b'const cdn = "//cdn.example.com/module.js";\n'
+            ),
+            headers={"Content-Type": "text/javascript"},
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response),
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy/app/entry.client.tsx",
+                HTTP_ACCEPT="text/javascript",
+            )
+
+        text = response.content.decode("utf-8")
+        proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
+        self.assertIn(f'import "{proxy_prefix}/app/root.tsx";', text)
+        self.assertIn(f'import route from "{proxy_prefix}/app/routes/articles.slug.tsx";', text)
+        self.assertIn(f'import("{proxy_prefix}/@id/__x00__virtual:react-router/inject-hmr-runtime");', text)
+        self.assertIn(f'import("{proxy_prefix}/node_modules/.vite/deps/react-dom_client.js?v=test");', text)
+        self.assertIn('fetch("/api/v1/auth/me/");', text)
+        self.assertIn('const cdn = "//cdn.example.com/module.js";', text)
+        self.assertEqual(response["Content-Type"], "text/javascript")
+
+    def test_live_preview_proxy_rewrites_root_relative_css_urls(self):
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=(
+                b'@import "/@vite/client";\n'
+                b".hero { background-image: url(/assets/hero.png); }\n"
+                b".font { src: url('/src/fonts/site.woff2'); }\n"
+                b".external { background: url(https://cdn.example.com/bg.png); }\n"
+            ),
+            headers={"Content-Type": "text/css", "X-Frame-Options": "DENY"},
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response),
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy/@react-router/critical.css",
+                HTTP_ACCEPT="text/css",
+            )
+
+        text = response.content.decode("utf-8")
+        proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
+        self.assertIn(f'@import "{proxy_prefix}/@vite/client";', text)
+        self.assertIn(f"url({proxy_prefix}/assets/hero.png)", text)
+        self.assertIn(f"url('{proxy_prefix}/src/fonts/site.woff2')", text)
+        self.assertIn("url(https://cdn.example.com/bg.png)", text)
+        self.assertEqual(response["Content-Type"], "text/css")
+        self.assertFalse(response.has_header("X-Frame-Options"))
+
     def test_remote_not_started_preview_does_not_overwrite_local_failed_preview(self):
         manifest = {
             "components": [

@@ -1403,6 +1403,84 @@ def _rewrite_live_preview_payload_for_browser(run_id, payload):
     return rewritten
 
 
+_LIVE_PREVIEW_PROXY_ASSET_PREFIXES = (
+    "@react-router/",
+    "@vite/",
+    "@id/",
+    "@fs/",
+    "app/",
+    "node_modules/",
+    "assets/",
+    "src/",
+)
+_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN = "|".join(re.escape(prefix) for prefix in _LIVE_PREVIEW_PROXY_ASSET_PREFIXES)
+_LIVE_PREVIEW_QUOTED_ASSET_RE = re.compile(
+    rf"(?P<prefix>['\"])/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^'\"\s)]*)"
+)
+_LIVE_PREVIEW_CSS_URL_ASSET_RE = re.compile(
+    rf"(?P<prefix>url\(\s*)(?P<quote>['\"]?)/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^'\"\s)]*)(?P=quote)(?P<suffix>\s*\))",
+    re.IGNORECASE,
+)
+_LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE = re.compile(
+    rf"(?P<prefix>\b(?:src|href|action|poster)=)/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^\s>]+)",
+    re.IGNORECASE,
+)
+
+
+def _should_rewrite_live_preview_body(content_type):
+    normalized = str(content_type or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "text/html",
+            "application/xhtml+xml",
+            "text/javascript",
+            "application/javascript",
+            "application/x-javascript",
+            "text/css",
+        )
+    )
+
+
+def _live_preview_proxy_asset_url(run_id, path):
+    clean_path = str(path or "").lstrip("/")
+    return f"{_backend_live_preview_proxy_prefix(run_id)}/{clean_path}"
+
+
+def _rewrite_live_preview_proxy_text(run_id, text):
+    def replace_quoted(match):
+        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+
+    def replace_css_url(match):
+        quote_char = match.group("quote") or ""
+        return (
+            f"{match.group('prefix')}{quote_char}"
+            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{quote_char}{match.group('suffix')}"
+        )
+
+    def replace_unquoted_attr(match):
+        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+
+    rewritten = _LIVE_PREVIEW_CSS_URL_ASSET_RE.sub(replace_css_url, str(text or ""))
+    rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
+    rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
+    return rewritten
+
+
+def _rewrite_live_preview_proxy_body(run_id, body, content_type):
+    if not body or not _should_rewrite_live_preview_body(content_type):
+        return body
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    rewritten = _rewrite_live_preview_proxy_text(run_id, text)
+    if rewritten == text:
+        return body
+    return rewritten.encode("utf-8")
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
@@ -4597,10 +4675,13 @@ class VibeMarketingRunLivePreviewProxyView(APIView):
                 content_type="text/plain; charset=utf-8",
             )
 
+        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+        response_body = response.content if request.method != "HEAD" else b""
+        response_body = _rewrite_live_preview_proxy_body(run_id, response_body, content_type)
         django_response = HttpResponse(
-            response.content if request.method != "HEAD" else b"",
+            response_body,
             status=response.status_code,
-            content_type=response.headers.get("Content-Type") or "application/octet-stream",
+            content_type=content_type,
         )
         for header, value in response.headers.items():
             lowered = header.lower()
