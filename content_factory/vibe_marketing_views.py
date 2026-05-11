@@ -1853,6 +1853,7 @@ def _serialize_component_comment(comment):
         "sourceSectionId": comment.source_section_id,
         "selector": comment.selector,
         "anchor": comment.anchor or None,
+        "context": comment.context or None,
         "body": comment.body,
         "status": comment.status,
         "batchId": comment.batch_id or None,
@@ -1980,6 +1981,71 @@ def _request_includes_comment_anchor(data):
     return getter("anchor") not in (None, "") or getter("anchorX") not in (None, "") or getter("anchor_x") not in (None, "")
 
 
+def _clean_comment_context_string(value, max_length):
+    text = str(value or "").strip()
+    return text[:max_length] if text else ""
+
+
+def _clean_comment_context_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
+def _clean_comment_context_number_map(value, allowed_keys):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in allowed_keys:
+        number = _clean_comment_context_number(value.get(key))
+        if number is not None:
+            result[key] = number
+    return result
+
+
+def _comment_context_from_request(data):
+    getter = data.get if hasattr(data, "get") else (lambda _key, default=None: default)
+    context = getter("context")
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except json.JSONDecodeError:
+            context = None
+    if not isinstance(context, dict):
+        return {}
+    normalized = {}
+    for key, max_length in {
+        "domPath": 1200,
+        "textHash": 120,
+        "textExcerpt": 1200,
+        "pageUrl": 1200,
+        "previewMode": 120,
+    }.items():
+        value = _clean_comment_context_string(context.get(key), max_length)
+        if value:
+            normalized[key] = value
+    rect = _clean_comment_context_number_map(context.get("rect"), ["left", "top", "right", "bottom", "width", "height"])
+    click = _clean_comment_context_number_map(context.get("click"), ["x", "y", "pageX", "pageY"])
+    viewport = _clean_comment_context_number_map(
+        context.get("viewport"),
+        ["width", "height", "scrollX", "scrollY", "devicePixelRatio"],
+    )
+    if rect:
+        normalized["rect"] = rect
+    if click:
+        normalized["click"] = click
+    if viewport:
+        normalized["viewport"] = viewport
+    return normalized
+
+
+def _request_includes_comment_context(data):
+    getter = data.get if hasattr(data, "get") else (lambda _key, default=None: default)
+    return getter("context") not in (None, "")
+
+
 def _comment_payload_from_request(data):
     component_id = str(data.get("componentId") or data.get("component_id") or "").strip()
     body = str(data.get("body") or data.get("comment") or "").strip()
@@ -1990,6 +2056,7 @@ def _comment_payload_from_request(data):
         "source_section_id": str(data.get("sourceSectionId") or data.get("source_section_id") or "").strip(),
         "selector": str(data.get("selector") or "").strip() or _selector_for_component(component_id),
         "anchor": _comment_anchor_from_request(data),
+        "context": _comment_context_from_request(data),
         "body": body,
     }
 
@@ -2003,6 +2070,7 @@ def _remote_comment_payload(comment):
         "source_section_id": comment.source_section_id,
         "selector": comment.selector or _selector_for_component(comment.component_id),
         "anchor": comment.anchor or {},
+        "context": comment.context or {},
         "body": comment.body,
     }
 
@@ -2058,6 +2126,7 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
                     "component_id": comment.component_id,
                     "component_type": comment.component_type,
                     "component_label": comment.component_label,
+                    "context": comment.context or {},
                     "comment": comment.body,
                     "normalized_rule": rule,
                 },
@@ -2068,6 +2137,7 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
                     "feedback_batch_id": batch_id,
                     "source_run_id": run.run_id,
                     "comment_id": str(comment.id),
+                    "context": comment.context or {},
                 },
                 "snippet_or_rule": rule,
                 "applies_to": [
@@ -2087,6 +2157,7 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
                         "component_id": comment.component_id,
                         "component_type": comment.component_type,
                         "component_label": comment.component_label,
+                        "context": comment.context or {},
                         "rule": rule,
                     },
                 },
@@ -4643,6 +4714,8 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
         payload = _comment_payload_from_request(request.data or {})
         if not _request_includes_comment_anchor(request.data or {}):
             payload["anchor"] = comment.anchor or {}
+        if not _request_includes_comment_context(request.data or {}):
+            payload["context"] = comment.context or {}
         if not payload["body"]:
             return Response({"detail": "Comment text is required."}, status=status.HTTP_400_BAD_REQUEST)
         for key, value in payload.items():
@@ -4654,6 +4727,7 @@ class VibeMarketingRunCommentDetailView(VibeMarketingRunCommentsMixin, APIView):
             "source_section_id",
             "selector",
             "anchor",
+            "context",
             "body",
             "updated_at",
         ])

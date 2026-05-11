@@ -469,6 +469,7 @@ class VibeMarketingComponentComment(models.Model):
     source_section_id = models.CharField(max_length=255, blank=True, default="")
     selector = models.CharField(max_length=500, blank=True, default="")
     anchor = models.JSONField(blank=True, default=dict)
+    context = models.JSONField(blank=True, default=dict)
     body = models.TextField()
     status = models.CharField(
         max_length=20,

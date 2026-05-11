@@ -706,6 +706,16 @@ class VibeMarketingComponentCommentTests(TestCase):
                 "componentLabel": "Table of contents",
                 "selector": '[data-cf-component-id="toc"]',
                 "anchor": {"x": 0.42, "y": 0.23, "createdFrom": "live_preview_click"},
+                "context": {
+                    "domPath": "body > main:nth-of-type(1) > nav:nth-of-type(1)",
+                    "textHash": "12345",
+                    "textExcerpt": "Table of contents",
+                    "rect": {"left": 10, "top": 20, "width": 300, "height": 64},
+                    "click": {"x": 24, "y": 40, "pageX": 24, "pageY": 140},
+                    "viewport": {"width": 1440, "height": 900, "scrollY": 100, "devicePixelRatio": 2},
+                    "pageUrl": "http://127.0.0.1:4321/articles/test?cfInspector=1",
+                    "previewMode": "exact",
+                },
                 "body": "Make this easier to scan.",
             },
             format="json",
@@ -714,6 +724,9 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["anchor"]["x"], 0.42)
         self.assertEqual(response.data["anchor"]["y"], 0.23)
+        self.assertEqual(response.data["context"]["domPath"], "body > main:nth-of-type(1) > nav:nth-of-type(1)")
+        self.assertEqual(response.data["context"]["textExcerpt"], "Table of contents")
+        self.assertEqual(response.data["context"]["rect"]["height"], 64.0)
 
         comment_id = response.data["id"]
         patch_response = self.client.patch(
@@ -731,10 +744,12 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(patch_response.status_code, 200)
         self.assertEqual(patch_response.data["anchor"]["x"], 0.42)
         self.assertEqual(patch_response.data["anchor"]["y"], 0.23)
+        self.assertEqual(patch_response.data["context"]["textHash"], "12345")
 
         list_response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments")
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.data["comments"][0]["anchor"]["createdFrom"], "live_preview_click")
+        self.assertEqual(list_response.data["comments"][0]["context"]["previewMode"], "exact")
 
     def test_revision_run_does_not_serialize_source_run_comments(self):
         VibeMarketingComponentComment.objects.create(
@@ -889,6 +904,13 @@ class VibeMarketingComponentCommentTests(TestCase):
             component_label="Intro section",
             selector='[data-cf-component-id="section:section-1"]',
             anchor={"x": 0.25, "y": 0.75, "createdFrom": "live_preview_click"},
+            context={
+                "domPath": "body > main:nth-of-type(1) > section:nth-of-type(1)",
+                "textExcerpt": "Intro section visible copy",
+                "click": {"x": 120, "y": 300},
+                "viewport": {"width": 1280, "height": 800},
+                "pageUrl": "http://127.0.0.1:4321/articles/test?cfInspector=1",
+            },
             body="Tighten this section.",
         )
 
@@ -910,6 +932,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         remote_comment = captured["payload"]["comments"][0]
         self.assertEqual(remote_comment["comment_id"], str(comment.id))
         self.assertEqual(remote_comment["anchor"], {"x": 0.25, "y": 0.75, "createdFrom": "live_preview_click"})
+        self.assertEqual(remote_comment["context"]["textExcerpt"], "Intro section visible copy")
+        self.assertEqual(remote_comment["context"]["click"]["x"], 120)
 
         comment.refresh_from_db()
         self.assertEqual(comment.status, "submitted")
