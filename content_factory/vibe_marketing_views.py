@@ -1332,6 +1332,11 @@ def _live_preview_from_run(run):
             or payload.get("verification_skipped_for_preview")
         ),
         "previewMode": payload.get("previewMode") or payload.get("preview_mode") or "",
+        "previewClientMode": payload.get("previewClientMode") or payload.get("preview_client_mode") or "",
+        "clientHydrationDisabledForPreview": bool(
+            payload.get("clientHydrationDisabledForPreview")
+            or payload.get("client_hydration_disabled_for_preview")
+        ),
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
     }
@@ -1425,6 +1430,27 @@ _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE = re.compile(
     rf"(?P<prefix>\b(?:src|href|action|poster)=)/(?P<path>(?:{_LIVE_PREVIEW_PROXY_ASSET_PREFIX_PATTERN})[^\s>]+)",
     re.IGNORECASE,
 )
+_LIVE_PREVIEW_CLIENT_RUNTIME_MARKERS = (
+    "app/entry.client",
+    "@vite/client",
+    "@react-refresh",
+    "__x00__virtual:react-router",
+    "virtual:react-router/hmr",
+    "virtual:react-router/inject-hmr",
+)
+_LIVE_PREVIEW_CLIENT_RUNTIME_PATHS = {
+    "app/entry.client.tsx",
+    "@vite/client",
+    "node_modules/vite/dist/client/env.mjs",
+}
+_LIVE_PREVIEW_CLIENT_MODULEPRELOAD_MARKERS = (
+    "/app/",
+    "/node_modules/",
+    "/@id/",
+    "/@vite/",
+    "/@react-refresh",
+    "/src/",
+)
 
 
 def _should_rewrite_live_preview_body(content_type):
@@ -1445,6 +1471,57 @@ def _should_rewrite_live_preview_body(content_type):
 def _live_preview_proxy_asset_url(run_id, path):
     clean_path = str(path or "").lstrip("/")
     return f"{_backend_live_preview_proxy_prefix(run_id)}/{clean_path}"
+
+
+def _has_live_preview_client_runtime_marker(value):
+    normalized = str(value or "").lower()
+    return any(marker in normalized for marker in _LIVE_PREVIEW_CLIENT_RUNTIME_MARKERS)
+
+
+def _has_live_preview_client_modulepreload_marker(value):
+    normalized = str(value or "").lower()
+    return any(marker in normalized for marker in _LIVE_PREVIEW_CLIENT_MODULEPRELOAD_MARKERS)
+
+
+def _is_live_preview_client_runtime_request_path(value):
+    path = urlsplit(str(value or "")).path.lstrip("/").lower()
+    if path in _LIVE_PREVIEW_CLIENT_RUNTIME_PATHS:
+        return True
+    return (
+        path.startswith("@id/__x00__virtual:react-router/")
+        or path.startswith("@react-refresh")
+        or path.startswith("@vite/")
+    )
+
+
+def _empty_live_preview_client_runtime_response(include_body=True):
+    body = b"export {};\n" if include_body else b""
+    response = HttpResponse(body, status=200, content_type="text/javascript; charset=utf-8")
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _strip_live_preview_client_runtime(text):
+    def replace_script(match):
+        tag = match.group(0)
+        return "" if _has_live_preview_client_runtime_marker(tag) else tag
+
+    def replace_link(match):
+        tag = match.group(0)
+        tag_lower = tag.lower()
+        if "modulepreload" in tag_lower:
+            return "" if _has_live_preview_client_modulepreload_marker(tag) else tag
+        if "rel=\"preload\"" in tag_lower or "rel='preload'" in tag_lower or "rel=preload" in tag_lower:
+            if "as=\"script\"" in tag_lower or "as='script'" in tag_lower or "as=script" in tag_lower:
+                return "" if (
+                    _has_live_preview_client_runtime_marker(tag)
+                    or _has_live_preview_client_modulepreload_marker(tag)
+                ) else tag
+        return tag
+
+    stripped = re.sub(r"(?is)<script\b[^>]*>.*?</script\s*>", replace_script, str(text or ""))
+    stripped = re.sub(r"(?is)<link\b[^>]*>", replace_link, stripped)
+    return stripped
 
 
 def _rewrite_live_preview_proxy_text(run_id, text):
@@ -1476,6 +1553,8 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
     except UnicodeDecodeError:
         return body
     rewritten = _rewrite_live_preview_proxy_text(run_id, text)
+    if "text/html" in str(content_type or "").lower():
+        rewritten = _strip_live_preview_client_runtime(rewritten)
     if rewritten == text:
         return body
     return rewritten.encode("utf-8")
@@ -4648,11 +4727,13 @@ class VibeMarketingRunLivePreviewProxyView(APIView):
         _context, _run, error_response = self._resolve_run(request, run_id)
         if error_response is not None:
             return error_response
+        safe_path = quote(str(proxy_path or "").lstrip("/"), safe="/:@!$&'()*+,;=-._~")
+        if _is_live_preview_client_runtime_request_path(safe_path):
+            return _empty_live_preview_client_runtime_response(include_body=request.method != "HEAD")
         remote_config = _content_factory_remote_config()
         if not remote_config["enabled"]:
             return Response({"detail": _content_factory_unavailable_message(remote_config)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        safe_path = quote(str(proxy_path or "").lstrip("/"), safe="/:@!$&'()*+,;=-._~")
         remote_url = f"{remote_config['base_url']}/api/runs/{run_id}/live-preview/proxy/{safe_path}"
         query_string = request.META.get("QUERY_STRING") or ""
         if query_string:

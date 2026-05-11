@@ -88,6 +88,8 @@ class VibeMarketingComponentCommentTests(TestCase):
             "proofAttempts": [{"attempt": 1, "exact": True}],
             "proofAcceptedWithWarnings": True,
             "previewMode": "local_runtime",
+            "previewClientMode": "ssr_static",
+            "clientHydrationDisabledForPreview": True,
         }
 
         with (
@@ -114,6 +116,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["proofAttempts"], preview_payload["proofAttempts"])
         self.assertTrue(response.data["livePreview"]["proofAcceptedWithWarnings"])
         self.assertEqual(response.data["livePreview"]["previewMode"], "local_runtime")
+        self.assertEqual(response.data["livePreview"]["previewClientMode"], "ssr_static")
+        self.assertTrue(response.data["livePreview"]["clientHydrationDisabledForPreview"])
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], expected_preview_url)
         self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
@@ -353,7 +357,12 @@ class VibeMarketingComponentCommentTests(TestCase):
             status_code=200,
             content=(
                 b'<html><head><link rel="stylesheet" href="/@react-router/critical.css?pathname=/articles/featured/generated">'
+                b'<link rel="modulepreload" href="/app/root.tsx">'
+                b'<link rel="modulepreload" href="/node_modules/.vite/deps/react.js?v=test">'
                 b'<script type="module" src="/app/entry.client.tsx"></script>'
+                b'<script type="module" src="/@vite/client"></script>'
+                b'<script type="module" src="/@id/__x00__virtual:react-router/inject-hmr-runtime"></script>'
+                b"<script>window.__cfArticleInspectorInstalled = true;</script>"
                 b'<script src=//@cdn.example.com/skip.js></script>'
                 b'</head><body><a href="/api/v1/auth/me/">api</a></body></html>'
             ),
@@ -383,9 +392,13 @@ class VibeMarketingComponentCommentTests(TestCase):
         text = response.content.decode("utf-8")
         proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
         self.assertIn(f'href="{proxy_prefix}/@react-router/critical.css?pathname=/articles/featured/generated"', text)
-        self.assertIn(f'src="{proxy_prefix}/app/entry.client.tsx"', text)
+        self.assertIn("window.__cfArticleInspectorInstalled", text)
         self.assertIn("src=//@cdn.example.com/skip.js", text)
         self.assertIn('href="/api/v1/auth/me/"', text)
+        self.assertNotIn("app/entry.client", text)
+        self.assertNotIn("@vite/client", text)
+        self.assertNotIn("__x00__virtual:react-router", text)
+        self.assertNotIn("modulepreload", text)
         self.assertEqual(response["Content-Type"], "text/html; charset=utf-8")
         self.assertFalse(response.has_header("X-Frame-Options"))
         self.assertFalse(response.has_header("Content-Security-Policy"))
@@ -414,7 +427,7 @@ class VibeMarketingComponentCommentTests(TestCase):
             patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response),
         ):
             response = self.client.get(
-                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy/app/entry.client.tsx",
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy/app/root.tsx",
                 HTTP_ACCEPT="text/javascript",
             )
 
@@ -427,6 +440,19 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertIn('fetch("/api/v1/auth/me/");', text)
         self.assertIn('const cdn = "//cdn.example.com/module.js";', text)
         self.assertEqual(response["Content-Type"], "text/javascript")
+
+    def test_live_preview_proxy_returns_empty_client_runtime_module(self):
+        with patch("content_factory.vibe_marketing_views._content_factory_remote_config") as remote_config:
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy/app/entry.client.tsx",
+                HTTP_ACCEPT="text/javascript",
+            )
+
+        remote_config.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"export {};\n")
+        self.assertEqual(response["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertEqual(response["Cache-Control"], "no-store")
 
     def test_live_preview_proxy_rewrites_root_relative_css_urls(self):
         remote_response = SimpleNamespace(
