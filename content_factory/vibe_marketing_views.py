@@ -1345,6 +1345,16 @@ def _live_preview_from_run(run):
         "fallbackReason": payload.get("fallbackReason") or payload.get("fallback_reason") or "",
         "nativePreviewFailure": payload.get("nativePreviewFailure") or payload.get("native_preview_failure") or {},
         "visualFallback": payload.get("visualFallback") or payload.get("visual_fallback") or {},
+        "platformProvider": payload.get("platformProvider") or payload.get("platform_provider") or "",
+        "platformStatus": payload.get("platformStatus") or payload.get("platform_status") or "",
+        "deploymentId": payload.get("deploymentId") or payload.get("deployment_id") or "",
+        "deploymentUrl": payload.get("deploymentUrl") or payload.get("deployment_url") or "",
+        "routeUrl": payload.get("routeUrl") or payload.get("route_url") or "",
+        "logsUrl": payload.get("logsUrl") or payload.get("logs_url") or "",
+        "commitSha": payload.get("commitSha") or payload.get("commit_sha") or "",
+        "branchName": payload.get("branchName") or payload.get("branch_name") or "",
+        "builderWorkflow": payload.get("builderWorkflow") or payload.get("builder_workflow") or "",
+        "builderRunUrl": payload.get("builderRunUrl") or payload.get("builder_run_url") or "",
     }
 
 
@@ -1407,6 +1417,9 @@ def _rewrite_live_preview_payload_for_browser(run_id, payload):
     if not isinstance(payload, dict):
         return payload
     rewritten = dict(payload)
+    preview_mode = str(rewritten.get("previewMode") or rewritten.get("preview_mode") or "").strip()
+    if preview_mode == "platform_deployment":
+        return rewritten
     internal_preview_url = (
         rewritten.get("internalPreviewUrl")
         or rewritten.get("internal_preview_url")

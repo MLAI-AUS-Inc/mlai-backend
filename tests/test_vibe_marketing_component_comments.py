@@ -11,7 +11,7 @@ from content_factory.models import KeywordStatus, OrganizationContentConfig, Res
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
-from content_factory.vibe_marketing_views import _call_content_factory_live_preview
+from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run
 
 
 User = get_user_model()
@@ -122,6 +122,35 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], expected_preview_url)
         self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
+
+    def test_platform_deployment_preview_url_is_not_rewritten_to_backend_proxy(self):
+        self.run.result = {
+            "livePreview": {
+                "available": True,
+                "status": "running",
+                "previewUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1",
+                "internalPreviewUrl": "https://abc.pages.dev",
+                "routePath": "/articles/generated",
+                "previewMode": "platform_deployment",
+                "platformProvider": "cloudflare",
+                "platformStatus": "ready",
+                "deploymentUrl": "https://abc.pages.dev",
+                "routeUrl": "https://run-123.mlai-previews.com/articles/generated?cfInspector=1",
+                "logsUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123",
+                "commitSha": "abc123",
+                "branchName": "cf-review/article-run-comments",
+            }
+        }
+
+        preview = _live_preview_from_run(self.run)
+
+        self.assertEqual(preview["previewUrl"], "https://run-123.mlai-previews.com/articles/generated?cfInspector=1")
+        self.assertEqual(preview["internalPreviewUrl"], "https://abc.pages.dev")
+        self.assertEqual(preview["previewMode"], "platform_deployment")
+        self.assertEqual(preview["platformProvider"], "cloudflare")
+        self.assertEqual(preview["platformStatus"], "ready")
+        self.assertEqual(preview["logsUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/123")
+        self.assertEqual(preview["commitSha"], "abc123")
 
     def test_live_preview_serializes_visual_fallback_metadata(self):
         self.run.result = {
