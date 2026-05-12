@@ -2538,6 +2538,119 @@ def _run_has_external_publish_evidence(run):
     )
 
 
+def _run_has_publish_pr_or_preview_evidence(run):
+    result = _run_mapping(run.result)
+    evidence = _publish_evidence_from_run(run)
+    live_preview = _live_preview_from_run(run)
+    return bool(
+        evidence.get("prUrl")
+        or evidence.get("previewUrl")
+        or result.get("pr_url")
+        or result.get("pull_request_url")
+        or result.get("draft_pr_url")
+        or result.get("preview_url")
+        or result.get("article_url")
+        or result.get("url")
+        or live_preview.get("previewUrl")
+    )
+
+
+def _payload_has_publish_approval_gate(payload):
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("approve_url") or payload.get("deny_url") or payload.get("requested_action"):
+        return True
+    if str(payload.get("approval_state") or payload.get("approvalState") or "").strip().lower() == ContentFactoryApprovalState.APPROVAL_REQUIRED:
+        return True
+    if str(payload.get("status") or "").strip().lower() in {
+        ContentFactoryRunStatus.AWAITING_APPROVAL,
+        ContentFactoryRunStatus.APPROVAL_REQUIRED,
+    }:
+        return True
+    for nested_key in ("result", "article_system_setup", "approval", "publish_approval"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict) and _payload_has_publish_approval_gate(nested):
+            return True
+    return False
+
+
+def _publish_child_has_real_approval_gate(run):
+    if not run:
+        return False
+    if run.status in {ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+        return True
+    if run.approval_state == ContentFactoryApprovalState.APPROVAL_REQUIRED:
+        return True
+    return _payload_has_publish_approval_gate(_run_mapping(run.result))
+
+
+def _publish_child_run_recoverable(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    if run.status != ContentFactoryRunStatus.AWAITING_CONFIRMATION:
+        return False
+    if _run_has_publish_pr_or_preview_evidence(run) or _publish_child_has_real_approval_gate(run):
+        return False
+    return True
+
+
+def _publish_child_wait_reason(run):
+    if _publish_child_run_recoverable(run):
+        return "Publish child is waiting for confirmation instead of creating a PR."
+    if _publish_child_has_real_approval_gate(run):
+        return "Publish child is waiting for approval."
+    return ""
+
+
+def _publish_source_run_for_child(run, context):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    source_run_id = _run_source_run_id(run)
+    if not source_run_id:
+        return None
+    source_run = ContentFactoryRun.objects.filter(run_id=source_run_id).prefetch_related("steps").first()
+    if not source_run or source_run.workflow not in ARTICLE_WORKFLOWS or not _run_belongs_to_context(source_run, context):
+        return None
+    return source_run
+
+
+def _publish_child_for_run_state(run, *, context=None):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    if run.workflow != "article_revision" and _publish_source_run_for_child(run, context) is not None:
+        return run
+    return _local_publish_child_for_run(run, context=context)
+
+
+def _annotate_publish_child_state(run, *, context=None):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return run
+    child = _publish_child_for_run_state(run, context=context)
+    if not child:
+        return run
+    recoverable = _publish_child_run_recoverable(child)
+    wait_reason = _publish_child_wait_reason(child)
+    result = dict(run.result or {})
+    updates = {
+        "publish_child_run_id": child.run_id,
+        "promoted_publish_job_id": child.run_id,
+        "publish_child_status": child.status,
+        "publish_child_recoverable": recoverable,
+        "publish_child_wait_reason": wait_reason,
+        "publish_handoff_status": "recoverable_wait" if recoverable else ("queued" if child.status in RUNNING_RUN_STATUSES else child.status),
+        "publish_handoff_pending": False,
+    }
+    changed = False
+    for key, value in updates.items():
+        if result.get(key) != value:
+            result[key] = value
+            changed = True
+    if changed:
+        run.result = result
+        run.save(update_fields=["result", "updated_at"])
+    return run
+
+
 def _pull_request_number_from_run(run):
     result = _run_mapping(run.result)
     for key in ("pr_number", "pull_request_number", "draft_pr_number"):
@@ -2735,6 +2848,85 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
                 "resume_available",
                 "acceptance_summary",
                 "verification_summary",
+                "error",
+                "result",
+                "updated_at",
+            ]
+        )
+        return locked_run
+
+
+def _cancel_local_scan_run(*, run, remote_data=None):
+    remote_data = remote_data if isinstance(remote_data, dict) else {}
+    now = timezone.now()
+    result = dict(_run_mapping(run.result))
+    nested = dict(_run_mapping(result.get("result")))
+    nested.update(
+        {
+            "requested_action": None,
+            "scaffold_status": "cancelled",
+            "approve_url": None,
+            "deny_url": None,
+        }
+    )
+    setup = nested.get("article_system_setup")
+    if isinstance(setup, dict):
+        setup = dict(setup)
+        setup.update(
+            {
+                "status": "cancelled",
+                "requested_action": None,
+                "approve_url": None,
+                "deny_url": None,
+            }
+        )
+        nested["article_system_setup"] = setup
+
+    result.update(
+        {
+            "status": ContentFactoryRunStatus.CANCELLED,
+            "cancelled": True,
+            "cancelled_at": now.isoformat(),
+            "requested_action": None,
+            "scaffold_status": "cancelled",
+            "approve_url": None,
+            "deny_url": None,
+            "remote_cancel": remote_data,
+            "result": nested,
+        }
+    )
+    setup = result.get("article_system_setup")
+    if isinstance(setup, dict):
+        setup = dict(setup)
+        setup.update(
+            {
+                "status": "cancelled",
+                "requested_action": None,
+                "approve_url": None,
+                "deny_url": None,
+            }
+        )
+        result["article_system_setup"] = setup
+
+    with transaction.atomic():
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
+            status=ContentFactoryStepStatus.CANCELLED,
+            message="Cancelled by user.",
+            error="",
+        )
+        locked_run.status = ContentFactoryRunStatus.CANCELLED
+        locked_run.current_step = "cancelled"
+        locked_run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        locked_run.resume_available = False
+        locked_run.error = ""
+        locked_run.result = result
+        locked_run.save(
+            update_fields=[
+                "status",
+                "current_step",
+                "approval_state",
+                "resume_available",
                 "error",
                 "result",
                 "updated_at",
@@ -3398,6 +3590,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     article_result = _run_mapping(article_run.result) if article_run else {}
     publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
     publish_handoff_stale = _publish_handoff_stale_for_run(article_run)
+    publish_child_recoverable = _publish_child_run_recoverable(publish_child_run)
     publish_running = bool(
         (publish_child_run and publish_child_run.status in RUNNING_RUN_STATUSES)
         or (publish_handoff_pending and not publish_handoff_stale and not publish_complete)
@@ -3540,6 +3733,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         href_by_id["publish"] = _run_url(publish_child_run or article_run)
         run_by_id["publish"] = (publish_child_run or article_run).run_id
         summary_by_id["publish"] = "Publishing child run is in progress." if publish_child_run else "Publish handoff is pending."
+    elif publish_child_recoverable and content_package_ready and package_can_promote:
+        status_by_id["publish"] = "ready"
+        href_by_id["publish"] = _run_url(article_run)
+        run_by_id["publish"] = article_run.run_id
+        action_by_id["publish"] = _workflow_step_action("Resume publish PR", href=_run_url(article_run), intent="promote-bundle")
+        summary_by_id["publish"] = "Publish child is waiting for confirmation. Resume safely."
     elif publish_handoff_stale and content_package_ready and package_can_promote:
         status_by_id["publish"] = "ready"
         href_by_id["publish"] = _run_url(article_run)
@@ -3636,6 +3835,9 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
         "prUrl": pr_url,
         "routePath": result.get("route_path") or result.get("path"),
         "diagnostics": result.get("diagnostics") or run.verification_summary or {},
+        "publishChildStatus": result.get("publish_child_status"),
+        "publishChildRecoverable": result.get("publish_child_recoverable"),
+        "publishChildWaitReason": result.get("publish_child_wait_reason"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,
         "livePreview": live_preview,
@@ -4208,6 +4410,13 @@ def _run_result_from_remote(remote_data):
         "live_preview",
         "componentManifest",
         "component_manifest",
+        "publish_child_status",
+        "publish_child_recoverable",
+        "publish_child_wait_reason",
+        "publish_handoff_status",
+        "repaired",
+        "repair_requested",
+        "previous_status",
     ):
         if remote_data.get(key) is not None and merged.get(key) is None:
             merged[key] = remote_data.get(key)
@@ -5737,6 +5946,7 @@ class VibeMarketingRunView(APIView):
             _recover_publish_child_for_run(run, request=request, context=context)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
+            run = _annotate_publish_child_state(run, context=context)
         skip_remote_status = bool(
             run.workflow in ARTICLE_WORKFLOWS
             and run.status == ContentFactoryRunStatus.COMPLETED
@@ -5783,6 +5993,7 @@ class VibeMarketingRunView(APIView):
             run = _ensure_article_live_preview(run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
+            run = _annotate_publish_child_state(run, context=context)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
@@ -6373,6 +6584,19 @@ class VibeMarketingRunControlView(APIView):
         payload.setdefault("slack_user_id", founder_actor_id_for_user(request.user))
 
         if action == "cancel":
+            if run.workflow in SCAN_WORKFLOWS:
+                remote_data = _call_content_factory_run_action(
+                    run_id=run_id,
+                    action=action,
+                    payload=payload,
+                    workflow=run.workflow,
+                    timeout=(2, 8),
+                    transport_errors_are_pending=True,
+                )
+                run = _cancel_local_scan_run(run=run, remote_data=remote_data)
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
             if run.workflow not in ARTICLE_WORKFLOWS:
                 return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
             if _run_has_external_publish_evidence(run):
@@ -6429,13 +6653,19 @@ class VibeMarketingRunControlView(APIView):
 
         remote_run = run
         if action in {"promote-bundle", "publish-pr"}:
+            publish_child_source = _publish_source_run_for_child(run, context)
+            if publish_child_source is not None:
+                remote_run = publish_child_source
+                payload.setdefault("source_run_id", publish_child_source.run_id)
+                payload.setdefault("publish_child_run_id", run.run_id)
+                run = publish_child_source
             accepted_revision = _accepted_component_revision_for_publish(run, context)
             if accepted_revision is not None:
                 remote_run = accepted_revision
                 payload.setdefault("review_source_run_id", run.run_id)
                 payload.setdefault("source_run_id", accepted_revision.run_id)
             existing_publish_run = _local_publish_child_for_run(run, context=context) or _local_publish_child_for_run(remote_run, context=context)
-            if existing_publish_run is not None:
+            if existing_publish_run is not None and not _publish_child_run_recoverable(existing_publish_run):
                 return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             known_child_run_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(remote_run)
             if known_child_run_id:
@@ -6447,7 +6677,7 @@ class VibeMarketingRunControlView(APIView):
                     payload=payload,
                     review_source_run_id=run.run_id if remote_run.run_id != run.run_id else "",
                 )
-                if recovered_publish_run is not None:
+                if recovered_publish_run is not None and not _publish_child_run_recoverable(recovered_publish_run):
                     return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             pending_runs = [
                 candidate
@@ -6529,6 +6759,10 @@ class VibeMarketingRunControlView(APIView):
                 result["latest_control_response"] = remote_data
                 result["promote_bundle_requested_at"] = timezone.now().isoformat()
                 result["publish_handoff_pending"] = False
+                result["publish_child_status"] = publish_run.status
+                result["publish_child_recoverable"] = _publish_child_run_recoverable(publish_run)
+                result["publish_child_wait_reason"] = _publish_child_wait_reason(publish_run)
+                result["publish_handoff_status"] = "recoverable_wait" if result["publish_child_recoverable"] else "queued"
                 run.result = result
                 run.save(update_fields=["result", "updated_at"])
                 if remote_run.run_id != run.run_id:
@@ -6537,6 +6771,10 @@ class VibeMarketingRunControlView(APIView):
                     remote_result["latest_control_response"] = remote_data
                     remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
                     remote_result["publish_handoff_pending"] = False
+                    remote_result["publish_child_status"] = publish_run.status
+                    remote_result["publish_child_recoverable"] = result["publish_child_recoverable"]
+                    remote_result["publish_child_wait_reason"] = result["publish_child_wait_reason"]
+                    remote_result["publish_handoff_status"] = result["publish_handoff_status"]
                     remote_run.result = remote_result
                     remote_run.save(update_fields=["result", "updated_at"])
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)

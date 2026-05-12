@@ -23,7 +23,13 @@ from content_factory.models import (
     WrittenArticle,
 )
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus, ContentFactoryRunStep, ContentFactoryStepStatus
+from workflow_runs.models import (
+    ContentFactoryApprovalState,
+    ContentFactoryRun,
+    ContentFactoryRunStatus,
+    ContentFactoryRunStep,
+    ContentFactoryStepStatus,
+)
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
@@ -889,6 +895,54 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         skip_value = json.loads(blocks[1]["elements"][1]["value"])
         self.assertEqual(confirm_value["scan_run_id"], "scan-run-awaiting-approval")
         self.assertEqual(skip_value["scan_run_id"], "scan-run-awaiting-approval")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_ignores_cancelled_scan_run(self, mock_send_dm):
+        ContentFactoryJob.objects.create(
+            job_id="scan-run-cancelled",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="cancelled",
+            request_meta={"type": "scan", "cancelled": True},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-cancelled",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.CANCELLED,
+            current_step="cancelled",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            result={"status": "cancelled", "cancelled": True},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-cancelled",
+                "run_id": "scan-run-cancelled",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "slack_user_id": "U123",
+                "requested_action": "scaffold_publish_route",
+                "scaffold_required": True,
+                "scaffold_status": "approval_required",
+                "approve_url": "/api/runs/scan-run-cancelled/approve",
+                "deny_url": "/api/runs/scan-run-cancelled/deny",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "ignored")
+        job = ContentFactoryJob.objects.get(job_id="scan-run-cancelled")
+        self.assertEqual(job.status, "cancelled")
+        run = ContentFactoryRun.objects.get(run_id="scan-run-cancelled")
+        self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(run.current_step, "cancelled")
+        mock_send_dm.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_callback_persists_article_surface_metadata_to_run(self, mock_send_dm):

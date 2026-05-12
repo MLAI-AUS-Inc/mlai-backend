@@ -1485,6 +1485,14 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
         return None
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if existing_run and existing_run.status in {ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}:
+        logger.info(
+            "Ignoring scan callback for terminal local run: run_id=%s status=%s",
+            run_id,
+            existing_run.status,
+        )
+        return existing_run
+
     scaffold_status = str(data.get("scaffold_status") or "").strip()
     readiness = data.get("article_system_readiness") if isinstance(data.get("article_system_readiness"), dict) else {}
     readiness_status = str(readiness.get("status") or "").strip()
@@ -3443,6 +3451,18 @@ class ContentFactoryCallbackView(APIView):
         # Update job record if one exists
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if job:
+            if job.status in {'cancelled', 'denied'}:
+                logger.info(
+                    "Ignoring scan_complete job update for terminal job: job_id=%s status=%s",
+                    job_id,
+                    job.status,
+                )
+                _sync_scan_callback_to_run(data=data, approval_required=approval_required)
+                return Response(
+                    {"status": "ignored", "message": "Scan run is terminal locally."},
+                    status=status.HTTP_200_OK,
+                )
+
             request_meta = dict(job.request_meta or {})
             request_meta.update(
                 {
