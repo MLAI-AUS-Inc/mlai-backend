@@ -6910,6 +6910,55 @@ class VibeMarketingRunControlView(APIView):
         if remote_data:
             result = run.result or {}
             result["latest_control_response"] = remote_data
+            if action == "approve" and run.workflow in SCAN_WORKFLOWS:
+                setup_run_id = str(remote_data.get("setup_run_id") or "").strip()
+                if setup_run_id:
+                    result["setup_run_id"] = setup_run_id
+                    result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
+                    result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
+                    setup_payload = remote_data.get("article_system_setup")
+                    setup_payload = dict(setup_payload) if isinstance(setup_payload, dict) else dict(result.get("article_system_setup") or {})
+                    setup_payload.setdefault("setup_run_id", setup_run_id)
+                    setup_payload.setdefault("parent_run_id", run.run_id)
+                    setup_payload["status"] = setup_payload.get("status") or "queued"
+                    setup_payload["requested_action"] = None
+                    result["article_system_setup"] = setup_payload
+
+                    nested_result = dict(result.get("result") or {})
+                    nested_result["setup_run_id"] = setup_run_id
+                    nested_result["scaffold_job_id"] = remote_data.get("scaffold_job_id") or setup_run_id
+                    nested_result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
+                    nested_result["article_system_setup"] = setup_payload
+                    result["result"] = nested_result
+
+                    if not ContentFactoryRun.objects.filter(run_id=setup_run_id).exists():
+                        ContentFactoryRun.objects.create(
+                            run_id=setup_run_id,
+                            workflow="article_system_setup",
+                            domain=run.domain,
+                            github_repo=run.github_repo,
+                            slack_user_id=run.slack_user_id,
+                            status=ContentFactoryRunStatus.QUEUED,
+                            current_step="queued",
+                            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+                            step_order=[
+                                "load_context",
+                                "validate_plan",
+                                "prepare_branch",
+                                "create_pull_request",
+                                "start_hosted_preview",
+                                "await_review",
+                            ],
+                            run_request={
+                                "workflow": "article_system_setup",
+                                "domain": run.domain,
+                                "github_repo": run.github_repo,
+                                "parent_run_id": run.run_id,
+                                "scan_run_id": run.run_id,
+                            },
+                            result=setup_payload,
+                            error="",
+                        )
             if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data):
                 run.status = remote_data["status"]
             if remote_data.get("current_step"):

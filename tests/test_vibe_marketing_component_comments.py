@@ -12,7 +12,7 @@ from integrations import http_client
 from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
+from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run
 
 
@@ -238,6 +238,54 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(stale_run.status, ContentFactoryRunStatus.CANCELLED)
         self.assertEqual(stale_run.current_step, "cancelled")
         self.assertEqual(queued_run.result["superseded_scan_run_ids"], ["repo-scan-stale-old"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_scan_approval_persists_setup_run_id_and_local_setup_child(self):
+        scan_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-awaiting-setup",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "requested_action": "scaffold_publish_route",
+                "scaffold_status": "approval_required",
+                "article_system_setup": {
+                    "status": "approval_required",
+                    "requested_action": "article_system_setup",
+                    "changed_files_preview": ["app/routes/articles.index.tsx"],
+                },
+                "result": {
+                    "requested_action": "scaffold_publish_route",
+                    "scaffold_status": "approval_required",
+                },
+            },
+        )
+
+        remote_payload = {
+            "status": "queued",
+            "workflow": "repo_scan",
+            "setup_run_id": "setup-run-guided-1",
+            "scaffold_job_id": "setup-run-guided-1",
+            "article_system_setup": {
+                "status": "queued",
+                "setup_run_id": "setup-run-guided-1",
+                "changed_files_preview": ["app/routes/articles.index.tsx"],
+            },
+        }
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value=remote_payload):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{scan_run.run_id}/approve", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result"]["setup_run_id"], "setup-run-guided-1")
+        self.assertEqual(response.data["result"]["article_system_setup"]["setup_run_id"], "setup-run-guided-1")
+        scan_run.refresh_from_db()
+        self.assertEqual(scan_run.result["setup_run_id"], "setup-run-guided-1")
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-guided-1")
+        self.assertEqual(setup_run.workflow, "article_system_setup")
+        self.assertEqual(setup_run.run_request["scan_run_id"], scan_run.run_id)
 
     def test_platform_deployment_preview_url_is_not_rewritten_to_backend_proxy(self):
         self.run.result = {
