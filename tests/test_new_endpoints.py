@@ -891,6 +891,152 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(skip_value["scan_run_id"], "scan-run-awaiting-approval")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_persists_article_surface_metadata_to_run(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-surface-1",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            step_order=["load_repo_context", "scan_structure"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-surface-1",
+                "run_id": "scan-run-surface-1",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "slack_user_id": "U123",
+                "requested_action": "scaffold_publish_route",
+                "scaffold_required": True,
+                "scaffold_status": "approval_required",
+                "article_surface_hint": {"source": "user_input", "route_path": "/articles"},
+                "article_surface_hint_status": "matched",
+                "matched_article_surface": {"path_or_locator": "app/routes/articles.index.tsx"},
+                "detected_candidates": [
+                    {
+                        "candidate_group": "listing_surface_candidates",
+                        "path_or_locator": "app/routes/articles.index.tsx",
+                        "route_template": "/articles",
+                        "confidence": 0.92,
+                    }
+                ],
+                "article_system_readiness": {
+                    "status": "upgrade_required",
+                    "missing_support_files": ["app/articles/resources.ts"],
+                    "required_support_files": ["app/articles/registry.ts", "app/articles/resources.ts"],
+                },
+                "article_system_setup": {
+                    "status": "upgrade_required",
+                    "missing_support_files": ["app/articles/resources.ts"],
+                },
+                "scaffold_plan": {
+                    "detected_candidates": [
+                        {
+                            "candidate_group": "listing_surface_candidates",
+                            "path_or_locator": "app/routes/articles.index.tsx",
+                            "route_template": "/articles",
+                        }
+                    ]
+                },
+                "approve_url": "/api/runs/scan-run-surface-1/approve",
+                "deny_url": "/api/runs/scan-run-surface-1/deny",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="scan-run-surface-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(run.approval_state, "approval_required")
+        self.assertEqual(run.result["article_surface_hint_status"], "matched")
+        self.assertEqual(run.result["article_surface_hint"]["route_path"], "/articles")
+        self.assertEqual(run.result["detected_candidates"][0]["route_template"], "/articles")
+        self.assertEqual(run.result["article_system_readiness"]["missing_support_files"], ["app/articles/resources.ts"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_persists_auto_setup_preview_queue(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-setup-queued",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            step_order=["load_repo_context", "scan_structure"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-setup-queued",
+                "run_id": "scan-run-setup-queued",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scaffold_required": True,
+                "scaffold_status": "queued",
+                "scaffold_queued": True,
+                "scaffold_job_id": "setup-run-1",
+                "setup_run_id": "setup-run-1",
+                "article_surface_hint": {"source": "user_input", "route_path": "/articles"},
+                "article_surface_hint_status": "matched",
+                "article_system_setup": {"status": "queued", "setup_run_id": "setup-run-1"},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="scan-run-setup-queued")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.result["setup_run_id"], "setup-run-1")
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-1")
+        self.assertEqual(setup_run.workflow, "article_system_setup")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_callback_creates_review_run(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-parent",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_ready",
+                "job_id": "setup-run-2",
+                "run_id": "setup-run-2",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-parent",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
+                "preview_url": "https://preview.example/articles",
+                "live_preview": {"available": True, "previewUrl": "https://preview.example/articles"},
+                "live_preview_url": "/api/runs/setup-run-2/live-preview",
+                "article_system_setup": {"status": "preview_ready", "setup_run_id": "setup-run-2"},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-2")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.result["livePreview"]["previewUrl"], "https://preview.example/articles")
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-parent")
+        self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
         config = OrganizationContentConfig.objects.create(
