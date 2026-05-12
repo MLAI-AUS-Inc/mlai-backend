@@ -1,9 +1,11 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from integrations import http_client
@@ -1408,7 +1410,9 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.result = {
             "delivery_mode": "content_only",
             "publish_handoff_pending": True,
-            "promote_bundle_requested_at": "2026-05-12T03:05:00+00:00",
+            "publish_handoff_started_at": timezone.now().isoformat(),
+            "publish_handoff_last_attempt_at": timezone.now().isoformat(),
+            "promote_bundle_requested_at": timezone.now().isoformat(),
             "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
             "delivery_package": {
                 "title": "Australian Founders and What the Term Means Today",
@@ -1425,6 +1429,85 @@ class VibeMarketingComponentCommentTests(TestCase):
         post.assert_not_called()
         self.run.refresh_from_db()
         self.assertTrue(self.run.result["publish_handoff_pending"])
+        self.assertFalse(self.run.result.get("publish_handoff_stale", False))
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_stale_pending_handoff_retries_dispatch(self):
+        stale_timestamp = (timezone.now() - timedelta(minutes=5)).isoformat()
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_handoff_pending": True,
+            "publish_handoff_started_at": stale_timestamp,
+            "publish_handoff_last_attempt_at": stale_timestamp,
+            "promote_bundle_requested_at": stale_timestamp,
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=202, payload={"run_id": "article-publish-child-retry", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post) as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-publish-child-retry")
+        post.assert_called_once()
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-retry")
+        self.assertFalse(self.run.result["publish_handoff_pending"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_completed_article_status_surfaces_stale_publish_handoff_retry(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        stale_timestamp = (timezone.now() - timedelta(minutes=5)).isoformat()
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_handoff_pending": True,
+            "publish_handoff_started_at": stale_timestamp,
+            "publish_handoff_last_attempt_at": stale_timestamp,
+            "promote_bundle_requested_at": stale_timestamp,
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["result"]["publish_handoff_stale"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["publish"]["status"], "ready")
+        self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_existing_child_id_recovers_local_child_without_dispatch(self):
