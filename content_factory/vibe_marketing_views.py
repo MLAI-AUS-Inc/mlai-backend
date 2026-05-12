@@ -114,6 +114,7 @@ VIBE_MARKETING_WORKFLOWS = {
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
+RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
 REMOTE_REQUIRED_WORKFLOWS = {
     "article_generation",
@@ -997,6 +998,166 @@ def _recent_written_topics(organization, *, limit=8):
         _serialize_written_article(article)
         for article in WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
     ]
+
+
+def _written_article_identity_keys(organization):
+    keys = {"slugs": set(), "keywords": set()}
+    for article in WrittenArticle.objects.filter(organization=organization).only("slug", "primary_keyword", "title")[:500]:
+        slug = slugify(str(article.slug or article.title or ""))
+        keyword = _normalize_keyword_memory(article.primary_keyword)
+        title_slug = slugify(str(article.title or ""))
+        if slug:
+            keys["slugs"].add(slug)
+        if title_slug:
+            keys["slugs"].add(title_slug)
+        if keyword:
+            keys["keywords"].add(keyword)
+    return keys
+
+
+def _article_draft_title_keyword(run):
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    package = _content_package_from_run(run) or {}
+    title = str(
+        package.get("title")
+        or run_request.get("custom_title")
+        or run_request.get("customTitle")
+        or run_request.get("selected_title")
+        or run_request.get("selectedTitle")
+        or run_request.get("topic")
+        or result.get("title")
+        or result.get("topic")
+        or ""
+    ).strip()
+    keyword = str(
+        package.get("targetKeyword")
+        or run_request.get("target_keyword")
+        or run_request.get("targetKeyword")
+        or run_request.get("keyword")
+        or result.get("target_keyword")
+        or result.get("targetKeyword")
+        or title
+        or ""
+    ).strip()
+    if not title and keyword:
+        title = keyword
+    return title, keyword
+
+
+def _article_draft_matches_written(run, written_keys):
+    title, keyword = _article_draft_title_keyword(run)
+    package = _content_package_from_run(run) or {}
+    slugs = written_keys.get("slugs") or set()
+    keywords = written_keys.get("keywords") or set()
+    candidate_slugs = {
+        slugify(str(package.get("slug") or "")),
+        slugify(title),
+    }
+    candidate_keywords = {_normalize_keyword_memory(keyword), _normalize_keyword_memory(title)}
+    return bool(
+        any(candidate for candidate in candidate_slugs if candidate and candidate in slugs)
+        or any(candidate for candidate in candidate_keywords if candidate and candidate in keywords)
+    )
+
+
+def _article_draft_stage_label(run):
+    status_value = str(run.status or "").strip()
+    current_step = str(run.current_step or "").strip().lower()
+    if status_value in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}:
+        return "Needs attention"
+    if status_value in {
+        ContentFactoryRunStatus.COMPLETED,
+        ContentFactoryRunStatus.AWAITING_APPROVAL,
+        ContentFactoryRunStatus.APPROVAL_REQUIRED,
+    }:
+        return "Ready for review"
+    if status_value == ContentFactoryRunStatus.AWAITING_DELIVERY_MODE:
+        return "Choose delivery mode"
+    if status_value == ContentFactoryRunStatus.AWAITING_CONFIRMATION:
+        return "Needs confirmation"
+    if current_step.startswith(("discover_", "collect_research", "research")):
+        return "Researching"
+    if current_step.startswith(("plan_", "draft_", "ground_", "assemble")):
+        return "Writing draft"
+    if "image" in current_step:
+        return "Preparing assets"
+    if "preview" in current_step or "verify" in current_step or "render" in current_step:
+        return "Preparing preview"
+    if status_value in RUNNING_RUN_STATUSES:
+        return "In progress"
+    return "Draft"
+
+
+def _article_draft_action(run):
+    status_value = str(run.status or "").strip()
+    if status_value in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}:
+        if run.resume_available:
+            return "resume", "Resume"
+        if _article_restart_available(run):
+            return "restart", "Restart"
+        return "review", "Review issue"
+    return "continue", "Continue"
+
+
+def _article_restart_available(run):
+    if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
+        return False
+    if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}:
+        return False
+    title, keyword = _article_draft_title_keyword(run)
+    return bool(title or keyword)
+
+
+def _serialize_article_draft(run, *, written_keys):
+    if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
+        return None
+    if run.status == ContentFactoryRunStatus.COMPLETED and _article_draft_matches_written(run, written_keys):
+        return None
+
+    title, keyword = _article_draft_title_keyword(run)
+    if not title and not keyword:
+        title = "Untitled article draft"
+    action_kind, action_label = _article_draft_action(run)
+    return {
+        "runId": run.run_id,
+        "sourceRunId": _run_source_run_id(run) or None,
+        "workflow": run.workflow,
+        "status": run.status,
+        "title": title or keyword or "Untitled article draft",
+        "targetKeyword": keyword or title or "",
+        "stageLabel": _article_draft_stage_label(run),
+        "actionKind": action_kind,
+        "actionLabel": action_label,
+        "resumeAvailable": bool(run.resume_available),
+        "restartAvailable": _article_restart_available(run),
+        "updatedAt": run.updated_at.isoformat() if run.updated_at else None,
+        "createdAt": run.created_at.isoformat() if run.created_at else None,
+    }
+
+
+def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
+    written_keys = _written_article_identity_keys(organization)
+    drafts = []
+    seen = set()
+    runs = (
+        ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
+        .exclude(status=ContentFactoryRunStatus.CANCELLED)
+        .prefetch_related("steps")
+        .order_by("-updated_at")[:scan_limit]
+    )
+    for run in runs:
+        draft = _serialize_article_draft(run, written_keys=written_keys)
+        if not draft:
+            continue
+        identity = draft.get("sourceRunId") or draft.get("runId")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        drafts.append(draft)
+        if len(drafts) >= limit:
+            break
+    return drafts
 
 
 def _has_completed_article_flow(organization, latest_runs=None):
@@ -2358,6 +2519,128 @@ def _cancel_local_article_run(*, run, organization, remote_data=None):
         return locked_run
 
 
+def _restart_article_payload_from_run(*, run, context, config, actor_id):
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    package = _content_package_from_run(run) or {}
+    title, keyword = _article_draft_title_keyword(run)
+    topic = str(
+        run_request.get("topic")
+        or run_request.get("custom_title")
+        or run_request.get("customTitle")
+        or run_request.get("selected_title")
+        or run_request.get("selectedTitle")
+        or title
+        or keyword
+        or ""
+    ).strip()
+    target_keyword = str(
+        run_request.get("target_keyword")
+        or run_request.get("targetKeyword")
+        or package.get("targetKeyword")
+        or result.get("target_keyword")
+        or result.get("targetKeyword")
+        or keyword
+        or topic
+        or ""
+    ).strip()
+    if not topic and target_keyword:
+        topic = target_keyword
+    if not topic and not target_keyword:
+        return None
+
+    requested_delivery_mode = str(
+        run_request.get("delivery_mode")
+        or run_request.get("deliveryMode")
+        or result.get("delivery_mode")
+        or result.get("deliveryMode")
+        or ""
+    ).strip()
+    delivery_mode_explicit = _bool_from_request(
+        run_request.get("delivery_mode_explicit")
+        if "delivery_mode_explicit" in run_request
+        else run_request.get("deliveryModeExplicit")
+    )
+    delivery_mode = _effective_article_delivery_mode(
+        config,
+        requested_mode=requested_delivery_mode or None,
+        explicit=delivery_mode_explicit,
+    )
+    return {
+        "domain": context.organization.domain,
+        "slack_user_id": actor_id,
+        "topic": topic,
+        "target_keyword": target_keyword or topic,
+        "context": str(run_request.get("context") or result.get("context") or ""),
+        "github_repo": config.github_repo or run.github_repo or run_request.get("github_repo") or run_request.get("githubRepo") or "",
+        "delivery_mode": delivery_mode,
+        "delivery_mode_confirmed": _bool_from_request(
+            run_request.get("delivery_mode_confirmed", run_request.get("deliveryModeConfirmed", True))
+        ),
+        "delivery_mode_explicit": delivery_mode_explicit,
+        "source_run_id": run_request.get("source_run_id") or run_request.get("sourceRunId") or "",
+        "custom_title": run_request.get("custom_title") or run_request.get("customTitle") or title or None,
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+        "restart_source_run_id": run.run_id,
+    }
+
+
+def _restart_article_run(*, run, context):
+    if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
+        return None, Response(
+            {"detail": "Only article generation drafts can be restarted from the marketing dashboard."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
+        return None, Response(
+            {"detail": "Only failed or blocked article drafts can be restarted."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if run.resume_available:
+        return None, Response(
+            {"detail": "This draft has a resumable step. Resume it instead of starting a replacement run."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    config = _get_config(context.organization)
+    actor_id = founder_actor_id_for_user(context.profile.user)
+    payload = _restart_article_payload_from_run(run=run, context=context, config=config, actor_id=actor_id)
+    if not payload:
+        return None, Response(
+            {"detail": "This draft does not have enough stored request data to restart automatically."},
+            status=status.HTTP_409_CONFLICT,
+        )
+    existing_article = _topic_is_already_written(
+        context.organization,
+        keyword=payload["target_keyword"],
+        title=payload["topic"],
+    )
+    if existing_article:
+        return None, Response(
+            {
+                "detail": "This topic has already been written. Open the published article instead of restarting the draft.",
+                "writtenArticle": _serialize_written_article(existing_article),
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    restarted_run = _queue_content_factory_run(
+        endpoint="article",
+        workflow="article_generation",
+        context=context,
+        config=config,
+        payload=payload,
+    )
+    result = run.result or {}
+    result["restart_child_run_id"] = restarted_run.run_id
+    result["restart_requested_at"] = timezone.now().isoformat()
+    run.result = result
+    run.save(update_fields=["result", "updated_at"])
+    if restarted_run.status not in FAILED_RUN_STATUSES:
+        _mark_keyword_in_progress(context.organization, payload["target_keyword"])
+    return restarted_run, None
+
+
 def _latest_baseline_snapshot(organization):
     return WebsiteBaselineSnapshot.objects.filter(organization=organization).order_by("-collected_at", "-created_at").first()
 
@@ -3072,6 +3355,7 @@ def _serialize_bootstrap(context, request=None):
         "topicCandidates": topic_candidates,
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
+        "draftArticles": _recent_article_drafts(context.organization),
         "writtenTopics": _recent_written_topics(context.organization),
         "publishEvidence": _publish_evidence_from_run(latest_article_run),
         "guidedSteps": guided_steps,
@@ -3151,6 +3435,7 @@ def _serialize_bootstrap_without_domain(company):
         "topicCandidates": [],
         "hiddenTopicCandidates": [],
         "declinedTopicFeedback": [],
+        "draftArticles": [],
         "writtenTopics": [],
         "publishEvidence": {},
         "guidedSteps": guided_steps,
@@ -5345,6 +5630,12 @@ class VibeMarketingRunControlView(APIView):
             run = _cancel_local_article_run(run=run, organization=context.organization, remote_data=remote_data)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action == "restart":
+            restarted_run, restart_error = _restart_article_run(run=run, context=context)
+            if restart_error:
+                return restart_error
+            return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         remote_run = run
         if action in {"promote-bundle", "publish-pr"}:
