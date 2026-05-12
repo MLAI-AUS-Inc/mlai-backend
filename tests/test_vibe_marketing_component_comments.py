@@ -1326,6 +1326,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         def fake_post(url, json=None, headers=None, timeout=None):
             captured["url"] = url
             captured["payload"] = json
+            captured["timeout"] = timeout
             return _Response(status_code=202, payload={"run_id": "article-publish-child-from-revision", "status": "queued"})
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
@@ -1336,6 +1337,7 @@ class VibeMarketingComponentCommentTests(TestCase):
             captured["url"],
             "https://content-factory.test/api/runs/article-run-comments-revision-accepted/promote-bundle",
         )
+        self.assertEqual(captured["timeout"], (3, 20))
         publish_run = ContentFactoryRun.objects.get(run_id="article-publish-child-from-revision")
         self.assertEqual(publish_run.run_request["source_run_id"], revision_run.run_id)
         self.assertEqual(publish_run.run_request["review_source_run_id"], self.run.run_id)
@@ -1399,6 +1401,78 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertTrue(self.run.result["latest_control_response"]["content_factory_transport_error"])
         steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
         self.assertEqual(steps["publish"]["status"], "running")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_pending_handoff_does_not_dispatch_again(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_handoff_pending": True,
+            "promote_bundle_requested_at": "2026-05-12T03:05:00+00:00",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], self.run.run_id)
+        post.assert_not_called()
+        self.run.refresh_from_db()
+        self.assertTrue(self.run.result["publish_handoff_pending"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_existing_child_id_recovers_local_child_without_dispatch(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_child_run_id": "article-publish-child-existing",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-publish-child-existing")
+        post.assert_not_called()
+        publish_run = ContentFactoryRun.objects.get(run_id="article-publish-child-existing")
+        self.assertEqual(publish_run.run_request["source_run_id"], self.run.run_id)
+        self.assertEqual(publish_run.run_request["delivery_mode"], "publish_code")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_completed_article_status_uses_local_state_without_remote_poll(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+            "livePreview": {
+                "available": True,
+                "status": "running",
+                "previewUrl": "https://preview.example/articles/australian-founders?cfInspector=1",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status") as status_poll:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        status_poll.assert_not_called()
 
     def test_merge_publish_pr_refuses_pending_checks(self):
         self.run.result = {

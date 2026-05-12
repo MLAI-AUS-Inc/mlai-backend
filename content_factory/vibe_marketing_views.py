@@ -2987,12 +2987,7 @@ def _latest_publish_child_run(latest_runs, article_run):
 def _local_publish_child_for_run(run, *, context=None):
     if not run:
         return None
-    result = _run_mapping(run.result)
-    explicit_child_run_id = str(
-        result.get("publish_child_run_id")
-        or result.get("promoted_publish_job_id")
-        or ""
-    ).strip()
+    explicit_child_run_id = _publish_child_run_id_for_run(run)
     if not explicit_child_run_id:
         return None
     child = ContentFactoryRun.objects.filter(run_id=explicit_child_run_id).prefetch_related("steps").first()
@@ -3001,6 +2996,86 @@ def _local_publish_child_for_run(run, *, context=None):
     if context is not None and not _run_belongs_to_context(child, context):
         return None
     return child
+
+
+def _publish_child_run_id_for_run(run):
+    if not run:
+        return ""
+    result = _run_mapping(run.result)
+    return str(
+        result.get("publish_child_run_id")
+        or result.get("promoted_publish_job_id")
+        or ""
+    ).strip()
+
+
+def _mark_publish_handoff_pending(*, run, remote_run=None, action="promote-bundle", remote_data=None):
+    timestamp = timezone.now().isoformat()
+    updated = []
+    for candidate in (run, remote_run):
+        if candidate is None or any(existing.pk == candidate.pk for existing in updated):
+            continue
+        result = dict(candidate.result or {})
+        result["publish_handoff_pending"] = True
+        result["publish_handoff_status"] = "pending"
+        result["publish_handoff_action"] = action
+        result["promote_bundle_requested_at"] = timestamp
+        if remote_data is not None:
+            result["latest_control_response"] = remote_data
+        candidate.result = result
+        candidate.save(update_fields=["result", "updated_at"])
+        updated.append(candidate)
+    return timestamp
+
+
+def _publish_handoff_pending_for_run(run):
+    if not run:
+        return False
+    result = _run_mapping(run.result)
+    return bool(result.get("publish_handoff_pending")) and not _publish_child_run_id_for_run(run)
+
+
+def _ensure_local_publish_child_from_known_id(
+    *,
+    child_run_id,
+    source_run,
+    request,
+    context,
+    payload=None,
+    remote_data=None,
+    review_source_run_id="",
+):
+    child_run_id = str(child_run_id or "").strip()
+    if not child_run_id or not source_run:
+        return None
+    child = ContentFactoryRun.objects.filter(run_id=child_run_id).prefetch_related("steps").first()
+    if child:
+        return child if _run_belongs_to_context(child, context) else None
+
+    config = _get_config(context.organization)
+    publish_payload = {
+        **(payload or {}),
+        "source_run_id": source_run.run_id,
+        "delivery_mode": "publish_code",
+        "delivery_mode_confirmed": True,
+    }
+    if review_source_run_id:
+        publish_payload["review_source_run_id"] = review_source_run_id
+    child_remote_data = {
+        "run_id": child_run_id,
+        "status": "queued",
+        "current_step": "queued",
+        "source_run_id": source_run.run_id,
+        **(remote_data or {}),
+    }
+    return _create_local_run(
+        workflow="article_generation",
+        domain=context.organization.domain,
+        github_repo=config.github_repo or source_run.github_repo or "",
+        actor_id=founder_actor_id_for_user(request.user),
+        payload=publish_payload,
+        remote_data=child_remote_data,
+    )
 
 
 def _accepted_revision_source_run(run):
@@ -5280,7 +5355,20 @@ class VibeMarketingRunView(APIView):
         run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
-        remote_data = _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+        skip_remote_status = bool(
+            run.workflow in ARTICLE_WORKFLOWS
+            and run.status == ContentFactoryRunStatus.COMPLETED
+            and _article_run_has_completed_local_artifacts(run)
+            and not _local_publish_child_for_run(run, context=context)
+        )
+        remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+        if skip_remote_status:
+            logger.info(
+                "content_factory_status_poll_skipped_terminal_article run_id=%s workflow=%s status=%s",
+                run.run_id,
+                run.workflow,
+                run.status,
+            )
         if _is_status_poll_unavailable_payload(remote_data):
             run = _heal_stale_status_poll_timeout(run)
             logger.warning(
@@ -5896,12 +5984,27 @@ class VibeMarketingRunControlView(APIView):
             existing_publish_run = _local_publish_child_for_run(run, context=context) or _local_publish_child_for_run(remote_run, context=context)
             if existing_publish_run is not None:
                 return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+            known_child_run_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(remote_run)
+            if known_child_run_id:
+                recovered_publish_run = _ensure_local_publish_child_from_known_id(
+                    child_run_id=known_child_run_id,
+                    source_run=remote_run,
+                    request=request,
+                    context=context,
+                    payload=payload,
+                    review_source_run_id=run.run_id if remote_run.run_id != run.run_id else "",
+                )
+                if recovered_publish_run is not None:
+                    return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+            if _publish_handoff_pending_for_run(run) or _publish_handoff_pending_for_run(remote_run):
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+            _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action)
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
             action=action,
             payload=payload,
             workflow=remote_run.workflow,
-            timeout=(3, 60) if action in {"promote-bundle", "publish-pr"} else (3, 15),
+            timeout=(3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15),
             transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
         )
 
@@ -5978,19 +6081,7 @@ class VibeMarketingRunControlView(APIView):
                     remote_run.save(update_fields=["result", "updated_at"])
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             if _content_factory_action_transport_pending(remote_data):
-                result = run.result or {}
-                result["promote_bundle_requested_at"] = timezone.now().isoformat()
-                result["latest_control_response"] = remote_data
-                result["publish_handoff_pending"] = True
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
-                if remote_run.run_id != run.run_id:
-                    remote_result = remote_run.result or {}
-                    remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
-                    remote_result["latest_control_response"] = remote_data
-                    remote_result["publish_handoff_pending"] = True
-                    remote_run.result = remote_result
-                    remote_run.save(update_fields=["result", "updated_at"])
+                _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, remote_data=remote_data)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
