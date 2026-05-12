@@ -19,7 +19,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.firebase_utils import (
+    create_signed_read_url,
     create_signed_upload_url,
+    delete_storage_object,
+    download_storage_object_bytes,
+    finalize_private_uploaded_storage_object,
     finalize_uploaded_storage_object,
     upload_file_to_storage,
 )
@@ -33,23 +37,45 @@ from integrations.models import (
 from startup_updates.models import (
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
+    StartupManualDocument,
+)
+from startup_updates.manual_documents import parse_manual_document
+from startup_updates.metric_catalog import (
+    STARTUP_UPDATE_METRIC_LABELS,
+    startup_update_metric_key,
+    startup_update_metric_label,
 )
 from integrations.services.external_connectors import mark_sources_sync_requested
+from integrations.services.gmail_scopes import (
+    gmail_scope_status_payload,
+    has_gmail_read_scope,
+)
 from startup_updates.services import (
     DEFAULT_BACKFILL_MONTHS,
+    MANUAL_DOCUMENTS_SOURCE,
     OPEN_RUN_STATUSES,
     RUN_STEP_ORDER,
     STARTUP_UPDATE_WORKFLOW,
     bind_user_to_startup,
+    coerce_startup_update_sources_for_gmail_scope,
     cancel_startup_update_run,
     create_startup_update_run,
     get_default_binding_for_domain,
     get_latest_startup_update_run,
     get_open_startup_update_run,
+    get_startup_update_run_target_month,
     gmail_required_for_sources,
+    build_startup_update_target_windows,
+    merge_xero_metrics_into_structured_memo,
+    merge_source_warnings,
     normalize_startup_update_input_sources,
+    parse_startup_update_target_month,
+    publish_xero_metric_observations,
+    record_valley_dispatch_result,
     resolve_or_create_profile,
     refresh_startup_update_run_source_context,
+    set_startup_update_run_target_month,
+    startup_update_run_matches_target_month,
     sync_startup_profile_from_company,
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
@@ -71,7 +97,9 @@ logger = logging.getLogger(__name__)
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=30)
 VALLEY_META_KEY = "_valley_meta"
 MAX_VIBE_RAISING_VIDEO_SIZE_BYTES = 250 * 1024 * 1024
+MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES = 25 * 1024 * 1024
 VIBE_RAISING_SIGNED_UPLOAD_TTL = timedelta(minutes=15)
+VIBE_RAISING_SIGNED_READ_TTL = timedelta(minutes=5)
 VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -86,6 +114,24 @@ VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES = {
     ".mkv": "video/x-matroska",
 }
 VIBE_RAISING_VIDEO_CONTENT_TYPES = set(VIBE_RAISING_VIDEO_EXTENSION_CONTENT_TYPES.values()) | {"video/mp4"}
+VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".rtf": "application/rtf",
+    ".odt": "application/vnd.oasis.opendocument.text",
+}
+VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES = set(VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES.values()) | {
+    "application/vnd.ms-excel",
+    "text/plain",
+}
 EMAIL_DRAFT_DISPLAY_STAGES = {
     "profile_resolution": "Preparing company context",
     "gmail_backfill": "Scanning recent Gmail messages",
@@ -93,6 +139,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "thread_hydration": "Pulling full thread context",
     "event_extraction": "Extracting metrics and highlights",
     "slack_backfill": "Scanning selected Slack channels",
+    "slack_relevance_classification": "Filtering Slack highlights",
     "slack_event_extraction": "Extracting Slack highlights",
     "timeline_merge": "Building timeline",
     "draft_generation": "Drafting monthly updates",
@@ -106,6 +153,8 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "notion",
     "google_drive",
     "slack",
+    "linear",
+    MANUAL_DOCUMENTS_SOURCE,
 }
 XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
 
@@ -161,22 +210,74 @@ def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -
     return warnings
 
 
-def _monthly_update_drafts_cover_input_sources(organization: Organization, input_sources: list[str]) -> bool:
-    latest_draft = (
-        organization.monthly_update_drafts.select_related("run")
-        .order_by("-month", "-updated_at")
-        .first()
-    )
-    if latest_draft is None:
+def _monthly_update_drafts_cover_input_sources(
+    organization: Organization,
+    input_sources: list[str],
+    *,
+    target_month: Optional[date] = None,
+) -> bool:
+    if MANUAL_DOCUMENTS_SOURCE in set(normalize_startup_update_input_sources(input_sources)):
+        return False
+
+    draft_queryset = organization.monthly_update_drafts.select_related("run")
+    if target_month is not None:
+        draft_queryset = draft_queryset.filter(month=target_month)
+    draft = draft_queryset.order_by("-month", "-updated_at").first()
+    if draft is None:
         return False
 
     requested_sources = set(normalize_startup_update_input_sources(input_sources))
-    if latest_draft.run is None:
+    if draft.run is None:
         return requested_sources == {"gmail"}
 
-    run_request = latest_draft.run.run_request or {}
+    run_request = draft.run.run_request or {}
     draft_sources = set(normalize_startup_update_input_sources(run_request.get("input_sources")))
     return requested_sources.issubset(draft_sources)
+
+
+def _month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def _previous_month_start(month: date) -> date:
+    if month.month == 1:
+        return date(month.year - 1, 12, 1)
+    return date(month.year, month.month - 1, 1)
+
+
+def _refresh_reusable_xero_metrics_for_drafts(
+    *,
+    organization: Organization,
+    input_sources: list[str],
+    source_warnings: dict[str, list[str]],
+    target_month: Optional[date] = None,
+) -> None:
+    selected = set(normalize_startup_update_input_sources(input_sources))
+    if ExternalServiceProvider.XERO not in selected:
+        return
+
+    windows = build_startup_update_target_windows(target_month)
+    try:
+        summary = publish_xero_metric_observations(
+            organization=organization,
+            run=None,
+            start_date=windows["financial_start_date"],
+            end_date=windows["financial_end_date"],
+        )
+    except Exception as exc:
+        logger.exception(
+            "Unable to refresh Xero metrics for reusable monthly update drafts",
+            extra={"organization_id": organization.id},
+        )
+        source_warnings.setdefault(ExternalServiceProvider.XERO, []).append(
+            str(exc) or "Xero metrics could not be refreshed before loading existing drafts."
+        )
+        return
+
+    for warning in summary.get("warnings", []) or []:
+        text = str(warning or "").strip()
+        if text:
+            source_warnings.setdefault(ExternalServiceProvider.XERO, []).append(text)
 
 
 def _get_profile_or_404(user):
@@ -232,6 +333,7 @@ def _serialize_binding_summary(binding):
 def _serialize_run_summary(run):
     if not run:
         return None
+    target_month = get_startup_update_run_target_month(run)
 
     step_states = {}
     for step in run.steps.order_by("display_order", "id"):
@@ -255,6 +357,7 @@ def _serialize_run_summary(run):
         "currentStep": run.current_step,
         "stepOrder": run.step_order or [],
         "stepStates": step_states,
+        "targetMonth": target_month.isoformat() if target_month else None,
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
     }
@@ -301,12 +404,53 @@ def _build_google_oauth_url(request):
 
 
 def _should_dispatch_existing_run(run) -> bool:
-    return (
-        bool(run)
-        and run.status == ContentFactoryRunStatus.QUEUED
-        and bool(run.updated_at)
-        and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
-    )
+    if not bool(run) or run.status != ContentFactoryRunStatus.QUEUED:
+        return False
+    if _get_run_meta(run).get("dispatch_status") == "failed":
+        return True
+    return bool(run.updated_at) and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER
+
+
+def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
+    return {
+        "run_id": run.run_id,
+        "runId": run.run_id,
+        "error": "valley_dispatch_failed",
+        "retryable": True,
+        "message": "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "valleyDispatch": {
+            "status": "failed",
+            "failureKind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
+            "statusCode": getattr(dispatch_result, "status_code", None),
+            "detail": str(getattr(dispatch_result, "detail", "") or "")[:300],
+        },
+    }
+
+
+def _dispatch_run_to_valley(run):
+    dispatch_result = notify_valley_run_created(run.run_id)
+    record_valley_dispatch_result(run, dispatch_result)
+    return dispatch_result
+
+
+def _requested_target_month_from_request(request) -> date:
+    raw_value = request.data.get("target_month") or request.data.get("targetMonth")
+    return parse_startup_update_target_month(raw_value)
+
+
+def _target_month_conflict_payload(*, requested_target_month: date, active_run) -> dict:
+    active_target_month = get_startup_update_run_target_month(active_run)
+    active_label = active_target_month.strftime("%B %Y") if active_target_month else "another month"
+    requested_label = requested_target_month.strftime("%B %Y")
+    return {
+        "targetMonthConflict": True,
+        "target_month_conflict": True,
+        "requestedTargetMonth": requested_target_month.isoformat(),
+        "requested_target_month": requested_target_month.isoformat(),
+        "activeTargetMonth": active_target_month.isoformat() if active_target_month else None,
+        "active_target_month": active_target_month.isoformat() if active_target_month else None,
+        "error": f"{active_label} is already generating. Finish or cancel it before generating {requested_label}.",
+    }
 
 
 def _normalize_text_list(value):
@@ -365,6 +509,61 @@ def _get_requested_input_sources(request):
     )
 
 
+def _get_requested_manual_document_ids(request):
+    raw_items = request.data.get("manualDocumentIds")
+    if raw_items is None:
+        raw_items = request.data.get("manual_document_ids")
+    if raw_items is None:
+        return []
+    if isinstance(raw_items, str):
+        raw_items = [item.strip() for item in raw_items.split(",")]
+    if not isinstance(raw_items, (list, tuple)):
+        return []
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def _get_requested_manual_summary(request):
+    return str(request.data.get("manualSummary") or request.data.get("manual_summary") or "").strip()
+
+
+def _include_manual_source_if_needed(input_sources, *, manual_document_ids, manual_summary):
+    selected = list(input_sources or [])
+    if (manual_document_ids or manual_summary) and MANUAL_DOCUMENTS_SOURCE not in selected:
+        selected.append(MANUAL_DOCUMENTS_SOURCE)
+    return normalize_startup_update_input_sources(selected)
+
+
+def _resolve_manual_documents_for_request(*, user, organization, company, document_ids):
+    if not document_ids:
+        return []
+
+    documents_by_id = {
+        str(document.id): document
+        for document in StartupManualDocument.objects.select_related("company", "company__profile")
+        .filter(organization=organization, company=company, id__in=document_ids)
+    }
+    documents = []
+    missing_ids = []
+    for document_id in document_ids:
+        document = documents_by_id.get(str(document_id))
+        if document is None or not _manual_document_access_allowed(user, document, active_company=company):
+            missing_ids.append(str(document_id))
+            continue
+        documents.append(document)
+
+    if missing_ids:
+        raise ValueError("One or more manual documents were not found for this startup.")
+    return documents
+
+
 def _join_text_items(value):
     items = _normalize_text_list(value)
     if not items:
@@ -400,48 +599,10 @@ def _normalize_metric_value(value):
 
 
 def _metric_key_from_label(label):
-    normalized = str(label or "").strip().lower()
-    if normalized in {"revenue", "monthly revenue"}:
-        return "revenue"
-    if normalized in {"active users", "users", "monthly active users"}:
-        return "activeUsers"
-    if normalized in {"mrr", "monthly recurring revenue"}:
-        return "mrr"
-    if normalized in {"burn rate", "burn"}:
-        return "burnRate"
-    if normalized == "runway":
-        return "runway"
-    if normalized in {"invoice revenue", "sales invoice revenue"}:
-        return "invoiceRevenue"
-    if normalized in {"cash collected", "cash received"}:
-        return "cashCollected"
-    if normalized in {"revenue growth", "revenue growth rate", "mrr growth", "mrr growth rate"}:
-        return "revenueGrowthRate"
-    if normalized in {"customer count", "customers"}:
-        return "customerCount"
-    if normalized == "churn":
-        return "churn"
-    if normalized in {"invoice count", "invoices"}:
-        return "invoiceCount"
-    if normalized in {"recurring invoice count", "repeating invoice count"}:
-        return "recurringInvoiceCount"
-    return None
+    return startup_update_metric_key(label)
 
 
-MANUAL_METRIC_LABELS = {
-    "revenue": "Revenue",
-    "activeUsers": "Active Users",
-    "mrr": "MRR",
-    "burnRate": "Burn Rate",
-    "runway": "Runway",
-    "invoiceRevenue": "Invoice Revenue",
-    "cashCollected": "Cash Collected",
-    "revenueGrowthRate": "Revenue Growth Rate",
-    "customerCount": "Customer Count",
-    "churn": "Churn",
-    "invoiceCount": "Invoice Count",
-    "recurringInvoiceCount": "Recurring Invoice Count",
-}
+MANUAL_METRIC_LABELS = STARTUP_UPDATE_METRIC_LABELS
 
 
 def _extract_metrics(structured_memo):
@@ -451,7 +612,7 @@ def _extract_metrics(structured_memo):
         if not isinstance(item, dict):
             continue
 
-        metric_key = str(item.get("metric_key") or "").strip() or _metric_key_from_label(
+        metric_key = startup_update_metric_key(item.get("metric_key")) or _metric_key_from_label(
             item.get("label") or item.get("name") or item.get("metric_name")
         )
         if not metric_key:
@@ -468,8 +629,57 @@ def _extract_metrics(structured_memo):
     return metrics
 
 
-def _serialize_draft_for_form(draft):
+def _extract_metric_suggestions(structured_memo):
+    suggestions = []
+    raw_suggestions = (
+        (structured_memo or {}).get("metric_suggestions")
+        or (structured_memo or {}).get("metricSuggestions")
+        or []
+    )
+    for item in raw_suggestions:
+        if not isinstance(item, dict):
+            continue
+        metric_key = startup_update_metric_key(item.get("metric_key") or item.get("metricKey")) or _metric_key_from_label(
+            item.get("label") or item.get("name") or item.get("metric_name")
+        )
+        if not metric_key:
+            continue
+        suggestions.append(
+            {
+                "metricKey": metric_key,
+                "label": str(item.get("label") or startup_update_metric_label(metric_key)).strip()
+                or startup_update_metric_label(metric_key),
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+    return suggestions
+
+
+def _structured_memo_section_text(structured_memo, key):
+    return _join_text_items_with_newlines((structured_memo or {}).get(key))
+
+
+def _structured_memo_manual_documents(structured_memo):
+    documents = (structured_memo or {}).get("manual_documents") or (structured_memo or {}).get("manualDocuments") or []
+    return documents if isinstance(documents, list) else []
+
+
+def _structured_memo_with_xero_metrics(draft):
     structured_memo = draft.structured_memo or {}
+    if not getattr(draft, "organization_id", None):
+        return structured_memo
+
+    merged_memo, _evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+        organization=draft.organization,
+        month=draft.month,
+        structured_memo=structured_memo,
+        evidence_metric_ids=getattr(draft, "evidence_metric_ids", []) or [],
+    )
+    return merged_memo
+
+
+def _serialize_draft_for_form(draft):
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
@@ -477,6 +687,7 @@ def _serialize_draft_for_form(draft):
         "year": month_value.year,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
@@ -486,14 +697,15 @@ def _serialize_draft_for_form(draft):
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
     }
 
 
@@ -559,10 +771,14 @@ def _build_manual_structured_memo(payload):
         "highlights": _split_editor_text(payload.get("highlights")),
         "lowlights": _split_editor_text(payload.get("challenges")),
         "asks": _split_editor_text(payload.get("asks")),
+        "learnings": _split_editor_text(payload.get("learnings")),
+        "next_30_days": _split_editor_text(payload.get("next30Days")),
         "kpi_snapshot": _build_manual_kpi_snapshot(payload.get("metrics") or {}),
+        "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
 
     summary = _optional_text(payload.get("summary"))
+    manual_summary = _optional_text(payload.get("manualSummary"))
     source_url = _optional_text(payload.get("sourceUrl"))
     video_url = _optional_text(payload.get("videoUrl"))
     video_storage_path = _optional_text(payload.get("videoStoragePath"))
@@ -572,6 +788,10 @@ def _build_manual_structured_memo(payload):
 
     if summary:
         memo["summary"] = summary
+    elif manual_summary:
+        memo["summary"] = manual_summary
+    if manual_summary:
+        memo["manual_summary"] = manual_summary
     if source_url:
         memo["source_url"] = source_url
     if video_url:
@@ -591,11 +811,15 @@ def _build_manual_structured_memo(payload):
     if video:
         memo["video"] = video
 
+    manual_documents = payload.get("manualDocuments") or []
+    if manual_documents:
+        memo["manual_documents"] = list(manual_documents)
+
     return memo
 
 
 def _serialize_monthly_update(draft):
-    structured_memo = draft.structured_memo or {}
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     return {
         "id": draft.id,
@@ -607,23 +831,25 @@ def _serialize_monthly_update(draft):
         "status": draft.status,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "highlights": _join_named_sections(structured_memo, [
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
     }
 
 
@@ -634,7 +860,7 @@ def _serialize_draft_bundle(drafts):
     current = _serialize_draft_for_form(drafts[0])
     past_months = []
     for draft in drafts[1:3]:
-        structured_memo = draft.structured_memo or {}
+        structured_memo = _structured_memo_with_xero_metrics(draft)
         month_value = draft.month
         past_months.append(
             {
@@ -643,14 +869,15 @@ def _serialize_draft_bundle(drafts):
                     ("Financial performance", "financial_performance"),
                     ("", "highlights"),
                     ("Product / GTM / Team / Fundraising", "operations"),
-                    ("Learning", "learnings"),
                 ]),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
                     ("", "asks"),
-                    ("Next 30 days", "next_30_days"),
                 ]),
+                "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+                "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
                 "metrics": _extract_metrics(structured_memo),
+                "metricSuggestions": _extract_metric_suggestions(structured_memo),
             }
         )
 
@@ -661,7 +888,7 @@ def _serialize_draft_bundle(drafts):
 
 
 def _serialize_email_draft_month(draft):
-    structured_memo = draft.structured_memo or {}
+    structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
     return {
@@ -671,23 +898,25 @@ def _serialize_email_draft_month(draft):
         "year": month_value.year,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
+        "manualDocuments": _structured_memo_manual_documents(structured_memo),
         "videoUrl": _structured_memo_video_url(structured_memo),
         "videoContentType": _structured_memo_text(video_metadata, "content_type", "contentType"),
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
+        "metricSuggestions": _extract_metric_suggestions(structured_memo),
         "highlights": _join_named_sections(structured_memo, [
             ("Financial performance", "financial_performance"),
             ("", "highlights"),
             ("Product / GTM / Team / Fundraising", "operations"),
-            ("Learning", "learnings"),
         ]),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
-            ("Next 30 days", "next_30_days"),
         ]),
+        "learnings": _structured_memo_section_text(structured_memo, "learnings"),
+        "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
     }
 
 
@@ -929,6 +1158,267 @@ def _complete_vibe_raising_signed_video_upload(
     }
 
 
+def _is_admin_user(user):
+    return bool(getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+
+
+def _normalize_vibe_raising_manual_document_content_type(*, content_type="", filename=""):
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
+        return content_type
+
+    filename = str(filename or "")
+    guessed_type, _encoding = mimetypes.guess_type(filename)
+    if guessed_type and guessed_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
+        return guessed_type
+
+    extension = Path(filename or "").suffix.lower()
+    return VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES.get(extension, "")
+
+
+def _parse_vibe_raising_manual_document_size(raw_size):
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _validate_vibe_raising_manual_document_metadata(*, filename, content_type, file_size_bytes):
+    resolved_content_type = _normalize_vibe_raising_manual_document_content_type(
+        content_type=content_type,
+        filename=filename,
+    )
+    if not resolved_content_type:
+        raise ValueError("Uploaded file must be a supported document.")
+
+    parsed_size = _parse_vibe_raising_manual_document_size(file_size_bytes)
+    if parsed_size is None:
+        raise ValueError("fileSizeBytes is required.")
+
+    if parsed_size > MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES:
+        raise ValueError(
+            f"Document exceeds maximum size of {MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+
+    return resolved_content_type, parsed_size
+
+
+def _vibe_raising_manual_document_storage_prefix(*, user, organization, company):
+    return os.path.join(
+        "vibe-raising",
+        "manual-documents",
+        f"org-{organization.id}",
+        f"company-{company.id}",
+        f"user-{user.id}",
+    )
+
+
+def _vibe_raising_manual_document_storage_path(*, user, organization, company, filename, content_type):
+    stem = slugify(Path(filename or "manual-document").stem) or "manual-document"
+    extension = Path(filename or "").suffix.lower()
+    if extension not in VIBE_RAISING_MANUAL_DOCUMENT_EXTENSION_CONTENT_TYPES:
+        extension = mimetypes.guess_extension(content_type) or ".txt"
+
+    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
+    return os.path.join(
+        _vibe_raising_manual_document_storage_prefix(user=user, organization=organization, company=company),
+        f"{timestamp}-{stem}-{uuid4().hex[:8]}{extension}",
+    )
+
+
+def _create_vibe_raising_signed_manual_document_upload(
+    *,
+    user,
+    organization,
+    company,
+    filename,
+    content_type,
+    file_size_bytes,
+):
+    resolved_content_type, parsed_size = _validate_vibe_raising_manual_document_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    storage_path = _vibe_raising_manual_document_storage_path(
+        user=user,
+        organization=organization,
+        company=company,
+        filename=filename,
+        content_type=resolved_content_type,
+    )
+    upload_url = create_signed_upload_url(
+        storage_path,
+        resolved_content_type,
+        expires_in=VIBE_RAISING_SIGNED_UPLOAD_TTL,
+    )
+    expires_at = timezone.now() + VIBE_RAISING_SIGNED_UPLOAD_TTL
+    return {
+        "uploadUrl": upload_url,
+        "storagePath": storage_path,
+        "contentType": resolved_content_type,
+        "fileSizeBytes": parsed_size,
+        "expiresAt": expires_at.isoformat(),
+        "maxUploadBytes": MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES,
+        "requiredHeaders": {"Content-Type": resolved_content_type},
+    }
+
+
+def _serialize_manual_document(document: StartupManualDocument):
+    return {
+        "id": str(document.id),
+        "originalFilename": document.original_filename,
+        "contentType": document.content_type,
+        "fileSizeBytes": document.file_size_bytes,
+        "extractionStatus": document.extraction_status,
+        "textSizeChars": document.text_size_chars,
+        "parseNotes": document.parse_notes,
+        "lastError": document.last_error,
+        "createdAt": document.created_at.isoformat() if document.created_at else None,
+        "updatedAt": document.updated_at.isoformat() if document.updated_at else None,
+    }
+
+
+def _serialize_manual_document_for_memo(document: StartupManualDocument):
+    return {
+        "id": str(document.id),
+        "original_filename": document.original_filename,
+        "content_type": document.content_type,
+        "file_size_bytes": document.file_size_bytes,
+        "extraction_status": document.extraction_status,
+        "text_size_chars": document.text_size_chars,
+        "created_at": document.created_at.isoformat() if document.created_at else None,
+    }
+
+
+def _get_manual_document_company_context_or_response(request):
+    requested_company_id = (
+        str(request.data.get("companyId") or request.data.get("company_id") or "").strip()
+        if hasattr(request, "data")
+        else ""
+    ) or str(request.query_params.get("companyId") or request.query_params.get("company_id") or "").strip()
+
+    if requested_company_id and _is_admin_user(request.user):
+        company = get_object_or_404(
+            VibeRaisingCompany.objects.select_related("profile", "profile__user", "organization"),
+            id=requested_company_id,
+        )
+        domain = normalize_domain(company.domain or "")
+        if not domain:
+            return None, Response(
+                {"detail": "Add a company domain before uploading documents."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        organization, _startup_profile, binding = _ensure_binding_for_company(
+            user=company.profile.user,
+            company=company,
+        )
+        return {
+            "profile": company.profile,
+            "company": company,
+            "domain": domain,
+            "organization": organization,
+            "binding": binding,
+        }, None
+
+    context, error_response = _get_founder_company_context_or_response(request.user)
+    if error_response:
+        return None, error_response
+    if not context["domain"]:
+        return None, Response(
+            {"detail": "Add a company domain before uploading documents."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    organization, _startup_profile, binding = _ensure_binding_for_company(
+        user=request.user,
+        company=context["company"],
+    )
+    return {
+        **context,
+        "organization": organization,
+        "binding": binding,
+    }, None
+
+
+def _manual_document_access_allowed(user, document: StartupManualDocument, *, active_company=None):
+    if _is_admin_user(user):
+        return True
+    if active_company is None or document.company_id != active_company.id:
+        return False
+    return document.created_by_id == user.id or document.company.profile.user_id == user.id
+
+
+def _get_accessible_manual_document_or_response(request, document_id):
+    document = get_object_or_404(
+        StartupManualDocument.objects.select_related("organization", "company", "company__profile"),
+        id=document_id,
+    )
+    if _is_admin_user(request.user):
+        return document, None
+
+    context, error_response = _get_founder_company_context_or_response(request.user)
+    if error_response:
+        return None, error_response
+    if not _manual_document_access_allowed(request.user, document, active_company=context["company"]):
+        return None, Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
+    return document, None
+
+
+def _complete_vibe_raising_signed_manual_document_upload(
+    *,
+    user,
+    organization,
+    company,
+    storage_path,
+    filename,
+    content_type,
+    file_size_bytes,
+):
+    expected_prefix = f"{_vibe_raising_manual_document_storage_prefix(user=user, organization=organization, company=company)}/"
+    if not str(storage_path or "").startswith(expected_prefix):
+        raise ValueError("Invalid upload path.")
+
+    resolved_content_type, parsed_size = _validate_vibe_raising_manual_document_metadata(
+        filename=filename,
+        content_type=content_type,
+        file_size_bytes=file_size_bytes,
+    )
+    finalized = finalize_private_uploaded_storage_object(storage_path, content_type=resolved_content_type)
+    actual_size = int(finalized.get("fileSizeBytes") or parsed_size)
+    if actual_size > MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES:
+        raise ValueError(
+            f"Document exceeds maximum size of {MAX_VIBE_RAISING_MANUAL_DOCUMENT_SIZE_BYTES // (1024 * 1024)} MB."
+        )
+    if parsed_size and actual_size and parsed_size != actual_size:
+        raise ValueError("Uploaded document size does not match the finalized object.")
+
+    raw_bytes = download_storage_object_bytes(storage_path)
+    parsed = parse_manual_document(
+        filename=filename or "manual-document",
+        content_type=finalized.get("contentType") or resolved_content_type,
+        raw_bytes=raw_bytes,
+    )
+    document = StartupManualDocument.objects.create(
+        organization=organization,
+        company=company,
+        created_by=user,
+        original_filename=filename or "manual-document",
+        content_type=finalized.get("contentType") or resolved_content_type,
+        file_size_bytes=actual_size,
+        storage_path=storage_path,
+        extraction_status=parsed.extraction_status,
+        extracted_text=parsed.extracted_text,
+        text_size_chars=len(parsed.extracted_text or ""),
+        parse_notes=parsed.parse_notes,
+        last_error=parsed.last_error,
+        metadata={
+            "storage_updated": finalized.get("updated"),
+        },
+    )
+    return document
+
+
 def _get_run_result_payload(run) -> dict:
     payload = run.result or {}
     return payload if isinstance(payload, dict) else {}
@@ -988,6 +1478,7 @@ def _serialize_run_progress(run):
 
     completed_steps, total_steps = _count_completed_run_steps(run)
     meta = _get_run_meta(run)
+    target_month = get_startup_update_run_target_month(run)
     return {
         "runId": run.run_id,
         "status": run.status,
@@ -1011,6 +1502,7 @@ def _serialize_run_progress(run):
             else None
         ),
         "generatedDraftMonths": _get_run_generated_draft_months(run),
+        "targetMonth": target_month.isoformat() if target_month else None,
     }
 
 
@@ -1029,6 +1521,7 @@ def _get_drafts_for_run(run):
 def _build_status_payload(*, user, company, domain):
     google_connection = getattr(user, "google_connection", None)
     google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
     google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
 
@@ -1036,6 +1529,7 @@ def _build_status_payload(*, user, company, domain):
         return {
             "state": "needs_domain",
             "googleConnected": google_connected,
+            **google_scope_status,
             "company": company_payload,
             "run": None,
             "draft": None,
@@ -1073,7 +1567,7 @@ def _build_status_payload(*, user, company, domain):
     )
 
     error = None
-    if latest_run_requires_gmail and not google_connected:
+    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
@@ -1097,6 +1591,7 @@ def _build_status_payload(*, user, company, domain):
     return {
         "state": state,
         "googleConnected": google_connected,
+        **google_scope_status,
         "company": company_payload,
         "run": _serialize_run_summary(open_run or latest_run),
         "draft": draft_payload,
@@ -1104,17 +1599,28 @@ def _build_status_payload(*, user, company, domain):
     }
 
 
-def _build_email_draft_payload(*, request, user, company, domain, run_id: Optional[str] = None):
+def _build_email_draft_payload(
+    *,
+    request,
+    user,
+    company,
+    domain,
+    run_id: Optional[str] = None,
+    target_month: Optional[date] = None,
+):
     google_connection = getattr(user, "google_connection", None)
     google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
     google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
     auth_url = _build_google_oauth_url(request)
+    requested_target_month = target_month
 
     if not domain:
         return {
             "state": "needs_domain",
             "gmailConnected": google_connected,
+            **google_scope_status,
             "company": company_payload,
             "authUrl": auth_url,
             "run": None,
@@ -1125,6 +1631,8 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             "stepStates": {},
             "currentMonth": None,
             "pastMonths": [],
+            "targetMonth": requested_target_month.isoformat() if requested_target_month else None,
+            "requestedTargetMonth": requested_target_month.isoformat() if requested_target_month else None,
             "error": "Add a company domain before connecting Gmail.",
         }
 
@@ -1139,21 +1647,38 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
             domain=organization.domain,
         ).order_by("-updated_at")
         selected_run = run_queryset.filter(run_id=run_id).first() if run_id else None
+        latest_matching_run = None
+        if requested_target_month is not None:
+            for candidate in run_queryset:
+                if startup_update_run_matches_target_month(candidate, requested_target_month):
+                    latest_matching_run = candidate
+                    break
         latest_run = selected_run or get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection_id,
-        ) or get_latest_startup_update_run(
-            organization=organization,
-            google_connection_id=google_connection_id,
+            target_month=requested_target_month,
         )
+        if latest_run is None:
+            latest_run = latest_matching_run if requested_target_month is not None else get_latest_startup_update_run(
+                organization=organization,
+                google_connection_id=google_connection_id,
+            )
         drafts = _get_drafts_for_run(latest_run)
-        if not drafts and latest_run is None and selected_run is None:
+        if requested_target_month is not None:
+            target_drafts = list(
+                organization.monthly_update_drafts.filter(month=requested_target_month).order_by("-month", "-updated_at")
+            )
+            if target_drafts:
+                drafts = target_drafts
+        if not drafts and latest_run is None and selected_run is None and requested_target_month is None:
             drafts = _get_recent_drafts_for_organization(organization)
 
     draft_payload = _serialize_draft_bundle(drafts)
     email_draft_payload = _serialize_email_draft_bundle(drafts)
     run_payload = _serialize_run_summary(latest_run)
     progress_payload = _serialize_run_progress(latest_run)
+    active_target_month = get_startup_update_run_target_month(latest_run) if latest_run is not None else None
+    resolved_target_month = requested_target_month or active_target_month
     latest_run_requires_gmail = (
         gmail_required_for_sources((latest_run.run_request or {}).get("input_sources"))
         if latest_run is not None
@@ -1161,7 +1686,7 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
     )
 
     error = None
-    if latest_run_requires_gmail and not google_connected:
+    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
@@ -1196,6 +1721,7 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
     return {
         "state": state,
         "gmailConnected": google_connected,
+        **google_scope_status,
         "company": company_payload,
         "binding": _serialize_binding_summary(binding),
         "authUrl": auth_url,
@@ -1213,6 +1739,10 @@ def _build_email_draft_payload(*, request, user, company, domain, run_id: Option
         "canRetry": progress_payload["canRetry"] if progress_payload else False,
         "terminalState": progress_payload["terminalState"] if progress_payload else None,
         "generatedDraftMonths": progress_payload["generatedDraftMonths"] if progress_payload else [],
+        "targetMonth": resolved_target_month.isoformat() if resolved_target_month else None,
+        "requestedTargetMonth": requested_target_month.isoformat() if requested_target_month else None,
+        "activeTargetMonth": active_target_month.isoformat() if active_target_month else None,
+        "targetMonthConflict": False,
         "currentMonth": (email_draft_payload or {}).get("currentMonth"),
         "pastMonths": (email_draft_payload or {}).get("pastMonths", []),
         "error": error,
@@ -1512,6 +2042,150 @@ class VibeRaisingVideoUploadCompleteView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class VibeRaisingManualDocumentListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        documents = StartupManualDocument.objects.filter(
+            organization=context["organization"],
+            company=context["company"],
+        ).order_by("-created_at")
+        return Response(
+            {"documents": [_serialize_manual_document(document) for document in documents]},
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeRaisingManualDocumentUploadSessionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "manual-document"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+
+        try:
+            payload = _create_vibe_raising_signed_manual_document_upload(
+                user=request.user,
+                organization=context["organization"],
+                company=context["company"],
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Failed to create Vibe Raising manual document upload session")
+            return Response(
+                {"detail": f"Failed to create upload session: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class VibeRaisingManualDocumentUploadCompleteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        context, error_response = _get_manual_document_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        storage_path = str(request.data.get("storagePath") or "").strip()
+        original_filename = str(request.data.get("originalFilename") or "").strip() or "manual-document"
+        content_type = str(request.data.get("contentType") or "").strip()
+        file_size_bytes = request.data.get("fileSizeBytes")
+        if not storage_path:
+            return Response({"detail": "storagePath is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            document = _complete_vibe_raising_signed_manual_document_upload(
+                user=request.user,
+                organization=context["organization"],
+                company=context["company"],
+                storage_path=storage_path,
+                filename=original_filename,
+                content_type=content_type,
+                file_size_bytes=file_size_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except FileNotFoundError:
+            return Response(
+                {"detail": "Uploaded document was not found in storage. Please upload it again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            logger.exception("Failed to finalize Vibe Raising manual document upload")
+            return Response(
+                {"detail": f"Failed to finalize document upload: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({"document": _serialize_manual_document(document)}, status=status.HTTP_200_OK)
+
+
+class VibeRaisingManualDocumentDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, document_id):
+        document, error_response = _get_accessible_manual_document_or_response(request, document_id)
+        if error_response:
+            return error_response
+
+        storage_path = document.storage_path
+        document.delete()
+        try:
+            delete_storage_object(storage_path)
+        except Exception:
+            logger.warning(
+                "Failed to delete Vibe Raising manual document from storage",
+                exc_info=True,
+                extra={"document_id": str(document_id), "storage_path": storage_path},
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VibeRaisingManualDocumentDownloadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, document_id):
+        document, error_response = _get_accessible_manual_document_or_response(request, document_id)
+        if error_response:
+            return error_response
+
+        try:
+            download_url = create_signed_read_url(
+                document.storage_path,
+                expires_in=VIBE_RAISING_SIGNED_READ_TTL,
+            )
+        except Exception as exc:
+            logger.exception("Failed to create Vibe Raising manual document download URL")
+            return Response(
+                {"detail": f"Failed to create download URL: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "downloadUrl": download_url,
+                "expiresAt": (timezone.now() + VIBE_RAISING_SIGNED_READ_TTL).isoformat(),
+                "document": _serialize_manual_document(document),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class VibeRaisingMonthlyUpdateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1554,6 +2228,23 @@ class VibeRaisingMonthlyUpdateView(APIView):
             user=request.user,
             company=company,
         )
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=serializer.validated_data.get("manualDocumentIds") or [],
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        structured_payload = {
+            **serializer.validated_data,
+            "manualDocuments": [
+                _serialize_manual_document_for_memo(document)
+                for document in manual_documents
+            ],
+        }
         month_bucket = date(
             serializer.validated_data["year"],
             serializer.validated_data["month_number"],
@@ -1566,7 +2257,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 "status": MonthlyUpdateDraftStatus.READY,
                 "title": f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update",
                 "model_name": "vibe-raising-manual",
-                "structured_memo": _build_manual_structured_memo(serializer.validated_data),
+                "structured_memo": _build_manual_structured_memo(structured_payload),
             },
         )
 
@@ -1604,6 +2295,7 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
         return Response(
             {
                 "googleConnected": bool(getattr(request.user, "google_connection", None)),
+                **gmail_scope_status_payload(getattr(request.user, "google_connection", None)),
                 "company": _serialize_company_summary(company),
                 "binding": _serialize_binding_summary(binding),
                 "oauthUrl": _build_google_oauth_url(request),
@@ -1632,10 +2324,39 @@ class VibeRaisingStartupUpdateRunView(APIView):
             user=request.user,
             company=company,
         )
-        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
-        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
+        requested_manual_document_ids = _get_requested_manual_document_ids(request)
+        manual_summary = _get_requested_manual_summary(request)
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=requested_manual_document_ids,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        manual_document_ids = [str(document.id) for document in manual_documents]
+        input_sources = _include_manual_source_if_needed(
+            _get_requested_input_sources(request),
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
+        )
+        try:
+            target_month = _requested_target_month_from_request(request)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = getattr(request.user, "google_connection", None)
-        if gmail_required_for_sources(input_sources) and google_connection is None:
+        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+            input_sources,
+            google_connection,
+        )
+        source_warnings = merge_source_warnings(
+            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            gmail_scope_warnings,
+        )
+        if gmail_required_for_sources(input_sources) and (
+            google_connection is None or not has_gmail_read_scope(google_connection)
+        ):
             return Response(
                 _build_status_payload(user=request.user, company=company, domain=domain),
                 status=status.HTTP_200_OK,
@@ -1644,7 +2365,26 @@ class VibeRaisingStartupUpdateRunView(APIView):
         existing_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            target_month=target_month,
+            input_sources=input_sources,
         )
+        conflicting_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id if google_connection else None,
+            input_sources=input_sources,
+        )
+        if (
+            existing_run is None
+            and conflicting_run is not None
+            and not startup_update_run_matches_target_month(conflicting_run, target_month)
+        ):
+            payload = _build_status_payload(user=request.user, company=company, domain=domain)
+            payload["run"] = _serialize_run_summary(conflicting_run)
+            payload.update(_target_month_conflict_payload(
+                requested_target_month=target_month,
+                active_run=conflicting_run,
+            ))
+            return Response(payload, status=status.HTTP_200_OK)
         if existing_run is None:
             run = create_startup_update_run(
                 organization=organization,
@@ -1652,26 +2392,42 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 window_months=DEFAULT_BACKFILL_MONTHS,
                 input_sources=input_sources,
                 source_warnings=source_warnings,
+                target_month=target_month,
+                manual_document_ids=manual_document_ids,
+                manual_summary=manual_summary,
             )
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_status_payload(user=request.user, company=company, domain=domain)
+                payload["run"] = _serialize_run_summary(run)
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             if _should_dispatch_existing_run(run):
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
                     extra={"run_id": run.run_id, "organization_id": organization.id},
                 )
-                transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+                dispatch_result = _dispatch_run_to_valley(run)
+                if not dispatch_result:
+                    payload = _build_status_payload(user=request.user, company=company, domain=domain)
+                    payload["run"] = _serialize_run_summary(run)
+                    payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                    return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         payload = _build_status_payload(user=request.user, company=company, domain=domain)
         payload["run"] = _serialize_run_summary(run)
@@ -1724,16 +2480,46 @@ class VibeRaisingEmailDraftStartView(APIView):
             user=request.user,
             company=company,
         )
-        input_sources = normalize_startup_update_input_sources(_get_requested_input_sources(request))
-        source_warnings = _sync_selected_financial_sources_for_draft(request.user, input_sources)
+        requested_manual_document_ids = _get_requested_manual_document_ids(request)
+        manual_summary = _get_requested_manual_summary(request)
+        try:
+            manual_documents = _resolve_manual_documents_for_request(
+                user=request.user,
+                organization=organization,
+                company=company,
+                document_ids=requested_manual_document_ids,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        manual_document_ids = [str(document.id) for document in manual_documents]
+        input_sources = _include_manual_source_if_needed(
+            _get_requested_input_sources(request),
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
+        )
+        try:
+            target_month = _requested_target_month_from_request(request)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = getattr(request.user, "google_connection", None)
-        if gmail_required_for_sources(input_sources) and google_connection is None:
+        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+            input_sources,
+            google_connection,
+        )
+        source_warnings = merge_source_warnings(
+            _sync_selected_financial_sources_for_draft(request.user, input_sources),
+            gmail_scope_warnings,
+        )
+        if gmail_required_for_sources(input_sources) and (
+            google_connection is None or not has_gmail_read_scope(google_connection)
+        ):
             return Response(
                 _build_email_draft_payload(
                     request=request,
                     user=request.user,
                     company=company,
                     domain=domain,
+                    target_month=target_month,
                 ),
                 status=status.HTTP_200_OK,
             )
@@ -1752,15 +2538,48 @@ class VibeRaisingEmailDraftStartView(APIView):
         existing_run = get_open_startup_update_run(
             organization=organization,
             google_connection_id=google_connection.id if google_connection else None,
+            target_month=target_month,
+            input_sources=input_sources,
         )
+        conflicting_run = get_open_startup_update_run(
+            organization=organization,
+            google_connection_id=google_connection.id if google_connection else None,
+            input_sources=input_sources,
+        )
+        if (
+            existing_run is None
+            and conflicting_run is not None
+            and not startup_update_run_matches_target_month(conflicting_run, target_month)
+        ):
+            payload = _build_email_draft_payload(
+                request=request,
+                user=request.user,
+                company=company,
+                domain=domain,
+                run_id=conflicting_run.run_id,
+                target_month=target_month,
+            )
+            payload["reusedExistingRun"] = True
+            payload.update(_target_month_conflict_payload(
+                requested_target_month=target_month,
+                active_run=conflicting_run,
+            ))
+            return Response(payload, status=status.HTTP_200_OK)
         reusable_drafts_cover_input_sources = _monthly_update_drafts_cover_input_sources(
             organization,
             input_sources,
+            target_month=target_month,
         )
 
         created = False
         if existing_run is None and reusable_drafts_cover_input_sources and not force_regenerate:
-            latest_draft = organization.monthly_update_drafts.order_by("-month", "-updated_at").first()
+            _refresh_reusable_xero_metrics_for_drafts(
+                organization=organization,
+                input_sources=input_sources,
+                source_warnings=source_warnings,
+                target_month=target_month,
+            )
+            latest_draft = organization.monthly_update_drafts.filter(month=target_month).order_by("-updated_at").first()
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because reusable drafts already exist",
                 extra={
@@ -1780,6 +2599,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 user=request.user,
                 company=company,
                 domain=domain,
+                target_month=target_month,
             )
             payload["reusedExistingRun"] = False
             return Response(payload, status=status.HTTP_200_OK)
@@ -1792,35 +2612,68 @@ class VibeRaisingEmailDraftStartView(APIView):
                 window_months=DEFAULT_BACKFILL_MONTHS,
                 input_sources=input_sources,
                 source_warnings=source_warnings,
+                target_month=target_month,
+                manual_document_ids=manual_document_ids,
+                manual_summary=manual_summary,
             )
             created = True
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                    run_id=run.run_id,
+                    target_month=target_month,
+                )
+                payload["reusedExistingRun"] = False
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         elif _should_dispatch_existing_run(run):
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             logger.info(
                 "Re-dispatching queued email draft run to Valley",
                 extra={"run_id": run.run_id, "organization_id": organization.id},
             )
-            transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+            dispatch_result = _dispatch_run_to_valley(run)
+            if not dispatch_result:
+                payload = _build_email_draft_payload(
+                    request=request,
+                    user=request.user,
+                    company=company,
+                    domain=domain,
+                    run_id=run.run_id,
+                    target_month=target_month,
+                )
+                payload["reusedExistingRun"] = True
+                payload.update(_valley_dispatch_failure_payload(run, dispatch_result))
+                return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
+            set_startup_update_run_target_month(run, target_month)
             if input_sources:
-                now = timezone.now()
+                windows = build_startup_update_target_windows(target_month)
                 refresh_startup_update_run_source_context(
                     run=run,
                     organization=organization,
                     input_sources=input_sources,
-                    start_date=(now - timedelta(days=120)).date(),
-                    end_date=now.date(),
+                    start_date=windows["financial_start_date"],
+                    end_date=windows["financial_end_date"],
                     source_warnings=source_warnings,
+                    manual_document_ids=manual_document_ids,
+                    manual_summary=manual_summary,
                 )
             logger.info(
                 "Skipping Valley dispatch for Vibe Raising email draft start because an open run is already active",
@@ -1842,6 +2695,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             company=company,
             domain=domain,
             run_id=run.run_id,
+            target_month=target_month,
         )
         payload["reusedExistingRun"] = not created
         return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

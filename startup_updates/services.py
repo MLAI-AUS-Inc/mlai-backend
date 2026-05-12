@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from decimal import Decimal
-from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional, Union
 
 from django.db import transaction
 from django.utils import timezone
 
+from integrations import http_client
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -20,15 +21,31 @@ from workflow_runs.models import (
     ContentFactoryStepStatus,
 )
 from integrations.models import (
+    ExternalServiceConnection,
     ExternalFinancialRecord,
     ExternalServiceConnectionStatus,
     ExternalServiceProvider,
 )
+from integrations.services.xero_scopes import (
+    XERO_REPORT_SCOPE,
+    xero_has_report_scope,
+)
+from integrations.services.gmail_scopes import (
+    GMAIL_RECONNECT_WARNING,
+    has_gmail_read_scope,
+)
 from startup_updates.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
+    GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     SlackChannelSelection,
+    SlackThreadArtifact,
     StartupEvent,
+    StartupManualDocument,
     StartupMetricObservation,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
@@ -36,7 +53,7 @@ from startup_updates.models import (
     StartupProfile,
     UserStartupBinding,
 )
-from integrations.services.valley_harness import notify_valley_run_created
+from integrations.services.valley_harness import ValleyHarnessResult, notify_valley_run_created
 from integrations.utils import normalize_domain
 
 
@@ -48,6 +65,9 @@ DEFAULT_CLASSIFICATION_BATCH_SIZE = 40
 DEFAULT_ATTACHMENT_BYTES_LIMIT = 10 * 1024 * 1024
 DEFAULT_MAX_SOURCE_THREADS = 40
 SUPERSEDED_GMAIL_CONNECTION_ERROR = "Superseded by a newer Gmail connection."
+MANUAL_DOCUMENTS_SOURCE = "manual_documents"
+MAX_MANUAL_DOCUMENT_CONTEXT_CHARS = 40000
+MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT = 12000
 MERGEABLE_DRAFT_LIST_SECTIONS = (
     "financial_performance",
     "highlights",
@@ -78,7 +98,69 @@ HIGH_SIGNAL_TERMS = [
     "partnership",
     "outage",
     "incident",
+    "revenue",
+    "customer",
+    "signed",
+    "deal",
+    "mrr",
+    "arr",
+    "cash",
+    "kpi",
+    "risk",
+    "compliance",
+    "security",
+    "run rate",
+    "invoice",
+    "runway",
+    "beta",
+    "shipped",
+    "release",
 ]
+SLACK_HARD_IRRELEVANT_PATTERNS = [
+    "has joined the channel",
+    "has left the channel",
+    "set the channel topic",
+    "set the channel purpose",
+    "archived the channel",
+    "unpinned a message",
+    "pinned a message",
+    "daily standup",
+    "standup reminder",
+    "reminder:",
+    "calendar reminder",
+    "build passed",
+    "build failed",
+    "workflow run",
+    "pull request opened",
+    "pull request closed",
+]
+SLACK_LOW_SIGNAL_PATTERNS = [
+    "thanks",
+    "thank you",
+    "sounds good",
+    "nice",
+    "ok",
+    "okay",
+    "done",
+    "cool",
+    "+1",
+    "approved",
+    "merged",
+]
+SLACK_AUTOMATION_AUTHOR_PATTERNS = [
+    "bot",
+    "github",
+    "linear",
+    "jira",
+    "notion",
+    "calendar",
+    "standup",
+    "zapier",
+]
+SLACK_COMPACT_MAX_MESSAGES = 40
+SLACK_COMPACT_MAX_CHARS = 6000
+GMAIL_COMPACT_MAX_MESSAGES = 24
+GMAIL_COMPACT_MAX_CHARS = 12000
 LOW_SIGNAL_PATTERNS = [
     "unsubscribe",
     "receipt",
@@ -143,18 +225,97 @@ RUN_STEP_ORDER = [
     "relevance_classification",
     "thread_hydration",
     "event_extraction",
+    "slack_backfill",
+    "slack_relevance_classification",
+    "slack_event_extraction",
+    "linear_backfill",
+    "linear_relevance_classification",
+    "linear_event_extraction",
+    "notion_backfill",
+    "notion_relevance_classification",
+    "notion_event_extraction",
     "timeline_merge",
+    "candidate_curation",
+    "founder_review",
     "draft_generation",
     "groundedness_review",
 ]
 SOURCE_REPROCESS_STEPS = {
     "timeline_merge",
+    "candidate_curation",
+    "founder_review",
     "draft_generation",
     "groundedness_review",
 }
+SLACK_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "slack_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
 SLACK_STEP_KEYS = {
     "slack_backfill",
+    "slack_relevance_classification",
     "slack_event_extraction",
+}
+LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "linear_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
+LINEAR_STEP_KEYS = {
+    "linear_backfill",
+    "linear_relevance_classification",
+    "linear_event_extraction",
+}
+NOTION_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "notion_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
+NOTION_STEP_KEYS = {
+    "notion_backfill",
+    "notion_relevance_classification",
+    "notion_event_extraction",
+}
+LINEAR_COMPACT_MAX_ISSUES = 35
+LINEAR_COMPACT_MAX_UPDATES = 8
+LINEAR_COMPACT_MAX_CHARS = 9000
+XERO_REPORTS_SCOPE = XERO_REPORT_SCOPE
+XERO_REPORT_METRIC_KEYS = {
+    "revenue",
+    "revenueGrowthRate",
+    "burnRate",
+    "runway",
+    "monthlyCosts",
+    "operatingExpenses",
+    "costOfSales",
+}
+XERO_DRAFT_METRIC_KEYS = (
+    "revenue",
+    "mrr",
+    "burnRate",
+    "runway",
+    "monthlyCosts",
+    "invoiceRevenue",
+    "cashCollected",
+    "revenueGrowthRate",
+    "customerCount",
+    "invoiceCount",
+    "recurringInvoiceCount",
+)
+XERO_DRAFT_METRIC_LABELS = {
+    "revenue": "Revenue",
+    "activeUsers": "Active Users",
+    "mrr": "MRR",
+    "burnRate": "Burn Rate",
+    "runway": "Runway",
+    "monthlyCosts": "Monthly Costs",
+    "operatingExpenses": "Operating Expenses",
+    "costOfSales": "Cost of Sales",
+    "invoiceRevenue": "Invoice Revenue",
+    "cashCollected": "Cash Collected",
+    "revenueGrowthRate": "Revenue Growth Rate",
+    "customerCount": "Customer Count",
+    "churn": "Churn",
+    "invoiceCount": "Invoice Count",
+    "recurringInvoiceCount": "Recurring Invoice Count",
 }
 
 
@@ -167,6 +328,8 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.NOTION,
         ExternalServiceProvider.GOOGLE_DRIVE,
         ExternalServiceProvider.SLACK,
+        ExternalServiceProvider.LINEAR,
+        MANUAL_DOCUMENTS_SOURCE,
     }
     if not input_sources:
         return ["gmail"]
@@ -185,6 +348,71 @@ def gmail_required_for_sources(input_sources: Optional[list[str]]) -> bool:
     return "gmail" in normalize_startup_update_input_sources(input_sources)
 
 
+def merge_source_warnings(
+    *warning_groups: Optional[dict[str, list[str]]],
+) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for warning_group in warning_groups:
+        if not warning_group:
+            continue
+        for source, warnings in warning_group.items():
+            source_key = str(source or "").strip().lower().replace("-", "_")
+            if not source_key:
+                continue
+            for warning in warnings or []:
+                warning_text = str(warning or "").strip()
+                if warning_text and warning_text not in merged.setdefault(source_key, []):
+                    merged[source_key].append(warning_text)
+    return {source: warnings for source, warnings in merged.items() if warnings}
+
+
+def coerce_startup_update_sources_for_gmail_scope(
+    input_sources: Optional[list[str]],
+    google_connection=None,
+) -> tuple[list[str], object | None, dict[str, list[str]]]:
+    selected_input_sources = normalize_startup_update_input_sources(input_sources)
+    if "gmail" not in selected_input_sources:
+        return selected_input_sources, None, {}
+    if google_connection is None or has_gmail_read_scope(google_connection):
+        return selected_input_sources, google_connection, {}
+
+    fallback_sources = [source for source in selected_input_sources if source != "gmail"]
+    warnings = {"gmail": [GMAIL_RECONNECT_WARNING]}
+    if fallback_sources:
+        return fallback_sources, None, warnings
+    return selected_input_sources, google_connection, warnings
+
+
+def startup_update_run_input_sources(run: ContentFactoryRun) -> list[str]:
+    return normalize_startup_update_input_sources((run.run_request or {}).get("input_sources"))
+
+
+def startup_update_run_matches_input_sources(
+    run: ContentFactoryRun,
+    input_sources: Optional[list[str]],
+    *,
+    google_connection_id: Optional[int],
+) -> bool:
+    if input_sources is None:
+        return True
+
+    requested = set(normalize_startup_update_input_sources(input_sources))
+    existing = set(startup_update_run_input_sources(run))
+    requested_uses_gmail = "gmail" in requested
+    existing_uses_gmail = "gmail" in existing
+
+    if not requested_uses_gmail:
+        return not existing_uses_gmail and requested == existing
+
+    if not existing_uses_gmail:
+        return False
+
+    run_google_connection_id = get_startup_update_run_google_connection_id(run)
+    if google_connection_id is not None and run_google_connection_id not in (None, google_connection_id):
+        return False
+    return existing.issubset(requested)
+
+
 def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[str]:
     selected = set(normalize_startup_update_input_sources(input_sources))
     steps = ["profile_resolution"]
@@ -196,8 +424,12 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
             "event_extraction",
         ])
     if ExternalServiceProvider.SLACK in selected:
-        steps.extend(["slack_backfill", "slack_event_extraction"])
-    steps.extend(["timeline_merge", "draft_generation", "groundedness_review"])
+        steps.extend(["slack_backfill", "slack_relevance_classification", "slack_event_extraction"])
+    if ExternalServiceProvider.LINEAR in selected:
+        steps.extend(["linear_backfill", "linear_relevance_classification", "linear_event_extraction"])
+    if ExternalServiceProvider.NOTION in selected:
+        steps.extend(["notion_backfill", "notion_relevance_classification", "notion_event_extraction"])
+    steps.extend(["timeline_merge", "candidate_curation", "founder_review", "draft_generation", "groundedness_review"])
     return steps
 
 
@@ -212,6 +444,11 @@ def reconcile_startup_update_run_source_steps(
     previous_steps = set(previous_step_order)
     added_steps = [step for step in desired_step_order if step not in previous_steps]
     slack_was_added = any(step in SLACK_STEP_KEYS for step in added_steps)
+    slack_classification_was_added = "slack_relevance_classification" in added_steps
+    linear_was_added = any(step in LINEAR_STEP_KEYS for step in added_steps)
+    linear_classification_was_added = "linear_relevance_classification" in added_steps
+    notion_was_added = any(step in NOTION_STEP_KEYS for step in added_steps)
+    notion_classification_was_added = "notion_relevance_classification" in added_steps
 
     update_fields: list[str] = []
     if previous_step_order != desired_step_order:
@@ -221,8 +458,23 @@ def reconcile_startup_update_run_source_steps(
     if not run.current_step or run.current_step not in desired_step_order:
         run.current_step = desired_step_order[0]
         update_fields.append("current_step")
-    elif slack_was_added and run.current_step in SOURCE_REPROCESS_STEPS:
+    elif "slack_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
         run.current_step = "slack_backfill"
+        update_fields.append("current_step")
+    elif slack_classification_was_added and run.current_step in SLACK_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "slack_relevance_classification"
+        update_fields.append("current_step")
+    elif "linear_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "linear_backfill"
+        update_fields.append("current_step")
+    elif linear_classification_was_added and run.current_step in LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "linear_relevance_classification"
+        update_fields.append("current_step")
+    elif "notion_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "notion_backfill"
+        update_fields.append("current_step")
+    elif notion_classification_was_added and run.current_step in NOTION_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "notion_relevance_classification"
         update_fields.append("current_step")
 
     if update_fields:
@@ -248,9 +500,50 @@ def reconcile_startup_update_run_source_steps(
             step.save(update_fields=["display_order"])
 
     if slack_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if slack_classification_was_added:
+            reset_steps.update(SLACK_CLASSIFICATION_DOWNSTREAM_STEPS)
         downstream_steps = ContentFactoryRunStep.objects.filter(
             run=run,
-            step_key__in=SOURCE_REPROCESS_STEPS,
+            step_key__in=reset_steps,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    if linear_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if linear_classification_was_added:
+            reset_steps.update(LINEAR_CLASSIFICATION_DOWNSTREAM_STEPS)
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=reset_steps,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    if notion_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if notion_classification_was_added:
+            reset_steps.update(NOTION_CLASSIFICATION_DOWNSTREAM_STEPS)
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=reset_steps,
         )
         ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
         downstream_steps.update(
@@ -326,6 +619,105 @@ def _month_start(value: Optional[Union[date, datetime]] = None) -> date:
     if isinstance(value, datetime):
         value = value.date()
     return date(value.year, value.month, 1)
+
+
+def parse_startup_update_target_month(
+    value: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[Union[date, datetime]] = None,
+) -> date:
+    current_month = _month_start(reference)
+    if value is None or value == "":
+        return current_month
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("target_month must use YYYY-MM-01 format.") from exc
+    if parsed.day != 1:
+        raise ValueError("target_month must be the first day of a month.")
+    target_month = date(parsed.year, parsed.month, 1)
+    if target_month > current_month:
+        raise ValueError("target_month cannot be in the future.")
+    return target_month
+
+
+def _aware_utc_datetime(day: date, boundary: time) -> datetime:
+    return datetime.combine(day, boundary, tzinfo=dt_timezone.utc)
+
+
+def build_startup_update_target_windows(
+    target_month: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[datetime] = None,
+) -> dict[str, Any]:
+    now = reference or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now, timezone=dt_timezone.utc)
+    month = parse_startup_update_target_month(target_month, reference=now)
+    month_end = _month_end(month)
+    narrative_start = _aware_utc_datetime(month, time.min)
+    narrative_month_end = _aware_utc_datetime(month_end, time.max)
+    narrative_end = min(now, narrative_month_end)
+    financial_start = _previous_month_start(month)
+    return {
+        "target_month": month,
+        "narrative_start": narrative_start,
+        "narrative_end": narrative_end,
+        "narrative_start_date": narrative_start.date(),
+        "narrative_end_date": narrative_end.date(),
+        "financial_start_date": financial_start,
+        "financial_end_date": narrative_end.date(),
+    }
+
+
+def get_startup_update_run_target_month(run: ContentFactoryRun) -> Optional[date]:
+    run_request = run.run_request or {}
+    raw_value = run_request.get("target_month") or run_request.get("current_month")
+    if not raw_value:
+        draft_months = run_request.get("draft_months") or []
+        if isinstance(draft_months, (list, tuple)) and draft_months:
+            raw_value = draft_months[-1]
+    if not raw_value:
+        return None
+    try:
+        parsed = date.fromisoformat(str(raw_value))
+    except ValueError:
+        return None
+    if parsed.day != 1:
+        return None
+    return date(parsed.year, parsed.month, 1)
+
+
+def startup_update_run_matches_target_month(run: ContentFactoryRun, target_month: date) -> bool:
+    return get_startup_update_run_target_month(run) == _month_start(target_month)
+
+
+def set_startup_update_run_target_month(
+    run: ContentFactoryRun,
+    target_month: Optional[Union[str, date, datetime]] = None,
+    *,
+    reference: Optional[datetime] = None,
+    window_months: Optional[int] = None,
+) -> ContentFactoryRun:
+    windows = build_startup_update_target_windows(target_month, reference=reference)
+    month = windows["target_month"]
+    run_request = dict(run.run_request or {})
+    if window_months is not None:
+        run_request["window_months"] = int(window_months)
+    run_request["target_month"] = month.isoformat()
+    run_request["current_month"] = month.isoformat()
+    run_request["draft_months"] = [month.isoformat()]
+    run_request["backfill_window_start"] = windows["narrative_start"].isoformat()
+    run_request["backfill_window_end"] = windows["narrative_end"].isoformat()
+    run.run_request = run_request
+    run.save(update_fields=["run_request", "updated_at"])
+    return run
 
 
 def iter_recent_month_starts(count: int, *, reference: Optional[Union[date, datetime]] = None) -> list[date]:
@@ -423,6 +815,270 @@ def _monthly_normalized_xero_amount(record: ExternalFinancialRecord) -> Optional
     if unit in {"DAILY", "DAY"}:
         return amount * Decimal("365") / Decimal("12") / period
     return amount
+
+
+def _month_end(month: date) -> date:
+    next_month = date(month.year + 1, 1, 1) if month.month == 12 else date(month.year, month.month + 1, 1)
+    return next_month - timedelta(days=1)
+
+
+def _xero_schedule(record: ExternalFinancialRecord) -> dict[str, Any]:
+    payload = record.raw_payload if isinstance(record.raw_payload, dict) else {}
+    schedule = payload.get("Schedule") if isinstance(payload.get("Schedule"), dict) else payload.get("schedule")
+    return schedule if isinstance(schedule, dict) else {}
+
+
+def _xero_schedule_date(record: ExternalFinancialRecord, *keys: str) -> Optional[date]:
+    schedule = _xero_schedule(record)
+    for key in keys:
+        value = schedule.get(key)
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        parsed = None
+        try:
+            from django.utils.dateparse import parse_date
+
+            parsed = parse_date(str(value))
+        except Exception:
+            parsed = None
+        if parsed:
+            return parsed
+    return None
+
+
+def _xero_repeating_invoice_active_in_month(record: ExternalFinancialRecord, month: date) -> bool:
+    status = str(record.status or "").upper()
+    if status in {"DRAFT", "DELETED", "VOIDED"}:
+        return False
+    month_start = _month_start(month)
+    month_end = _month_end(month_start)
+    start = _xero_schedule_date(record, "StartDate", "start_date")
+    if start is None and record.transaction_date and record.transaction_date <= month_end:
+        start = record.transaction_date
+    end = _xero_schedule_date(record, "EndDate", "end_date")
+    if start and start > month_end:
+        return False
+    if end and end < month_start:
+        return False
+    return True
+
+
+def _report_decimal(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text in {"-", "--"}:
+        return None
+    negative = text.startswith("(") and text.endswith(")")
+    text = text.strip("()")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if not text or text in {"-", "."}:
+        return None
+    try:
+        amount = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return -amount if negative and amount > 0 else amount
+
+
+def _normalize_report_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _iter_xero_report_entries(rows: Any, *, section: str = "") -> Iterable[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_type = str(row.get("RowType") or row.get("row_type") or "").strip()
+        title = str(row.get("Title") or row.get("title") or "").strip()
+        cells = row.get("Cells") or row.get("cells") or []
+        values = [
+            str((cell or {}).get("Value") or (cell or {}).get("value") or "").strip()
+            for cell in cells
+            if isinstance(cell, dict)
+        ]
+        label = title or (values[0] if values else "")
+        amount = None
+        for value in reversed(values[1:] or values):
+            amount = _report_decimal(value)
+            if amount is not None:
+                break
+        if label and amount is not None:
+            yield {
+                "label": label,
+                "normalized_label": _normalize_report_label(label),
+                "amount": amount,
+                "section": section,
+                "normalized_section": _normalize_report_label(section),
+                "row_type": row_type,
+            }
+        nested_rows = row.get("Rows") or row.get("rows")
+        child_section = " > ".join(part for part in [section, title] if part)
+        yield from _iter_xero_report_entries(nested_rows, section=child_section)
+
+
+def _xero_report_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    reports = payload.get("Reports") or payload.get("reports") or []
+    report = reports[0] if reports and isinstance(reports[0], dict) else {}
+    return list(_iter_xero_report_entries(report.get("Rows") or report.get("rows") or []))
+
+
+def _xero_report_entry_labels(entries: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for entry in entries:
+        label = str(entry.get("label") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:40]
+
+
+def _find_xero_report_amount(entries: list[dict[str, Any]], labels: Iterable[str]) -> Optional[dict[str, Any]]:
+    normalized_labels = {_normalize_report_label(label) for label in labels}
+    for entry in entries:
+        if entry["normalized_label"] in normalized_labels:
+            return entry
+    for entry in entries:
+        if any(label in entry["normalized_label"] for label in normalized_labels if label):
+            return entry
+    return None
+
+
+def _positive_xero_report_entry(entry: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not entry or entry.get("amount") is None:
+        return None
+    return {
+        **entry,
+        "amount": abs(entry["amount"]),
+    }
+
+
+def _xero_monthly_cost_entry(
+    *,
+    cost_of_sales: Optional[dict[str, Any]],
+    operating_expenses: Optional[dict[str, Any]],
+    total_expenses: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    cost_of_sales = _positive_xero_report_entry(cost_of_sales)
+    operating_expenses = _positive_xero_report_entry(operating_expenses)
+    total_expenses = _positive_xero_report_entry(total_expenses)
+    if cost_of_sales and operating_expenses:
+        return {
+            "label": "Cost of Sales + Operating Expenses",
+            "normalized_label": "cost of sales + operating expenses",
+            "amount": cost_of_sales["amount"] + operating_expenses["amount"],
+            "section": "",
+            "normalized_section": "",
+            "row_type": "calculated",
+            "component_labels": [cost_of_sales.get("label"), operating_expenses.get("label")],
+            "component_amounts": [str(cost_of_sales["amount"]), str(operating_expenses["amount"])],
+        }
+    return total_expenses or operating_expenses or cost_of_sales
+
+
+def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any]:
+    entries = _xero_report_entries(payload)
+    revenue = _find_xero_report_amount(entries, ["Total Income", "Total Revenue", "Income"])
+    net = _find_xero_report_amount(entries, ["Net Profit", "Net Loss", "Net Profit/(Loss)", "Net Profit / (Loss)"])
+    cost_of_sales = _find_xero_report_amount(
+        entries,
+        [
+            "Total Cost of Sales",
+            "Total Cost of Goods Sold",
+            "Total Direct Costs",
+            "Cost of Sales",
+            "Cost of Goods Sold",
+        ],
+    )
+    operating_expenses = _find_xero_report_amount(
+        entries,
+        [
+            "Total Operating Expenses",
+            "Operating Expenses",
+        ],
+    )
+    total_expenses = _find_xero_report_amount(
+        entries,
+        [
+            "Total Expenses",
+            "Expenses",
+            "Total Expense",
+        ],
+    )
+    return {
+        "entries": entries,
+        "revenue": revenue,
+        "net": net,
+        "cost_of_sales": _positive_xero_report_entry(cost_of_sales),
+        "operating_expenses": _positive_xero_report_entry(operating_expenses or total_expenses),
+        "monthly_costs": _xero_monthly_cost_entry(
+            cost_of_sales=cost_of_sales,
+            operating_expenses=operating_expenses,
+            total_expenses=total_expenses,
+        ),
+    }
+
+
+def _parse_xero_balance_sheet_report(payload: dict[str, Any]) -> dict[str, Any]:
+    entries = _xero_report_entries(payload)
+    cash = _find_xero_report_amount(
+        entries,
+        [
+            "Total Bank",
+            "Total Cash",
+            "Cash and Cash Equivalents",
+            "Total Cash and Cash Equivalents",
+            "Cash at Bank",
+            "Total Cash at Bank",
+        ],
+    )
+    if cash is None:
+        bank_entries = [
+            entry for entry in entries
+            if "bank" in entry["normalized_section"] and entry["normalized_label"].startswith("total")
+        ]
+        cash = bank_entries[-1] if bank_entries else None
+    return {
+        "entries": entries,
+        "cash": cash,
+    }
+
+
+def _xero_connection_currency(connection, records: list[ExternalFinancialRecord]) -> str:
+    currencies = sorted({
+        record.currency
+        for record in records
+        if record.connection_id == connection.id and record.currency
+    })
+    return currencies[0] if len(currencies) == 1 else ""
+
+
+def _xero_report_metadata(
+    *,
+    source_metric: str,
+    warnings: list[str],
+    report_name: str,
+    start_date: Optional[date],
+    end_date: date,
+    entry: Optional[dict[str, Any]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return {
+        "source_metric": source_metric,
+        "warnings": warnings,
+        "source_record_count": 0,
+        "report_name": report_name,
+        "report_start_date": start_date.isoformat() if start_date else None,
+        "report_end_date": end_date.isoformat(),
+        "report_row_label": entry.get("label") if entry else "",
+        "report_row_section": entry.get("section") if entry else "",
+        **(extra or {}),
+    }
 
 
 def build_xero_run_context(*, organization: Organization, start_date: date, end_date: date) -> dict:
@@ -560,6 +1216,14 @@ def publish_xero_metric_observations(
         and record.transaction_date
         and start_date <= record.transaction_date <= end_date
     ]
+    connections = list(
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.XERO,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("id")
+    )
     currencies = sorted({record.currency for record in recurring_records + invoice_records + payment_records if record.currency})
     warnings = [
         "Xero financial metrics are deterministic accounting context. Do not infer additional financial values."
@@ -618,10 +1282,20 @@ def publish_xero_metric_observations(
         )
         saved_metric_ids.append(metric.id)
 
+    def delete_report_metrics(month: date) -> None:
+        StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=month,
+            metric_key__in=XERO_REPORT_METRIC_KEYS,
+        ).delete()
+
     for currency in currencies or [""]:
         currency_recurring = records_for_currency(recurring_records, currency)
-        current_recurring_for_month = records_for_month(currency_recurring, current_month, currency)
-        current_recurring_metrics = current_recurring_for_month or currency_recurring
+        current_recurring_metrics = [
+            record for record in currency_recurring
+            if _xero_repeating_invoice_active_in_month(record, current_month)
+        ]
         current_mrr = sum(
             (value for value in (_monthly_normalized_xero_amount(record) for record in current_recurring_metrics) if value is not None),
             Decimal("0"),
@@ -649,31 +1323,6 @@ def publish_xero_metric_observations(
                 summary="Active Xero repeating invoice count.",
                 metadata=_metric_summary_metadata(source_metric="xero_recurring_invoice_count", warnings=warnings, records=current_recurring_metrics),
             )
-
-            previous_month = _previous_month_start(current_month)
-            previous_recurring = records_for_month(currency_recurring, previous_month, currency)
-            previous_mrr = sum(
-                (value for value in (_monthly_normalized_xero_amount(record) for record in previous_recurring) if value is not None),
-                Decimal("0"),
-            )
-            if previous_mrr > 0:
-                growth = (current_mrr - previous_mrr) / previous_mrr
-                save_metric(
-                    month=current_month,
-                    key="revenueGrowthRate",
-                    name="MRR growth rate",
-                    value_text=_format_percent(growth),
-                    value_number=growth,
-                    unit="ratio",
-                    records_for_metric=current_recurring_metrics + previous_recurring,
-                    summary="MRR growth calculated from current and previous Xero repeating invoice MRR.",
-                    metadata=_metric_summary_metadata(
-                        source_metric="xero_mrr_growth_rate",
-                        warnings=warnings,
-                        records=current_recurring_metrics + previous_recurring,
-                        extra={"previous_month": previous_month.isoformat(), "previous_mrr": str(previous_mrr)},
-                    ),
-                )
 
         months_with_activity = sorted({
             _month_start(record.transaction_date)
@@ -723,12 +1372,308 @@ def publish_xero_metric_observations(
                     metadata=_metric_summary_metadata(source_metric="xero_cash_collected", warnings=warnings, records=monthly_payments),
                 )
 
+            customer_ids = {
+                record.merchant_name
+                for record in monthly_invoices + monthly_payments
+                if str(record.merchant_name or "").strip()
+            }
+            if customer_ids:
+                save_metric(
+                    month=month,
+                    key="customerCount",
+                    name="Customer count",
+                    value_text=str(len(customer_ids)),
+                    value_number=Decimal(len(customer_ids)),
+                    unit="count",
+                    records_for_metric=monthly_invoices + monthly_payments,
+                    summary="Unique Xero customer contacts with sales invoices or payments in the month.",
+                    metadata=_metric_summary_metadata(
+                        source_metric="xero_customer_count",
+                        warnings=warnings,
+                        records=monthly_invoices + monthly_payments,
+                        extra={"customer_names": sorted(customer_ids)},
+                    ),
+                )
+
             month_summaries.setdefault(month.isoformat(), {})[currency or "unknown"] = {
                 "invoice_revenue": str(invoice_revenue),
                 "cash_collected": str(cash_collected),
                 "invoice_count": len(monthly_invoices),
                 "payment_count": len(monthly_payments),
+                "customer_count": len(customer_ids),
             }
+
+    report_months = [
+        current_month,
+        _previous_month_start(current_month),
+        _previous_month_start(_previous_month_start(current_month)),
+    ]
+    report_metrics_available = False
+    for month in report_months:
+        delete_report_metrics(month)
+    for connection in connections:
+        if not xero_has_report_scope(connection.scopes):
+            warnings.append(
+                "Xero reports scope is missing; reconnect Xero to calculate Revenue, Burn Rate, Runway, and Revenue Growth from accounting reports."
+            )
+            continue
+        profit_and_loss_by_month: dict[date, dict[str, Any]] = {}
+        try:
+            from integrations.services.external_connectors import fetch_xero_accounting_report
+
+            for month in report_months:
+                month_payload = fetch_xero_accounting_report(
+                    connection,
+                    "ProfitAndLoss",
+                    params={"fromDate": month.isoformat(), "toDate": _month_end(month).isoformat()},
+                )
+                profit_and_loss_by_month[month] = _parse_xero_profit_and_loss_report(month_payload)
+            balance_payload = fetch_xero_accounting_report(
+                connection,
+                "BalanceSheet",
+                params={"date": _month_end(current_month).isoformat()},
+            )
+        except http_client.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 403:
+                warnings.append(
+                    "Xero reports permission was denied; reconnect Xero with Profit and Loss and Balance Sheet report scopes to calculate Revenue, Burn Rate, Runway, and Revenue Growth."
+                )
+            else:
+                warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
+            continue
+        except Exception as exc:
+            warnings.append(f"Xero reports could not be fetched: {str(exc) or 'request failed'}")
+            continue
+
+        report_metrics_available = True
+        currency = _xero_connection_currency(connection, records)
+        current_report = profit_and_loss_by_month.get(current_month) or {}
+        previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
+        current_revenue = current_report.get("revenue")
+        previous_revenue = previous_report.get("revenue")
+        monthly_costs = current_report.get("monthly_costs")
+        operating_expenses = current_report.get("operating_expenses")
+        cost_of_sales = current_report.get("cost_of_sales")
+        current_report_labels = _xero_report_entry_labels(current_report.get("entries") or [])
+        for report_month, report in profit_and_loss_by_month.items():
+            revenue = report.get("revenue")
+            if not revenue:
+                continue
+            report_labels = _xero_report_entry_labels(report.get("entries") or [])
+            save_metric(
+                month=report_month,
+                key="revenue",
+                name="Revenue",
+                value_text=_format_money(revenue["amount"], currency),
+                value_number=revenue["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Revenue calculated from Xero Profit and Loss total income.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_revenue",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=report_month,
+                    end_date=_month_end(report_month),
+                    entry=revenue,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": report_labels,
+                        "calculation_basis": "profit_and_loss_total_income",
+                    },
+                ),
+            )
+        if monthly_costs:
+            save_metric(
+                month=current_month,
+                key="monthlyCosts",
+                name="Monthly costs",
+                value_text=_format_money(monthly_costs["amount"], currency),
+                value_number=monthly_costs["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Monthly costs calculated from Xero Profit and Loss expense rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_monthly_costs",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=monthly_costs,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+                        "component_labels": monthly_costs.get("component_labels", []),
+                        "component_amounts": monthly_costs.get("component_amounts", []),
+                    },
+                ),
+            )
+        if operating_expenses:
+            save_metric(
+                month=current_month,
+                key="operatingExpenses",
+                name="Operating expenses",
+                value_text=_format_money(operating_expenses["amount"], currency),
+                value_number=operating_expenses["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Operating expenses calculated from Xero Profit and Loss expense rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_operating_expenses",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=operating_expenses,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "profit_and_loss_operating_or_total_expenses",
+                    },
+                ),
+            )
+        if cost_of_sales:
+            save_metric(
+                month=current_month,
+                key="costOfSales",
+                name="Cost of sales",
+                value_text=_format_money(cost_of_sales["amount"], currency),
+                value_number=cost_of_sales["amount"],
+                unit=currency,
+                records_for_metric=[],
+                summary="Cost of sales calculated from Xero Profit and Loss cost rows.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_cost_of_sales",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=cost_of_sales,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "profit_and_loss_cost_of_sales",
+                    },
+                ),
+            )
+        if current_revenue and previous_revenue and previous_revenue["amount"] > 0:
+            growth = (current_revenue["amount"] - previous_revenue["amount"]) / previous_revenue["amount"]
+            save_metric(
+                month=current_month,
+                key="revenueGrowthRate",
+                name="Revenue growth rate",
+                value_text=_format_percent(growth),
+                value_number=growth,
+                unit="ratio",
+                records_for_metric=[],
+                summary="Revenue growth calculated from current and previous Xero Profit and Loss total income.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_revenue_growth",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=_previous_month_start(current_month),
+                    end_date=_month_end(current_month),
+                    entry=current_revenue,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "previous_month": _previous_month_start(current_month).isoformat(),
+                        "previous_revenue": str(previous_revenue["amount"]),
+                        "current_revenue": str(current_revenue["amount"]),
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "current_month_total_income_minus_previous_month_total_income_divided_by_previous_month_total_income",
+                    },
+                ),
+            )
+        current_net = current_report.get("net")
+        current_burn: Optional[Decimal] = None
+        if current_net:
+            label = _normalize_report_label(current_net.get("label"))
+            amount = current_net["amount"]
+            if "loss" in label and amount > 0:
+                current_burn = amount
+            elif amount < 0:
+                current_burn = abs(amount)
+        if current_burn and current_burn > 0:
+            save_metric(
+                month=current_month,
+                key="burnRate",
+                name="Burn rate",
+                value_text=_format_money(current_burn, currency),
+                value_number=current_burn,
+                unit=currency,
+                records_for_metric=[],
+                summary="Burn rate calculated as positive net accounting loss from Xero Profit and Loss.",
+                metadata=_xero_report_metadata(
+                    source_metric="xero_profit_and_loss_accounting_burn",
+                    warnings=warnings,
+                    report_name="ProfitAndLoss",
+                    start_date=current_month,
+                    end_date=_month_end(current_month),
+                    entry=current_net,
+                    extra={
+                        "connection_id": connection.id,
+                        "source_currency": currency,
+                        "parsed_row_labels": current_report_labels,
+                        "calculation_basis": "positive_net_loss",
+                    },
+                ),
+            )
+        trailing_burns: list[Decimal] = []
+        for month in report_months:
+            net_entry = (profit_and_loss_by_month.get(month) or {}).get("net")
+            if not net_entry:
+                continue
+            amount = net_entry["amount"]
+            label = _normalize_report_label(net_entry.get("label"))
+            if "loss" in label and amount > 0:
+                trailing_burns.append(amount)
+            elif amount < 0:
+                trailing_burns.append(abs(amount))
+        balance = _parse_xero_balance_sheet_report(balance_payload)
+        cash_entry = balance.get("cash")
+        if cash_entry and cash_entry["amount"] > 0 and trailing_burns:
+            average_burn = sum(trailing_burns, Decimal("0")) / Decimal(len(trailing_burns))
+            if average_burn > 0:
+                runway_months = cash_entry["amount"] / average_burn
+                runway_value_number = runway_months.quantize(Decimal("0.0001"))
+                runway_text = f"{_format_decimal(runway_months, places='0.1')} months"
+                save_metric(
+                    month=current_month,
+                    key="runway",
+                    name="Runway",
+                    value_text=runway_text,
+                    value_number=runway_value_number,
+                    unit="months",
+                    records_for_metric=[],
+                    summary="Runway calculated from Xero Balance Sheet cash divided by trailing accounting burn.",
+                    metadata=_xero_report_metadata(
+                        source_metric="xero_balance_sheet_runway",
+                        warnings=warnings,
+                        report_name="BalanceSheet",
+                        start_date=None,
+                        end_date=_month_end(current_month),
+                        entry=cash_entry,
+                        extra={
+                            "connection_id": connection.id,
+                            "source_currency": currency,
+                            "cash_balance": str(cash_entry["amount"]),
+                            "average_burn": str(average_burn),
+                            "burn_month_count": len(trailing_burns),
+                            "parsed_row_labels": _xero_report_entry_labels(balance.get("entries") or []),
+                            "calculation_basis": "cash_balance_divided_by_trailing_positive_net_loss",
+                        },
+                    ),
+                )
+
+    if report_metrics_available:
+        month_summaries.setdefault(current_month.isoformat(), {}).setdefault("reports", {})["available"] = True
 
     return {
         "source": "xero",
@@ -767,6 +1712,92 @@ def build_slack_run_context(*, organization: Organization, selected_channel_ids:
     }
 
 
+def build_linear_run_context(*, organization: Organization, selected_project_ids: Optional[list[str]] = None) -> dict:
+    queryset = LinearProjectSelection.objects.filter(
+        organization=organization,
+        selected=True,
+    ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if selected_project_ids:
+        queryset = queryset.filter(linear_project_id__in=selected_project_ids)
+    projects = [
+        {
+            "project_id": selection.linear_project_id,
+            "project_name": selection.project_name,
+            "status": selection.project_status,
+            "health": selection.project_health,
+            "last_synced_at": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+        }
+        for selection in queryset.order_by("project_name", "linear_project_id")
+    ]
+    project_ids = [project["project_id"] for project in projects]
+    artifacts = LinearProjectArtifact.objects.filter(
+        organization=organization,
+        linear_project_id__in=project_ids,
+    )
+    issue_count = LinearIssueArtifact.objects.filter(organization=organization, project__in=artifacts).count()
+    update_count = LinearProjectUpdateArtifact.objects.filter(organization=organization, project__in=artifacts).count()
+    return {
+        "source": "linear",
+        "purpose": "selected_project_management_context",
+        "warning": "Linear is project-management context only and is not financial truth.",
+        "selected_project_ids": project_ids,
+        "selected_project_count": len(projects),
+        "selected_projects": projects,
+        "cached_project_count": artifacts.count(),
+        "cached_issue_count": issue_count,
+        "cached_update_count": update_count,
+        "warnings": [] if projects else ["Linear was selected but no projects are selected."],
+    }
+
+
+def latest_external_connection_for_startup(
+    *,
+    user,
+    organization: Organization,
+    provider: str,
+) -> Optional[ExternalServiceConnection]:
+    connection = (
+        user.external_service_connections.filter(
+            provider=provider,
+            organization=organization,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if connection is not None:
+        return connection
+    return (
+        user.external_service_connections.filter(provider=provider)
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def build_notion_run_context(*, organization: Organization) -> dict:
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.NOTION,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    sync_cursor = connection.sync_cursor if connection is not None and isinstance(connection.sync_cursor, dict) else {}
+    return {
+        "source": "notion",
+        "purpose": "founder_workspace_context",
+        "scope": "whole_accessible_workspace",
+        "connection_id": connection.id if connection else None,
+        "workspace": connection.account_label if connection else "",
+        "last_synced_at": connection.last_synced_at.isoformat() if connection and connection.last_synced_at else None,
+        "index_partial": bool(sync_cursor.get("startup_update_index_partial", True)) if connection else True,
+        "warnings": [] if connection else ["Notion was selected but no Notion connection is available."],
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -774,6 +1805,8 @@ def build_external_context_for_sources(
     start_date: date,
     end_date: date,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> dict[str, Any]:
     selected = set(input_sources or [])
     context: dict[str, Any] = {}
@@ -799,6 +1832,109 @@ def build_external_context_for_sources(
             organization=organization,
             selected_channel_ids=None,
         )
+    if ExternalServiceProvider.LINEAR in selected:
+        context["linear"] = build_linear_run_context(
+            organization=organization,
+            selected_project_ids=None,
+        )
+    if ExternalServiceProvider.NOTION in selected:
+        context["notion"] = build_notion_run_context(organization=organization)
+    if MANUAL_DOCUMENTS_SOURCE in selected:
+        context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
+            organization=organization,
+            document_ids=manual_document_ids,
+            summary=manual_summary,
+        )
+    if warnings_by_source.get("gmail"):
+        context["gmail"] = {
+            "source_unavailable": True,
+            "needs_reconnect": True,
+            "warnings": list(warnings_by_source["gmail"]),
+        }
+    return context
+
+
+def _normalize_manual_document_id_list(document_ids: Optional[list[str]]) -> list[str]:
+    if not document_ids:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_id in document_ids:
+        value = str(raw_id or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _manual_document_context_excerpt(text: str, remaining_chars: int) -> tuple[str, int]:
+    limit = min(MAX_MANUAL_DOCUMENT_CONTEXT_CHARS_PER_DOCUMENT, max(remaining_chars, 0))
+    if limit <= 0:
+        return "", 0
+    excerpt = str(text or "").strip()[:limit].strip()
+    return excerpt, len(excerpt)
+
+
+def build_manual_documents_run_context(
+    *,
+    organization: Organization,
+    document_ids: Optional[list[str]],
+    summary: Optional[str] = None,
+) -> dict[str, Any]:
+    normalized_ids = _normalize_manual_document_id_list(document_ids)
+    context: dict[str, Any] = {
+        "summary": str(summary or "").strip(),
+        "documents": [],
+        "warnings": [],
+    }
+    if not normalized_ids:
+        if not context["summary"]:
+            context["warnings"].append("Manual documents were selected but no uploaded documents or summary were provided.")
+        return context
+
+    documents_by_id = {
+        str(document.id): document
+        for document in StartupManualDocument.objects.filter(
+            organization=organization,
+            id__in=normalized_ids,
+        ).order_by("-created_at")
+    }
+    remaining_chars = MAX_MANUAL_DOCUMENT_CONTEXT_CHARS
+    for document_id in normalized_ids:
+        document = documents_by_id.get(document_id)
+        if document is None:
+            context["warnings"].append(f"Manual document {document_id} was not found for this startup.")
+            continue
+
+        text_excerpt = ""
+        excerpt_chars = 0
+        if document.extraction_status == "processed" and document.extracted_text.strip():
+            text_excerpt, excerpt_chars = _manual_document_context_excerpt(document.extracted_text, remaining_chars)
+            remaining_chars -= excerpt_chars
+        else:
+            context["warnings"].append(
+                f"{document.original_filename} could not be used as extracted text "
+                f"({document.extraction_status or 'unknown'})."
+            )
+
+        context["documents"].append(
+            {
+                "id": str(document.id),
+                "filename": document.original_filename,
+                "content_type": document.content_type,
+                "file_size_bytes": document.file_size_bytes,
+                "extraction_status": document.extraction_status,
+                "parse_notes": document.parse_notes,
+                "text_size_chars": document.text_size_chars,
+                "text_excerpt": text_excerpt,
+                "text_excerpt_chars": excerpt_chars,
+                "uploaded_at": document.created_at.isoformat() if document.created_at else None,
+            }
+        )
+
+    if remaining_chars <= 0:
+        context["warnings"].append("Manual document context was truncated before being sent to the draft generator.")
     return context
 
 
@@ -810,12 +1946,30 @@ def refresh_startup_update_run_source_context(
     start_date: date,
     end_date: date,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> ContentFactoryRun:
     run_request = dict(run.run_request or {})
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     reconcile_startup_update_run_source_steps(run=run, input_sources=selected_input_sources)
     if selected_input_sources:
         run_request["input_sources"] = list(selected_input_sources)
+    if MANUAL_DOCUMENTS_SOURCE in set(selected_input_sources):
+        document_ids = (
+            _normalize_manual_document_id_list(manual_document_ids)
+            if manual_document_ids is not None
+            else _normalize_manual_document_id_list(run_request.get("manual_document_ids"))
+        )
+        summary = str(
+            manual_summary
+            if manual_summary is not None
+            else run_request.get("manual_summary") or ""
+        ).strip()
+        run_request["manual_document_ids"] = document_ids
+        run_request["manual_summary"] = summary
+    else:
+        run_request.pop("manual_document_ids", None)
+        run_request.pop("manual_summary", None)
     if ExternalServiceProvider.SLACK in set(selected_input_sources):
         run_request["slack_channel_ids"] = [
             selection.channel_id
@@ -824,12 +1978,43 @@ def refresh_startup_update_run_source_context(
                 selected=True,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
+    if ExternalServiceProvider.LINEAR in set(selected_input_sources):
+        run_request["linear_project_ids"] = [
+            selection.linear_project_id
+            for selection in LinearProjectSelection.objects.filter(
+                organization=organization,
+                selected=True,
+            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+        ]
+    if ExternalServiceProvider.NOTION in set(selected_input_sources):
+        binding = (
+            UserStartupBinding.objects.select_related("user")
+            .filter(id=run_request.get("binding_id"), organization=organization)
+            .first()
+            or organization.user_startup_bindings.select_related("user").first()
+        )
+        notion_connection = (
+            latest_external_connection_for_startup(
+                user=binding.user,
+                organization=organization,
+                provider=ExternalServiceProvider.NOTION,
+            )
+            if binding is not None
+            else None
+        )
+        if notion_connection is not None:
+            if notion_connection.organization_id != organization.id:
+                notion_connection.organization = organization
+                notion_connection.save(update_fields=["organization", "updated_at"])
+            run_request["notion_connection_id"] = notion_connection.id
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
         start_date=start_date,
         end_date=end_date,
         source_warnings=source_warnings,
+        manual_document_ids=run_request.get("manual_document_ids"),
+        manual_summary=run_request.get("manual_summary"),
     )
     if ExternalServiceProvider.XERO in set(selected_input_sources or []):
         xero_metrics = publish_xero_metric_observations(
@@ -875,6 +2060,28 @@ def _set_run_meta(run: ContentFactoryRun, meta: dict) -> None:
     payload = dict(_get_run_result_payload(run))
     payload[VALLEY_META_KEY] = dict(meta or {})
     _set_run_result_payload(run, payload)
+
+
+def record_valley_dispatch_result(run: ContentFactoryRun, dispatch_result: ValleyHarnessResult | object) -> None:
+    meta = _get_run_meta(run)
+    meta["last_dispatch_attempt_at"] = timezone.now().isoformat()
+    raw_status_code = getattr(dispatch_result, "status_code", None)
+    status_code = raw_status_code if isinstance(raw_status_code, int) else None
+    if bool(dispatch_result):
+        payload = getattr(dispatch_result, "payload", None)
+        response_payload = payload if isinstance(payload, dict) else {}
+        meta["dispatch_status"] = "queued"
+        meta["last_dispatch_job_id"] = response_payload.get("job_id") or ""
+        meta["last_dispatch_error"] = ""
+        meta["last_dispatch_error_kind"] = ""
+        meta["last_dispatch_status_code"] = status_code
+    else:
+        meta["dispatch_status"] = "failed"
+        meta["last_dispatch_error"] = str(getattr(dispatch_result, "detail", "") or "Valley dispatch failed.")[:300]
+        meta["last_dispatch_error_kind"] = str(getattr(dispatch_result, "failure_kind", "") or "unknown")
+        meta["last_dispatch_status_code"] = status_code
+    _set_run_meta(run, meta)
+    run.save(update_fields=["result", "updated_at"])
 
 
 def get_startup_update_run_cancel_backups(run: ContentFactoryRun) -> dict:
@@ -1208,6 +2415,7 @@ def build_startup_context_snapshot(
         "default_currency": profile.default_currency,
         "notes": profile.notes,
         "stage": profile.stage,
+        "organization_kind": profile.organization_kind,
     }
 
 
@@ -1300,20 +2508,44 @@ def get_open_startup_update_run(
     *,
     organization: Organization,
     google_connection_id: Optional[int] = None,
+    target_month: Optional[date] = None,
+    input_sources: Optional[list[str]] = None,
 ) -> Optional[ContentFactoryRun]:
     runs = _iter_startup_update_runs(
         organization=organization,
         statuses=OPEN_RUN_STATUSES,
     )
+    target = _month_start(target_month) if target_month is not None else None
+
+    def matches_target(run: ContentFactoryRun) -> bool:
+        return target is None or startup_update_run_matches_target_month(run, target)
+
+    def matches_sources(run: ContentFactoryRun) -> bool:
+        return startup_update_run_matches_input_sources(
+            run,
+            input_sources,
+            google_connection_id=google_connection_id,
+        )
+
     if google_connection_id is None:
-        return runs[0] if runs else None
+        for run in runs:
+            if matches_target(run) and matches_sources(run):
+                return run
+        return None
 
     legacy_candidate = None
     for run in runs:
         run_google_connection_id = get_startup_update_run_google_connection_id(run)
         if run_google_connection_id == google_connection_id:
-            return run
-        if run_google_connection_id is None and legacy_candidate is None:
+            if matches_target(run) and matches_sources(run):
+                return run
+            continue
+        if (
+            run_google_connection_id is None
+            and legacy_candidate is None
+            and matches_target(run)
+            and matches_sources(run)
+        ):
             legacy_candidate = run
     return legacy_candidate
 
@@ -1372,30 +2604,47 @@ def create_startup_update_run(
     window_months: int = DEFAULT_BACKFILL_MONTHS,
     input_sources: Optional[list[str]] = None,
     source_warnings: Optional[dict[str, list[str]]] = None,
+    target_month: Optional[Union[str, date, datetime]] = None,
+    manual_document_ids: Optional[list[str]] = None,
+    manual_summary: Optional[str] = None,
 ) -> ContentFactoryRun:
+    now = timezone.now()
+    windows = build_startup_update_target_windows(target_month, reference=now)
+    selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
-    selected_source_set = set(selected_input_sources)
     google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
-    if not gmail_required_for_sources(selected_input_sources):
-        google_connection = None
+    selected_input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
+        selected_input_sources,
+        google_connection,
+    )
+    source_warnings = merge_source_warnings(source_warnings, gmail_scope_warnings)
+    selected_source_set = set(selected_input_sources)
     google_connection_id = google_connection.id if google_connection else None
     step_order = build_startup_update_step_order(selected_input_sources)
 
     existing = get_open_startup_update_run(
         organization=organization,
         google_connection_id=google_connection_id,
+        target_month=selected_target_month,
+        input_sources=selected_input_sources,
     )
     if existing:
         pin_startup_update_run_connection(existing, google_connection_id)
-        now = timezone.now()
-        months = iter_recent_month_starts(3, reference=now)
+        set_startup_update_run_target_month(
+            existing,
+            selected_target_month,
+            reference=now,
+            window_months=window_months,
+        )
         refresh_startup_update_run_source_context(
             run=existing,
             organization=organization,
             input_sources=selected_input_sources,
-            start_date=_previous_month_start(months[0]),
-            end_date=now.date(),
+            start_date=windows["financial_start_date"],
+            end_date=windows["financial_end_date"],
             source_warnings=source_warnings,
+            manual_document_ids=manual_document_ids,
+            manual_summary=manual_summary,
         )
         supersede_conflicting_startup_update_runs(
             organization=organization,
@@ -1404,11 +2653,11 @@ def create_startup_update_run(
         )
         return existing
 
-    now = timezone.now()
-    backfill_start = now - timedelta(days=30 * int(window_months))
-    current_month = _month_start(now)
-    months = iter_recent_month_starts(3, reference=now)
-    financial_start_date = min(backfill_start.date(), _previous_month_start(months[0]))
+    backfill_start = windows["narrative_start"]
+    backfill_end = windows["narrative_end"]
+    current_month = selected_target_month
+    months = [selected_target_month]
+    financial_start_date = windows["financial_start_date"]
     profile = getattr(organization, "startup_profile", None)
     startup_context = (
         build_startup_context_snapshot(organization=organization, profile=profile)
@@ -1428,13 +2677,28 @@ def create_startup_update_run(
         "classification_batch_size": DEFAULT_CLASSIFICATION_BATCH_SIZE,
         "attachment_bytes_limit": DEFAULT_ATTACHMENT_BYTES_LIMIT,
         "max_source_threads": DEFAULT_MAX_SOURCE_THREADS,
+        "target_month": current_month.isoformat(),
         "draft_months": [item.isoformat() for item in months],
         "current_month": current_month.isoformat(),
         "backfill_window_start": backfill_start.isoformat(),
-        "backfill_window_end": now.isoformat(),
+        "backfill_window_end": backfill_end.isoformat(),
         "startup_context": startup_context,
     }
     run_request["input_sources"] = list(selected_input_sources)
+    if MANUAL_DOCUMENTS_SOURCE in selected_source_set:
+        run_request["manual_document_ids"] = _normalize_manual_document_id_list(manual_document_ids)
+        run_request["manual_summary"] = str(manual_summary or "").strip()
+    if ExternalServiceProvider.NOTION in selected_source_set:
+        notion_connection = latest_external_connection_for_startup(
+            user=binding.user,
+            organization=organization,
+            provider=ExternalServiceProvider.NOTION,
+        )
+        if notion_connection is not None:
+            if notion_connection.organization_id != organization.id:
+                notion_connection.organization = organization
+                notion_connection.save(update_fields=["organization", "updated_at"])
+            run_request["notion_connection_id"] = notion_connection.id
     selected_slack_channels = []
     if ExternalServiceProvider.SLACK in selected_source_set:
         selected_slack_channels = [
@@ -1445,16 +2709,30 @@ def create_startup_update_run(
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
         run_request["slack_channel_ids"] = selected_slack_channels
+    selected_linear_projects = []
+    if ExternalServiceProvider.LINEAR in selected_source_set:
+        selected_linear_projects = [
+            selection.linear_project_id
+            for selection in LinearProjectSelection.objects.filter(
+                organization=organization,
+                selected=True,
+            ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
+        ]
+        run_request["linear_project_ids"] = selected_linear_projects
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
         start_date=financial_start_date,
-        end_date=now.date(),
+        end_date=windows["financial_end_date"],
         source_warnings=source_warnings,
+        manual_document_ids=run_request.get("manual_document_ids"),
+        manual_summary=run_request.get("manual_summary"),
     )
     if external_context:
         if ExternalServiceProvider.SLACK in external_context:
             external_context[ExternalServiceProvider.SLACK]["selected_channel_ids"] = selected_slack_channels
+        if ExternalServiceProvider.LINEAR in external_context:
+            external_context[ExternalServiceProvider.LINEAR]["selected_project_ids"] = selected_linear_projects
         run_request["external_context"] = external_context
 
     run = ContentFactoryRun.objects.create(
@@ -1478,7 +2756,7 @@ def create_startup_update_run(
             google_connection=google_connection,
             defaults={
                 "backfill_window_start": backfill_start,
-                "backfill_window_end": now,
+                "backfill_window_end": backfill_end,
             },
         )
     if ExternalServiceProvider.XERO in selected_source_set:
@@ -1487,7 +2765,7 @@ def create_startup_update_run(
             organization=organization,
             input_sources=selected_input_sources,
             start_date=financial_start_date,
-            end_date=now.date(),
+            end_date=windows["financial_end_date"],
             source_warnings=source_warnings,
         )
     return run
@@ -1804,7 +3082,10 @@ def maybe_start_startup_update_for_google_connection(
         },
     )
     if existing_run is None:
-        transaction.on_commit(lambda: notify_valley_run_created(run.run_id))
+        def _dispatch_to_valley() -> None:
+            record_valley_dispatch_result(run, notify_valley_run_created(run.run_id))
+
+        transaction.on_commit(_dispatch_to_valley)
     return run
 
 
@@ -1919,6 +3200,477 @@ def apply_profile_scoring(
         artifact.save(update_fields=update_fields)
 
     return artifact.heuristic_score, artifact.heuristic_reasons, artifact.relevance_label
+
+
+def _slack_thread_haystack(thread: SlackThreadArtifact) -> str:
+    participant_summary = thread.participant_summary or {}
+    participants = participant_summary.get("participants") if isinstance(participant_summary, dict) else []
+    payload_text = " ".join(
+        str(item.get("cleaned_text") or item.get("text") or "")
+        for item in (thread.message_payloads or [])
+        if isinstance(item, dict)
+    )
+    return " ".join(
+        [
+            thread.channel_name or "",
+            thread.channel_id or "",
+            thread.cleaned_text or "",
+            payload_text,
+            " ".join(str(item or "") for item in (participants or [])),
+        ]
+    ).lower()
+
+
+def _slack_message_payload_text(payload: dict[str, Any]) -> str:
+    return str(payload.get("cleaned_text") or payload.get("text") or "").strip()
+
+
+def _is_short_slack_acknowledgement(text: str) -> bool:
+    normalized = re.sub(r"[\W_]+", " ", str(text or "").lower()).strip()
+    if not normalized:
+        return True
+    if normalized in {item.replace("+", "").strip() for item in SLACK_LOW_SIGNAL_PATTERNS}:
+        return True
+    words = normalized.split()
+    return len(words) <= 3 and normalized in {"ok", "okay", "yes", "yep", "done", "nice", "cool", "thanks", "thank you"}
+
+
+def score_slack_thread_for_profile(profile: StartupProfile, thread: SlackThreadArtifact) -> tuple[int, list[str], str, bool]:
+    haystack = _slack_thread_haystack(thread)
+    profile_signals = _profile_signal_lists(profile)
+    allowlist_terms = (
+        profile_signals["company_aliases"]
+        + profile_signals["positive_keywords"]
+        + profile_signals["founder_names"]
+        + profile_signals["team_names"]
+        + profile_signals["investor_names"]
+        + profile_signals["customer_names"]
+        + profile_signals["prospect_names"]
+        + profile_signals["competitor_names"]
+        + HIGH_SIGNAL_TERMS
+    )
+    allowlist_reasons = []
+    if _match_any(allowlist_terms, haystack):
+        allowlist_reasons.append("allowlist_profile_or_high_signal_term")
+
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    texts = [_slack_message_payload_text(item) for item in payloads]
+    non_empty_texts = [text for text in texts if text]
+    hard_reasons = []
+    if not str(thread.cleaned_text or "").strip() and not non_empty_texts:
+        hard_reasons.append("hard_filtered_empty_thread")
+    if non_empty_texts and all(_is_short_slack_acknowledgement(text) for text in non_empty_texts):
+        hard_reasons.append("hard_filtered_acknowledgement_only")
+    if any(pattern in haystack for pattern in SLACK_HARD_IRRELEVANT_PATTERNS):
+        hard_reasons.append("hard_filtered_slack_system_or_routine_automation")
+
+    author_names = [
+        str(item.get("author_name") or item.get("author_id") or "").lower()
+        for item in payloads
+    ]
+    automation_authors = [
+        name for name in author_names
+        if any(pattern in name for pattern in SLACK_AUTOMATION_AUTHOR_PATTERNS)
+    ]
+    if automation_authors and len(automation_authors) >= max(len(author_names), 1):
+        hard_reasons.append("hard_filtered_automation_author")
+
+    if hard_reasons and not allowlist_reasons:
+        return 0, _uniq(hard_reasons), GmailRelevanceLabel.IRRELEVANT, True
+
+    score = 45
+    reasons = []
+    if hard_reasons and allowlist_reasons:
+        reasons.append("allowlist_override_hard_filter")
+    if any(pattern in haystack for pattern in SLACK_LOW_SIGNAL_PATTERNS):
+        score -= 15
+        reasons.append("matched_low_signal_slack_pattern")
+    if _match_any(profile_signals["company_aliases"] + profile_signals["positive_keywords"], haystack):
+        score += 15
+        reasons.append("matched_company_alias_or_positive_keyword")
+    if _match_any(profile_signals["founder_names"] + profile_signals["team_names"], haystack):
+        score += 10
+        reasons.append("matched_founder_or_team_name")
+    if _match_any(profile_signals["investor_names"], haystack):
+        score += 20
+        reasons.append("matched_investor_name")
+    if _match_any(profile_signals["customer_names"] + profile_signals["prospect_names"], haystack):
+        score += 20
+        reasons.append("matched_customer_or_prospect_name")
+    if _match_any(profile_signals["competitor_names"], haystack):
+        score += 10
+        reasons.append("matched_competitor_name")
+    if _match_any(HIGH_SIGNAL_TERMS, haystack):
+        score += 20
+        reasons.append("matched_high_signal_term")
+    if _match_any(profile_signals["negative_keywords"], haystack):
+        score -= 20
+        reasons.append("matched_negative_keyword")
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        label = GmailRelevanceLabel.RELEVANT
+    elif score <= 20:
+        label = GmailRelevanceLabel.IRRELEVANT
+    else:
+        label = GmailRelevanceLabel.AMBIGUOUS
+    return score, _uniq([*reasons, *allowlist_reasons]), label, False
+
+
+def apply_slack_profile_scoring(
+    profile: StartupProfile,
+    thread: SlackThreadArtifact,
+    *,
+    persist: bool = True,
+) -> tuple[int, list[str], str, bool]:
+    score, reasons, label, hard_filtered = score_slack_thread_for_profile(profile, thread)
+    thread.heuristic_score = score
+    thread.heuristic_reasons = reasons
+    if hard_filtered and thread.classified_at is None:
+        thread.relevance_label = GmailRelevanceLabel.IRRELEVANT
+        thread.relevance_score = 0.0
+        thread.relevance_reason = ", ".join(reasons)
+        thread.needs_extraction = False
+        thread.classified_at = timezone.now()
+    if persist:
+        update_fields = [
+            "heuristic_score",
+            "heuristic_reasons",
+            "updated_at",
+        ]
+        if hard_filtered:
+            update_fields.extend([
+                "relevance_label",
+                "relevance_score",
+                "relevance_reason",
+                "needs_extraction",
+                "classified_at",
+            ])
+        thread.save(update_fields=[*dict.fromkeys(update_fields)])
+    return thread.heuristic_score, thread.heuristic_reasons, thread.relevance_label, hard_filtered
+
+
+def _compact_text(value: str, *, max_chars: int) -> tuple[str, bool]:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    quote_markers = [
+        "\nOn ",
+        "\nFrom:",
+        "\nSent:",
+        "\n-----Original Message-----",
+    ]
+    cut_at = len(text)
+    for marker in quote_markers:
+        index = text.find(marker)
+        if index > 0:
+            cut_at = min(cut_at, index)
+    lines = []
+    for line in text[:cut_at].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(">"):
+            continue
+        if stripped.lower() in {"unsubscribe", "view in browser"}:
+            continue
+        lines.append(stripped)
+    compacted = "\n".join(lines).strip()
+    truncated = False
+    if len(compacted) > max_chars:
+        compacted = compacted[:max_chars].rstrip()
+        truncated = True
+    return compacted, truncated or cut_at < len(text)
+
+
+def _payload_is_high_signal(payload: dict[str, Any], profile: StartupProfile) -> bool:
+    haystack = " ".join(
+        [
+            str(payload.get("subject") or ""),
+            str(payload.get("from_address") or ""),
+            str(payload.get("author_name") or ""),
+            _slack_message_payload_text(payload),
+        ]
+    ).lower()
+    profile_signals = _profile_signal_lists(profile)
+    terms = (
+        profile_signals["company_aliases"]
+        + profile_signals["positive_keywords"]
+        + profile_signals["founder_names"]
+        + profile_signals["team_names"]
+        + profile_signals["investor_names"]
+        + profile_signals["customer_names"]
+        + profile_signals["prospect_names"]
+        + HIGH_SIGNAL_TERMS
+    )
+    return _match_any(terms, haystack)
+
+
+def compact_gmail_thread_bundle(
+    thread: GmailThreadArtifact,
+    *,
+    profile: StartupProfile,
+    attachments: list[Any],
+) -> dict[str, Any]:
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    important_ids = {
+        str(item.get("message_id") or "")
+        for item in payloads
+        if _payload_is_high_signal(item, profile)
+    }
+    if not important_ids and payloads:
+        important_ids.add(str(payloads[-1].get("message_id") or ""))
+
+    kept_payloads = []
+    omitted_count = 0
+    used_chars = 0
+    for index, payload in enumerate(payloads):
+        message_id = str(payload.get("message_id") or "")
+        keep = (
+            message_id in important_ids
+            or index == 0
+            or index >= len(payloads) - 3
+            or len(kept_payloads) < 4
+        )
+        if not keep:
+            omitted_count += 1
+            continue
+        compacted_text, truncated = _compact_text(
+            str(payload.get("cleaned_text") or ""),
+            max_chars=2500,
+        )
+        if used_chars + len(compacted_text) > GMAIL_COMPACT_MAX_CHARS and kept_payloads:
+            omitted_count += 1
+            continue
+        compacted_payload = {**payload, "cleaned_text": compacted_text}
+        if truncated:
+            compacted_payload["compression_note"] = "quoted_or_long_text_trimmed"
+        kept_payloads.append(compacted_payload)
+        used_chars += len(compacted_text)
+        if len(kept_payloads) >= GMAIL_COMPACT_MAX_MESSAGES:
+            omitted_count += max(len(payloads) - index - 1, 0)
+            break
+
+    cleaned_text = "\n\n".join(
+        str(item.get("cleaned_text") or "").strip()
+        for item in kept_payloads
+        if str(item.get("cleaned_text") or "").strip()
+    )
+    compression_notes = []
+    if omitted_count:
+        compression_notes.append(f"omitted_{omitted_count}_low_signal_or_over_budget_messages")
+    return {
+        "gmail_thread_id": thread.gmail_thread_id,
+        "source_message_ids": thread.source_message_ids or [],
+        "source_message_count": thread.source_message_count,
+        "cleaned_text": cleaned_text or thread.cleaned_text[:GMAIL_COMPACT_MAX_CHARS],
+        "participant_summary": {
+            **(thread.participant_summary or {}),
+            "compression": {
+                "original_message_count": len(payloads),
+                "kept_message_count": len(kept_payloads),
+                "omitted_message_count": omitted_count,
+            },
+        },
+        "message_payloads": kept_payloads,
+        "attachments": attachments,
+        "omitted_message_count": omitted_count,
+        "compression_notes": compression_notes,
+    }
+
+
+def compact_slack_thread_bundle(thread: SlackThreadArtifact) -> dict[str, Any]:
+    payloads = [item for item in (thread.message_payloads or []) if isinstance(item, dict)]
+    hint_ids = set()
+    extraction_hints = thread.extraction_hints or {}
+    if isinstance(extraction_hints, dict):
+        hint_ids = {str(item or "") for item in extraction_hints.get("important_message_ids") or []}
+
+    kept_payloads = []
+    omitted_count = 0
+    used_chars = 0
+    for index, payload in enumerate(payloads):
+        message_id = str(payload.get("message_id") or "")
+        text = _slack_message_payload_text(payload)
+        high_signal = any(term in text.lower() for term in HIGH_SIGNAL_TERMS)
+        keep = (
+            message_id in hint_ids
+            or high_signal
+            or index == 0
+            or index >= len(payloads) - 5
+            or len(kept_payloads) < 6
+        )
+        if not keep:
+            omitted_count += 1
+            continue
+        compacted_text, truncated = _compact_text(text, max_chars=1000)
+        if used_chars + len(compacted_text) > SLACK_COMPACT_MAX_CHARS and kept_payloads:
+            omitted_count += 1
+            continue
+        compacted_payload = {**payload, "cleaned_text": compacted_text}
+        if truncated:
+            compacted_payload["compression_note"] = "long_text_trimmed"
+        kept_payloads.append(compacted_payload)
+        used_chars += len(compacted_text)
+        if len(kept_payloads) >= SLACK_COMPACT_MAX_MESSAGES:
+            omitted_count += max(len(payloads) - index - 1, 0)
+            break
+
+    lines = []
+    for item in kept_payloads:
+        posted = item.get("posted_at") or item.get("message_ts") or ""
+        author = item.get("author_name") or item.get("author_id") or "Slack user"
+        text = item.get("cleaned_text") or ""
+        if text:
+            lines.append(f"[{posted}] {author}: {text}")
+
+    compression_notes = []
+    if omitted_count:
+        compression_notes.append(f"omitted_{omitted_count}_low_signal_or_over_budget_messages")
+    return {
+        "slack_thread_id": f"slack:{thread.channel_id}:{thread.thread_ts}",
+        "channel_id": thread.channel_id,
+        "channel_name": thread.channel_name,
+        "thread_ts": thread.thread_ts,
+        "source_message_ids": thread.source_message_ids or [],
+        "source_message_count": thread.source_message_count,
+        "cleaned_text": "\n".join(lines) or thread.cleaned_text[:SLACK_COMPACT_MAX_CHARS],
+        "participant_summary": {
+            **(thread.participant_summary or {}),
+            "compression": {
+                "original_message_count": len(payloads),
+                "kept_message_count": len(kept_payloads),
+                "omitted_message_count": omitted_count,
+            },
+        },
+        "message_payloads": kept_payloads,
+        "heuristic_score": thread.heuristic_score,
+        "heuristic_reasons": thread.heuristic_reasons or [],
+        "relevance_score": thread.relevance_score,
+        "relevance_reason": thread.relevance_reason,
+        "extraction_hints": extraction_hints if isinstance(extraction_hints, dict) else {},
+        "omitted_message_count": omitted_count,
+        "compression_notes": compression_notes,
+    }
+
+
+def _linear_project_public_id(project: LinearProjectArtifact) -> str:
+    return f"linear:project:{project.linear_project_id}"
+
+
+def _linear_issue_public_id(issue: LinearIssueArtifact) -> str:
+    return f"linear:issue:{issue.identifier or issue.linear_issue_id}"
+
+
+def _linear_update_public_id(update: LinearProjectUpdateArtifact) -> str:
+    return f"linear:update:{update.linear_project_update_id}"
+
+
+def compact_linear_project_bundle(project: LinearProjectArtifact) -> dict[str, Any]:
+    extraction_hints = project.extraction_hints if isinstance(project.extraction_hints, dict) else {}
+    important_issue_ids = {str(item or "") for item in extraction_hints.get("important_issue_ids") or []}
+    important_update_ids = {str(item or "") for item in extraction_hints.get("important_update_ids") or []}
+
+    issue_queryset = project.issues.order_by("-updated_at_linear", "-id")
+    update_queryset = project.project_updates.order_by("-updated_at_linear", "-id")
+    issues = []
+    omitted_issue_count = 0
+    for index, issue in enumerate(issue_queryset):
+        public_id = _linear_issue_public_id(issue)
+        high_signal = any(term in " ".join([issue.title or "", issue.description or ""]).lower() for term in HIGH_SIGNAL_TERMS)
+        keep = (
+            public_id in important_issue_ids
+            or issue.identifier in important_issue_ids
+            or high_signal
+            or index < LINEAR_COMPACT_MAX_ISSUES
+        )
+        if not keep:
+            omitted_issue_count += 1
+            continue
+        description, truncated = _compact_text(issue.description or "", max_chars=1000)
+        issues.append(
+            {
+                "issue_id": public_id,
+                "identifier": issue.identifier,
+                "title": issue.title,
+                "description": description,
+                "state_name": issue.state_name,
+                "state_type": issue.state_type,
+                "priority": issue.priority,
+                "priority_label": issue.priority_label,
+                "assignee_name": issue.assignee_name,
+                "labels": issue.label_names or [],
+                "due_date": issue.due_date.isoformat() if issue.due_date else None,
+                "updated_at": issue.updated_at_linear.isoformat() if issue.updated_at_linear else None,
+                "url": issue.url,
+                "compression_note": "long_description_trimmed" if truncated else "",
+            }
+        )
+        if len(issues) >= LINEAR_COMPACT_MAX_ISSUES:
+            omitted_issue_count += max(issue_queryset.count() - index - 1, 0)
+            break
+
+    updates = []
+    omitted_update_count = 0
+    used_chars = 0
+    for index, update in enumerate(update_queryset):
+        public_id = _linear_update_public_id(update)
+        body, truncated = _compact_text(update.body or "", max_chars=1800)
+        keep = public_id in important_update_ids or index < LINEAR_COMPACT_MAX_UPDATES
+        if not keep:
+            omitted_update_count += 1
+            continue
+        if used_chars + len(body) > LINEAR_COMPACT_MAX_CHARS and updates:
+            omitted_update_count += 1
+            continue
+        updates.append(
+            {
+                "update_id": public_id,
+                "body": body,
+                "health": update.health,
+                "author_name": update.author_name,
+                "updated_at": update.updated_at_linear.isoformat() if update.updated_at_linear else None,
+                "url": update.url,
+                "compression_note": "long_body_trimmed" if truncated else "",
+            }
+        )
+        used_chars += len(body)
+
+    source_record_ids = [_linear_project_public_id(project)]
+    source_record_ids.extend(item["update_id"] for item in updates)
+    source_record_ids.extend(item["issue_id"] for item in issues)
+    compression_notes = []
+    if omitted_issue_count:
+        compression_notes.append(f"omitted_{omitted_issue_count}_low_signal_or_over_budget_issues")
+    if omitted_update_count:
+        compression_notes.append(f"omitted_{omitted_update_count}_over_budget_updates")
+
+    return {
+        "linear_project_id": _linear_project_public_id(project),
+        "project_id": project.linear_project_id,
+        "project_name": project.name,
+        "description": project.description[:1500],
+        "status_name": project.status_name,
+        "status_type": project.status_type,
+        "health": project.health,
+        "progress": project.progress,
+        "scope": project.scope,
+        "priority": project.priority,
+        "lead_name": project.lead_name,
+        "team_names": project.team_names or [],
+        "start_date": project.start_date.isoformat() if project.start_date else None,
+        "target_date": project.target_date.isoformat() if project.target_date else None,
+        "url": project.url,
+        "source_record_ids": source_record_ids,
+        "issues": issues,
+        "updates": updates,
+        "issue_count": project.issues.count(),
+        "update_count": project.project_updates.count(),
+        "heuristic_score": project.heuristic_score,
+        "heuristic_reasons": project.heuristic_reasons or [],
+        "relevance_score": project.relevance_score,
+        "relevance_reason": project.relevance_reason,
+        "extraction_hints": extraction_hints,
+        "omitted_issue_count": omitted_issue_count,
+        "omitted_update_count": omitted_update_count,
+        "compression_notes": compression_notes,
+    }
 
 
 def build_timeline_payload(*, organization: Organization) -> dict:
@@ -2109,6 +3861,76 @@ def _unique_id_list(*values: Optional[list[int]]) -> list[int]:
             seen.add(normalized)
             merged.append(normalized)
     return merged
+
+
+def _draft_item_from_xero_metric(metric: StartupMetricObservation) -> dict[str, Any]:
+    value_number = str(metric.value_number) if metric.value_number is not None else None
+    return {
+        "metric_key": metric.metric_key,
+        "key": metric.metric_key,
+        "label": XERO_DRAFT_METRIC_LABELS.get(metric.metric_key) or metric.metric_name,
+        "value": metric.value_text,
+        "value_text": metric.value_text,
+        "value_number": value_number,
+        "unit": metric.unit,
+        "source_provider": ExternalServiceProvider.XERO,
+        "source_metric_id": metric.id,
+        "source_record_ids": metric.source_record_ids or [],
+        "source_metadata": {
+            **(metric.source_metadata or {}),
+            "draft_merge_basis": "xero_backed_metric_observation",
+        },
+        "summary": metric.summary,
+    }
+
+
+def merge_xero_metrics_into_structured_memo(
+    *,
+    organization: Organization,
+    month: date,
+    structured_memo: dict,
+    evidence_metric_ids: Optional[list[int]] = None,
+) -> tuple[dict, list[int]]:
+    month_start = _month_start(month)
+    memo = dict(structured_memo or {})
+    metrics = list(
+        StartupMetricObservation.objects.filter(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            period_month=month_start,
+            metric_key__in=XERO_DRAFT_METRIC_KEYS,
+        )
+        .order_by("metric_key", "unit", "-observed_at", "-updated_at", "-id")
+    )
+    if not metrics:
+        return memo, evidence_metric_ids or []
+
+    by_key: dict[str, list[StartupMetricObservation]] = {}
+    for metric in metrics:
+        by_key.setdefault(metric.metric_key, []).append(metric)
+
+    xero_items: list[dict[str, Any]] = []
+    merged_metric_ids: list[int] = []
+    source_notes = list(memo.get("source_notes") or []) if isinstance(memo.get("source_notes"), list) else []
+    for key in XERO_DRAFT_METRIC_KEYS:
+        key_metrics = by_key.get(key) or []
+        if not key_metrics:
+            continue
+        units = {metric.unit for metric in key_metrics}
+        if len(key_metrics) > 1 and len(units) > 1:
+            note = f"Xero provided multiple currencies for {XERO_DRAFT_METRIC_LABELS.get(key, key)}; review source records before using a combined value."
+            if note not in source_notes:
+                source_notes.append(note)
+            continue
+        metric = key_metrics[0]
+        xero_items.append(_draft_item_from_xero_metric(metric))
+        merged_metric_ids.append(metric.id)
+
+    if xero_items:
+        memo["kpi_snapshot"] = _merge_kpi_snapshot(memo.get("kpi_snapshot"), xero_items)
+    if source_notes:
+        memo["source_notes"] = source_notes
+    return memo, _unique_id_list(evidence_metric_ids, merged_metric_ids)
 
 
 def _merge_groundedness_notes(existing_notes: str, incoming_notes: str, stats: dict[str, int]) -> str:

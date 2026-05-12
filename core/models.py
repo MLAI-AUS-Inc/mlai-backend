@@ -4,11 +4,11 @@ from django.utils import timezone
 
 
 class CustomUserManager(BaseUserManager):
-    def create_user(self, email, role='participant', password=None, **extra_fields):
+    def create_user(self, email, role=None, password=None, **extra_fields):
         if not email:
             raise ValueError('Email is required.')
         email = self.normalize_email(email)
-        user = self.model(email=email, role=role, **extra_fields)
+        user = self.model(email=email, **extra_fields)
         if password:
             user.set_password(password)
         else:
@@ -17,17 +17,12 @@ class CustomUserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
-    def create_superuser(self, email, role='admin', password=None, **extra_fields):
+    def create_superuser(self, email, role=None, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         return self.create_user(email, role, password, **extra_fields)
 
 class User(AbstractBaseUser, PermissionsMixin):
-    ROLE_CHOICES = (
-        ('admin', 'Admin'),
-        ('participant', 'Participant'),
-        ('professional', 'Professional'), # Added for flexibility
-    )
     email = models.EmailField(unique=True)
     slack_id = models.CharField(max_length=50, blank=True, null=True, unique=True)
     first_name = models.CharField(max_length=150, blank=True)
@@ -47,17 +42,15 @@ class User(AbstractBaseUser, PermissionsMixin):
             self.last_name = ''
     phone = models.CharField(max_length=20, blank=True, null=True)
     about = models.TextField(blank=True, null=True)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='participant')
     is_superuser = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
-    has_team = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)  # Required for admin interface
     date_joined = models.DateTimeField(default=timezone.now)
     avatar_url = models.URLField(blank=True, null=True)
     personas = models.JSONField(default=list, blank=True)
 
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['role']
+    REQUIRED_FIELDS = []
 
     objects = CustomUserManager()
 

@@ -19,10 +19,17 @@ from content_factory.models import (
     ResearchedKeyword,
     ScheduledDiscoveryDispatch,
     ScheduledDiscoveryDispatchState,
+    TopicFeedback,
     WrittenArticle,
 )
 from organizations.models import Organization
-from workflow_runs.models import ContentFactoryRun
+from workflow_runs.models import (
+    ContentFactoryApprovalState,
+    ContentFactoryRun,
+    ContentFactoryRunStatus,
+    ContentFactoryRunStep,
+    ContentFactoryStepStatus,
+)
 from integrations.models import UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
@@ -890,6 +897,200 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(skip_value["scan_run_id"], "scan-run-awaiting-approval")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_ignores_cancelled_scan_run(self, mock_send_dm):
+        ContentFactoryJob.objects.create(
+            job_id="scan-run-cancelled",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="cancelled",
+            request_meta={"type": "scan", "cancelled": True},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-cancelled",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.CANCELLED,
+            current_step="cancelled",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            result={"status": "cancelled", "cancelled": True},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-cancelled",
+                "run_id": "scan-run-cancelled",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "slack_user_id": "U123",
+                "requested_action": "scaffold_publish_route",
+                "scaffold_required": True,
+                "scaffold_status": "approval_required",
+                "approve_url": "/api/runs/scan-run-cancelled/approve",
+                "deny_url": "/api/runs/scan-run-cancelled/deny",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "ignored")
+        job = ContentFactoryJob.objects.get(job_id="scan-run-cancelled")
+        self.assertEqual(job.status, "cancelled")
+        run = ContentFactoryRun.objects.get(run_id="scan-run-cancelled")
+        self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(run.current_step, "cancelled")
+        mock_send_dm.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_persists_article_surface_metadata_to_run(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-surface-1",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            step_order=["load_repo_context", "scan_structure"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-surface-1",
+                "run_id": "scan-run-surface-1",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "slack_user_id": "U123",
+                "requested_action": "scaffold_publish_route",
+                "scaffold_required": True,
+                "scaffold_status": "approval_required",
+                "article_surface_hint": {"source": "user_input", "route_path": "/articles"},
+                "article_surface_hint_status": "matched",
+                "matched_article_surface": {"path_or_locator": "app/routes/articles.index.tsx"},
+                "detected_candidates": [
+                    {
+                        "candidate_group": "listing_surface_candidates",
+                        "path_or_locator": "app/routes/articles.index.tsx",
+                        "route_template": "/articles",
+                        "confidence": 0.92,
+                    }
+                ],
+                "article_system_readiness": {
+                    "status": "upgrade_required",
+                    "missing_support_files": ["app/articles/resources.ts"],
+                    "required_support_files": ["app/articles/registry.ts", "app/articles/resources.ts"],
+                },
+                "article_system_setup": {
+                    "status": "upgrade_required",
+                    "missing_support_files": ["app/articles/resources.ts"],
+                },
+                "scaffold_plan": {
+                    "detected_candidates": [
+                        {
+                            "candidate_group": "listing_surface_candidates",
+                            "path_or_locator": "app/routes/articles.index.tsx",
+                            "route_template": "/articles",
+                        }
+                    ]
+                },
+                "approve_url": "/api/runs/scan-run-surface-1/approve",
+                "deny_url": "/api/runs/scan-run-surface-1/deny",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="scan-run-surface-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(run.approval_state, "approval_required")
+        self.assertEqual(run.result["article_surface_hint_status"], "matched")
+        self.assertEqual(run.result["article_surface_hint"]["route_path"], "/articles")
+        self.assertEqual(run.result["detected_candidates"][0]["route_template"], "/articles")
+        self.assertEqual(run.result["article_system_readiness"]["missing_support_files"], ["app/articles/resources.ts"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_persists_auto_setup_preview_queue(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-setup-queued",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            step_order=["load_repo_context", "scan_structure"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-setup-queued",
+                "run_id": "scan-run-setup-queued",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scaffold_required": True,
+                "scaffold_status": "queued",
+                "scaffold_queued": True,
+                "scaffold_job_id": "setup-run-1",
+                "setup_run_id": "setup-run-1",
+                "article_surface_hint": {"source": "user_input", "route_path": "/articles"},
+                "article_surface_hint_status": "matched",
+                "article_system_setup": {"status": "queued", "setup_run_id": "setup-run-1"},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="scan-run-setup-queued")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.result["setup_run_id"], "setup-run-1")
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-1")
+        self.assertEqual(setup_run.workflow, "article_system_setup")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_callback_creates_review_run(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-parent",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_ready",
+                "job_id": "setup-run-2",
+                "run_id": "setup-run-2",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-parent",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
+                "preview_url": "https://preview.example/articles",
+                "live_preview": {"available": True, "previewUrl": "https://preview.example/articles"},
+                "live_preview_url": "/api/runs/setup-run-2/live-preview",
+                "article_system_setup": {"status": "preview_ready", "setup_run_id": "setup-run-2"},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-2")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.result["livePreview"]["previewUrl"], "https://preview.example/articles")
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-parent")
+        self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
         config = OrganizationContentConfig.objects.create(
@@ -1140,7 +1341,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             status="generating",
             client_request_id="publish-target-request-1",
             billing_source_job_id="publish-target-run-1",
-            billing_amount=6,
+            billing_amount=4,
             billing_status="charged",
             request_meta={
                 "domain": "woofya.com.au",
@@ -1171,7 +1372,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("refunded automatically", message)
 
         user.points_account.refresh_from_db()
-        self.assertEqual(user.points_account.balance, 20)
+        self.assertEqual(user.points_account.balance, 18)
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
 
@@ -1235,7 +1436,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_user_id="U123",
             status="generating",
             billing_status="charged",
-            billing_amount=6,
+            billing_amount=4,
             request_meta={"domain": "mlai.au"},
         )
 
@@ -1265,9 +1466,87 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(job.billing_status, "charged")
         self.assertEqual(job.request_meta.get("blocked_step"), "verify_build")
         self.assertEqual(job.request_meta.get("blocked_preferred_queue"), "build-verifier")
-        mock_upsert_live_progress_card.assert_called_once()
+        run = ContentFactoryRun.objects.get(run_id="blocked-run-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.current_step, "verify_build")
+        self.assertIn("Dedicated verifier worker", run.error)
+        step = ContentFactoryRunStep.objects.get(run=run, step_key="verify_build")
+        self.assertEqual(step.status, ContentFactoryStepStatus.BLOCKED)
         mock_send_dm.assert_not_called()
         mock_send_message.assert_not_called()
+
+    @patch('integrations.services.article_generation.upsert_live_progress_card')
+    @patch('integrations.services.slack.SlackService.send_message')
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_updates_durable_run_state(
+        self,
+        mock_send_dm,
+        mock_send_message,
+        mock_upsert_live_progress_card,
+    ):
+        ContentFactoryJob.objects.create(
+            job_id="failed-run-1",
+            domain="mlai.au",
+            status="generating",
+            request_meta={"domain": "mlai.au"},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="failed-run-1",
+            workflow="direct_generate",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="synthesize_repository_contract",
+            step_order=["fetch_org_config", "synthesize_repository_contract"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "failed-run-1",
+                "run_id": "failed-run-1",
+                "workflow": "direct_generate",
+                "domain": "mlai.au",
+                "failed_step": "synthesize_repository_contract",
+                "error_code": "INTERNAL_ERROR",
+                "error": "Task failed with unhandled exception: TimeLimitExceeded(5600)",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="failed-run-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+        self.assertEqual(run.current_step, "synthesize_repository_contract")
+        self.assertIn("TimeLimitExceeded", run.error)
+        step = ContentFactoryRunStep.objects.get(run=run, step_key="synthesize_repository_contract")
+        self.assertEqual(step.status, ContentFactoryStepStatus.FAILED)
+        mock_send_dm.assert_not_called()
+        mock_send_message.assert_not_called()
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_catalog_missing_components_points_to_repo_scan(self, mock_send_dm):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "catalog-missing-run-1",
+                "run_id": "catalog-missing-run-1",
+                "workflow": "article_revision",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "error_code": "CATALOG_MISSING_REQUIRED_COMPONENTS",
+                "error": "Missing required mlai.au featured components in catalog: ArticleDisclaimer",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args.args[1]
+        self.assertIn("article component catalog refreshed", message)
+        self.assertIn("Connect repo & article system", message)
+        self.assertNotIn("contact support", message)
 
     @patch('integrations.services.article_generation.upsert_live_progress_card')
     @patch('integrations.services.slack.SlackService.send_message')
@@ -2906,6 +3185,24 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(article.article_url, "https://mlai.au/articles/how-to-find-a-technical-cofounder")
         self.assertEqual(article.pr_url, "https://github.com/example/repo/pull/12")
 
+    def test_seo_written_article_list_returns_written_article_records(self):
+        org = Organization.objects.create(name="MLAI", domain="mlai.au")
+        WrittenArticle.objects.create(
+            organization=org,
+            title="What Is Artificial Intelligence With Example",
+            slug="what-is-artificial-intelligence-with-example",
+            category="featured",
+            primary_keyword="what is artificial intelligence with example",
+            article_url="https://mlai.au/articles/what-is-artificial-intelligence-with-example",
+        )
+
+        response = self.client.get("/api/seo/articles/?domain=mlai.au")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["articles"][0]["primary_keyword"], "what is artificial intelligence with example")
+        self.assertEqual(response.data["articles"][0]["title"], "What Is Artificial Intelligence With Example")
+
     def test_content_preview_route_renders_signed_article_html(self):
         self._create_content_factory_run("run-preview-1")
         signature = build_content_factory_preview_signature("run-preview-1")
@@ -3015,6 +3312,33 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         )
         self.assertEqual(mock_send_message.call_args_list[1][0][0], "C123")
         self.assertEqual(mock_send_message.call_args_list[1][1]["thread_ts"], "123.456")
+
+    def test_article_review_ready_callback_is_processed(self):
+        ContentFactoryJob.objects.create(
+            job_id="job-review-ready",
+            domain="mlai.au",
+            slack_user_id="U123",
+            status="generating",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_review_ready",
+                "job_id": "job-review-ready",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "live_preview_url": "/api/runs/job-review-ready/live-preview",
+                "component_manifest_path": "steps/render_article/artifacts/article_component_manifest.json",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="job-review-ready")
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.request_meta["publish_stage"], "article_review_ready")
+        self.assertEqual(job.request_meta["live_preview_url"], "/api/runs/job-review-ready/live-preview")
 
 
 class ArticleGenerationStatusTests(TestCase):
@@ -3367,6 +3691,51 @@ class SEOResearchMemoryTests(TestCase):
         self.assertEqual(self.keyword_b.times_shown, 1)
         self.assertEqual(self.keyword_b.times_rejected, 1)
         self.assertIsNotNone(self.keyword_b.cooldown_until)
+
+    def test_topic_feedback_persists_lists_and_restores_declines(self):
+        payload = {
+            "domain": self.organization.domain,
+            "session_id": "discovery-selection-1",
+            "keyword": "how to calculate equity in a house",
+            "feedback_type": "declined",
+            "reason_code": "not_appropriate",
+            "reason_text": None,
+            "decline_scope": "similar",
+            "source": "homepage_topic_card",
+        }
+
+        response = self.client.post("/api/seo/topic-feedback/", payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["keyword"], "how to calculate equity in a house")
+        self.assertTrue(response.data["active"])
+        feedback = TopicFeedback.objects.get(organization=self.organization)
+        self.assertEqual(feedback.keyword_normalized, "how to calculate equity in a house")
+
+        duplicate = self.client.post(
+            "/api/seo/topic-feedback/",
+            {**payload, "keyword": "How To Calculate Equity In A House", "reason_code": "off_topic"},
+            format='json',
+        )
+        self.assertEqual(duplicate.status_code, status.HTTP_200_OK)
+        self.assertEqual(TopicFeedback.objects.filter(organization=self.organization, restored_at__isnull=True).count(), 1)
+        feedback.refresh_from_db()
+        self.assertEqual(feedback.reason_code, "off_topic")
+
+        list_response = self.client.get(
+            f"/api/seo/topic-feedback/?domain={self.organization.domain}&feedback_type=declined"
+        )
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 1)
+        self.assertEqual(list_response.data["feedback"][0]["id"], str(feedback.id))
+
+        restore_response = self.client.post(f"/api/seo/topic-feedback/{feedback.id}/restore/")
+        self.assertEqual(restore_response.status_code, status.HTTP_200_OK)
+        feedback.refresh_from_db()
+        self.assertIsNotNone(feedback.restored_at)
+
+        active_response = self.client.get(f"/api/seo/topic-feedback/?domain={self.organization.domain}")
+        self.assertEqual(active_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(active_response.data["count"], 0)
 
     def test_keyword_list_supports_offset(self):
         response = self.client.get(

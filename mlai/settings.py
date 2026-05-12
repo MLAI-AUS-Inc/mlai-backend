@@ -18,6 +18,7 @@ from datetime import timedelta
 from corsheaders.defaults import default_headers
 
 import dj_database_url
+from django.db.backends.signals import connection_created
 load_dotenv()
 
 
@@ -121,7 +122,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'hospital',
-    'innovate_connect_alliance',
     'organizations',
     'workflow_runs',
     'startup_updates',
@@ -181,6 +181,10 @@ CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 database_url = os.getenv('DATABASE_URL')
 is_sqlite_database = (database_url or '').startswith('sqlite:')
 database_conn_max_age = 0 if is_sqlite_database else 600
+SQLITE_TIMEOUT_SECONDS = int(os.getenv('SQLITE_TIMEOUT_SECONDS', '30'))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv('SQLITE_BUSY_TIMEOUT_MS', str(SQLITE_TIMEOUT_SECONDS * 1000)))
+SQLITE_ENABLE_WAL = _env_is_true('SQLITE_ENABLE_WAL', True)
+SQLITE_LOCK_RETRY_AFTER_SECONDS = int(os.getenv('SQLITE_LOCK_RETRY_AFTER_SECONDS', '2'))
 
 # Parse database configuration from $DATABASE_URL
 default_config = dj_database_url.config(
@@ -191,11 +195,28 @@ default_config = dj_database_url.config(
 
 if default_config.get('ENGINE') == 'django.db.backends.sqlite3':
     sqlite_options = default_config.setdefault('OPTIONS', {})
-    sqlite_options.setdefault('timeout', int(os.getenv('SQLITE_TIMEOUT_SECONDS', '30')))
+    sqlite_options.setdefault('timeout', SQLITE_TIMEOUT_SECONDS)
 
 DATABASES = {
     'default': default_config
 }
+
+
+def _configure_sqlite_connection(sender, connection, **kwargs):
+    if connection.vendor != 'sqlite':
+        return
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f'PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}')
+            if SQLITE_ENABLE_WAL and connection.settings_dict.get('NAME') != ':memory:':
+                cursor.execute('PRAGMA journal_mode=WAL')
+            cursor.execute('PRAGMA synchronous=NORMAL')
+    except Exception:
+        # SQLite pragmas are local-development hardening only; never block app boot.
+        return
+
+
+connection_created.connect(_configure_sqlite_connection)
 
 POINTS_STATEMENT_TIMEOUT_MS = int(os.getenv('POINTS_STATEMENT_TIMEOUT_MS', '12000'))
 POINTS_LOCK_TIMEOUT_MS = int(os.getenv('POINTS_LOCK_TIMEOUT_MS', '5000'))
@@ -313,10 +334,11 @@ if not DEBUG:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-try:
-    from .settings_prod import *
-except ImportError:
-    pass
+if IS_PRODUCTION_ENV:
+    try:
+        from .settings_prod import *
+    except ImportError:
+        pass
 
 # App URLs
 DEFAULT_FRONTEND_URL = os.getenv('DEFAULT_FRONTEND_URL') or (
@@ -327,9 +349,9 @@ DEFAULT_BACKEND_URL = os.getenv('DEFAULT_BACKEND_URL') or (
 )
 MEDHACK_URL = os.getenv('MEDHACK_URL') or DEFAULT_FRONTEND_URL
 ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
-INNOVATE_CONNECT_ALLIANCE_URL = os.getenv('INNOVATE_CONNECT_ALLIANCE_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
+CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
@@ -337,10 +359,13 @@ CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL',
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
     os.getenv('CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS', str(7 * 24 * 60 * 60))
 )
+CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS = int(
+    os.getenv('CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS', '20')
+)
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
-    'publish_code',
+    'review_draft',
 )
 SCHEDULED_DISCOVERY_TIMEZONE = os.getenv('SCHEDULED_DISCOVERY_TIMEZONE', 'Australia/Melbourne')
 SCHEDULED_DISCOVERY_CHANNEL_NAME = os.getenv('SCHEDULED_DISCOVERY_CHANNEL_NAME', 'vibe-marketing')
@@ -348,7 +373,7 @@ SCHEDULED_DISCOVERY_SLOT_MINUTES = int(os.getenv('SCHEDULED_DISCOVERY_SLOT_MINUT
 SCHEDULED_DISCOVERY_MAX_TARGETS = int(os.getenv('SCHEDULED_DISCOVERY_MAX_TARGETS', '20'))
 JOBS_PUBLIC_BASE_URL = os.getenv('JOBS_PUBLIC_BASE_URL', DEFAULT_BACKEND_URL)
 JOBS_TRIGGER_TOKEN = os.getenv('JOBS_TRIGGER_TOKEN', '')
-JOBS_SCHEDULER_ENABLED = _env_is_true('JOBS_SCHEDULER_ENABLED', False)
+JOBS_SCHEDULER_ENABLED = _env_is_true('JOBS_SCHEDULER_ENABLED', True)
 JOBS_SCHEDULE_TIMEZONE = os.getenv('JOBS_SCHEDULE_TIMEZONE', 'Australia/Melbourne')
 JOBS_SCHEDULE_HOUR = int(os.getenv('JOBS_SCHEDULE_HOUR', '7'))
 JOBS_SCHEDULE_MINUTE = int(os.getenv('JOBS_SCHEDULE_MINUTE', '0'))
@@ -370,6 +395,7 @@ JOBS_NOTION_PARENT_PAGE_ID = os.getenv('JOBS_NOTION_PARENT_PAGE_ID', '')
 JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
 JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
 JOBS_SLACK_BOT_TOKEN = os.getenv('JOBS_SLACK_BOT_TOKEN', '')
 ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
 ADZUNA_APP_KEY = os.getenv('ADZUNA_APP_KEY', '')
@@ -400,10 +426,16 @@ GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+GOOGLE_OAUTH_IDENTITY_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
 GOOGLE_WEBSITE_BASELINE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
-    "https://www.googleapis.com/auth/analytics.readonly",
 ]
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(
@@ -416,6 +448,7 @@ STRIPE_SECRET_KEY = _env_first(
     "STRIPE_API_SECRET_KEY",
     "STRIPE_API_KEY",
 )
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
     "STRIPE_OAUTH_REDIRECT_URI",
     f"{DEFAULT_BACKEND_URL}/integrations/callback/stripe",
@@ -445,6 +478,8 @@ NOTION_OAUTH_REDIRECT_URI = os.environ.get(
     "NOTION_OAUTH_REDIRECT_URI",
     "http://localhost:8000/integrations/callback/notion",
 )
+NOTION_API_VERSION = os.environ.get("NOTION_API_VERSION", "2026-03-11")
+NOTION_SYNC_PAGE_LIMIT = int(os.environ.get("NOTION_SYNC_PAGE_LIMIT", "20") or 20)
 
 GOOGLE_DRIVE_OAUTH_REDIRECT_URI = os.environ.get(
     "GOOGLE_DRIVE_OAUTH_REDIRECT_URI",
@@ -488,6 +523,20 @@ SLACK_SYNC_REPLY_PAGE_BUDGET = int(os.environ.get("SLACK_SYNC_REPLY_PAGE_BUDGET"
 SLACK_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
 SLACK_API_READ_TIMEOUT_SECONDS = float(os.environ.get("SLACK_API_READ_TIMEOUT_SECONDS", "8") or 8)
 
+LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+LINEAR_CLIENT_ID = os.environ.get("LINEAR_CLIENT_ID", "")
+LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
+LINEAR_OAUTH_REDIRECT_URI = os.environ.get(
+    "LINEAR_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/linear",
+)
+LINEAR_OAUTH_SCOPES = _env_list("LINEAR_OAUTH_SCOPES", ["read"])
+LINEAR_SYNC_PROJECT_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_PROJECT_PAGE_LIMIT", "100") or 100)
+LINEAR_SYNC_ISSUE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_ISSUE_PAGE_LIMIT", "50") or 50)
+LINEAR_SYNC_UPDATE_PAGE_LIMIT = int(os.environ.get("LINEAR_SYNC_UPDATE_PAGE_LIMIT", "20") or 20)
+LINEAR_API_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_CONNECT_TIMEOUT_SECONDS", "3") or 3)
+LINEAR_API_READ_TIMEOUT_SECONDS = float(os.environ.get("LINEAR_API_READ_TIMEOUT_SECONDS", "20") or 20)
+
 BASIQ_API_KEY = os.environ.get("BASIQ_API_KEY", "")
 BASIQ_API_BASE_URL = os.environ.get("BASIQ_API_BASE_URL", "https://au-api.basiq.io")
 BASIQ_CONSENT_UI_URL = os.environ.get("BASIQ_CONSENT_UI_URL", "https://consent.basiq.io/home")
@@ -504,7 +553,7 @@ GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
 
 # Points System Configuration
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]
-DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '10'))
+DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '24'))
 COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '1'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
@@ -513,6 +562,8 @@ COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_D
 ROO_API_KEY = os.environ.get('ROO_API_KEY')
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
+LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
+LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
 
 # MedHack Game Configuration
 MEDHACK_ADMIN_IDS = [s.strip() for s in os.getenv('MEDHACK_ADMIN_IDS', '').split(',') if s.strip()]

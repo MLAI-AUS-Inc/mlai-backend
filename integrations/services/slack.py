@@ -45,6 +45,8 @@ class SlackService:
                 return {
                     'slack_id': user['id'],
                     'real_name': user.get('real_name') or profile.get('real_name'),
+                    'display_name': profile.get('display_name') or user.get('name'),
+                    'name': user.get('name'),
                     'email': profile.get('email'),
                     'image_url': profile.get('image_512') or profile.get('image_192'),
                     'is_bot': user.get('is_bot', False),

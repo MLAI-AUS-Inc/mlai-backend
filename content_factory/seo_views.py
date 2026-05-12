@@ -7,5 +7,7 @@ from .service_views import (
     SEOKeywordListView,
     SEOKeywordResearchFeedbackView,
     SEOKeywordStatusUpdateView,
+    SEOTopicFeedbackRestoreView,
+    SEOTopicFeedbackView,
     SEOWrittenArticleCreateView,
 )

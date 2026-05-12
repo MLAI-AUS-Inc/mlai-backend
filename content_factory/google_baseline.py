@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from django.utils import timezone
 
@@ -11,7 +12,7 @@ from integrations.services.gmail import get_refreshed_credentials
 
 GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
 GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
-BASELINE_GOOGLE_SCOPES = [GSC_SCOPE, GA4_SCOPE]
+BASELINE_GOOGLE_SCOPES = [GSC_SCOPE]
 
 
 def google_connection_for_user(user):
@@ -19,10 +20,14 @@ def google_connection_for_user(user):
 
 
 def google_connection_has_baseline_scope(connection: Optional[GoogleConnection]) -> bool:
+    return google_connection_has_scope(connection, GSC_SCOPE)
+
+
+def google_connection_has_scope(connection: Optional[GoogleConnection], scope: str) -> bool:
     if not connection:
         return False
     scopes = set(str(connection.scope or "").split())
-    return set(BASELINE_GOOGLE_SCOPES).issubset(scopes)
+    return scope in scopes
 
 
 def google_baseline_connection_status(user) -> Dict[str, Any]:
@@ -52,9 +57,9 @@ def collect_verified_google_metrics(
 ) -> Dict[str, Any]:
     connection = google_connection_for_user(user)
     if not connection:
-        return _needs_connection("Connect Google Search Console or GA4 to verify traffic.")
+        return _needs_connection("Connect Google Search Console to verify traffic.")
     if not google_connection_has_baseline_scope(connection):
-        return _needs_connection("Reconnect Google with Search Console or Analytics read-only access.")
+        return _needs_connection("Reconnect Google with Search Console read-only access.")
 
     metrics: Dict[str, Any] = {
         "status": "measured",
@@ -75,10 +80,16 @@ def collect_verified_google_metrics(
     metrics["googleSearchConsole"] = gsc
     source_status["googleSearchConsole"] = gsc.get("status", "unavailable")
 
-    if ga4_property_id:
+    if ga4_property_id and google_connection_has_scope(connection, GA4_SCOPE):
         ga4 = _collect_ga4(connection, ga4_property_id, start_28=start_28, end_date=end_date)
         metrics["googleAnalytics"] = ga4
         source_status["googleAnalytics"] = ga4.get("status", "unavailable")
+    elif ga4_property_id:
+        metrics["googleAnalytics"] = {
+            "status": "needs_connection",
+            "message": "Reconnect Google with Analytics read-only access to include GA4 user metrics.",
+        }
+        source_status["googleAnalytics"] = "needs_connection"
     else:
         metrics["googleAnalytics"] = {
             "status": "needs_connection",
@@ -88,6 +99,13 @@ def collect_verified_google_metrics(
     measured_sources = [value for value in source_status.values() if value == "measured"]
     if not measured_sources:
         metrics["status"] = "needs_connection" if "needs_connection" in source_status.values() else "error"
+        metrics["message"] = (
+            gsc.get("message")
+            or metrics.get("googleAnalytics", {}).get("message")
+            or "No verified Google traffic source returned data for this baseline."
+        )
+    else:
+        metrics["message"] = "Verified Google traffic data was added to this baseline."
     metrics["sourceStatus"] = source_status
     metrics["score"] = _traffic_score(metrics)
     return {"traffic": metrics, "sourceStatus": source_status}
@@ -121,6 +139,7 @@ def _collect_search_console(connection: GoogleConnection, domain: str, *, start_
             }
         summary_28 = _query_search_console(service, site_url, start_28, end_date)
         summary_90 = _query_search_console(service, site_url, start_90, end_date)
+        daily = _query_search_console(service, site_url, start_28, end_date, dimensions=["date"], row_limit=250)
         top_queries = _query_search_console(service, site_url, start_28, end_date, dimensions=["query"], row_limit=10)
         top_pages = _query_search_console(service, site_url, start_28, end_date, dimensions=["page"], row_limit=10)
         return {
@@ -128,6 +147,7 @@ def _collect_search_console(connection: GoogleConnection, domain: str, *, start_
             "siteUrl": site_url,
             "last28Days": summary_28,
             "last90Days": summary_90,
+            "daily": sorted(daily.get("rows", []), key=lambda row: (row.get("keys") or [""])[0]),
             "topQueries": top_queries.get("rows", []),
             "topPages": top_pages.get("rows", []),
         }
@@ -136,7 +156,7 @@ def _collect_search_console(connection: GoogleConnection, domain: str, *, start_
 
 
 def _match_search_console_site(service, domain: str) -> Optional[str]:
-    normalized = str(domain or "").strip().lower().removeprefix("www.")
+    normalized = _normalize_search_console_domain(domain)
     candidates = {
         f"sc-domain:{normalized}",
         f"https://{normalized}/",
@@ -154,6 +174,16 @@ def _match_search_console_site(service, domain: str) -> Optional[str]:
         if normalized and normalized in site_url.lower():
             return site_url
     return None
+
+
+def _normalize_search_console_domain(domain: str) -> str:
+    value = str(domain or "").strip().lower()
+    if value.startswith("sc-domain:"):
+        value = value.removeprefix("sc-domain:")
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = parsed.netloc or parsed.path
+    host = host.split("/")[0].split(":")[0]
+    return host.removeprefix("www.")
 
 
 def _query_search_console(service, site_url: str, start_date, end_date, *, dimensions=None, row_limit=1) -> Dict[str, Any]:

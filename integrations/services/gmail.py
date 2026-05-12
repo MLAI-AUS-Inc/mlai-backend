@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from integrations.models import GoogleConnection
+from integrations.services.gmail_scopes import normalize_google_scope_list
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
@@ -80,6 +81,7 @@ class StaleHistoryCursorError(Exception):
 GMAIL_API_MAX_ATTEMPTS = 3
 GMAIL_API_RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 GMAIL_API_RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
     ssl.SSLError,
     TimeoutError,
     httplib2.HttpLib2Error,
@@ -123,9 +125,38 @@ def get_refreshed_credentials(connection: GoogleConnection):
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_OAUTH_CLIENT_ID,
         client_secret=settings.GOOGLE_OAUTH_CLIENT_SECRET,
-        scopes=connection.scope.split(" ") if connection.scope else [],
+        scopes=normalize_google_scope_list(connection.scope),
     )
     return creds
+
+
+def is_gmail_insufficient_permissions_error(exc: Exception) -> bool:
+    if not isinstance(exc, HttpError):
+        return False
+    status_code = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code != 403:
+        return False
+
+    reason = str(getattr(getattr(exc, "resp", None), "reason", "") or "")
+    content = getattr(exc, "content", b"")
+    if isinstance(content, bytes):
+        content_text = content.decode("utf-8", errors="ignore")
+    else:
+        content_text = str(content or "")
+    message = f"{reason} {content_text}".lower()
+    return any(
+        marker in message
+        for marker in (
+            "insufficientpermissions",
+            "insufficient permission",
+            "insufficient authentication scopes",
+            "request had insufficient authentication scopes",
+        )
+    )
 
 
 def build_gmail_service(connection: GoogleConnection, *, cache_discovery: bool = False):
@@ -617,6 +648,23 @@ def _attachment_supported(mime_type: str) -> bool:
     return mime_type in SUPPORTED_ATTACHMENT_MIME_TYPES
 
 
+def _is_non_blocking_attachment_hydration_error(exc: Exception) -> bool:
+    if isinstance(exc, HttpError):
+        status_code = getattr(getattr(exc, "resp", None), "status", None)
+        return status_code in GMAIL_API_RETRYABLE_HTTP_STATUSES
+    return isinstance(exc, GMAIL_API_RETRYABLE_EXCEPTIONS)
+
+
+def _safe_attachment_error_message(exc: Exception) -> str:
+    if isinstance(exc, HttpError):
+        status_code = getattr(getattr(exc, "resp", None), "status", None)
+        return f"{exc.__class__.__name__}: HTTP {status_code or 'unknown'}"
+    message = " ".join(str(exc).split())
+    if not message:
+        return exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {message[:500]}"
+
+
 def _hydrate_attachment(
     *,
     organization,
@@ -642,6 +690,8 @@ def _hydrate_attachment(
         "size_bytes": size_bytes,
         "is_inline": "inline" in content_disposition.lower(),
         "metadata": manifest_item,
+        "parse_notes": "",
+        "last_error": "",
         "hydrated_at": timezone.now(),
     }
 
@@ -669,7 +719,35 @@ def _hydrate_attachment(
 
     raw_bytes = b""
     if attachment_id:
-        payload = get_attachment_payload(connection, message_artifact.gmail_message_id, attachment_id)
+        try:
+            payload = get_attachment_payload(connection, message_artifact.gmail_message_id, attachment_id)
+        except Exception as exc:
+            if not _is_non_blocking_attachment_hydration_error(exc):
+                raise
+            last_error = _safe_attachment_error_message(exc)
+            logger.warning(
+                "gmail_attachment_hydration_failed_non_blocking error=%s",
+                last_error,
+                extra={
+                    "organization_id": organization.id,
+                    "google_connection_id": connection.id,
+                    "gmail_message_id": message_artifact.gmail_message_id,
+                    "part_id": part_id,
+                    "error": last_error,
+                },
+            )
+            defaults["raw_content_base64"] = ""
+            defaults["sha256"] = ""
+            defaults["extraction_status"] = ArtifactProcessingStatus.ERROR
+            defaults["parse_notes"] = "gmail_attachment_hydration_failed"
+            defaults["last_error"] = last_error
+            attachment, _ = GmailAttachmentArtifact.objects.update_or_create(
+                message_artifact=message_artifact,
+                part_id=part_id,
+                gmail_attachment_id=attachment_id,
+                defaults=defaults,
+            )
+            return attachment
         raw_bytes = _decode_base64url(str(payload.get("data") or ""))
 
     defaults["raw_content_base64"] = _encode_bytes(raw_bytes)

@@ -33,7 +33,15 @@ class StartupProfileUpsertSerializer(serializers.Serializer):
     kpi_definitions = serializers.ListField(child=serializers.DictField(), required=False)
     default_currency = serializers.CharField(required=False, allow_blank=True)
     stage = serializers.CharField(required=False, allow_blank=True)
+    organization_kind = serializers.CharField(required=False, allow_blank=True)
+    organizationKind = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if "organizationKind" in attrs and "organization_kind" not in attrs:
+            attrs["organization_kind"] = attrs["organizationKind"]
+        attrs.pop("organizationKind", None)
+        return attrs
 
 
 class StartupUpdateRunCreateSerializer(serializers.Serializer):
@@ -42,6 +50,8 @@ class StartupUpdateRunCreateSerializer(serializers.Serializer):
     window_months = serializers.IntegerField(required=False, default=1, min_value=1, max_value=24)
     input_sources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     inputSources = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    target_month = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    targetMonth = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StartupUpdateIngestSerializer(serializers.Serializer):
@@ -71,6 +81,47 @@ class ClassificationResultItemSerializer(serializers.Serializer):
 
 class ClassificationResultsSerializer(serializers.Serializer):
     results = ClassificationResultItemSerializer(many=True)
+
+
+class SlackClassificationResultItemSerializer(serializers.Serializer):
+    slack_thread_id = serializers.CharField()
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    extraction_hints = serializers.DictField(required=False, default=dict)
+
+
+class SlackClassificationResultsSerializer(serializers.Serializer):
+    results = SlackClassificationResultItemSerializer(many=True)
+
+
+class LinearClassificationResultItemSerializer(serializers.Serializer):
+    linear_project_id = serializers.CharField()
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    extraction_hints = serializers.DictField(required=False, default=dict)
+
+
+class LinearClassificationResultsSerializer(serializers.Serializer):
+    results = LinearClassificationResultItemSerializer(many=True)
+
+
+class NotionClassificationResultItemSerializer(serializers.Serializer):
+    notion_page_id = serializers.CharField()
+    notion_chunk_id = serializers.CharField(required=False, allow_blank=True, default="")
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    important_block_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    extraction_hint = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class NotionClassificationResultsSerializer(serializers.Serializer):
+    results = NotionClassificationResultItemSerializer(many=True)
 
 
 class AttachmentUpdateSerializer(serializers.Serializer):
@@ -151,6 +202,41 @@ class SlackExtractionResultItemSerializer(serializers.Serializer):
 
 class SlackExtractionResultsSerializer(serializers.Serializer):
     results = SlackExtractionResultItemSerializer(many=True)
+
+
+class LinearExtractionResultItemSerializer(serializers.Serializer):
+    linear_project_id = serializers.CharField()
+    extraction_status = serializers.ChoiceField(
+        choices=ArtifactProcessingStatus.choices,
+        required=False,
+        default=ArtifactProcessingStatus.PROCESSED,
+    )
+    events = EventResultSerializer(many=True, required=False, default=list)
+    metrics = MetricResultSerializer(many=True, required=False, default=list)
+
+
+class LinearExtractionResultsSerializer(serializers.Serializer):
+    results = LinearExtractionResultItemSerializer(many=True)
+
+
+class NotionExtractionResultItemSerializer(serializers.Serializer):
+    notion_page_id = serializers.CharField()
+    notion_chunk_id = serializers.CharField(required=False, allow_blank=True, default="")
+    extraction_status = serializers.ChoiceField(
+        choices=ArtifactProcessingStatus.choices,
+        required=False,
+        default=ArtifactProcessingStatus.PROCESSED,
+    )
+    events = EventResultSerializer(many=True, required=False, default=list)
+    metrics = MetricResultSerializer(many=True, required=False, default=list)
+
+
+class NotionExtractionResultsSerializer(serializers.Serializer):
+    results = NotionExtractionResultItemSerializer(many=True)
+
+
+class CurationResultsSerializer(serializers.Serializer):
+    candidates = serializers.ListField(child=serializers.DictField(), required=False, default=list)
 
 
 class DraftResultSerializer(serializers.Serializer):

@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -437,6 +438,59 @@ class ContentFactoryHealingRecord(models.Model):
 
     def __str__(self):
         return f"{self.domain}:{self.github_repo}:{self.failure_kind}:{self.failure_family_key}"
+
+
+class VibeMarketingComponentCommentStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    SUBMITTED = "submitted", "Submitted"
+    APPLIED = "applied", "Applied"
+    SUPERSEDED = "superseded", "Superseded"
+
+
+class VibeMarketingComponentComment(models.Model):
+    """Founder review comment attached to one generated article component."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(
+        "workflow_runs.ContentFactoryRun",
+        on_delete=models.CASCADE,
+        related_name="component_comments",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="vibe_marketing_component_comments",
+    )
+    component_id = models.CharField(max_length=255, db_index=True)
+    component_type = models.CharField(max_length=120, blank=True, default="")
+    component_label = models.CharField(max_length=255, blank=True, default="")
+    source_section_id = models.CharField(max_length=255, blank=True, default="")
+    selector = models.CharField(max_length=500, blank=True, default="")
+    anchor = models.JSONField(blank=True, default=dict)
+    context = models.JSONField(blank=True, default=dict)
+    body = models.TextField()
+    status = models.CharField(
+        max_length=20,
+        choices=VibeMarketingComponentCommentStatus.choices,
+        default=VibeMarketingComponentCommentStatus.DRAFT,
+        db_index=True,
+    )
+    batch_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_vibe_component_comment"
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["run", "status"], name="vibe_comment_run_status_idx"),
+            models.Index(fields=["run", "batch_id"], name="vibe_comment_run_batch_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id}:{self.component_id}:{self.status}"
 # =============================================================================
 # SEO Research Models
 # =============================================================================
@@ -551,6 +605,11 @@ class ResearchedKeyword(models.Model):
     # Core metrics (refreshable)
     volume = models.IntegerField(default=0, help_text="Monthly search volume")
     difficulty = models.IntegerField(default=50, help_text="SEO difficulty 0-100")
+    difficulty_source = models.CharField(
+        max_length=30,
+        default="legacy_default",
+        help_text="Source for difficulty: dataforseo_labs, dataforseo_bulk, missing, or legacy_default",
+    )
     intent = models.CharField(max_length=50, default="informational")
 
     # GEO metrics
@@ -574,6 +633,8 @@ class ResearchedKeyword(models.Model):
         help_text="E.g., competitor domain or seed keyword"
     )
     competitor_urls = models.JSONField(default=list, blank=True)
+    related_keywords = models.JSONField(default=list, blank=True)
+    monthly_searches = models.JSONField(default=list, blank=True)
 
     # Writing status
     status = models.CharField(
@@ -626,6 +687,49 @@ class ResearchedKeyword(models.Model):
 
     def __str__(self):
         return f"{self.keyword} ({self.organization.domain}) - {self.tier}"
+
+
+class TopicFeedback(models.Model):
+    """
+    Explicit topic-level research memory captured from product UX.
+
+    This is separate from ResearchedKeyword lifecycle status: a declined topic
+    means "do not recommend this or close variants again for this organization"
+    until restored.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='topic_feedback',
+        db_index=True,
+    )
+    keyword = models.CharField(max_length=500)
+    keyword_normalized = models.CharField(max_length=500, db_index=True)
+    feedback_type = models.CharField(max_length=32, default='declined', db_index=True)
+    reason_code = models.CharField(max_length=64, default='not_appropriate')
+    reason_text = models.TextField(blank=True, null=True)
+    decline_scope = models.CharField(max_length=32, default='similar')
+    source = models.CharField(max_length=80, default='homepage_topic_card')
+    session_id = models.CharField(max_length=120, blank=True, null=True, db_index=True)
+    restored_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_topic_feedback'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['organization', 'feedback_type', 'restored_at'], name='seo_tf_org_type_active_idx'),
+            models.Index(fields=['organization', 'keyword_normalized'], name='seo_tf_org_keyword_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.keyword_normalized = " ".join(str(self.keyword or "").lower().strip().split())
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.feedback_type}: {self.keyword} ({self.organization.domain})"
 
 
 class KeywordVelocity(models.Model):

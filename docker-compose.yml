@@ -3,7 +3,7 @@
 services:
   web:
     build: .
-    command: gunicorn --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --worker-class sync --keep-alive ${GUNICORN_KEEP_ALIVE:-2} --timeout ${GUNICORN_TIMEOUT:-30} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} --max-requests ${GUNICORN_MAX_REQUESTS:-300} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50} mlai.wsgi:application
+    command: sh /app/scripts/start-web.sh
     environment:
       APP_ENV: ${APP_ENV:-production}
       JOBS_SCRAPE_HEADLESS: ${JOBS_SCRAPE_HEADLESS:-true}
@@ -15,7 +15,7 @@ services:
       - db
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/healthz/ready', headers={'Connection':'close'}); resp=urllib.request.urlopen(req, timeout=5); body=resp.read(); resp.close(); raise SystemExit(0 if body else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/healthz/live', headers={'Connection':'close'}); resp=urllib.request.urlopen(req, timeout=5); body=resp.read(); resp.close(); raise SystemExit(0 if body else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -31,7 +31,7 @@ services:
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; while true; do python manage.py run_scheduled_discovery; sleep 60; done"
     environment:
       APP_ENV: ${APP_ENV:-production}
-      JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-false}
+      JOBS_SCHEDULER_ENABLED: ${JOBS_SCHEDULER_ENABLED:-true}
       JOBS_SCHEDULE_TIMEZONE: ${JOBS_SCHEDULE_TIMEZONE:-Australia/Melbourne}
       JOBS_SCHEDULE_HOUR: ${JOBS_SCHEDULE_HOUR:-7}
       JOBS_SCHEDULE_MINUTE: ${JOBS_SCHEDULE_MINUTE:-0}

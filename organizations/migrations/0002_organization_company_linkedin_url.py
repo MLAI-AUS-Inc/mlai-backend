@@ -4,6 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("organizations", "0001_split_content_factory_apps"),
+        ("core", "0051_split_content_factory_apps"),
     ]
 
     operations = [

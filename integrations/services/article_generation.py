@@ -22,13 +22,13 @@ from integrations import http_client as http_requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ARTICLE_DELIVERY_MODE = "publish_code"
-VALID_ARTICLE_DELIVERY_MODES = {"publish_code", "content_only"}
+DEFAULT_ARTICLE_DELIVERY_MODE = "review_draft"
+VALID_ARTICLE_DELIVERY_MODES = {"review_draft", "publish_code", "content_only"}
 FAILURE_RUN_STATUSES = {"failed", "error", "denied"}
 BLOCKED_RUN_STATUSES = {"blocked", "blocked_verification"}
 REVIEWABLE_RUN_STATUSES = {"pr_opened", "needs_review"}
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 4
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
 CONTENT_FACTORY_BILLING_STATUS_CHARGED = "charged"

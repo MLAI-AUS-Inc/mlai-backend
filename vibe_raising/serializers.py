@@ -3,22 +3,14 @@ import calendar
 from rest_framework import serializers
 
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from startup_updates.metric_catalog import (
+    STARTUP_UPDATE_METRIC_KEY_SET,
+    startup_update_metric_key,
+    startup_update_metric_label,
+)
 
 
-VIBE_RAISING_UPDATE_METRIC_KEYS = {
-    "revenue",
-    "activeUsers",
-    "mrr",
-    "burnRate",
-    "runway",
-    "invoiceRevenue",
-    "cashCollected",
-    "revenueGrowthRate",
-    "customerCount",
-    "churn",
-    "invoiceCount",
-    "recurringInvoiceCount",
-}
+VIBE_RAISING_UPDATE_METRIC_KEYS = STARTUP_UPDATE_METRIC_KEY_SET
 
 
 def _blank_to_none(value):
@@ -157,6 +149,10 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "videoContentType": ("video_content_type",),
         "videoFileSizeBytes": ("video_file_size_bytes",),
         "videoOriginalFilename": ("video_original_filename",),
+        "manualDocumentIds": ("manual_document_ids",),
+        "manualSummary": ("manual_summary",),
+        "metricSuggestions": ("metric_suggestions",),
+        "next30Days": ("next_30_days",),
     }
 
     month = serializers.CharField()
@@ -168,13 +164,26 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     videoContentType = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     videoFileSizeBytes = serializers.IntegerField(min_value=0, required=False, allow_null=True)
     videoOriginalFilename = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    manualDocumentIds = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        default=list,
+    )
+    manualSummary = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     highlights = serializers.CharField(allow_blank=True, required=False, default="")
     challenges = serializers.CharField(allow_blank=True, required=False, default="")
     asks = serializers.CharField(allow_blank=True, required=False, default="")
+    learnings = serializers.CharField(allow_blank=True, required=False, default="")
+    next30Days = serializers.CharField(allow_blank=True, required=False, default="")
     metrics = serializers.DictField(
         child=serializers.CharField(allow_blank=True),
         required=False,
         default=dict,
+    )
+    metricSuggestions = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
     )
 
     def validate(self, attrs):
@@ -191,7 +200,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         attrs["month"] = calendar.month_name[month_number]
         attrs["month_number"] = month_number
 
-        for field in ("highlights", "challenges", "asks"):
+        for field in ("highlights", "challenges", "asks", "learnings", "next30Days"):
             attrs[field] = str(attrs.get(field) or "").strip()
 
         for field in (
@@ -201,17 +210,46 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
             "videoStoragePath",
             "videoContentType",
             "videoOriginalFilename",
+            "manualSummary",
         ):
             if field in attrs:
                 attrs[field] = _blank_to_none(attrs.get(field))
 
+        attrs["manualDocumentIds"] = [
+            str(item)
+            for item in attrs.get("manualDocumentIds") or []
+        ]
+
         normalized_metrics = {}
         for key, value in (attrs.get("metrics") or {}).items():
-            if key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
+            metric_key = startup_update_metric_key(key)
+            if metric_key not in VIBE_RAISING_UPDATE_METRIC_KEYS:
                 continue
             normalized_value = _blank_to_none(value)
             if normalized_value is not None:
-                normalized_metrics[key] = normalized_value
+                normalized_metrics[metric_key] = normalized_value
 
         attrs["metrics"] = normalized_metrics
+
+        normalized_suggestions = []
+        seen_suggestions = set()
+        for item in attrs.get("metricSuggestions") or []:
+            if not isinstance(item, dict):
+                continue
+            metric_key = startup_update_metric_key(
+                item.get("metricKey") or item.get("metric_key") or item.get("label")
+            )
+            if metric_key not in VIBE_RAISING_UPDATE_METRIC_KEYS or metric_key in seen_suggestions:
+                continue
+            seen_suggestions.add(metric_key)
+            normalized_suggestions.append(
+                {
+                    "metric_key": metric_key,
+                    "label": str(item.get("label") or startup_update_metric_label(metric_key)).strip()
+                    or startup_update_metric_label(metric_key),
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+
+        attrs["metricSuggestions"] = normalized_suggestions
         return attrs

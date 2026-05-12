@@ -9,6 +9,11 @@ from .views import (
     VibeRaisingEmailDraftResultsView,
     VibeRaisingEmailDraftStartView,
     VibeRaisingEmailDraftStatusView,
+    VibeRaisingManualDocumentDetailView,
+    VibeRaisingManualDocumentDownloadView,
+    VibeRaisingManualDocumentListView,
+    VibeRaisingManualDocumentUploadCompleteView,
+    VibeRaisingManualDocumentUploadSessionView,
     VibeRaisingMonthlyUpdateView,
     VibeRaisingProfileView,
     VibeRaisingStartupUpdateBootstrapView,
@@ -28,6 +33,31 @@ urlpatterns = [
     path("uploads/video/", VibeRaisingVideoUploadView.as_view(), name="vibe-raising-video-upload"),
     path("uploads/video/session/", VibeRaisingVideoUploadSessionView.as_view(), name="vibe-raising-video-upload-session"),
     path("uploads/video/complete/", VibeRaisingVideoUploadCompleteView.as_view(), name="vibe-raising-video-upload-complete"),
+    path(
+        "uploads/manual-documents/",
+        VibeRaisingManualDocumentListView.as_view(),
+        name="vibe-raising-manual-documents",
+    ),
+    path(
+        "uploads/manual-documents/session/",
+        VibeRaisingManualDocumentUploadSessionView.as_view(),
+        name="vibe-raising-manual-document-upload-session",
+    ),
+    path(
+        "uploads/manual-documents/complete/",
+        VibeRaisingManualDocumentUploadCompleteView.as_view(),
+        name="vibe-raising-manual-document-upload-complete",
+    ),
+    path(
+        "uploads/manual-documents/<uuid:document_id>/",
+        VibeRaisingManualDocumentDetailView.as_view(),
+        name="vibe-raising-manual-document-detail",
+    ),
+    path(
+        "uploads/manual-documents/<uuid:document_id>/download/",
+        VibeRaisingManualDocumentDownloadView.as_view(),
+        name="vibe-raising-manual-document-download",
+    ),
     path(
         "startup-update/bootstrap/",
         VibeRaisingStartupUpdateBootstrapView.as_view(),

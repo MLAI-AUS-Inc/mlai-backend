@@ -10,12 +10,14 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
+from googleapiclient.errors import HttpError
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from content_factory.models import OrganizationContentConfig
 from integrations import http_client
 from organizations.models import Organization
+from integrations.services.valley_harness import ValleyHarnessResult
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -151,6 +153,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
                         "user_id": self.user.id,
                         "domain": self.organization.domain,
                         "window_months": 6,
+                        "target_month": "2026-03-01",
                     },
                     format="json",
                     **self.headers,
@@ -162,7 +165,9 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(run.workflow, "startup_monthly_update")
         self.assertEqual(run.run_request["google_connection_id"], self.google_connection.id)
         self.assertEqual(run.run_request["window_months"], 6)
-        self.assertEqual(len(run.run_request["draft_months"]), 3)
+        self.assertEqual(run.run_request["target_month"], "2026-03-01")
+        self.assertEqual(run.run_request["current_month"], "2026-03-01")
+        self.assertEqual(run.run_request["draft_months"], ["2026-03-01"])
         self.assertEqual(run.run_request["startup_context"]["stage"], "seed")
         self.assertEqual(run.run_request["startup_context"]["company_aliases"], ["Acme", "Acme AI"])
         self.assertTrue(
@@ -226,6 +231,74 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
         self.assertEqual(active.data["status"], ContentFactoryRunStatus.QUEUED)
         self.assertEqual(active.data["display_stage"], "Preparing company context")
         mock_notify.assert_called_once()
+
+    @patch("startup_updates.services.timezone.now")
+    @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_run_creation_returns_conflict_for_open_run_in_different_month(self, mock_notify, mock_now):
+        mock_now.return_value = datetime(2026, 4, 26, 5, 30, tzinfo=dt_timezone.utc)
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        active_run = create_startup_update_run(
+            organization=self.organization,
+            binding=binding,
+            target_month=date(2026, 4, 1),
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_run"),
+                {
+                    "user_id": self.user.id,
+                    "domain": self.organization.domain,
+                    "target_month": "2026-03-01",
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["target_month_conflict"])
+        self.assertEqual(response.data["requested_target_month"], "2026-03-01")
+        self.assertEqual(response.data["active_target_month"], "2026-04-01")
+        self.assertEqual(response.data["run_id"], active_run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        mock_notify.assert_not_called()
+
+    @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_run_creation_returns_503_when_valley_dispatch_fails(self, mock_notify):
+        UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        mock_notify.return_value = ValleyHarnessResult(
+            ok=False,
+            failure_kind="dns",
+            detail="Failed to resolve 'valley-api'",
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_run"),
+                {
+                    "user_id": self.user.id,
+                    "domain": self.organization.domain,
+                    "window_months": 6,
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["error"], "valley_dispatch_failed")
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "failed")
+        self.assertEqual(run.result["_valley_meta"]["last_dispatch_error_kind"], "dns")
 
     def test_run_status_and_draft_results_getters(self):
         binding = UserStartupBinding.objects.create(
@@ -541,6 +614,47 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertIsNotNone(cursor.backfill_completed_at)
         self.assertEqual(response.data["ingested_count"], 1)
         self.assertEqual(response.data["relevance_counts"]["relevant"], 1)
+
+    def test_ingest_next_page_returns_source_unavailable_when_gmail_scope_missing(self):
+        self.google_connection.scope = "openid https://www.googleapis.com/auth/userinfo.email"
+        self.google_connection.save(update_fields=["scope", "updated_at"])
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["sourceUnavailable"])
+        self.assertEqual(response.data["source"], "gmail")
+        self.assertEqual(response.data["code"], "gmail_insufficient_scope")
+        self.assertFalse(response.data["retryable"])
+        self.assertFalse(response.data["hasGmailScope"])
+        self.assertTrue(response.data["needsGmailReconnect"])
+        self.assertEqual(response.data["ingested_count"], 0)
+
+    @patch("startup_updates.api_views.sync_message_metadata_page")
+    def test_ingest_next_page_converts_gmail_403_to_source_unavailable(self, mock_sync):
+        mock_sync.side_effect = HttpError(
+            resp=SimpleNamespace(status=403, reason="insufficientPermissions"),
+            content=b'{"error":{"message":"Request had insufficient authentication scopes."}}',
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {},
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["sourceUnavailable"])
+        self.assertEqual(response.data["code"], "gmail_insufficient_scope")
+        self.assertFalse(response.data["retryable"])
 
     @patch("startup_updates.api_views.sync_message_metadata_page")
     @patch("startup_updates.api_views.sync_history_metadata_page")
@@ -863,6 +977,154 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
         self.connection.refresh_from_db()
         self.assertEqual(self.connection.status, ExternalServiceConnectionStatus.SYNCING)
         self.assertEqual(self.connection.last_error, "")
+
+    def test_slack_classification_batch_hard_filters_noise_and_returns_candidates(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        noisy_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000000.000100",
+            source_message_ids=["slack:C123:1770000000.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:00:00+00:00] Standup Bot: daily standup reminder",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000000.000100",
+                    "author_name": "Standup Bot",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "daily standup reminder",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        candidate_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000001.000100",
+            source_message_ids=["slack:C123:1770000001.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:01:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000001.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            response = self.client.get(
+                reverse("startup_updates_slack_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["threads"][0]["slack_thread_id"], f"slack:C123:{candidate_thread.thread_ts}")
+        noisy_thread.refresh_from_db()
+        self.assertEqual(noisy_thread.relevance_label, GmailRelevanceLabel.IRRELEVANT)
+        self.assertFalse(noisy_thread.needs_extraction)
+
+    def test_slack_classification_results_gate_extraction_batch(self):
+        latest_message_at = timezone.now() - timedelta(minutes=1)
+        relevant_thread = SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000002.000100",
+            source_message_ids=["slack:C123:1770000002.000100", "slack:C123:1770000002.000200"],
+            source_message_count=2,
+            cleaned_text="\n".join(
+                [
+                    "[2026-03-15T12:00:00+00:00] Sam: Acme signed a $12k MRR pilot.",
+                    "[2026-03-15T12:01:00+00:00] Alex: thanks",
+                ]
+            ),
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000002.000100",
+                    "author_name": "Sam",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "Acme signed a $12k MRR pilot.",
+                },
+                {
+                    "message_id": "slack:C123:1770000002.000200",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                },
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+        )
+        SlackThreadArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            channel_id="C123",
+            channel_name="wins",
+            thread_ts="1770000003.000100",
+            source_message_ids=["slack:C123:1770000003.000100"],
+            source_message_count=1,
+            cleaned_text="[2026-03-15T12:03:00+00:00] Alex: thanks",
+            message_payloads=[
+                {
+                    "message_id": "slack:C123:1770000003.000100",
+                    "author_name": "Alex",
+                    "posted_at": latest_message_at.isoformat(),
+                    "cleaned_text": "thanks",
+                }
+            ],
+            latest_message_at=latest_message_at,
+            extraction_status=ArtifactProcessingStatus.HYDRATED,
+            relevance_label=GmailRelevanceLabel.IRRELEVANT,
+            classified_at=timezone.now(),
+        )
+
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            results_response = self.client.post(
+                reverse("startup_updates_slack_classification_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "slack_thread_id": f"slack:C123:{relevant_thread.thread_ts}",
+                            "relevance_label": GmailRelevanceLabel.RELEVANT,
+                            "relevance_score": 0.97,
+                            "relevance_reason": "Customer and MRR update.",
+                            "needs_extraction": True,
+                            "extraction_hints": {
+                                "important_message_ids": ["slack:C123:1770000002.000100"],
+                                "extraction_hint": "Extract pilot conversion.",
+                            },
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+            batch_response = self.client.get(
+                reverse("startup_updates_slack_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(results_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 1)
+        bundle = batch_response.data["threads"][0]
+        self.assertEqual(bundle["slack_thread_id"], f"slack:C123:{relevant_thread.thread_ts}")
+        self.assertEqual(bundle["relevance_score"], 0.97)
+        self.assertIn("compression", bundle["participant_summary"])
 
 
 class StartupUpdateResetCommandTest(StartupUpdateApiTestCase):
@@ -1297,6 +1559,13 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                                     {"metric_key": "mrr", "label": "MRR", "value": "$26,000"},
                                     {"metric_key": "cashCollected", "label": "Cash Collected", "value": "$20,000"},
                                 ],
+                                "metric_suggestions": [
+                                    {
+                                        "metric_key": "customerInterviews",
+                                        "label": "Customer Interviews",
+                                        "reason": "Useful before revenue is consistent.",
+                                    }
+                                ],
                                 "highlights": [
                                     "Converted the pilot into a paid annual contract",
                                     "Launched onboarding refresh",
@@ -1337,11 +1606,181 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             {item["metric_key"]: item["value"] for item in memo["kpi_snapshot"]},
             {"mrr": "$26,000", "cashCollected": "$20,000"},
         )
+        self.assertEqual(
+            memo["metric_suggestions"],
+            [
+                {
+                    "metric_key": "customerInterviews",
+                    "label": "Customer Interviews",
+                    "reason": "Useful before revenue is consistent.",
+                }
+            ],
+        )
         self.assertEqual(set(draft.evidence_event_ids), {11, 12})
         self.assertEqual(set(draft.evidence_metric_ids), {21, 22})
         self.assertEqual(set(draft.carry_forward_event_ids), {31, 32})
         self.assertIn("3 bullets refreshed", draft.groundedness_notes)
         self.assertIn("1 added", draft.groundedness_notes)
+
+    def test_draft_results_merge_xero_metrics_into_kpi_snapshot(self):
+        month_bucket = date(2026, 3, 1)
+        revenue_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 4000.00",
+            value_number=Decimal("4000.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={
+                "report_name": "ProfitAndLoss",
+                "report_start_date": "2026-03-01",
+                "report_end_date": "2026-03-31",
+                "calculation_basis": "profit_and_loss_total_income",
+            },
+        )
+        burn_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="burnRate",
+            metric_name="Burn rate",
+            value_text="AUD 1500.00",
+            value_number=Decimal("1500.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+        monthly_costs_metric = StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="monthlyCosts",
+            metric_name="Monthly costs",
+            value_text="AUD 2500.00",
+            value_number=Decimal("2500.00"),
+            unit="AUD",
+            period_month=month_bucket,
+            confidence=1.0,
+            source_metadata={
+                "report_name": "ProfitAndLoss",
+                "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+            },
+        )
+
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                {
+                    "drafts": [
+                        {
+                            "month": month_bucket.isoformat(),
+                            "status": "ready",
+                            "model_name": "gpt-5.4",
+                            "structured_memo": {
+                                "title": "Acme March Update",
+                                "kpi_snapshot": [
+                                    {"metric_key": "revenue", "label": "Revenue", "value": "$1,000"},
+                                    {"metric_key": "monthlyCosts", "label": "Monthly Costs", "value": "$500"},
+                                    {"metric_key": "activeUsers", "label": "Active Users", "value": "240"},
+                                ],
+                                "highlights": ["Launched onboarding refresh"],
+                            },
+                            "evidence_metric_ids": [],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=month_bucket)
+        snapshot = {item["metric_key"]: item for item in draft.structured_memo["kpi_snapshot"]}
+        self.assertEqual(snapshot["revenue"]["value"], "AUD 4000.00")
+        self.assertEqual(snapshot["revenue"]["source_provider"], ExternalServiceProvider.XERO)
+        self.assertEqual(snapshot["revenue"]["source_metadata"]["report_name"], "ProfitAndLoss")
+        self.assertEqual(snapshot["burnRate"]["value"], "AUD 1500.00")
+        self.assertEqual(snapshot["monthlyCosts"]["value"], "AUD 2500.00")
+        self.assertEqual(snapshot["monthlyCosts"]["source_provider"], ExternalServiceProvider.XERO)
+        self.assertEqual(snapshot["activeUsers"]["value"], "240")
+        self.assertEqual(
+            set(draft.evidence_metric_ids),
+            {revenue_metric.id, burn_metric.id, monthly_costs_metric.id},
+        )
+
+    def test_draft_results_get_hydrates_xero_metrics_without_saving_draft(self):
+        current_month = date(2026, 4, 1)
+        previous_month = date(2026, 3, 1)
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=current_month,
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "title": "Acme April Update",
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "5"}],
+                "highlights": ["April highlight"],
+            },
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=self.organization,
+            run=self.run,
+            month=previous_month,
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "title": "Acme March Update",
+                "kpi_snapshot": [{"metric_key": "activeUsers", "label": "Active Users", "value": "4"}],
+                "highlights": ["March highlight"],
+            },
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 3800.00",
+            value_number=Decimal("3800.00"),
+            unit="AUD",
+            period_month=current_month,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+        StartupMetricObservation.objects.create(
+            organization=self.organization,
+            run=self.run,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 2735.75",
+            value_number=Decimal("2735.75"),
+            unit="AUD",
+            period_month=previous_month,
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["draft"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["draft"]["pastMonths"][0]["metrics"]["revenue"], "AUD 2735.75")
+        self.assertEqual(response.data["current_month"]["metrics"]["revenue"], "AUD 3800.00")
+        self.assertEqual(response.data["past_months"][0]["metrics"]["revenue"], "AUD 2735.75")
+        stored_draft = MonthlyUpdateDraft.objects.get(organization=self.organization, month=current_month)
+        self.assertNotIn(
+            "revenue",
+            [item.get("metric_key") for item in stored_draft.structured_memo["kpi_snapshot"]],
+        )
 
     def test_hydration_candidates_endpoint_returns_unhydrated_threads(self):
         GmailThreadArtifact.objects.filter(pk=self.thread.pk).update(hydration_status=ArtifactProcessingStatus.PENDING)
@@ -1635,6 +2074,132 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             self.message.gmail_message_id,
             "att-lazy",
         )
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_records_failed_attachment_hydration_without_failing(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        attachment_payload = response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+        self.assertEqual(attachment_payload["parse_notes"], "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", attachment_payload["last_error"])
+
+        failed_attachment = GmailAttachmentArtifact.objects.get(
+            organization=self.organization,
+            message_artifact=self.message,
+            gmail_attachment_id="att-reset",
+        )
+        self.assertEqual(failed_attachment.raw_content_base64, "")
+        self.assertEqual(failed_attachment.extraction_status, ArtifactProcessingStatus.ERROR)
+        self.assertEqual(failed_attachment.parse_notes, "gmail_attachment_hydration_failed")
+        self.assertIn("ConnectionResetError", failed_attachment.last_error)
+        self.thread.refresh_from_db()
+        self.assertEqual(self.thread.attachment_ids, [failed_attachment.id])
+
+    @patch("integrations.services.gmail.get_attachment_payload")
+    def test_extraction_batch_reuses_failed_attachment_without_refetching(self, mock_get_attachment_payload):
+        self.message.attachment_manifest = [
+            {
+                "part_id": "1.2",
+                "filename": "metrics.txt",
+                "mime_type": "text/plain",
+                "attachment_id": "att-reset",
+                "size_bytes": 24,
+                "content_disposition": "attachment",
+            }
+        ]
+        self.message.save(update_fields=["attachment_manifest", "updated_at"])
+        self.attachment.delete()
+        self.thread.attachment_ids = []
+        self.thread.save(update_fields=["attachment_ids", "updated_at"])
+        mock_get_attachment_payload.side_effect = ConnectionResetError("connection reset by peer")
+
+        with self._with_key():
+            first_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+            second_response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_get_attachment_payload.call_count, 1)
+        attachment_payload = second_response.data["threads"][0]["attachments"][0]
+        self.assertEqual(attachment_payload["extraction_status"], ArtifactProcessingStatus.ERROR)
+
+    def test_extraction_batch_compacts_quoted_gmail_history(self):
+        self.thread.message_payloads = [
+            {
+                "message_id": "msg-123",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "ACME pilot converted",
+                "from_address": "ceo@acme.com",
+                "cleaned_text": (
+                    "We closed the pilot and now have $24000 ARR.\n\n"
+                    "On Monday, someone wrote:\n> old quoted reply\n> repeated old thread"
+                ),
+            },
+            {
+                "message_id": "msg-noise",
+                "internal_date": timezone.now().isoformat(),
+                "subject": "FYI",
+                "from_address": "ops@acme.com",
+                "cleaned_text": "unsubscribe\nview in browser",
+            },
+        ]
+        self.thread.source_message_ids = ["msg-123", "msg-noise"]
+        self.thread.source_message_count = 2
+        self.thread.cleaned_text = "\n\n".join(item["cleaned_text"] for item in self.thread.message_payloads)
+        self.thread.save(
+            update_fields=[
+                "message_payloads",
+                "source_message_ids",
+                "source_message_count",
+                "cleaned_text",
+                "updated_at",
+            ]
+        )
+
+        with self._with_key():
+            response = self.client.get(
+                reverse("startup_updates_extraction_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bundle = response.data["threads"][0]
+        self.assertIn("We closed the pilot", bundle["cleaned_text"])
+        self.assertNotIn("old quoted reply", bundle["cleaned_text"])
+        self.assertIn("compression", bundle["participant_summary"])
 
     @patch("integrations.services.gmail.get_attachment_payload")
     def test_extraction_batch_accepts_long_gmail_attachment_ids(self, mock_get_attachment_payload):
@@ -2015,6 +2580,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                                 "highlights": ["Converted pilot to annual deal"],
                                 "lowlights": ["None"],
                                 "operations": ["Hiring one engineer"],
+                                "learnings": ["Paid pilots convert faster when buyer scope is narrow"],
                                 "next_30_days": ["Close two more pilots"],
                             },
                             "evidence_event_ids": [event.id],
@@ -2043,12 +2609,25 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
                 reverse("startup_updates_draft_detail", args=[draft.id]),
                 **self.headers,
             )
+            draft_results = self.client.get(
+                reverse("startup_updates_draft_results", args=[self.run.run_id]),
+                **self.headers,
+            )
 
         self.assertEqual(draft_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(draft_list.data["drafts"]), 1)
         self.assertEqual(draft_detail.status_code, status.HTTP_200_OK)
         self.assertEqual(draft_detail.data["events"][0]["canonical_key"], event.canonical_key)
         self.assertEqual(draft_detail.data["metrics"][0]["metric_key"], metric.metric_key)
+        self.assertEqual(draft_results.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            draft_results.data["draft"]["highlights"],
+            "Converted pilot to annual deal\nProduct / GTM / Team / Fundraising: Hiring one engineer",
+        )
+        self.assertEqual(draft_results.data["draft"]["learnings"], "Paid pilots convert faster when buyer scope is narrow")
+        self.assertEqual(draft_results.data["draft"]["next30Days"], "Close two more pilots")
+        self.assertNotIn("Learning:", draft_results.data["draft"]["highlights"])
+        self.assertNotIn("Next 30 days:", draft_results.data["draft"]["asks"])
 
 
 class StartupUpdateOpenRunsViewTest(StartupUpdateApiTestCase):
