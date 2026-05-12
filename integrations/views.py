@@ -51,6 +51,8 @@ def _known_frontend_origins() -> Set[str]:
             _origin_from_url(getattr(settings, "DEFAULT_FRONTEND_URL", None)),
             _origin_from_url(getattr(settings, "ESAFETY_URL", None)),
             _origin_from_url(getattr(settings, "VIBE_RAISING_URL", None)),
+            _origin_from_url(getattr(settings, "FOUNDER_TOOLS_URL", None)),
+            _origin_from_url(getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", None)),
         )
         if origin
     }
@@ -131,6 +133,32 @@ def _resolve_google_oauth_user(request):
     return user
 
 
+def _dedupe_scopes(*scope_groups):
+    scopes = []
+    for scope_group in scope_groups:
+        for scope in scope_group or []:
+            if scope and scope not in scopes:
+                scopes.append(scope)
+    return scopes
+
+
+def _google_oauth_scopes_for_request(request):
+    requested_scope = request.GET.get("scope")
+    if requested_scope in {"website_baseline", "vibe_marketing_baseline"}:
+        identity_scopes = getattr(
+            settings,
+            "GOOGLE_OAUTH_IDENTITY_SCOPES",
+            [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ],
+        )
+        return _dedupe_scopes(identity_scopes, getattr(settings, "GOOGLE_WEBSITE_BASELINE_SCOPES", []))
+
+    return _dedupe_scopes(getattr(settings, "GOOGLE_OAUTH_SCOPES", []))
+
+
 def _ensure_django_session_for_user(request, user) -> None:
     if str(request.session.get("_auth_user_id") or "") == str(user.pk):
         return
@@ -161,11 +189,7 @@ def google_connect(request):
     else:
         request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
-    scopes = list(settings.GOOGLE_OAUTH_SCOPES)
-    if request.GET.get("scope") in {"website_baseline", "vibe_marketing_baseline"}:
-        for scope in getattr(settings, "GOOGLE_WEBSITE_BASELINE_SCOPES", []):
-            if scope not in scopes:
-                scopes.append(scope)
+    scopes = _google_oauth_scopes_for_request(request)
 
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
@@ -438,7 +462,8 @@ def github_callback(request):
     except Exception:
         repos = []
 
-    selected_repo = repos[0]["full_name"] if len(repos) == 1 else None
+    repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
+    selected_repo = repo_names[0] if len(repo_names) == 1 else None
 
     retry_message = ""
     domain_display = ""
@@ -459,12 +484,22 @@ def github_callback(request):
 
         # Get or create config and update GitHub credentials
         config, _ = OrganizationContentConfig.objects.get_or_create(organization=org)
+        previous_repo = str(config.github_repo or "").strip()
+        if not selected_repo and len(repo_names) > 1 and previous_repo:
+            selected_repo = next(
+                (repo_name for repo_name in repo_names if repo_name.casefold() == previous_repo.casefold()),
+                None,
+            )
+        repo_to_store = selected_repo
+        if not repo_to_store and len(repo_names) > 1 and previous_repo:
+            repo_to_store = previous_repo
+
         config.github_token_encrypted = access_token
         config.github_refresh_token_encrypted = refresh_token
         config.github_token_expires_at = token_expires_at
         config.github_user_name = github_login
         config.connected_slack_user_id = slack_user_id or config.connected_slack_user_id
-        config.github_repo = selected_repo if selected_repo else None
+        config.github_repo = repo_to_store if repo_to_store else None
         config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
@@ -473,7 +508,7 @@ def github_callback(request):
             "Org-level GitHub %s for %s: repo=%s, user=%s",
             setup_action,
             normalized_domain,
-            selected_repo,
+            repo_to_store,
             github_login,
         )
         domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
@@ -576,12 +611,12 @@ def github_callback(request):
     if selected_repo:
         repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
     elif len(repos) > 1:
-        repo_names = ", ".join(r["full_name"] for r in repos)
+        repo_names_html = ", ".join(repo_names)
         repo_list_html = (
             "<p style='color: orange;'>⚠️ Multiple repositories are selected for this installation.</p>"
             "<p>Roo requires exactly one repository per domain binding. Update the GitHub App installation "
             "and reconnect after narrowing it to a single repository.</p>"
-            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names}</p>"
+            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names_html}</p>"
         )
     else:
         repo_list_html = "<p style='color: orange;'>⚠️ No repositories were selected. Please reinstall the app and select at least one repository.</p>"

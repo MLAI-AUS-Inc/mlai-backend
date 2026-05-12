@@ -3,7 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
-    RateCardView, AdminAllowanceView, PointsRequestViewSet,
+    RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
+    StripeWebhookView, SystemAwardView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
     # Quest views
@@ -17,8 +18,10 @@ router.register(r'minters', MinterViewSet, basename='minter')  # Backwards compa
 router.register(r'tasks', TaskViewSet)
 router.register(r'ledger', LedgerViewSet, basename='ledger')
 router.register(r'requests', PointsRequestViewSet, basename='points-request')
+router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('', include(router.urls)),
     
     # ============================================================
@@ -30,6 +33,7 @@ urlpatterns = [
     # Coworking
     # ============================================================
     path('coworking/availability/', CoworkingViewSet.as_view({'get': 'availability'}), name='coworking-availability'),
+    path('coworking/report/', CoworkingViewSet.as_view({'get': 'report'}), name='coworking-report'),
     path('coworking/book/', CoworkingViewSet.as_view({'post': 'book'}), name='coworking-book'),
     path('coworking/cancel/', CoworkingViewSet.as_view({'post': 'cancel'}), name='coworking-cancel'),
     path('coworking/my-bookings/', CoworkingViewSet.as_view({'get': 'my_bookings'}), name='coworking-my-bookings'),
@@ -55,6 +59,7 @@ urlpatterns = [
     # ============================================================
     path('admin/award/', ManualAwardView.as_view(), name='manual-award'),
     path('admin/allowance/', AdminAllowanceView.as_view(), name='admin-allowance'),
+    path('system/award/', SystemAwardView.as_view(), name='system-award'),
     
     # ============================================================
     # Activity Tracking

@@ -21,6 +21,7 @@ from rest_framework import permissions, status, generics
 from core.permissions import IsLeaderboardAdmin
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from core.user_compat import get_compat_user_role
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -75,7 +76,7 @@ class TeamListView(APIView):
                                 "full_name": member.full_name,
                                 "email": member.email,
                                 "avatar_url": member.avatar_url,
-                                "role": member.role,
+                                "role": get_compat_user_role(member),
                                 "personas": member.personas,
                             }
                             for member in team.members.all()
@@ -137,9 +138,6 @@ class TeamListView(APIView):
             )
 
         team.members.add(user)
-        if not user.has_team:
-            user.has_team = True
-            user.save(update_fields=['has_team'])
 
         serializer = TeamSerializer(team)
         return Response(
@@ -191,9 +189,6 @@ class JoinTeamView(APIView):
             current_team.members.remove(user)
 
         team.members.add(user)
-        if not user.has_team:
-            user.has_team = True
-            user.save(update_fields=['has_team'])
 
         return Response(
             {

@@ -1,8 +1,11 @@
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
+
+from hospital.models import Team as HospitalTeam
 
 User = get_user_model()
 
@@ -54,6 +57,25 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['email'], 'current-user@example.com')
         self.assertEqual(response.data['full_name'], 'Current User')
+        self.assertEqual(response.data['role'], 'participant')
+        self.assertFalse(response.data['has_team'])
+
+    def test_current_user_derives_has_team_from_membership(self):
+        user = User.objects.create_user(
+            email='team-user@example.com',
+            first_name='Team',
+            last_name='User',
+        )
+        team = HospitalTeam.objects.create(team_name='Team Contract')
+        team.members.add(user)
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get('/api/v1/auth/me/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['has_team'])
+        self.assertEqual(response.data['team']['team_name'], 'Team Contract')
+        self.assertEqual(response.data['team']['members'][0]['role'], 'participant')
 
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=abc')
@@ -87,7 +109,7 @@ class AuthContractTests(TestCase):
 
     @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=vibe')
-    def test_create_user_includes_vibe_raising_contract(self, mock_generate, mock_send):
+    def test_create_user_normalizes_vibe_raising_to_founder_tools_contract(self, mock_generate, mock_send):
         response = self.client.post(
             '/api/v1/auth/create-user/',
             {
@@ -101,31 +123,31 @@ class AuthContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertIn('app=vibe-raising', response.data['magic_link'])
+        self.assertIn('app=founder-tools', response.data['magic_link'])
         self.assertIn('next=/vibe-raising', response.data['magic_link'])
         mock_generate.assert_called_once()
         mock_send.assert_called_once()
 
     @patch('core.views.send_magic_link_email')
-    @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=ica')
-    def test_create_user_includes_innovate_connect_alliance_contract(self, mock_generate, mock_send):
+    @patch('core.views.generate_magic_link')
+    def test_create_user_rejects_unsupported_app(self, mock_generate, mock_send):
         response = self.client.post(
             '/api/v1/auth/create-user/',
             {
-                'email': 'innovator@example.com',
-                'firstName': 'Ingrid',
-                'lastName': 'Alliance',
-                'app': 'innovate-connect-alliance',
-                'next': '/innovate-connect-alliance',
+                'email': 'unsupported-app@example.com',
+                'firstName': 'Unsupported',
+                'lastName': 'App',
+                'app': 'unknown-product',
+                'next': '/unknown-product',
             },
             format='json',
         )
 
-        self.assertEqual(response.status_code, 201)
-        self.assertIn('app=innovate-connect-alliance', response.data['magic_link'])
-        self.assertIn('next=/innovate-connect-alliance', response.data['magic_link'])
-        mock_generate.assert_called_once()
-        mock_send.assert_called_once()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], 'Unsupported app.')
+        self.assertFalse(User.objects.filter(email='unsupported-app@example.com').exists())
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
 
     @override_settings(MEDHACK_URL='http://localhost:3000')
     @patch('core.views.send_magic_link_email')
@@ -174,24 +196,58 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.data['message'], 'User does not exist.')
         mock_send.assert_not_called()
 
-    @override_settings(INNOVATE_CONNECT_ALLIANCE_URL='http://localhost:4100')
+    @override_settings(VIBE_RAISING_URL='http://localhost:5173')
     @patch('core.views.send_magic_link_email')
-    @patch('core.views.generate_magic_link')
-    def test_send_magic_link_uses_innovate_connect_alliance_frontend_origin(self, mock_generate, mock_send):
-        user = User.objects.create_user(email='ica-origin@example.com', role='participant')
+    @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify-email?token=next-query')
+    def test_send_magic_link_encodes_nested_next_query(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='nested-next@example.com', role='participant')
 
-        self.client.post(
+        response = self.client.post(
             '/api/v1/auth/send-magic-link/',
             {
-                'email': 'ica-origin@example.com',
-                'app': 'innovate-connect-alliance',
-                'next': '/innovate-connect-alliance',
+                'email': 'nested-next@example.com',
+                'app': 'founder-tools',
+                'next': '/founder-tools/marketing/create?step=baseline&googleBaseline=refresh',
             },
             format='json',
         )
 
-        mock_generate.assert_called_once_with(user, base_url='http://localhost:4100')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['magic_link_sent'])
+        magic_link = mock_send.call_args.args[1]
+        self.assertIn(
+            'next=/founder-tools/marketing/create%3Fstep%3Dbaseline%26googleBaseline%3Drefresh',
+            magic_link,
+        )
+        parsed_params = parse_qs(urlparse(magic_link).query)
+        self.assertEqual(parsed_params['token'], ['next-query'])
+        self.assertEqual(parsed_params['app'], ['founder-tools'])
+        self.assertEqual(
+            parsed_params['next'],
+            ['/founder-tools/marketing/create?step=baseline&googleBaseline=refresh'],
+        )
+        mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
         mock_send.assert_called_once()
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_rejects_unsupported_app(self, mock_generate, mock_send):
+        User.objects.create_user(email='unsupported-origin@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {
+                'email': 'unsupported-origin@example.com',
+                'app': 'unknown-product',
+                'next': '/unknown-product',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], 'Unsupported app.')
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
 
     @override_settings(MEDHACK_URL='', DEFAULT_FRONTEND_URL='http://localhost:3000')
     @patch('core.views.send_magic_link_email')
@@ -226,6 +282,8 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['user']['id'], user.id)
         self.assertEqual(response.data['user']['email'], 'verify@example.com')
+        self.assertEqual(response.data['user']['role'], 'participant')
+        self.assertFalse(response.data['user']['has_team'])
         self.assertEqual(response.data['redirect'], '/hospital/app')
         self.assertTrue(response.data['next_url'].endswith('/hospital/app'))
         self.assertIn('access_token', response.cookies)
@@ -238,7 +296,7 @@ class AuthContractTests(TestCase):
         mock_verify.assert_called_once_with('test-token')
 
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'vibe-verify@example.com'})
-    def test_verify_magic_link_defaults_to_vibe_raising_redirect(self, mock_verify):
+    def test_verify_magic_link_defaults_to_founder_tools_for_vibe_raising_alias(self, mock_verify):
         user = User.objects.create_user(
             email='vibe-verify@example.com',
             role='participant',
@@ -254,32 +312,32 @@ class AuthContractTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['user']['id'], user.id)
-        self.assertEqual(response.data['redirect'], '/vibe-raising')
-        self.assertTrue(response.data['next_url'].endswith('/vibe-raising'))
+        self.assertEqual(response.data['redirect'], '/founder-tools')
+        self.assertTrue(response.data['next_url'].endswith('/founder-tools'))
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
 
-    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'ica-verify@example.com'})
-    def test_verify_magic_link_defaults_to_innovate_connect_alliance_redirect(self, mock_verify):
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'unsupported-verify@example.com'})
+    def test_verify_magic_link_rejects_unsupported_app(self, mock_verify):
         user = User.objects.create_user(
-            email='ica-verify@example.com',
+            email='unsupported-verify@example.com',
             role='participant',
-            first_name='Innovate',
+            first_name='Unsupported',
             last_name='Verify',
         )
         user.is_active = False
         user.save(update_fields=['is_active'])
 
         response = self.client.get(
-            '/api/v1/auth/verify-magic-link/?token=test-token&app=innovate-connect-alliance'
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=unknown-product'
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['user']['id'], user.id)
-        self.assertEqual(response.data['redirect'], '/innovate-connect-alliance')
-        self.assertTrue(response.data['next_url'].endswith('/innovate-connect-alliance'))
-        self.assertIn('access_token', response.cookies)
-        self.assertIn('refresh_token', response.cookies)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], 'Unsupported app.')
+        self.assertNotIn('access_token', response.cookies)
+        self.assertNotIn('refresh_token', response.cookies)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
 
     @patch(
         'core.views.verify_magic_link',

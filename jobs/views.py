@@ -201,7 +201,6 @@ class DailyJobsHtmlView(APIView):
             <section>
               <h2>Filters</h2>
               <div class="filters">
-                <a href="#australian_ai">Australian AI</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}">All</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_ai">Australian AI</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_startup">Australian Startup</a>

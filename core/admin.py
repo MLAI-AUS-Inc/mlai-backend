@@ -9,7 +9,7 @@ class UserAdmin(BaseUserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     model = User
-    list_display = ('email', 'first_name', 'last_name', 'role', 'slack_id', 'is_staff', 'avatar_preview')
+    list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
     search_fields = ('email', 'first_name', 'last_name', 'slack_id')
     ordering = ('email',)
@@ -19,13 +19,13 @@ class UserAdmin(BaseUserAdmin):
         ('Personal info', {'fields': ('first_name', 'last_name', 'avatar_url', 'avatar_preview')}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
-        ('Other', {'fields': ('role', 'has_team', 'slack_id')}),
+        ('Other', {'fields': ('slack_id',)}),
     )
     
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'password', 'password_2'),
+            'fields': ('email', 'password1', 'password2'),
         }),
     )
     

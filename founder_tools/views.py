@@ -105,12 +105,19 @@ class FounderToolsCompanyView(APIView):
                 setattr(company, field, value)
             company.save()
         else:
-            company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
+            company = profile.companies.filter(name__iexact=company_fields["name"]).first()
+            if company is None:
+                company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
+            else:
+                for field, value in company_fields.items():
+                    setattr(company, field, value)
+                company.save()
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)
         if profile.active_company_id is None:
             set_active_company(profile, company)
+        company.refresh_from_db()
 
         return Response(FounderCompanySerializer(company).data, status=status.HTTP_200_OK)
 

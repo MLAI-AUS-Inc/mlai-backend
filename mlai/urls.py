@@ -16,6 +16,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from .views import health_check, health_live, health_points, health_ready
+from startup_updates import data_views as startup_data_views
 
 urlpatterns = [
     path('', health_check, name='health_check'),
@@ -25,7 +26,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/auth/', include('core.urls')),
     path('api/v1/hackathons/esafety/', include('esafety.urls')),
-    path('api/v1/hackathons/innovate-connect-alliance/', include('innovate_connect_alliance.urls')),
     path('api/v1/hackathons/', include('core.urls_hackathons')),
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/founder-tools/', include('founder_tools.urls')),
@@ -36,11 +36,22 @@ urlpatterns = [
     path('api/v1/medhack/', include('hospital.medhack_urls')),
     # Content Factory API
     path('api/content-factory/', include('content_factory.urls_service')),
+    path('api/v1/content-factory/app/', include('integrations.content_factory_app_urls')),
     path('api/v1/content/', include('content_factory.urls_content')),
     # SEO Research API
     path('api/seo/', include('content_factory.urls_seo')),
 
     path('integrations/', include('integrations.urls')),
     path('api/v1/integrations/', include('integrations.api_urls')),
+    path(
+        'api/v1/startups/<int:organization_id>/data/status',
+        startup_data_views.StartupDataStatusView.as_view(),
+        name='startup_data_status',
+    ),
+    path(
+        'api/v1/startups/<int:organization_id>/data',
+        startup_data_views.StartupDataDeletionView.as_view(),
+        name='startup_data_delete',
+    ),
     path('api/v1/users/', include('core.urls_users')),
 ]

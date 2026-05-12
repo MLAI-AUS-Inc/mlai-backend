@@ -1387,6 +1387,330 @@ def _load_content_package_for_callback(run_id: str, *, attempts: int = 3, delay_
     return run, package
 
 
+TERMINAL_RUN_STATUSES = {
+    ContentFactoryRunStatus.FAILED,
+    ContentFactoryRunStatus.BLOCKED,
+    ContentFactoryRunStatus.DENIED,
+    ContentFactoryRunStatus.CANCELLED,
+}
+
+
+def _is_terminal_run_status(value: str) -> bool:
+    return str(value or "").strip() in TERMINAL_RUN_STATUSES
+
+
+def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status: str) -> Optional[ContentFactoryRun]:
+    run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
+    if not run_id:
+        return None
+
+    step_key = str(
+        data.get("failed_step")
+        or data.get("blocked_step")
+        or data.get("current_step")
+        or data.get("step")
+        or ""
+    ).strip()
+    workflow = str(data.get("workflow") or "direct_generate").strip() or "direct_generate"
+    error_message = str(data.get("error") or data.get("error_message") or "").strip()
+    error_code = str(data.get("error_code") or "").strip()
+    existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    result = dict((existing_run.result if existing_run else None) or {})
+    result.update(
+        {
+            "status": run_status,
+            "run_id": run_id,
+            "job_id": str(data.get("job_id") or run_id),
+            "workflow": workflow,
+            "current_step": step_key,
+            "step": step_key,
+            "error": error_message,
+            "error_code": error_code,
+            "retry_after_seconds": data.get("retry_after_seconds"),
+            "next_step": data.get("next_step"),
+            "rerunnable_step": data.get("rerunnable_step"),
+        }
+    )
+    diagnostics = data.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        result["diagnostics"] = diagnostics
+
+    step_order = list((existing_run.step_order if existing_run else None) or [])
+    if step_key and step_key not in step_order:
+        step_order.append(step_key)
+
+    run, _created = ContentFactoryRun.objects.update_or_create(
+        run_id=run_id,
+        defaults={
+            "workflow": workflow,
+            "domain": str(data.get("domain") or (existing_run.domain if existing_run else "") or ""),
+            "github_repo": str(data.get("github_repo") or (existing_run.github_repo if existing_run else "") or ""),
+            "slack_user_id": str(data.get("slack_user_id") or (existing_run.slack_user_id if existing_run else "") or ""),
+            "status": run_status,
+            "current_step": step_key or (existing_run.current_step if existing_run else ""),
+            "approval_state": (existing_run.approval_state if existing_run else ContentFactoryApprovalState.NOT_REQUIRED),
+            "artifact_root": (existing_run.artifact_root if existing_run else ""),
+            "step_order": step_order,
+            "acceptance_summary": (existing_run.acceptance_summary if existing_run else {}),
+            "verification_summary": diagnostics if isinstance(diagnostics, dict) else (existing_run.verification_summary if existing_run else {}),
+            "run_request": (existing_run.run_request if existing_run else {}),
+            "result": result,
+            "error": error_message,
+            "resume_available": True,
+        },
+    )
+
+    if step_key:
+        display_order = step_order.index(step_key) if step_key in step_order else len(step_order)
+        ContentFactoryRunStep.objects.update_or_create(
+            run=run,
+            step_key=step_key,
+            defaults={
+                "display_order": display_order,
+                "required": True,
+                "status": step_status,
+                "attempts": 1,
+                "message": error_message,
+                "completed_at": timezone.now(),
+                "error": error_message,
+                "artifacts": data.get("failure_artifacts") or [],
+            },
+        )
+    return run
+
+
+def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Optional[ContentFactoryRun]:
+    run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
+    if not run_id:
+        return None
+
+    existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if existing_run and existing_run.status in {ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}:
+        logger.info(
+            "Ignoring scan callback for terminal local run: run_id=%s status=%s",
+            run_id,
+            existing_run.status,
+        )
+        return existing_run
+
+    scaffold_status = str(data.get("scaffold_status") or "").strip()
+    readiness = data.get("article_system_readiness") if isinstance(data.get("article_system_readiness"), dict) else {}
+    readiness_status = str(readiness.get("status") or "").strip()
+    if approval_required:
+        run_status = ContentFactoryRunStatus.AWAITING_CONFIRMATION
+        approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        result_status = "awaiting_confirmation"
+    elif scaffold_status == "queued":
+        run_status = ContentFactoryRunStatus.RUNNING
+        approval_state = ContentFactoryApprovalState.APPROVED
+        result_status = "article_system_setup_queued"
+    elif scaffold_status == "manual_blocked" or readiness_status == "manual_blocked":
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        result_status = "manual_blocked"
+    else:
+        run_status = ContentFactoryRunStatus.COMPLETED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        result_status = "completed"
+
+    result = dict((existing_run.result if existing_run else None) or {})
+    result.update(
+        {
+            "status": result_status,
+            "run_id": run_id,
+            "job_id": str(data.get("job_id") or run_id),
+            "workflow": str(data.get("workflow") or "repo_scan"),
+            "domain": str(data.get("domain") or (existing_run.domain if existing_run else "") or ""),
+            "github_repo": str(data.get("github_repo") or (existing_run.github_repo if existing_run else "") or ""),
+            "requested_action": data.get("requested_action"),
+            "scaffold_required": bool(data.get("scaffold_required")),
+            "scaffold_status": scaffold_status,
+            "scaffold_plan": data.get("scaffold_plan") if isinstance(data.get("scaffold_plan"), dict) else {},
+            "article_system": data.get("article_system") if isinstance(data.get("article_system"), dict) else {},
+            "article_system_readiness": readiness,
+            "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
+            "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
+            "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
+            "matched_article_surface": data.get("matched_article_surface"),
+            "publish_targets": data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else [],
+            "default_publish_target_id": data.get("default_publish_target_id"),
+            "approve_url": data.get("approve_url"),
+            "deny_url": data.get("deny_url"),
+            "scaffold_queued": bool(data.get("scaffold_queued")),
+            "scaffold_job_id": data.get("scaffold_job_id"),
+            "setup_run_id": data.get("setup_run_id"),
+            "preview_url": data.get("preview_url"),
+            "pr_url": data.get("pr_url"),
+            "live_preview_url": data.get("live_preview_url"),
+            "components_generated": bool(data.get("components_generated")),
+            "components_count": data.get("components_count") or 0,
+            "component_names": data.get("component_names") if isinstance(data.get("component_names"), list) else [],
+            "scaffold_reason": str(data.get("scaffold_reason") or "").strip(),
+        }
+    )
+    detected_candidates = data.get("detected_candidates")
+    if not isinstance(detected_candidates, list):
+        scaffold_plan = result.get("scaffold_plan") if isinstance(result.get("scaffold_plan"), dict) else {}
+        detected_candidates = scaffold_plan.get("detected_candidates")
+    if isinstance(detected_candidates, list):
+        result["detected_candidates"] = detected_candidates
+
+    step_order = list((existing_run.step_order if existing_run else None) or [])
+    if not step_order:
+        step_order = ["load_repo_context", "scan_structure", "extract_components", "persist_org_config", "finalize"]
+
+    run, _created = ContentFactoryRun.objects.update_or_create(
+        run_id=run_id,
+        defaults={
+            "workflow": str(data.get("workflow") or "repo_scan"),
+            "domain": result["domain"],
+            "github_repo": result["github_repo"],
+            "slack_user_id": str(data.get("slack_user_id") or (existing_run.slack_user_id if existing_run else "") or ""),
+            "status": run_status,
+            "current_step": str(data.get("current_step") or (existing_run.current_step if existing_run else "") or "finalize"),
+            "approval_state": approval_state,
+            "artifact_root": (existing_run.artifact_root if existing_run else ""),
+            "step_order": step_order,
+            "acceptance_summary": (existing_run.acceptance_summary if existing_run else {}),
+            "verification_summary": (existing_run.verification_summary if existing_run else {}),
+            "run_request": (existing_run.run_request if existing_run else {}),
+            "result": result,
+            "error": "" if run_status != ContentFactoryRunStatus.BLOCKED else result.get("scaffold_reason") or readiness.get("reason") or "",
+            "resume_available": bool(existing_run.resume_available if existing_run else False),
+        },
+    )
+    setup_run_id = str(result.get("setup_run_id") or "").strip()
+    if setup_run_id:
+        setup_result = dict(result.get("article_system_setup") or {})
+        setup_result.setdefault("setup_run_id", setup_run_id)
+        setup_result.setdefault("parent_run_id", run_id)
+        existing_setup = ContentFactoryRun.objects.filter(run_id=setup_run_id).first()
+        if not existing_setup:
+            ContentFactoryRun.objects.create(
+                run_id=setup_run_id,
+                workflow="article_system_setup",
+                domain=result["domain"],
+                github_repo=result["github_repo"],
+                slack_user_id=str(data.get("slack_user_id") or (existing_run.slack_user_id if existing_run else "") or ""),
+                status=ContentFactoryRunStatus.RUNNING,
+                current_step="queued",
+                approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+                step_order=["load_context", "validate_plan", "prepare_branch", "create_pull_request", "start_hosted_preview", "await_review"],
+                run_request={
+                    "workflow": "article_system_setup",
+                    "domain": result["domain"],
+                    "github_repo": result["github_repo"],
+                    "parent_run_id": run_id,
+                    "scan_run_id": run_id,
+                },
+                result=setup_result,
+                error="",
+            )
+    return run
+
+
+def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
+    run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
+    if not run_id:
+        return None
+
+    existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    setup_payload = data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
+    live_preview = data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
+    result = dict((existing_run.result if existing_run else None) or {})
+    result.update(
+        {
+            "status": str(data.get("status") or setup_payload.get("status") or event_type).strip(),
+            "event": event_type,
+            "run_id": run_id,
+            "job_id": str(data.get("job_id") or run_id),
+            "workflow": str(data.get("workflow") or "article_system_setup"),
+            "domain": str(data.get("domain") or (existing_run.domain if existing_run else "") or ""),
+            "github_repo": str(data.get("github_repo") or (existing_run.github_repo if existing_run else "") or ""),
+            "parent_run_id": data.get("parent_run_id"),
+            "scan_run_id": data.get("scan_run_id") or data.get("parent_run_id"),
+            "setup_run_id": run_id,
+            "article_system_setup": setup_payload,
+            "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
+            "preview_url": data.get("preview_url") or setup_payload.get("preview_url"),
+            "live_preview_url": data.get("live_preview_url") or setup_payload.get("live_preview_url"),
+            "approve_url": data.get("approve_url") or setup_payload.get("approve_url"),
+            "deny_url": data.get("deny_url") or setup_payload.get("deny_url"),
+            "feedback_batch_id": data.get("feedback_batch_id") or result.get("feedback_batch_id"),
+            "review_comments_path": data.get("review_comments_path") or result.get("review_comments_path"),
+            "livePreview": live_preview,
+            "live_preview": live_preview,
+        }
+    )
+
+    if event_type == "article_system_setup_completed":
+        run_status = ContentFactoryRunStatus.COMPLETED
+        approval_state = ContentFactoryApprovalState.APPROVED
+        current_step = "completed"
+        error = ""
+    elif event_type == "article_system_setup_manual_merge_required":
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "manual_merge_required"
+        error = str(data.get("message") or "Manual merge is required for this article system setup.")
+    else:
+        run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
+        approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        current_step = "await_review"
+        error = ""
+
+    run, _created = ContentFactoryRun.objects.update_or_create(
+        run_id=run_id,
+        defaults={
+            "workflow": "article_system_setup",
+            "domain": result["domain"],
+            "github_repo": result["github_repo"],
+            "slack_user_id": str(data.get("slack_user_id") or (existing_run.slack_user_id if existing_run else "") or ""),
+            "status": run_status,
+            "current_step": current_step,
+            "approval_state": approval_state,
+            "artifact_root": (existing_run.artifact_root if existing_run else ""),
+            "step_order": (existing_run.step_order if existing_run else []) or ["load_context", "validate_plan", "prepare_branch", "create_pull_request", "start_hosted_preview", "await_review"],
+            "acceptance_summary": (existing_run.acceptance_summary if existing_run else {}),
+            "verification_summary": (existing_run.verification_summary if existing_run else {}),
+            "run_request": (existing_run.run_request if existing_run else {}) or {
+                "workflow": "article_system_setup",
+                "domain": result["domain"],
+                "github_repo": result["github_repo"],
+                "parent_run_id": data.get("parent_run_id"),
+                "scan_run_id": data.get("scan_run_id") or data.get("parent_run_id"),
+            },
+            "result": result,
+            "error": error,
+            "resume_available": bool(existing_run.resume_available if existing_run else False),
+        },
+    )
+
+    parent_run_id = str(data.get("parent_run_id") or data.get("scan_run_id") or "").strip()
+    if parent_run_id:
+        parent = ContentFactoryRun.objects.filter(run_id=parent_run_id).first()
+        if parent:
+            parent_result = dict(parent.result or {})
+            parent_setup = dict(parent_result.get("article_system_setup") or {})
+            parent_setup.update(setup_payload)
+            parent_setup["setup_run_id"] = run_id
+            parent_result.update(
+                {
+                    "setup_run_id": run_id,
+                    "article_system_setup": parent_setup,
+                    "preview_url": result.get("preview_url"),
+                    "pr_url": result.get("pr_url"),
+                    "live_preview_url": result.get("live_preview_url"),
+                }
+            )
+            parent.result = parent_result
+            if parent.status == ContentFactoryRunStatus.RUNNING:
+                parent.current_step = "article_system_setup_preview"
+            parent.save(update_fields=["result", "current_step", "updated_at"])
+
+    return run
+
+
 class ContentFactoryCallbackView(APIView):
     """
     Receives callbacks from content-factory for various pipeline events.
@@ -1441,6 +1765,17 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_auth_required(data)
             elif event_type == 'scan_complete':
                 return self._handle_scan_complete(data)
+            elif event_type in {
+                'article_system_setup_preview_ready',
+                'article_system_setup_revision_ready',
+                'article_system_setup_completed',
+                'article_system_setup_manual_merge_required',
+            }:
+                _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)
+                return Response(
+                    {'status': 'received', 'message': f'{event_type} callback processed', 'job_id': job_id},
+                    status=status.HTTP_200_OK,
+                )
             elif event_type == 'website_baseline_complete':
                 return self._handle_website_baseline_complete(data)
             elif event_type == 'generation_failed':
@@ -1461,6 +1796,8 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_content_ready(data)
             elif event_type == 'publish_bundle_ready':
                 return self._handle_publish_bundle_ready(data)
+            elif event_type == 'article_review_ready':
+                return self._handle_article_review_ready(data)
             elif event_type == 'discovery_progress':
                 return self._handle_discovery_progress(data)
             elif event_type == 'article_progress':
@@ -1491,21 +1828,28 @@ class ContentFactoryCallbackView(APIView):
         if error_message is not None:
             defaults['error_message'] = error_message
 
-        job, _ = ContentFactoryJob.objects.update_or_create(
-            job_id=job_id,
-            defaults=defaults,
-        )
-        requested_by_slack_user_id = str(
-            (self.request.data or {}).get('requested_by_slack_user_id')
-            or ''
-        ).strip()
-        if requested_by_slack_user_id:
-            request_meta = dict(job.request_meta or {})
-            if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
-                request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
-                job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
-        return job
+        requested_by_slack_user_id = str((self.request.data or {}).get('requested_by_slack_user_id') or '').strip()
+        max_attempts = 3 if connection.vendor == 'sqlite' else 1
+        last_error = None
+        for attempt in range(max_attempts):
+            try:
+                job, _ = ContentFactoryJob.objects.update_or_create(
+                    job_id=job_id,
+                    defaults=defaults,
+                )
+                if requested_by_slack_user_id:
+                    request_meta = dict(job.request_meta or {})
+                    if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
+                        request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
+                        job.request_meta = request_meta
+                        job.save(update_fields=['request_meta', 'updated_at'])
+                return job
+            except OperationalError as exc:
+                last_error = exc
+                if not _is_retryable_sqlite_lock(exc) or attempt == max_attempts - 1:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
+        raise last_error
 
     def _resolve_job_thread_context(self, *, job, data):
         channel_id = (job.slack_channel_id if job else None) or data.get('slack_channel_id') or ''
@@ -2768,6 +3112,44 @@ class ContentFactoryCallbackView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    def _handle_article_review_ready(self, data):
+        data = self._enrich_review_preview_payload(data)
+        job_id = data.get('job_id')
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value='completed',
+            error_message='',
+        )
+        request_meta = dict(job.request_meta or {})
+        request_meta['publish_stage'] = 'article_review_ready'
+        for field in (
+            'live_preview_url',
+            'component_manifest_path',
+            'article_component_manifest_path',
+            'route_path',
+            'primary_artifact_path',
+        ):
+            if data.get(field):
+                request_meta[field] = data.get(field)
+        if request_meta != (job.request_meta or {}):
+            job.request_meta = request_meta
+            job.save(update_fields=['request_meta', 'updated_at'])
+
+        logger.info("Article review draft ready for job %s (%s)", job_id, domain)
+        return Response(
+            {
+                'status': 'received',
+                'message': 'Article review ready callback processed',
+                'job_id': job_id,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def _handle_auth_required(self, data):
         """
         Handle 'auth_required' event: notify user to re-authenticate.
@@ -3069,6 +3451,18 @@ class ContentFactoryCallbackView(APIView):
         # Update job record if one exists
         job = ContentFactoryJob.objects.filter(job_id=job_id).first()
         if job:
+            if job.status in {'cancelled', 'denied'}:
+                logger.info(
+                    "Ignoring scan_complete job update for terminal job: job_id=%s status=%s",
+                    job_id,
+                    job.status,
+                )
+                _sync_scan_callback_to_run(data=data, approval_required=approval_required)
+                return Response(
+                    {"status": "ignored", "message": "Scan run is terminal locally."},
+                    status=status.HTTP_200_OK,
+                )
+
             request_meta = dict(job.request_meta or {})
             request_meta.update(
                 {
@@ -3084,6 +3478,8 @@ class ContentFactoryCallbackView(APIView):
             job.status = 'awaiting_confirmation' if approval_required else 'completed'
             job.request_meta = request_meta
             job.save(update_fields=['status', 'request_meta', 'updated_at'])
+
+        _sync_scan_callback_to_run(data=data, approval_required=approval_required)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
 
@@ -3430,6 +3826,11 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
+        _sync_generation_callback_to_run(
+            data=data,
+            run_status=ContentFactoryRunStatus.FAILED,
+            step_status=ContentFactoryStepStatus.FAILED,
+        )
         scheduled_daily_job = is_scheduled_daily_job(job)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
@@ -3517,6 +3918,12 @@ class ContentFactoryCallbackView(APIView):
                         f"⚠️ *{domain} needs a supported publish target before direct publish can continue.*\n\n"
                         f"{error_message}\n\n"
                         f"Roo stopped before changing the repository. You can retry in content-only mode, or add a supported publish target such as `.content-factory/target.yml`."
+                    )
+                elif error_code == 'CATALOG_MISSING_REQUIRED_COMPONENTS':
+                    message = (
+                        f"⚠️ *{domain} needs its article component catalog refreshed.*\n\n"
+                        f"{error_message}\n\n"
+                        f"Open the Connect repo & article system step and run the repository scan again."
                     )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
@@ -3610,6 +4017,11 @@ class ContentFactoryCallbackView(APIView):
                 'status': 'blocked',
                 'error_message': f"[{error_code}] {error_message}",
             }
+        )
+        _sync_generation_callback_to_run(
+            data=data,
+            run_status=ContentFactoryRunStatus.BLOCKED,
+            step_status=ContentFactoryStepStatus.BLOCKED,
         )
         sync_blocked_job_state(job, data, update_card=True, allow_visible_notification=True)
 
@@ -3867,7 +4279,8 @@ class ContentFactoryCallbackView(APIView):
     def _generate_topic_explanation(self, option_data, company_context=None, competitors=None):
         """Generate a user-friendly explanation for why this topic was chosen."""
         volume = option_data.get('volume', 0)
-        difficulty = option_data.get('difficulty', 50)
+        difficulty = option_data.get('difficulty')
+        difficulty_source = option_data.get('difficulty_source') or option_data.get('difficultySource') or 'missing'
         tier = option_data.get('tier', 'tier_4_discard')
         opportunity_index = option_data.get('opportunity_index', 0.0)
         
@@ -3886,18 +4299,24 @@ class ContentFactoryCallbackView(APIView):
         else:
             parts.append(f"Niche search volume ({volume_val:,}/mo)")
         
-        # Difficulty assessment  
+        # Difficulty assessment
         try:
             diff_val = int(difficulty)
         except (ValueError, TypeError):
-            diff_val = 50
-            
-        if diff_val <= 35:
-            parts.append("with low competition.")
+            diff_val = None
+
+        if difficulty_source not in {'dataforseo_labs', 'dataforseo_bulk'} or diff_val is None:
+            parts.append("Difficulty is still being verified.")
+        elif diff_val <= 20:
+            parts.append("Very approachable; strong content could start getting traction in a few months.")
+        elif diff_val <= 40:
+            parts.append("Achievable with strong content and a realistic 4-6 month ranking window.")
         elif diff_val <= 60:
-            parts.append("with moderate competition.")
+            parts.append("Moderate difficulty; likely needs a strong article, internal links, and time, often 6-9+ months.")
+        elif diff_val <= 80:
+            parts.append("Hard difficulty; usually needs authority, supporting content, and backlinks.")
         else:
-            parts.append("but highly competitive.")
+            parts.append("Very hard difficulty; treat this as a long-term authority play.")
         
         # Tier-based reasoning
         tier_reasons = {
@@ -4367,7 +4786,7 @@ class ContentFactoryCallbackView(APIView):
 from content_factory.models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
     SemanticCluster, ClusterMembership, TopicMap, WrittenArticle, ResearchSession,
-    KeywordStatus
+    KeywordStatus, TopicFeedback
 )
 from content_factory.serializers import (
     ResearchedKeywordListSerializer, ResearchedKeywordDetailSerializer,
@@ -4375,7 +4794,13 @@ from content_factory.serializers import (
     ClusterBulkUpsertSerializer, TopicMapSerializer, WrittenArticleSerializer,
     WrittenArticleCreateSerializer, ResearchSessionSerializer,
     KeywordStatusUpdateSerializer, SEODashboardSerializer,
-    ResearchFeedbackSerializer,
+    ResearchFeedbackSerializer, TopicFeedbackRequestSerializer,
+)
+from content_factory.topic_feedback import (
+    list_topic_feedback,
+    record_topic_feedback,
+    restore_topic_feedback,
+    serialize_topic_feedback,
 )
 
 
@@ -4511,17 +4936,29 @@ class SEOKeywordBulkUpsertView(APIView):
                     continue
 
                 keyword_normalized = keyword_text.lower().strip()
+                velocity = kw_data.get('velocity_data') or kw_data.get('velocity') or {}
+                related_keywords = kw_data.get('related_keywords') or kw_data.get('relatedKeywords') or []
+                monthly_searches = (
+                    kw_data.get('monthly_searches')
+                    or kw_data.get('monthlySearches')
+                    or velocity.get('daily_volumes')
+                    or velocity.get('dailyVolumes')
+                    or []
+                )
 
                 defaults = {
                     'keyword': keyword_text,
                     'volume': kw_data.get('volume', 0),
                     'difficulty': kw_data.get('difficulty', 50),
+                    'difficulty_source': kw_data.get('difficulty_source') or kw_data.get('difficultySource') or 'legacy_default',
                     'intent': kw_data.get('intent', 'informational'),
                     'tier': kw_data.get('tier', 'tier_4_discard'),
                     'opportunity_index': kw_data.get('opportunity_index', 0.0),
                     'source': kw_data.get('source', 'seed'),
                     'source_detail': kw_data.get('source_detail'),
                     'competitor_urls': kw_data.get('competitor_urls', []),
+                    'related_keywords': related_keywords if isinstance(related_keywords, list) else [],
+                    'monthly_searches': monthly_searches if isinstance(monthly_searches, list) else [],
                     'cluster_fingerprint': kw_data.get('cluster_fingerprint', ''),
                 }
 
@@ -4537,7 +4974,6 @@ class SEOKeywordBulkUpsertView(APIView):
                     updated_count += 1
 
                 # Create velocity snapshot if provided
-                velocity = kw_data.get('velocity_data') or kw_data.get('velocity')
                 if velocity:
                     KeywordVelocity.objects.create(
                         keyword=keyword_obj,
@@ -4714,6 +5150,102 @@ class SEOKeywordResearchFeedbackView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class SEOTopicFeedbackView(APIView):
+    """
+    GET/POST /api/seo/topic-feedback/
+
+    Persist explicit startup/domain-scoped topic feedback independently from
+    researched keyword lifecycle status.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = str(request.query_params.get('domain') or '').strip()
+        if not domain:
+            return Response({'error': 'domain query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response({'error': f'Organization not found for domain: {domain}'}, status=status.HTTP_404_NOT_FOUND)
+
+        feedback_type = str(request.query_params.get('feedback_type') or 'declined').strip() or 'declined'
+        include_restored = str(request.query_params.get('include_restored') or '').lower() in {'1', 'true', 'yes'}
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 100)), 500))
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        feedback = list_topic_feedback(
+            org,
+            feedback_type=feedback_type,
+            include_restored=include_restored,
+            limit=limit,
+            offset=offset,
+        )
+        return Response(
+            {
+                'domain': domain,
+                'count': len(feedback),
+                'feedback': [serialize_topic_feedback(item) for item in feedback],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        serializer = TopicFeedbackRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        domain = str(serializer.validated_data.get('domain') or '').strip()
+        if not domain:
+            return Response({'error': 'domain is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        keyword = str(serializer.validated_data['keyword'] or '').strip()
+        if not keyword:
+            return Response({'error': 'keyword is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response({'error': f'Organization not found for domain: {domain}'}, status=status.HTTP_404_NOT_FOUND)
+
+        feedback, created = record_topic_feedback(
+            org,
+            keyword=keyword,
+            feedback_type=serializer.validated_data.get('feedback_type') or 'declined',
+            reason_code=serializer.validated_data.get('reason_code') or 'not_appropriate',
+            reason_text=serializer.validated_data.get('reason_text'),
+            decline_scope=serializer.validated_data.get('decline_scope') or 'similar',
+            source=serializer.validated_data.get('source') or 'homepage_topic_card',
+            session_id=serializer.validated_data.get('session_id'),
+        )
+        return Response(
+            {**serialize_topic_feedback(feedback), 'created': created},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class SEOTopicFeedbackRestoreView(APIView):
+    """POST /api/seo/topic-feedback/<uuid>/restore/"""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, pk):
+        try:
+            feedback = TopicFeedback.objects.select_related('organization').get(pk=pk)
+        except TopicFeedback.DoesNotExist:
+            return Response({'error': 'Topic feedback not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        restored = restore_topic_feedback(feedback)
+        return Response({**serialize_topic_feedback(restored), 'restored': True}, status=status.HTTP_200_OK)
+
+
 class SEOClusterListView(APIView):
     """
     GET /api/seo/clusters/?domain=example.com
@@ -4836,12 +5368,47 @@ class SEOClusterBulkUpsertView(APIView):
 
 class SEOWrittenArticleCreateView(APIView):
     """
-    POST /api/seo/articles/
+    GET/POST /api/seo/articles/
 
-    Create a written article record and update keyword status.
+    List or create written article records and update keyword status.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        domain = request.query_params.get('domain')
+        if not domain:
+            return Response(
+                {'error': 'domain query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': f'Organization not found for domain: {domain}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 100)), 1000))
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+
+        qs = WrittenArticle.objects.filter(organization=org).order_by('-created_at')
+        total_count = qs.count()
+        serializer = WrittenArticleSerializer(qs[offset:offset + limit], many=True)
+        return Response({
+            'domain': domain,
+            'count': len(serializer.data),
+            'total_count': total_count,
+            'articles': serializer.data,
+        }, status=status.HTTP_200_OK)
 
     def post(self, request):
         serializer = WrittenArticleCreateSerializer(data=request.data)
@@ -5163,6 +5730,7 @@ class ContentFactoryRunView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         step_states = request.data.get("step_states", {}) or {}
+        incoming_status = str(data.get("status") or "").strip()
 
         if (
             existing_run is not None
@@ -5178,6 +5746,21 @@ class ContentFactoryRunView(APIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
+
+        if (
+            existing_run is not None
+            and _is_terminal_run_status(existing_run.status)
+            and incoming_status not in {
+                ContentFactoryRunStatus.COMPLETED,
+                ContentFactoryRunStatus.FAILED,
+                ContentFactoryRunStatus.BLOCKED,
+                ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.CANCELLED,
+            }
+        ):
+            response_payload = _serialize_content_factory_run(existing_run)
+            response_payload["sync_status"] = "ignored_terminal_state"
+            return Response(response_payload, status=status.HTTP_200_OK)
 
         max_attempts = 3 if connection.vendor == "sqlite" else 1
         for attempt_number in range(1, max_attempts + 1):
@@ -5201,6 +5784,10 @@ class ContentFactoryRunView(APIView):
 
         response_payload = _serialize_content_factory_run(run)
         response_payload["sync_status"] = "created" if created else "updated"
+        if run.status == ContentFactoryRunStatus.COMPLETED:
+            from content_factory.vibe_marketing_views import _persist_completed_article_memory_if_possible
+
+            _persist_completed_article_memory_if_possible(run)
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

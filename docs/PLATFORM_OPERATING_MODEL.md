@@ -17,6 +17,12 @@ This document lives in `mlai-backend/docs` because `mlai-backend` is the platfor
 
 Linear can mirror this as a planning document, but the repo copy is the version-controlled source of truth.
 
+Related task-system docs:
+
+- [Roo Structured Task Capabilities](./ROO_TASK_CAPABILITIES.md)
+- [Roo Task Operations Runbook](./ROO_TASK_OPERATIONS_RUNBOOK.md)
+- [Roo Task Engine Technical Notes](./ROO_TASK_ENGINE_TECHNICAL.md)
+
 ## North Star
 
 MLAI Tech should become a community operating system.
@@ -104,7 +110,7 @@ Roo is the community-facing command layer.
 
 Roo should:
 
-- list available tasks
+- list open volunteer tasks
 - help people claim tasks
 - post task reminders
 - connect Slack users to Linear/GitHub records

@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from integrations.services.slack import SlackService
 
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 4
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 QUIET_RUN_THRESHOLD = timedelta(minutes=10)
 SCHEDULED_DAILY_TRIGGER_SOURCE = "scheduled_daily"

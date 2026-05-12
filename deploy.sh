@@ -16,7 +16,7 @@ rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh $USER@$DROPLET_IP << EOF
+ssh $USER@$DROPLET_IP <<EOF
     set -euo pipefail
 
     upsert_env_value() {
@@ -27,6 +27,21 @@ ssh $USER@$DROPLET_IP << EOF
         else
             echo "\${key}=\${value}" >> .env
         fi
+    }
+
+    require_env_value() {
+        local key="\$1"
+        local message="\$2"
+        if ! grep -Eq "^\${key}=.+" .env; then
+            echo "❌ Missing required \${key} in $PROJECT_DIR/.env"
+            echo "   \${message}"
+            exit 1
+        fi
+    }
+
+    env_has_value() {
+        local key="\$1"
+        grep -Eq "^\${key}=.+" .env
     }
 
     # Install Docker if not exists
@@ -49,21 +64,38 @@ ssh $USER@$DROPLET_IP << EOF
     fi
 
     # Update .env with production values (Run on every deploy)
-    sed -i 's/DEBUG=.*/DEBUG=False/' .env
-    sed -i 's/ALLOWED_HOSTS=.*/ALLOWED_HOSTS=api.mlai.au,209.38.85.60,localhost,127.0.0.1,esafety.localhost/' .env
-    sed -i 's|CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=https://mlai.au,https://www.mlai.au|' .env
-    sed -i 's|CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=https://mlai.au,https://www.mlai.au,https://api.mlai.au|' .env
+    upsert_env_value DEBUG "False"
+    upsert_env_value ALLOWED_HOSTS "api.mlai.au,209.38.85.60,10.126.0.2,localhost,127.0.0.1,esafety.localhost"
+    upsert_env_value CORS_ALLOWED_ORIGINS "https://mlai.au,https://www.mlai.au"
+    upsert_env_value CSRF_TRUSTED_ORIGINS "https://mlai.au,https://www.mlai.au,https://api.mlai.au"
+    upsert_env_value DEFAULT_BACKEND_URL "https://api.mlai.au"
+    upsert_env_value DEFAULT_FRONTEND_URL "https://mlai.au"
+    upsert_env_value MEDHACK_URL "https://mlai.au"
+    upsert_env_value ESAFETY_URL "https://mlai.au"
+    upsert_env_value VIBE_RAISING_URL "https://mlai.au"
+    upsert_env_value FOUNDER_TOOLS_URL "https://mlai.au"
+    upsert_env_value GOOGLE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google"
+    upsert_env_value GITHUB_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/github"
+    upsert_env_value STRIPE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/stripe"
+    upsert_env_value XERO_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/xero"
+    upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
+    upsert_env_value GOOGLE_DRIVE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-drive"
+    upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
+    upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
-    if grep -q '^VALLEY_HARNESS_URL=' .env; then
-        sed -i 's|^VALLEY_HARNESS_URL=$|VALLEY_HARNESS_URL=http://valley-api:8080|' .env
-    else
-        echo "VALLEY_HARNESS_URL=http://valley-api:8080" >> .env
-    fi
-    if ! grep -Eq '^VALLEY_HARNESS_URL=.+' .env; then
-        echo "WARNING: VALLEY_HARNESS_URL is blank; Vibe Raising email draft runs will not reach Valley."
-    fi
+    require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
+    require_env_value VALLEY_HARNESS_URL "Set VALLEY_HARNESS_URL to http://<valley-private-ip>:8080 for the cross-droplet Valley deployment."
     if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
+    fi
+
+    runtime_services=(web scheduler)
+    if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
+        runtime_services+=(bridge-worker)
+        bridge_worker_enabled=1
+    else
+        bridge_worker_enabled=0
+        echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
     fi
 
     migration_applied() {
@@ -105,8 +137,11 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🐘 Starting database..."
     docker compose up -d db
 
-    echo "🏗️ Building web, scheduler, and bridge-worker images..."
-    docker compose build web scheduler bridge-worker
+    echo "🏗️ Building runtime images: \${runtime_services[*]}..."
+    docker compose build "\${runtime_services[@]}"
+
+    echo "🔗 Validating production URL configuration and service connectivity..."
+    compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
 
     echo "🔍 Inspecting for stale generated migrations..."
     inspect_stale_migration \
@@ -136,6 +171,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "✅ Verifying migration readiness..."
     compose_run_web python manage.py migrate --check --noinput
 
+    echo "🧩 Verifying startup update schema..."
+    compose_run_web python manage.py validate_startup_update_schema
+
     echo "🧭 Verifying Vibe Raising video upload routes..."
     compose_run_web python manage.py shell -c "
 from django.urls import resolve
@@ -160,8 +198,21 @@ print(index_name)
 
     trap - ERR
 
-    echo "🌐 Starting web, scheduler, and bridge-worker services..."
-    docker compose up -d web scheduler bridge-worker
+    echo "🌐 Starting runtime services: \${runtime_services[*]}..."
+    docker compose up -d --force-recreate "\${runtime_services[@]}"
+
+    if [ "\$bridge_worker_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled bridge-worker service..."
+        docker compose stop bridge-worker || true
+        docker compose rm -f bridge-worker || true
+    fi
+
+    echo "🔁 Verifying the running web container picked up APP_RELEASE..."
+    running_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null)
+    if [ "\$running_release" != "$APP_RELEASE" ]; then
+        echo "Expected running web container APP_RELEASE=$APP_RELEASE but found \$running_release"
+        exit 1
+    fi
 
     echo "🩺 Verifying external health release..."
     release_ok=0

@@ -5,7 +5,7 @@ import re
 import secrets
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
 
@@ -29,12 +29,31 @@ from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailMessageArtifact,
     GmailSyncCursor,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
+    StartupMetricObservation,
 )
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
+from integrations.services.gmail_scopes import (
+    GMAIL_RECONNECT_WARNING,
+    gmail_scope_status_payload,
+    has_gmail_read_scope,
+)
 from startup_updates.services import bind_user_to_startup, get_default_gmail_binding, resolve_or_create_profile
+from integrations.services.xero_scopes import (
+    XERO_REPORT_SCOPE_WARNING,
+    XERO_REPORT_SCOPE_CONFIGURATION_WARNING,
+    XERO_REQUIRED_OPERATIONAL_SCOPES,
+    XERO_REQUIRED_REPORT_SCOPES,
+    xero_can_request_report_scopes,
+    xero_has_report_scope,
+    xero_needs_report_reconnect,
+)
 from integrations.utils import normalize_domain
 
 logger = logging.getLogger(__name__)
@@ -99,6 +118,12 @@ CONNECTOR_DEFINITIONS: dict[str, ConnectorDefinition] = {
         "Slack",
         ("context",),
     ),
+    ExternalServiceProvider.LINEAR: ConnectorDefinition(
+        ExternalServiceProvider.LINEAR,
+        "linear",
+        "Linear",
+        ("context",),
+    ),
 }
 
 PROVIDER_ALIASES = {
@@ -115,6 +140,7 @@ PROVIDER_ALIASES = {
     "google_drive": ExternalServiceProvider.GOOGLE_DRIVE,
     "drive": ExternalServiceProvider.GOOGLE_DRIVE,
     "slack": ExternalServiceProvider.SLACK,
+    "linear": ExternalServiceProvider.LINEAR,
 }
 
 EXTERNAL_PROVIDER_ORDER = (
@@ -124,6 +150,7 @@ EXTERNAL_PROVIDER_ORDER = (
     ExternalServiceProvider.NOTION,
     ExternalServiceProvider.GOOGLE_DRIVE,
     ExternalServiceProvider.SLACK,
+    ExternalServiceProvider.LINEAR,
 )
 
 
@@ -138,7 +165,7 @@ class ConnectorOAuthError(Exception):
 class ConnectorRateLimitError(Exception):
     def __init__(self, retry_after_seconds: int):
         self.retry_after_seconds = max(int(retry_after_seconds or 1), 1)
-        super().__init__(f"Slack rate limit exceeded; retry after {self.retry_after_seconds}s.")
+        super().__init__(f"Connector rate limit exceeded; retry after {self.retry_after_seconds}s.")
 
 
 def normalize_provider(provider: str) -> str:
@@ -245,6 +272,10 @@ def _xero_oauth_scope_list() -> list[str]:
     return deduped_scopes
 
 
+def _xero_can_request_report_scopes() -> bool:
+    return xero_can_request_report_scopes(_xero_oauth_scope_list())
+
+
 def _slack_oauth_user_scope_list() -> list[str]:
     configured = _as_scope_list(
         getattr(settings, "SLACK_OAUTH_USER_SCOPES", None)
@@ -255,6 +286,10 @@ def _slack_oauth_user_scope_list() -> list[str]:
 
 def _slack_oauth_bot_scope_list() -> list[str]:
     return _uniq_scopes(_as_scope_list(getattr(settings, "SLACK_OAUTH_BOT_SCOPES", [])))
+
+
+def _linear_oauth_scope_list() -> list[str]:
+    return _uniq_scopes(_as_scope_list(getattr(settings, "LINEAR_OAUTH_SCOPES", ["read"])))
 
 
 def _uniq_scopes(scopes: Iterable[str]) -> list[str]:
@@ -317,13 +352,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         client_secret = str(getattr(settings, "XERO_CLIENT_SECRET", "") or "").strip()
         redirect_uri = str(getattr(settings, "XERO_OAUTH_REDIRECT_URI", "") or "").strip()
         scopes = set(_xero_oauth_scope_list())
-        required_scopes = {
-            "offline_access",
-            "accounting.invoices.read",
-            "accounting.payments.read",
-            "accounting.settings.read",
-            "accounting.contacts.read",
-        }
+        required_scopes = set(XERO_REQUIRED_OPERATIONAL_SCOPES)
         missing = []
         if not client_id:
             missing.append("XERO_CLIENT_ID")
@@ -411,6 +440,32 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
             return f"Slack OAuth v1 excludes DMs and MPIMs. Remove: {', '.join(configured_dm_scopes)}."
         return None
 
+    if provider == ExternalServiceProvider.LINEAR:
+        client_id = str(getattr(settings, "LINEAR_CLIENT_ID", "") or "").strip()
+        client_secret = str(getattr(settings, "LINEAR_CLIENT_SECRET", "") or "").strip()
+        redirect_uri = str(getattr(settings, "LINEAR_OAUTH_REDIRECT_URI", "") or "").strip()
+        scopes = set(_linear_oauth_scope_list())
+        missing = []
+        if not client_id:
+            missing.append("LINEAR_CLIENT_ID")
+        if not client_secret:
+            missing.append("LINEAR_CLIENT_SECRET")
+        if not redirect_uri:
+            missing.append("LINEAR_OAUTH_REDIRECT_URI")
+        if missing:
+            return (
+                f"{definition.label} OAuth is not configured. "
+                f"Set {', '.join(missing)} for Linear OAuth."
+            )
+        if _looks_like_placeholder_secret(client_id) or _looks_like_placeholder_secret(client_secret):
+            return "Linear OAuth is not configured with valid app credentials."
+        parsed_redirect = urllib.parse.urlparse(redirect_uri)
+        if parsed_redirect.scheme not in {"http", "https"} or not parsed_redirect.netloc:
+            return "Linear OAuth redirect URI must be an absolute http or https URL."
+        if "read" not in scopes:
+            return "Linear OAuth scopes must include read."
+        return None
+
     if not is_provider_configured(provider):
         return f"{definition.label} OAuth is not configured."
     return None
@@ -437,6 +492,8 @@ def is_provider_configured(provider: str) -> bool:
         return bool(getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") and getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", ""))
     if provider == ExternalServiceProvider.SLACK:
         return bool(getattr(settings, "SLACK_CLIENT_ID", "") and getattr(settings, "SLACK_CLIENT_SECRET", ""))
+    if provider == ExternalServiceProvider.LINEAR:
+        return bool(getattr(settings, "LINEAR_CLIENT_ID", "") and getattr(settings, "LINEAR_CLIENT_SECRET", ""))
     return False
 
 
@@ -635,6 +692,16 @@ def build_authorization_url(request, provider: str) -> str:
             params["user_scope"] = ",".join(user_scopes)
         return "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode(params)
 
+    if provider == ExternalServiceProvider.LINEAR:
+        params = {
+            "client_id": settings.LINEAR_CLIENT_ID,
+            "redirect_uri": settings.LINEAR_OAUTH_REDIRECT_URI,
+            "response_type": "code",
+            "scope": " ".join(_linear_oauth_scope_list()),
+            "state": state,
+        }
+        return "https://linear.app/oauth/authorize?" + urllib.parse.urlencode(params)
+
     raise ConnectorConfigurationError("Unsupported connector provider.")
 
 
@@ -831,6 +898,66 @@ def _exchange_slack_code(code: str) -> dict[str, Any]:
     return token_data
 
 
+def _exchange_linear_code(code: str) -> dict[str, Any]:
+    response = requests.post(
+        "https://api.linear.app/oauth/token",
+        data={
+            "client_id": settings.LINEAR_CLIENT_ID,
+            "client_secret": settings.LINEAR_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": settings.LINEAR_OAUTH_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if token_data.get("error"):
+        raise ConnectorOAuthError(token_data.get("error_description") or token_data.get("error"))
+    return token_data
+
+
+def _refresh_linear_token(connection: ExternalServiceConnection) -> dict[str, Any]:
+    if not connection.refresh_token:
+        raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
+    response = requests.post(
+        "https://api.linear.app/oauth/token",
+        data={
+            "client_id": settings.LINEAR_CLIENT_ID,
+            "client_secret": settings.LINEAR_CLIENT_SECRET,
+            "refresh_token": connection.refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if token_data.get("error"):
+        raise ConnectorOAuthError(token_data.get("error_description") or token_data.get("error"))
+    connection.access_token = str(token_data.get("access_token") or connection.access_token or "")
+    connection.refresh_token = str(token_data.get("refresh_token") or connection.refresh_token or "")
+    connection.token_type = str(token_data.get("token_type") or connection.token_type or "Bearer")
+    connection.token_expires_at = _expires_at(token_data)
+    scopes = _as_scope_list(token_data.get("scope"))
+    if scopes:
+        connection.scopes = scopes
+    connection.status = ExternalServiceConnectionStatus.CONNECTED
+    connection.last_error = ""
+    connection.save(
+        update_fields=[
+            "access_token",
+            "refresh_token",
+            "token_type",
+            "token_expires_at",
+            "scopes",
+            "status",
+            "last_error",
+            "updated_at",
+        ]
+    )
+    return token_data
+
+
 def _fetch_xero_connections(access_token: str) -> list[dict[str, Any]]:
     response = requests.get(
         "https://api.xero.com/connections",
@@ -1003,6 +1130,75 @@ def _store_slack_connection(user, organization: Optional[Organization], token_da
     )
 
 
+def _store_linear_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
+    access_token = str(token_data.get("access_token") or "")
+    refresh_token = str(token_data.get("refresh_token") or "")
+    scopes = _as_scope_list(token_data.get("scope")) or _linear_oauth_scope_list()
+    temporary_connection = type(
+        "LinearTemporaryConnection",
+        (),
+        {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_expires_at": None,
+            "status": ExternalServiceConnectionStatus.CONNECTED,
+            "save": lambda *args, **kwargs: None,
+        },
+    )()
+    identity = {}
+    if access_token:
+        try:
+            identity_payload = _linear_graphql_request(
+                temporary_connection,
+                """
+                query LinearViewer {
+                  viewer {
+                    id
+                    name
+                    email
+                    organization {
+                      id
+                      name
+                      urlKey
+                    }
+                  }
+                }
+                """,
+                {},
+                allow_refresh=False,
+            )
+            identity = identity_payload.get("viewer") if isinstance(identity_payload.get("viewer"), dict) else {}
+        except Exception:
+            logger.exception("Unable to load Linear viewer during OAuth storage", extra={"user_id": user.id})
+            identity = {}
+
+    linear_org = identity.get("organization") if isinstance(identity.get("organization"), dict) else {}
+    external_account_id = str(linear_org.get("id") or identity.get("id") or "").strip()
+    account_label = (
+        str(linear_org.get("name") or "").strip()
+        or str(identity.get("email") or "").strip()
+        or str(identity.get("name") or "").strip()
+        or "Linear workspace"
+    )
+    return _upsert_connection(
+        user=user,
+        provider=ExternalServiceProvider.LINEAR,
+        organization=organization,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type=str(token_data.get("token_type") or "Bearer"),
+        token_expires_at=_expires_at(token_data),
+        scopes=scopes,
+        external_account_id=external_account_id,
+        account_label=account_label,
+        provider_metadata={
+            "viewer": identity,
+            "organization": linear_org,
+            "token_type": token_data.get("token_type"),
+        },
+    )
+
+
 def complete_oauth_callback(request, provider: str) -> str:
     provider = normalize_provider(provider)
     if provider == "gmail":
@@ -1052,6 +1248,8 @@ def complete_oauth_callback(request, provider: str) -> str:
             connection = _store_google_drive_connection(request.user, organization, _exchange_google_drive_code(code))
         elif provider == ExternalServiceProvider.SLACK:
             connection = _store_slack_connection(request.user, organization, _exchange_slack_code(code))
+        elif provider == ExternalServiceProvider.LINEAR:
+            connection = _store_linear_connection(request.user, organization, _exchange_linear_code(code))
         else:
             raise ConnectorOAuthError("Unsupported connector provider.")
     except requests.RequestException as exc:
@@ -1691,6 +1889,19 @@ def _xero_collection(
     return items
 
 
+def fetch_xero_accounting_report(
+    connection: ExternalServiceConnection,
+    report_name: str,
+    *,
+    params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return _xero_get_json(
+        connection,
+        f"/Reports/{report_name.strip('/')}",
+        params=params,
+    )
+
+
 def _xero_contact_name(payload: dict[str, Any]) -> str:
     contact = _as_dict(payload.get("Contact") or payload.get("contact"))
     return _nested_text(contact, "Name", "name", "ContactID", "contact_id")
@@ -1851,6 +2062,84 @@ def _upsert_xero_payments(connection: ExternalServiceConnection, payments: list[
     return upserted
 
 
+def _previous_month_start(month: date) -> date:
+    if month.month == 1:
+        return date(month.year - 1, 12, 1)
+    return date(month.year, month.month - 1, 1)
+
+
+def _xero_report_metric_window(today: date) -> tuple[date, date]:
+    current_month = date(today.year, today.month, 1)
+    previous_month = _previous_month_start(current_month)
+    oldest_month = _previous_month_start(previous_month)
+    return oldest_month, today
+
+
+def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection, today: date) -> dict[str, Any]:
+    has_report_scope = xero_has_report_scope(connection.scopes)
+    can_request_report_scopes = _xero_can_request_report_scopes()
+    needs_report_scope_configuration = not has_report_scope and not can_request_report_scopes
+    needs_report_reconnect = not has_report_scope and can_request_report_scopes and xero_needs_report_reconnect(connection.scopes)
+    metric_warnings: list[str] = []
+    metrics_published_count = 0
+
+    if not has_report_scope:
+        logger.warning(
+            "Xero report metric sync skipped because reports scope is missing",
+            extra={"connection_id": connection.id, "user_id": connection.user_id},
+        )
+        metric_warnings.append(
+            XERO_REPORT_SCOPE_CONFIGURATION_WARNING
+            if needs_report_scope_configuration
+            else XERO_REPORT_SCOPE_WARNING
+        )
+    elif not connection.organization_id:
+        logger.warning(
+            "Xero report metric sync skipped because connection is not linked to an organization",
+            extra={"connection_id": connection.id, "user_id": connection.user_id},
+        )
+        metric_warnings.append("Xero report metrics could not be published because the connection is not linked to a company.")
+    else:
+        try:
+            from startup_updates.services import publish_xero_metric_observations
+
+            start_date, end_date = _xero_report_metric_window(today)
+            summary = publish_xero_metric_observations(
+                organization=connection.organization,
+                run=None,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            metrics_published_count = int(summary.get("published_metric_count") or 0)
+            metric_warnings = [
+                str(warning or "").strip()
+                for warning in summary.get("warnings", []) or []
+                if str(warning or "").strip()
+                and "deterministic accounting context" not in str(warning or "")
+            ]
+        except Exception as exc:
+            logger.exception(
+                "Xero report metric sync failed",
+                extra={"connection_id": connection.id, "user_id": connection.user_id},
+            )
+            metric_warnings.append(str(exc) or "Xero report metrics could not be published after sync.")
+
+    return {
+        "hasReportScope": has_report_scope,
+        "has_report_scope": has_report_scope,
+        "needsReportReconnect": needs_report_reconnect,
+        "needs_report_reconnect": needs_report_reconnect,
+        "canRequestReportScopes": can_request_report_scopes,
+        "can_request_report_scopes": can_request_report_scopes,
+        "needsReportScopeConfiguration": needs_report_scope_configuration,
+        "needs_report_scope_configuration": needs_report_scope_configuration,
+        "metricsPublishedCount": metrics_published_count,
+        "metrics_published_count": metrics_published_count,
+        "metricWarnings": metric_warnings,
+        "metric_warnings": metric_warnings,
+    }
+
+
 def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any]:
     if connection.provider != ExternalServiceProvider.XERO:
         raise ConnectorConfigurationError("Connection is not a Xero connection.")
@@ -1904,6 +2193,8 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
         }
         connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
 
+    report_metric_summary = _publish_xero_report_metrics_for_sync(connection, now.date())
+
     return {
         "connectionId": connection.id,
         "connection_id": connection.id,
@@ -1917,6 +2208,7 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
         "invoices_synced": invoices_synced,
         "paymentsSynced": payments_synced,
         "payments_synced": payments_synced,
+        **report_metric_summary,
     }
 
 
@@ -1985,6 +2277,25 @@ def _xero_monthly_normalized_amount(record: ExternalFinancialRecord) -> Optional
     return amount
 
 
+def _xero_preview_month(end_date: Optional[date]) -> date:
+    resolved = end_date or timezone.now().date()
+    return date(resolved.year, resolved.month, 1)
+
+
+def _xero_metric_value_lookup(connection: ExternalServiceConnection, month: date) -> dict[str, str]:
+    if connection.organization_id is None:
+        return {}
+    metrics = StartupMetricObservation.objects.filter(
+        organization=connection.organization,
+        source_provider=ExternalServiceProvider.XERO,
+        period_month=month,
+    ).order_by("metric_key", "-observed_at", "-updated_at", "-id")
+    values: dict[str, str] = {}
+    for metric in metrics:
+        values.setdefault(metric.metric_key, metric.value_text)
+    return values
+
+
 def serialize_xero_preview(
     user,
     *,
@@ -2002,10 +2313,40 @@ def serialize_xero_preview(
             "recurring_invoices": [],
             "recentInvoices": [],
             "recent_invoices": [],
+            "revenue": None,
+            "burnRate": None,
+            "burn_rate": None,
+            "runway": None,
+            "monthlyCosts": None,
+            "monthly_costs": None,
+            "operatingExpenses": None,
+            "operating_expenses": None,
+            "costOfSales": None,
+            "cost_of_sales": None,
+            "revenueGrowthRate": None,
+            "revenue_growth_rate": None,
+            "invoiceRevenue": "0",
+            "invoice_revenue": "0",
+            "invoiceCount": "0",
+            "invoice_count": "0",
+            "customerCount": "0",
+            "customer_count": "0",
+            "recurringInvoiceCount": "0",
+            "recurring_invoice_count": "0",
             "cashCollected": "0",
             "cash_collected": "0",
             "currencies": [],
             "warnings": ["Xero is not connected."],
+            "hasReportScope": False,
+            "has_report_scope": False,
+            "needsReportReconnect": False,
+            "needs_report_reconnect": False,
+            "canRequestReportScopes": _xero_can_request_report_scopes(),
+            "can_request_report_scopes": _xero_can_request_report_scopes(),
+            "needsReportScopeConfiguration": False,
+            "needs_report_scope_configuration": False,
+            "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+            "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         }
 
     parsed_start_date = parse_date(str(start_date)) if start_date else None
@@ -2032,16 +2373,32 @@ def serialize_xero_preview(
         date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE)
         .order_by("-transaction_date", "-posted_at", "-id")[:10]
     )
+    all_invoice_records = list(date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_INVOICE))
     payment_records = list(date_filtered.filter(record_type=ExternalFinancialRecord.RECORD_XERO_PAYMENT))
+    invoice_revenue = sum((record.amount or Decimal("0") for record in all_invoice_records), Decimal("0"))
     cash_collected = sum((abs(record.amount or Decimal("0")) for record in payment_records), Decimal("0"))
     currencies = sorted({record.currency for record in list(recurring_records) + invoice_records + payment_records if record.currency})
     monthly_recurring_revenue = sum(
         (value for value in (_xero_monthly_normalized_amount(record) for record in recurring_records) if value is not None),
         Decimal("0"),
     )
+    customer_count = len({
+        record.merchant_name
+        for record in all_invoice_records + payment_records
+        if str(record.merchant_name or "").strip()
+    })
+    metric_values = _xero_metric_value_lookup(connection, _xero_preview_month(parsed_end_date))
     warnings = []
     if len(currencies) > 1:
         warnings.append("Xero records include multiple currencies; do not combine them into one MRR value.")
+    has_report_scope = xero_has_report_scope(connection.scopes)
+    can_request_report_scopes = _xero_can_request_report_scopes()
+    needs_report_scope_configuration = not has_report_scope and not can_request_report_scopes
+    needs_report_reconnect = not has_report_scope and can_request_report_scopes and xero_needs_report_reconnect(connection.scopes)
+    if needs_report_reconnect:
+        warnings.append(XERO_REPORT_SCOPE_WARNING)
+    elif needs_report_scope_configuration:
+        warnings.append(XERO_REPORT_SCOPE_CONFIGURATION_WARNING)
     if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
         warnings.append(connection.last_error)
 
@@ -2052,12 +2409,42 @@ def serialize_xero_preview(
         "tenant_id": connection.external_account_id,
         "lastSyncedAt": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
         "last_synced_at": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
-        "monthlyRecurringRevenue": _money_string(monthly_recurring_revenue),
-        "monthly_recurring_revenue": _money_string(monthly_recurring_revenue),
-        "cashCollected": _money_string(cash_collected),
-        "cash_collected": _money_string(cash_collected),
+        "monthlyRecurringRevenue": metric_values.get("mrr") or _money_string(monthly_recurring_revenue),
+        "monthly_recurring_revenue": metric_values.get("mrr") or _money_string(monthly_recurring_revenue),
+        "revenue": metric_values.get("revenue"),
+        "burnRate": metric_values.get("burnRate"),
+        "burn_rate": metric_values.get("burnRate"),
+        "runway": metric_values.get("runway"),
+        "monthlyCosts": metric_values.get("monthlyCosts"),
+        "monthly_costs": metric_values.get("monthlyCosts"),
+        "operatingExpenses": metric_values.get("operatingExpenses"),
+        "operating_expenses": metric_values.get("operatingExpenses"),
+        "costOfSales": metric_values.get("costOfSales"),
+        "cost_of_sales": metric_values.get("costOfSales"),
+        "revenueGrowthRate": metric_values.get("revenueGrowthRate"),
+        "revenue_growth_rate": metric_values.get("revenueGrowthRate"),
+        "invoiceRevenue": metric_values.get("invoiceRevenue") or _money_string(invoice_revenue),
+        "invoice_revenue": metric_values.get("invoiceRevenue") or _money_string(invoice_revenue),
+        "cashCollected": metric_values.get("cashCollected") or _money_string(cash_collected),
+        "cash_collected": metric_values.get("cashCollected") or _money_string(cash_collected),
+        "invoiceCount": metric_values.get("invoiceCount") or str(len(all_invoice_records)),
+        "invoice_count": metric_values.get("invoiceCount") or str(len(all_invoice_records)),
+        "customerCount": metric_values.get("customerCount") or str(customer_count),
+        "customer_count": metric_values.get("customerCount") or str(customer_count),
+        "recurringInvoiceCount": metric_values.get("recurringInvoiceCount") or str(len(recurring_records)),
+        "recurring_invoice_count": metric_values.get("recurringInvoiceCount") or str(len(recurring_records)),
         "currencies": currencies,
         "warnings": warnings,
+        "hasReportScope": has_report_scope,
+        "has_report_scope": has_report_scope,
+        "needsReportReconnect": needs_report_reconnect,
+        "needs_report_reconnect": needs_report_reconnect,
+        "canRequestReportScopes": can_request_report_scopes,
+        "can_request_report_scopes": can_request_report_scopes,
+        "needsReportScopeConfiguration": needs_report_scope_configuration,
+        "needs_report_scope_configuration": needs_report_scope_configuration,
+        "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+        "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
         "recurringInvoices": [_serialize_xero_record(record) for record in recurring_records],
         "recurring_invoices": [_serialize_xero_record(record) for record in recurring_records],
         "recentInvoices": [_serialize_xero_record(record) for record in invoice_records],
@@ -2193,10 +2580,12 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
             "total_cached_messages": 0,
             "messages": [],
             "warnings": ["Gmail is not connected."],
+            **gmail_scope_status_payload(None),
         }
 
     organization = binding.organization
     connection = binding.google_connection
+    scope_status = gmail_scope_status_payload(connection)
     base_queryset = GmailMessageArtifact.objects.none()
     cursor = None
     if organization:
@@ -2225,6 +2614,20 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
     warnings: list[str] = []
     messages = [_serialize_gmail_artifact_preview(artifact) for artifact in artifacts]
 
+    if not scope_status["hasGmailScope"]:
+        warnings.append(GMAIL_RECONNECT_WARNING)
+        return {
+            "accountLabel": connection.google_email,
+            "account_label": connection.google_email,
+            "lastSyncedAt": last_synced_at.isoformat() if last_synced_at else None,
+            "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+            "totalCachedMessages": total_cached,
+            "total_cached_messages": total_cached,
+            "warnings": warnings,
+            "messages": messages,
+            **scope_status,
+        }
+
     if not messages:
         try:
             service = build_gmail_service(connection, cache_discovery=False)
@@ -2252,6 +2655,928 @@ def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
         "totalCachedMessages": total_cached,
         "total_cached_messages": total_cached,
         "messages": messages,
+        "warnings": warnings,
+        **scope_status,
+    }
+
+
+LINEAR_PROJECT_LIST_QUERY = """
+query LinearProjects($first: Int!, $after: String) {
+  projects(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      description
+      createdAt
+      updatedAt
+      startDate
+      targetDate
+      startedAt
+      completedAt
+      canceledAt
+      priority
+      health
+      progress
+      scope
+      url
+      status { name type }
+      lead { id name email }
+      teams(first: 10) { nodes { id key name } }
+      lastUpdate { id body health createdAt updatedAt url user { id name email } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+LINEAR_PROJECT_DETAIL_QUERY = """
+query LinearProjectDetail($id: String!, $issueFirst: Int!, $issueAfter: String, $updateFirst: Int!, $updateAfter: String) {
+  project(id: $id) {
+    id
+    name
+    description
+    createdAt
+    updatedAt
+    startDate
+    targetDate
+    startedAt
+    completedAt
+    canceledAt
+    priority
+    health
+    progress
+    scope
+    url
+    status { name type }
+    lead { id name email }
+    teams(first: 10) { nodes { id key name } }
+    projectUpdates(first: $updateFirst, after: $updateAfter) {
+      nodes {
+        id
+        body
+        health
+        createdAt
+        updatedAt
+        url
+        user { id name email }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+    issues(first: $issueFirst, after: $issueAfter) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        priorityLabel
+        estimate
+        dueDate
+        createdAt
+        updatedAt
+        startedAt
+        completedAt
+        canceledAt
+        url
+        state { id name type }
+        team { id key name }
+        assignee { id name email }
+        labels(first: 10) { nodes { id name } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+
+def _latest_linear_connection(user) -> Optional[ExternalServiceConnection]:
+    return (
+        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.LINEAR)
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _linear_retry_after_seconds(response) -> int:
+    raw_retry_after = str(response.headers.get("Retry-After") or "").strip()
+    if raw_retry_after:
+        try:
+            return max(int(float(raw_retry_after)), 1)
+        except (TypeError, ValueError):
+            pass
+    raw_reset = str(response.headers.get("X-RateLimit-Requests-Reset") or "").strip()
+    if raw_reset:
+        try:
+            reset_value = float(raw_reset)
+            if reset_value > 10_000_000_000:
+                reset_value = reset_value / 1000
+            return max(int(reset_value - timezone.now().timestamp()), 1)
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _linear_token_expired(connection: ExternalServiceConnection) -> bool:
+    expires_at = getattr(connection, "token_expires_at", None)
+    if expires_at is None:
+        return False
+    if timezone.is_naive(expires_at):
+        expires_at = timezone.make_aware(expires_at)
+    return expires_at <= timezone.now() + timedelta(seconds=60)
+
+
+def _linear_required_token(connection: ExternalServiceConnection, *, allow_refresh: bool = True) -> str:
+    if not getattr(connection, "access_token", ""):
+        raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
+    if allow_refresh and _linear_token_expired(connection):
+        _refresh_linear_token(connection)
+    return str(connection.access_token or "")
+
+
+def _linear_graphql_request(
+    connection: ExternalServiceConnection,
+    query: str,
+    variables: Optional[dict[str, Any]] = None,
+    *,
+    allow_refresh: bool = True,
+) -> dict[str, Any]:
+    token = _linear_required_token(connection, allow_refresh=allow_refresh)
+    connect_timeout = float(getattr(settings, "LINEAR_API_CONNECT_TIMEOUT_SECONDS", 3) or 3)
+    read_timeout = float(getattr(settings, "LINEAR_API_READ_TIMEOUT_SECONDS", 20) or 20)
+    response = requests.post(
+        "https://api.linear.app/graphql",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={"query": query, "variables": variables or {}},
+        timeout=(connect_timeout, read_timeout),
+    )
+    if response.status_code == 429:
+        raise ConnectorRateLimitError(_linear_retry_after_seconds(response))
+    if response.status_code in {401, 403} and allow_refresh and getattr(connection, "refresh_token", ""):
+        _refresh_linear_token(connection)
+        return _linear_graphql_request(connection, query, variables, allow_refresh=False)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ConnectorOAuthError("Linear GraphQL returned an invalid response.")
+    errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+    if errors:
+        first_error = errors[0] if isinstance(errors[0], dict) else {}
+        message = str(first_error.get("message") or "Linear GraphQL request failed.")
+        extension = first_error.get("extensions") if isinstance(first_error.get("extensions"), dict) else {}
+        http_extension = extension.get("http") if isinstance(extension.get("http"), dict) else {}
+        status_value = extension.get("status") or http_extension.get("status")
+        code = str(extension.get("code") or "").lower()
+        if status_value == 429 or "rate" in code or "rate limit" in message.lower():
+            raise ConnectorRateLimitError(1)
+        if code in {"unauthenticated", "authentication_error"} and allow_refresh and getattr(connection, "refresh_token", ""):
+            _refresh_linear_token(connection)
+            return _linear_graphql_request(connection, query, variables, allow_refresh=False)
+        raise ConnectorOAuthError(message)
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _linear_source_project_id(project_id: str) -> str:
+    return f"linear:project:{project_id}"
+
+
+def _linear_source_issue_id(identifier_or_id: str) -> str:
+    return f"linear:issue:{identifier_or_id}"
+
+
+def _linear_source_update_id(update_id: str) -> str:
+    return f"linear:update:{update_id}"
+
+
+def _linear_float_or_none(value: Any) -> Optional[float]:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _linear_project_is_active(project: dict[str, Any]) -> bool:
+    if project.get("canceledAt"):
+        return False
+    status = project.get("status") if isinstance(project.get("status"), dict) else {}
+    status_type = str(status.get("type") or "").lower()
+    if status_type in {"canceled", "cancelled"}:
+        return False
+    return True
+
+
+def _linear_project_defaults(project: dict[str, Any]) -> dict[str, Any]:
+    status_payload = project.get("status") if isinstance(project.get("status"), dict) else {}
+    lead = project.get("lead") if isinstance(project.get("lead"), dict) else {}
+    teams_payload = project.get("teams") if isinstance(project.get("teams"), dict) else {}
+    team_nodes = teams_payload.get("nodes") if isinstance(teams_payload.get("nodes"), list) else []
+    team_names = [
+        str(team.get("name") or team.get("key") or "").strip()
+        for team in team_nodes
+        if isinstance(team, dict) and str(team.get("name") or team.get("key") or "").strip()
+    ]
+    project_id = str(project.get("id") or "").strip()
+    source_record_ids = [_linear_source_project_id(project_id)] if project_id else []
+    last_update = project.get("lastUpdate") if isinstance(project.get("lastUpdate"), dict) else {}
+    if last_update.get("id"):
+        source_record_ids.append(_linear_source_update_id(str(last_update["id"])))
+    return {
+        "name": str(project.get("name") or project_id or "Linear project").strip(),
+        "description": str(project.get("description") or ""),
+        "status_name": str(status_payload.get("name") or ""),
+        "status_type": str(status_payload.get("type") or ""),
+        "health": str(project.get("health") or ""),
+        "progress": _linear_float_or_none(project.get("progress")),
+        "scope": _linear_float_or_none(project.get("scope")),
+        "priority": int(_linear_float_or_none(project.get("priority")) or 0),
+        "lead_name": str(lead.get("name") or ""),
+        "lead_email": str(lead.get("email") or ""),
+        "team_names": team_names,
+        "start_date": _date_or_none(project.get("startDate")),
+        "target_date": _date_or_none(project.get("targetDate")),
+        "started_at": _datetime_or_none(project.get("startedAt")),
+        "completed_at": _datetime_or_none(project.get("completedAt")),
+        "canceled_at": _datetime_or_none(project.get("canceledAt")),
+        "url": str(project.get("url") or ""),
+        "source_record_ids": source_record_ids,
+        "raw_payload": project,
+    }
+
+
+def _serialize_linear_project_selection(selection: LinearProjectSelection) -> dict[str, Any]:
+    return {
+        "id": selection.id,
+        "projectId": selection.linear_project_id,
+        "project_id": selection.linear_project_id,
+        "linearProjectId": selection.linear_project_id,
+        "linear_project_id": selection.linear_project_id,
+        "name": selection.project_name or selection.linear_project_id,
+        "projectName": selection.project_name,
+        "project_name": selection.project_name,
+        "status": selection.project_status,
+        "health": selection.project_health,
+        "selected": bool(selection.selected),
+        "lastSyncedAt": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+        "last_synced_at": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+    }
+
+
+def serialize_linear_projects(user, *, cursor: Optional[str] = None, limit: int = 100) -> dict[str, Any]:
+    connection = _latest_linear_connection(user)
+    if not connection:
+        return {
+            "accountLabel": None,
+            "account_label": None,
+            "workspaceId": None,
+            "workspace_id": None,
+            "projects": [],
+            "nextCursor": None,
+            "next_cursor": None,
+            "warnings": ["Linear is not connected."],
+        }
+
+    limit = min(max(int(limit or 100), 1), 250)
+    payload = _linear_graphql_request(
+        connection,
+        LINEAR_PROJECT_LIST_QUERY,
+        {"first": limit, "after": cursor or None},
+    )
+    project_connection = payload.get("projects") if isinstance(payload.get("projects"), dict) else {}
+    nodes = [item for item in project_connection.get("nodes") or [] if isinstance(item, dict)]
+    project_rows = []
+    with transaction.atomic():
+        for project in nodes:
+            if not _linear_project_is_active(project):
+                continue
+            project_id = str(project.get("id") or "").strip()
+            if not project_id:
+                continue
+            status_payload = project.get("status") if isinstance(project.get("status"), dict) else {}
+            defaults = {
+                "user": connection.user,
+                "organization": connection.organization,
+                "project_name": str(project.get("name") or project_id).strip(),
+                "project_status": str(status_payload.get("name") or status_payload.get("type") or ""),
+                "project_health": str(project.get("health") or ""),
+                "raw_payload": project,
+            }
+            selection, _created = LinearProjectSelection.objects.update_or_create(
+                connection=connection,
+                linear_project_id=project_id,
+                defaults=defaults,
+            )
+            project_rows.append(selection)
+
+    page_info = project_connection.get("pageInfo") if isinstance(project_connection.get("pageInfo"), dict) else {}
+    next_cursor = str(page_info.get("endCursor") or "").strip() if page_info.get("hasNextPage") else ""
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "workspaceId": connection.external_account_id,
+        "workspace_id": connection.external_account_id,
+        "projects": [_serialize_linear_project_selection(selection) for selection in project_rows],
+        "nextCursor": next_cursor or None,
+        "next_cursor": next_cursor or None,
+        "warnings": [],
+    }
+
+
+def _selected_linear_projects(connection: ExternalServiceConnection):
+    return LinearProjectSelection.objects.filter(
+        connection=connection,
+        selected=True,
+    ).order_by("project_name", "linear_project_id")
+
+
+def update_linear_project_selections(user, project_ids: Iterable[str]) -> dict[str, Any]:
+    connection = _latest_linear_connection(user)
+    if not connection:
+        raise ConnectorConfigurationError("Linear is not connected.")
+    selected_ids = {
+        str(project_id or "").strip()
+        for project_id in project_ids or []
+        if str(project_id or "").strip()
+    }
+    with transaction.atomic():
+        LinearProjectSelection.objects.filter(connection=connection).update(selected=False)
+        for project_id in sorted(selected_ids):
+            selection, created = LinearProjectSelection.objects.get_or_create(
+                connection=connection,
+                linear_project_id=project_id,
+                defaults={
+                    "user": connection.user,
+                    "organization": connection.organization,
+                    "project_name": project_id,
+                    "selected": True,
+                },
+            )
+            if not created:
+                selection.selected = True
+                selection.user = connection.user
+                selection.organization = connection.organization
+                selection.save(update_fields=["selected", "user", "organization", "updated_at"])
+        if selected_ids:
+            LinearProjectSelection.objects.filter(
+                connection=connection,
+                linear_project_id__in=selected_ids,
+            ).update(selected=True)
+    selected = list(_selected_linear_projects(connection))
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "workspaceId": connection.external_account_id,
+        "workspace_id": connection.external_account_id,
+        "selectedProjects": [_serialize_linear_project_selection(selection) for selection in selected],
+        "selected_projects": [_serialize_linear_project_selection(selection) for selection in selected],
+        "selectedProjectCount": len(selected),
+        "selected_project_count": len(selected),
+    }
+
+
+def _linear_selection_needs_work(selection: LinearProjectSelection, *, run_id: str) -> bool:
+    cursor_payload = dict(selection.sync_cursor or {})
+    if cursor_payload.get("startup_update_run_id") != run_id:
+        return True
+    return not bool(cursor_payload.get("run_backfill_complete"))
+
+
+def _reset_linear_run_cursor(cursor_payload: dict[str, Any], *, run_id: str) -> dict[str, Any]:
+    cursor = dict(cursor_payload or {})
+    if cursor.get("startup_update_run_id") == run_id:
+        return cursor
+    cursor.pop("issues_cursor", None)
+    cursor.pop("updates_cursor", None)
+    cursor.pop("run_backfill_complete", None)
+    cursor.pop("run_issues_synced", None)
+    cursor.pop("run_updates_synced", None)
+    cursor["startup_update_run_id"] = run_id
+    return cursor
+
+
+def _upsert_linear_project_artifact(
+    *,
+    connection: ExternalServiceConnection,
+    project: dict[str, Any],
+) -> Optional[LinearProjectArtifact]:
+    if not connection.organization:
+        return None
+    project_id = str(project.get("id") or "").strip()
+    if not project_id:
+        return None
+    existing = LinearProjectArtifact.objects.filter(
+        organization=connection.organization,
+        connection=connection,
+        linear_project_id=project_id,
+    ).first()
+    defaults = _linear_project_defaults(project)
+    content_changed = bool(existing and existing.raw_payload != project)
+    if content_changed:
+        defaults.update(
+            {
+                "relevance_label": GmailRelevanceLabel.PENDING,
+                "relevance_score": 0.0,
+                "relevance_reason": "",
+                "needs_extraction": False,
+                "extraction_hints": {},
+                "classified_at": None,
+                "extraction_status": ArtifactProcessingStatus.HYDRATED,
+            }
+        )
+    elif existing and existing.extraction_status == ArtifactProcessingStatus.PROCESSED:
+        defaults["extraction_status"] = ArtifactProcessingStatus.PROCESSED
+    else:
+        defaults["extraction_status"] = ArtifactProcessingStatus.HYDRATED
+    artifact, _created = LinearProjectArtifact.objects.update_or_create(
+        organization=connection.organization,
+        connection=connection,
+        linear_project_id=project_id,
+        defaults=defaults,
+    )
+    return artifact
+
+
+def _upsert_linear_issue_artifact(
+    *,
+    connection: ExternalServiceConnection,
+    project_artifact: Optional[LinearProjectArtifact],
+    issue: dict[str, Any],
+) -> Optional[LinearIssueArtifact]:
+    if not connection.organization:
+        return None
+    issue_id = str(issue.get("id") or "").strip()
+    if not issue_id:
+        return None
+    state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+    assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+    labels = issue.get("labels") if isinstance(issue.get("labels"), dict) else {}
+    label_nodes = labels.get("nodes") if isinstance(labels.get("nodes"), list) else []
+    identifier = str(issue.get("identifier") or issue_id).strip()
+    source_record_id = _linear_source_issue_id(identifier or issue_id)
+    artifact, _created = LinearIssueArtifact.objects.update_or_create(
+        organization=connection.organization,
+        connection=connection,
+        linear_issue_id=issue_id,
+        defaults={
+            "project": project_artifact,
+            "identifier": identifier,
+            "title": str(issue.get("title") or ""),
+            "description": str(issue.get("description") or ""),
+            "state_name": str(state.get("name") or ""),
+            "state_type": str(state.get("type") or ""),
+            "priority": _linear_float_or_none(issue.get("priority")),
+            "priority_label": str(issue.get("priorityLabel") or ""),
+            "assignee_name": str(assignee.get("name") or ""),
+            "assignee_email": str(assignee.get("email") or ""),
+            "team_key": str(team.get("key") or ""),
+            "team_name": str(team.get("name") or ""),
+            "label_names": [
+                str(label.get("name") or "").strip()
+                for label in label_nodes
+                if isinstance(label, dict) and str(label.get("name") or "").strip()
+            ],
+            "estimate": _linear_float_or_none(issue.get("estimate")),
+            "due_date": _date_or_none(issue.get("dueDate")),
+            "created_at_linear": _datetime_or_none(issue.get("createdAt")),
+            "updated_at_linear": _datetime_or_none(issue.get("updatedAt")),
+            "started_at": _datetime_or_none(issue.get("startedAt")),
+            "completed_at": _datetime_or_none(issue.get("completedAt")),
+            "canceled_at": _datetime_or_none(issue.get("canceledAt")),
+            "url": str(issue.get("url") or ""),
+            "source_record_id": source_record_id,
+            "raw_payload": issue,
+        },
+    )
+    return artifact
+
+
+def _upsert_linear_project_update_artifact(
+    *,
+    connection: ExternalServiceConnection,
+    project_artifact: Optional[LinearProjectArtifact],
+    update: dict[str, Any],
+) -> Optional[LinearProjectUpdateArtifact]:
+    if not connection.organization:
+        return None
+    update_id = str(update.get("id") or "").strip()
+    if not update_id:
+        return None
+    user = update.get("user") if isinstance(update.get("user"), dict) else {}
+    artifact, _created = LinearProjectUpdateArtifact.objects.update_or_create(
+        organization=connection.organization,
+        connection=connection,
+        linear_project_update_id=update_id,
+        defaults={
+            "project": project_artifact,
+            "body": str(update.get("body") or ""),
+            "health": str(update.get("health") or ""),
+            "author_name": str(user.get("name") or ""),
+            "author_email": str(user.get("email") or ""),
+            "url": str(update.get("url") or ""),
+            "created_at_linear": _datetime_or_none(update.get("createdAt")),
+            "updated_at_linear": _datetime_or_none(update.get("updatedAt")),
+            "source_record_id": _linear_source_update_id(update_id),
+            "raw_payload": update,
+        },
+    )
+    return artifact
+
+
+def sync_linear_connection_page(
+    connection: ExternalServiceConnection,
+    *,
+    run_id: str,
+    project_ids: Optional[Iterable[str]] = None,
+) -> dict[str, Any]:
+    if connection.provider != ExternalServiceProvider.LINEAR:
+        raise ConnectorConfigurationError("Connection is not a Linear connection.")
+    if not connection.organization:
+        raise ConnectorConfigurationError("Linear connection is not linked to an organization.")
+    if not connection.access_token:
+        raise ConnectorOAuthError("Linear connection needs to be reauthorised.")
+
+    selected_qs = _selected_linear_projects(connection)
+    if project_ids:
+        selected_set = {str(item or "").strip() for item in project_ids if str(item or "").strip()}
+        selected_qs = selected_qs.filter(linear_project_id__in=selected_set)
+    selections = list(selected_qs)
+    if not selections:
+        raise ConnectorConfigurationError("Select at least one Linear project before syncing.")
+
+    selected_run_id = str(run_id or "").strip()
+    if not selected_run_id:
+        raise ConnectorConfigurationError("Linear sync run id is required.")
+
+    connection.status = ExternalServiceConnectionStatus.SYNCING
+    connection.last_error = ""
+    connection.save(update_fields=["status", "last_error", "updated_at"])
+
+    selection = next(
+        (item for item in selections if _linear_selection_needs_work(item, run_id=selected_run_id)),
+        None,
+    )
+    synced_at = timezone.now()
+    if selection is None:
+        connection.status = ExternalServiceConnectionStatus.CONNECTED
+        connection.last_error = ""
+        connection.last_synced_at = synced_at
+        connection.save(update_fields=["status", "last_error", "last_synced_at", "updated_at"])
+        return {
+            "connectionId": connection.id,
+            "connection_id": connection.id,
+            "provider": connection.provider,
+            "status": "synced",
+            "lastSyncedAt": synced_at.isoformat(),
+            "last_synced_at": synced_at.isoformat(),
+            "projectsSynced": 0,
+            "projects_synced": 0,
+            "issuesSynced": 0,
+            "issues_synced": 0,
+            "updatesSynced": 0,
+            "updates_synced": 0,
+            "projects": [],
+            "has_more": False,
+        }
+
+    cursor_payload = _reset_linear_run_cursor(dict(selection.sync_cursor or {}), run_id=selected_run_id)
+    issue_limit = min(max(int(getattr(settings, "LINEAR_SYNC_ISSUE_PAGE_LIMIT", 50) or 50), 1), 250)
+    update_limit = min(max(int(getattr(settings, "LINEAR_SYNC_UPDATE_PAGE_LIMIT", 20) or 20), 1), 100)
+
+    try:
+        data = _linear_graphql_request(
+            connection,
+            LINEAR_PROJECT_DETAIL_QUERY,
+            {
+                "id": selection.linear_project_id,
+                "issueFirst": issue_limit,
+                "issueAfter": str(cursor_payload.get("issues_cursor") or "") or None,
+                "updateFirst": update_limit,
+                "updateAfter": str(cursor_payload.get("updates_cursor") or "") or None,
+            },
+        )
+        project = data.get("project") if isinstance(data.get("project"), dict) else None
+        if project is None:
+            cursor_payload["run_backfill_complete"] = True
+            selection.sync_cursor = cursor_payload
+            selection.last_synced_at = synced_at
+            selection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
+            project_result = {
+                "projectId": selection.linear_project_id,
+                "project_id": selection.linear_project_id,
+                "projectName": selection.project_name,
+                "project_name": selection.project_name,
+                "issuesSynced": 0,
+                "issues_synced": 0,
+                "updatesSynced": 0,
+                "updates_synced": 0,
+                "notFound": True,
+                "not_found": True,
+            }
+            issue_count = 0
+            update_count = 0
+            selection_has_more = False
+        else:
+            project_artifact = _upsert_linear_project_artifact(connection=connection, project=project)
+            issues_payload = project.get("issues") if isinstance(project.get("issues"), dict) else {}
+            updates_payload = project.get("projectUpdates") if isinstance(project.get("projectUpdates"), dict) else {}
+            issue_nodes = [item for item in issues_payload.get("nodes") or [] if isinstance(item, dict)]
+            update_nodes = [item for item in updates_payload.get("nodes") or [] if isinstance(item, dict)]
+            issue_count = 0
+            update_count = 0
+            for issue in issue_nodes:
+                if _upsert_linear_issue_artifact(
+                    connection=connection,
+                    project_artifact=project_artifact,
+                    issue=issue,
+                ):
+                    issue_count += 1
+            for update in update_nodes:
+                if _upsert_linear_project_update_artifact(
+                    connection=connection,
+                    project_artifact=project_artifact,
+                    update=update,
+                ):
+                    update_count += 1
+
+            issue_page_info = issues_payload.get("pageInfo") if isinstance(issues_payload.get("pageInfo"), dict) else {}
+            update_page_info = updates_payload.get("pageInfo") if isinstance(updates_payload.get("pageInfo"), dict) else {}
+            if issue_page_info.get("hasNextPage"):
+                cursor_payload["issues_cursor"] = str(issue_page_info.get("endCursor") or "")
+            else:
+                cursor_payload.pop("issues_cursor", None)
+            if update_page_info.get("hasNextPage"):
+                cursor_payload["updates_cursor"] = str(update_page_info.get("endCursor") or "")
+            else:
+                cursor_payload.pop("updates_cursor", None)
+
+            cursor_payload["run_issues_synced"] = int(cursor_payload.get("run_issues_synced") or 0) + issue_count
+            cursor_payload["run_updates_synced"] = int(cursor_payload.get("run_updates_synced") or 0) + update_count
+            selection_has_more = bool(cursor_payload.get("issues_cursor") or cursor_payload.get("updates_cursor"))
+            if not selection_has_more:
+                cursor_payload["run_backfill_complete"] = True
+                cursor_payload["last_synced_at"] = synced_at.isoformat()
+                selection.last_synced_at = synced_at
+            if project_artifact:
+                selection.project_name = project_artifact.name
+                selection.project_status = project_artifact.status_name or project_artifact.status_type
+                selection.project_health = project_artifact.health
+                selection.raw_payload = project
+            project_result = {
+                "projectId": selection.linear_project_id,
+                "project_id": selection.linear_project_id,
+                "projectName": selection.project_name,
+                "project_name": selection.project_name,
+                "issuesSynced": issue_count,
+                "issues_synced": issue_count,
+                "updatesSynced": update_count,
+                "updates_synced": update_count,
+            }
+
+        selection.sync_cursor = cursor_payload
+        selection.save(
+            update_fields=[
+                "sync_cursor",
+                "last_synced_at",
+                "project_name",
+                "project_status",
+                "project_health",
+                "raw_payload",
+                "updated_at",
+            ]
+        )
+
+        has_more = selection_has_more or any(
+            _linear_selection_needs_work(item, run_id=selected_run_id)
+            for item in selections
+            if item.pk != selection.pk
+        )
+        connection.status = ExternalServiceConnectionStatus.SYNCING if has_more else ExternalServiceConnectionStatus.CONNECTED
+        if not has_more:
+            connection.last_synced_at = synced_at
+        connection.last_error = ""
+        connection.sync_cursor = {
+            **dict(connection.sync_cursor or {}),
+            "last_synced_at": synced_at.isoformat(),
+        }
+        connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
+        return {
+            "connectionId": connection.id,
+            "connection_id": connection.id,
+            "provider": connection.provider,
+            "status": "syncing" if has_more else "synced",
+            "lastSyncedAt": synced_at.isoformat(),
+            "last_synced_at": synced_at.isoformat(),
+            "projectsSynced": 1,
+            "projects_synced": 1,
+            "issuesSynced": issue_count,
+            "issues_synced": issue_count,
+            "updatesSynced": update_count,
+            "updates_synced": update_count,
+            "projects": [project_result],
+            "has_more": has_more,
+        }
+    except ConnectorRateLimitError:
+        raise
+    except (ConnectorOAuthError, requests.RequestException) as exc:
+        connection.status = ExternalServiceConnectionStatus.ERROR
+        connection.last_error = str(exc) or "Linear sync failed."
+        connection.save(update_fields=["status", "last_error", "updated_at"])
+        raise
+
+
+def sync_linear_connection(
+    connection: ExternalServiceConnection,
+    *,
+    project_ids: Optional[Iterable[str]] = None,
+) -> dict[str, Any]:
+    run_id = f"manual-{timezone.now().timestamp()}"
+    aggregate = {
+        "connectionId": connection.id,
+        "connection_id": connection.id,
+        "provider": connection.provider,
+        "status": "synced",
+        "projectsSynced": 0,
+        "projects_synced": 0,
+        "issuesSynced": 0,
+        "issues_synced": 0,
+        "updatesSynced": 0,
+        "updates_synced": 0,
+        "projects": [],
+        "has_more": False,
+    }
+    selected_count = _selected_linear_projects(connection).count()
+    max_pages = max(selected_count * 20, 1)
+    for _index in range(max_pages):
+        page = sync_linear_connection_page(connection, run_id=run_id, project_ids=project_ids)
+        aggregate["lastSyncedAt"] = page.get("lastSyncedAt")
+        aggregate["last_synced_at"] = page.get("last_synced_at")
+        aggregate["projectsSynced"] += int(page.get("projectsSynced") or 0)
+        aggregate["projects_synced"] = aggregate["projectsSynced"]
+        aggregate["issuesSynced"] += int(page.get("issuesSynced") or 0)
+        aggregate["issues_synced"] = aggregate["issuesSynced"]
+        aggregate["updatesSynced"] += int(page.get("updatesSynced") or 0)
+        aggregate["updates_synced"] = aggregate["updatesSynced"]
+        aggregate["projects"].extend(page.get("projects") or [])
+        if not page.get("has_more"):
+            aggregate["status"] = page.get("status") or "synced"
+            aggregate["has_more"] = False
+            return aggregate
+    aggregate["status"] = "syncing"
+    aggregate["has_more"] = True
+    return aggregate
+
+
+def _serialize_linear_project_artifact(project: LinearProjectArtifact) -> dict[str, Any]:
+    issue_count = project.issues.count()
+    update_count = project.project_updates.count()
+    return {
+        "id": project.id,
+        "projectId": project.linear_project_id,
+        "project_id": project.linear_project_id,
+        "name": project.name,
+        "description": project.description,
+        "statusName": project.status_name,
+        "status_name": project.status_name,
+        "statusType": project.status_type,
+        "status_type": project.status_type,
+        "health": project.health,
+        "progress": project.progress,
+        "scope": project.scope,
+        "priority": project.priority,
+        "leadName": project.lead_name,
+        "lead_name": project.lead_name,
+        "teamNames": project.team_names or [],
+        "team_names": project.team_names or [],
+        "targetDate": project.target_date.isoformat() if project.target_date else None,
+        "target_date": project.target_date.isoformat() if project.target_date else None,
+        "url": project.url,
+        "issueCount": issue_count,
+        "issue_count": issue_count,
+        "updateCount": update_count,
+        "update_count": update_count,
+    }
+
+
+def serialize_linear_preview(user, *, limit: int = 5) -> dict[str, Any]:
+    connection = _latest_linear_connection(user)
+    if not connection:
+        return {
+            "accountLabel": None,
+            "account_label": None,
+            "workspaceId": None,
+            "workspace_id": None,
+            "lastSyncedAt": None,
+            "last_synced_at": None,
+            "selectedProjects": [],
+            "selected_projects": [],
+            "projects": [],
+            "projectUpdates": [],
+            "project_updates": [],
+            "issues": [],
+            "totalCachedProjects": 0,
+            "total_cached_projects": 0,
+            "totalCachedIssues": 0,
+            "total_cached_issues": 0,
+            "totalCachedUpdates": 0,
+            "total_cached_updates": 0,
+            "warnings": ["Linear is not connected."],
+        }
+    selected = list(_selected_linear_projects(connection))
+    warnings: list[str] = []
+    if not selected:
+        warnings.append("Select at least one Linear project before syncing.")
+    if connection.status == ExternalServiceConnectionStatus.ERROR and connection.last_error:
+        warnings.append(connection.last_error)
+
+    selected_ids = [selection.linear_project_id for selection in selected]
+    project_queryset = LinearProjectArtifact.objects.filter(
+        connection=connection,
+        organization=connection.organization,
+    )
+    if selected_ids:
+        project_queryset = project_queryset.filter(linear_project_id__in=selected_ids)
+    issue_queryset = LinearIssueArtifact.objects.filter(
+        connection=connection,
+        organization=connection.organization,
+    )
+    update_queryset = LinearProjectUpdateArtifact.objects.filter(
+        connection=connection,
+        organization=connection.organization,
+    )
+    if selected_ids:
+        issue_queryset = issue_queryset.filter(project__linear_project_id__in=selected_ids)
+        update_queryset = update_queryset.filter(project__linear_project_id__in=selected_ids)
+
+    limit = min(max(int(limit or 5), 1), 20)
+    projects = [_serialize_linear_project_artifact(project) for project in project_queryset.order_by("name", "id")[:limit]]
+    project_updates = [
+        {
+            "id": update.linear_project_update_id,
+            "projectId": update.project.linear_project_id if update.project else None,
+            "project_id": update.project.linear_project_id if update.project else None,
+            "projectName": update.project.name if update.project else "",
+            "project_name": update.project.name if update.project else "",
+            "body": update.body,
+            "health": update.health,
+            "authorName": update.author_name,
+            "author_name": update.author_name,
+            "updatedAt": update.updated_at_linear.isoformat() if update.updated_at_linear else None,
+            "updated_at": update.updated_at_linear.isoformat() if update.updated_at_linear else None,
+            "url": update.url,
+        }
+        for update in update_queryset.select_related("project").order_by("-updated_at_linear", "-id")[:limit]
+    ]
+    issues = [
+        {
+            "id": issue.linear_issue_id,
+            "identifier": issue.identifier,
+            "projectId": issue.project.linear_project_id if issue.project else None,
+            "project_id": issue.project.linear_project_id if issue.project else None,
+            "projectName": issue.project.name if issue.project else "",
+            "project_name": issue.project.name if issue.project else "",
+            "title": issue.title,
+            "stateName": issue.state_name,
+            "state_name": issue.state_name,
+            "stateType": issue.state_type,
+            "state_type": issue.state_type,
+            "priorityLabel": issue.priority_label,
+            "priority_label": issue.priority_label,
+            "assigneeName": issue.assignee_name,
+            "assignee_name": issue.assignee_name,
+            "updatedAt": issue.updated_at_linear.isoformat() if issue.updated_at_linear else None,
+            "updated_at": issue.updated_at_linear.isoformat() if issue.updated_at_linear else None,
+            "url": issue.url,
+        }
+        for issue in issue_queryset.select_related("project").order_by("-updated_at_linear", "-id")[:limit]
+    ]
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "workspaceId": connection.external_account_id,
+        "workspace_id": connection.external_account_id,
+        "lastSyncedAt": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
+        "last_synced_at": connection.last_synced_at.isoformat() if connection.last_synced_at else None,
+        "selectedProjects": [_serialize_linear_project_selection(selection) for selection in selected],
+        "selected_projects": [_serialize_linear_project_selection(selection) for selection in selected],
+        "projects": projects,
+        "projectUpdates": project_updates,
+        "project_updates": project_updates,
+        "issues": issues,
+        "totalCachedProjects": project_queryset.count(),
+        "total_cached_projects": project_queryset.count(),
+        "totalCachedIssues": issue_queryset.count(),
+        "total_cached_issues": issue_queryset.count(),
+        "totalCachedUpdates": update_queryset.count(),
+        "total_cached_updates": update_queryset.count(),
         "warnings": warnings,
     }
 
@@ -2421,17 +3746,38 @@ def _upsert_slack_thread_artifact(
         if message.cleaned_text:
             lines.append(f"[{posted}] {author}: {message.cleaned_text}")
 
+    source_message_ids = [_slack_source_id(message.channel_id, message.slack_message_ts) for message in messages]
+    cleaned_text = "\n".join(lines)
     existing = SlackThreadArtifact.objects.filter(
         organization=connection.organization,
         connection=connection,
         channel_id=channel_id,
         thread_ts=thread_ts,
     ).first()
+    content_changed = bool(
+        existing
+        and (
+            (existing.source_message_ids or []) != source_message_ids
+            or (existing.cleaned_text or "") != cleaned_text
+        )
+    )
     extraction_status = (
         existing.extraction_status
         if existing and existing.extraction_status == ArtifactProcessingStatus.PROCESSED
+        else existing.extraction_status
+        if existing and not content_changed and existing.extraction_status == ArtifactProcessingStatus.UNSUPPORTED
         else ArtifactProcessingStatus.HYDRATED
     )
+    classification_defaults = {}
+    if content_changed:
+        classification_defaults = {
+            "relevance_label": "pending",
+            "relevance_score": 0.0,
+            "relevance_reason": "",
+            "needs_extraction": False,
+            "extraction_hints": {},
+            "classified_at": None,
+        }
     artifact, _created = SlackThreadArtifact.objects.update_or_create(
         organization=connection.organization,
         connection=connection,
@@ -2439,9 +3785,9 @@ def _upsert_slack_thread_artifact(
         thread_ts=thread_ts,
         defaults={
             "channel_name": channel_name,
-            "source_message_ids": [_slack_source_id(message.channel_id, message.slack_message_ts) for message in messages],
+            "source_message_ids": source_message_ids,
             "source_message_count": len(messages),
-            "cleaned_text": "\n".join(lines),
+            "cleaned_text": cleaned_text,
             "participant_summary": {
                 "participants": sorted(participants.keys()),
                 "message_counts": participants,
@@ -2450,6 +3796,7 @@ def _upsert_slack_thread_artifact(
             "latest_message_at": max((message.posted_at for message in messages if message.posted_at), default=None),
             "extraction_status": extraction_status,
             "last_error": "",
+            **classification_defaults,
         },
     )
     return artifact
@@ -3136,15 +4483,20 @@ def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
         "total_cached_messages": total_cached,
         "warnings": warnings,
         "messages": messages,
+        **scope_status,
     }
 
 
 def _serialize_google_source(user) -> dict[str, Any]:
     connection = GoogleConnection.objects.filter(user=user).first()
     configured = is_provider_configured("gmail")
-    if connection:
+    scope_status = gmail_scope_status_payload(connection)
+    if connection and scope_status["hasGmailScope"]:
         status_value = "connected"
         warning = None
+    elif connection:
+        status_value = "error"
+        warning = GMAIL_RECONNECT_WARNING
     elif configured:
         status_value = "not_connected"
         warning = None
@@ -3157,7 +4509,7 @@ def _serialize_google_source(user) -> dict[str, Any]:
         "provider": "gmail",
         "label": CONNECTOR_DEFINITIONS["gmail"].label,
         "capabilities": list(CONNECTOR_DEFINITIONS["gmail"].capabilities),
-        "selected": status_value == "connected",
+        "selected": status_value == "connected" and has_gmail_read_scope(connection),
         "status": status_value,
         "connectionId": connection.id if connection else None,
         "connection_id": connection.id if connection else None,
@@ -3166,6 +4518,13 @@ def _serialize_google_source(user) -> dict[str, Any]:
         "lastSyncedAt": None,
         "last_synced_at": None,
         "warning": warning,
+        "canDisconnect": bool(connection),
+        "can_disconnect": bool(connection),
+        "canDeleteData": bool(connection),
+        "can_delete_data": bool(connection),
+        "googlePermissionsUrl": "https://myaccount.google.com/permissions",
+        "google_permissions_url": "https://myaccount.google.com/permissions",
+        **scope_status,
     }
 
 
@@ -3196,8 +4555,16 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         ).count()
         if status_value in {"connected", "syncing"} and selected_channel_count == 0:
             warning = warning or "Select Slack channels before using Slack in a monthly update."
+    selected_project_count = 0
+    if provider == ExternalServiceProvider.LINEAR and connection:
+        selected_project_count = LinearProjectSelection.objects.filter(
+            connection=connection,
+            selected=True,
+        ).count()
+        if status_value in {"connected", "syncing"} and selected_project_count == 0:
+            warning = warning or "Select Linear projects before using Linear in a monthly update."
 
-    return {
+    payload = {
         "key": provider,
         "provider": provider,
         "label": definition.label,
@@ -3205,6 +4572,8 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         "selected": (
             selected_channel_count > 0
             if provider == ExternalServiceProvider.SLACK
+            else selected_project_count > 0
+            if provider == ExternalServiceProvider.LINEAR
             else status_value in {"connected", "syncing"}
         ),
         "status": status_value,
@@ -3220,7 +4589,38 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         "configured": configured,
         "selectedChannelCount": selected_channel_count,
         "selected_channel_count": selected_channel_count,
+        "selectedProjectCount": selected_project_count,
+        "selected_project_count": selected_project_count,
     }
+    if provider == ExternalServiceProvider.XERO:
+        has_report_scope = xero_has_report_scope(connection.scopes if connection else [])
+        can_request_report_scopes = _xero_can_request_report_scopes()
+        needs_report_scope_configuration = bool(connection) and not has_report_scope and not can_request_report_scopes
+        needs_report_reconnect = (
+            bool(connection)
+            and not has_report_scope
+            and can_request_report_scopes
+            and xero_needs_report_reconnect(connection.scopes)
+        )
+        if status_value in {"connected", "syncing"} and needs_report_reconnect:
+            payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_WARNING
+        elif status_value in {"connected", "syncing"} and needs_report_scope_configuration:
+            payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_CONFIGURATION_WARNING
+        payload.update(
+            {
+                "hasReportScope": has_report_scope,
+                "has_report_scope": has_report_scope,
+                "needsReportReconnect": needs_report_reconnect,
+                "needs_report_reconnect": needs_report_reconnect,
+                "canRequestReportScopes": can_request_report_scopes,
+                "can_request_report_scopes": can_request_report_scopes,
+                "needsReportScopeConfiguration": needs_report_scope_configuration,
+                "needs_report_scope_configuration": needs_report_scope_configuration,
+                "requiredReportScopes": list(XERO_REQUIRED_REPORT_SCOPES),
+                "required_report_scopes": list(XERO_REQUIRED_REPORT_SCOPES),
+            }
+        )
+    return payload
 
 
 def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, Any]:
@@ -3317,6 +4717,28 @@ def mark_sources_sync_requested(user, providers: Optional[list[str]] = None, *, 
                 )
                 connection.status = ExternalServiceConnectionStatus.ERROR
                 connection.last_error = str(exc) or "Slack sync failed."
+                connection.save(update_fields=["status", "last_error", "updated_at"])
+                updated.append(
+                    {
+                        "connectionId": connection.id,
+                        "connection_id": connection.id,
+                        "provider": connection.provider,
+                        "status": "error",
+                        "error": connection.last_error,
+                    }
+                )
+            continue
+
+        if connection.provider == ExternalServiceProvider.LINEAR:
+            try:
+                updated.append(sync_linear_connection(connection))
+            except (ConnectorConfigurationError, ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
+                logger.exception(
+                    "Linear sync failed",
+                    extra={"connection_id": connection.id, "user_id": user.id},
+                )
+                connection.status = ExternalServiceConnectionStatus.ERROR
+                connection.last_error = str(exc) or "Linear sync failed."
                 connection.save(update_fields=["status", "last_error", "updated_at"])
                 updated.append(
                     {

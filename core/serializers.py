@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
+from .user_compat import get_compat_user_role
 
 User = get_user_model()
 
@@ -8,7 +9,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        token['role'] = user.role
+        token['role'] = get_compat_user_role(user)
         return token
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -41,7 +42,11 @@ class HackathonSerializer(serializers.ModelSerializer):
         fields = ['name', 'slug', 'description', 'start_date', 'end_date', 'bg_image_url']
 
 class UserSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
     team_avatar = serializers.FileField(write_only=True, required=False)
+
+    def get_role(self, obj):
+        return get_compat_user_role(obj)
     
     class Meta:
         model = User

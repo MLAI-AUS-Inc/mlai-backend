@@ -25,7 +25,7 @@ class ContentJobConfirmTest(TestCase):
         self.user = User.objects.create_user(email="confirm@example.com", password="password")
         self.ledger = Ledger.objects.create(
             user=self.user,
-            delta=-6,
+            delta=-4,
             kind="SPEND",
             source="CONTENT_FACTORY",
             description="Content Factory charge",
@@ -41,7 +41,7 @@ class ContentJobConfirmTest(TestCase):
             selected_keyword="existing keyword",
             client_request_id="content-factory-job-confirm",
             billing_source_job_id=self.job_id,
-            billing_amount=6,
+            billing_amount=4,
             billing_status="charged",
             billing_ledger=self.ledger,
             selection_data={
@@ -80,7 +80,7 @@ class ContentJobConfirmTest(TestCase):
         child_job = ContentFactoryJob.objects.get(job_id="child-job-123")
         self.assertEqual(child_job.client_request_id, "content-factory-job-confirm")
         self.assertEqual(child_job.billing_source_job_id, self.job_id)
-        self.assertEqual(child_job.billing_amount, 6)
+        self.assertEqual(child_job.billing_amount, 4)
         self.assertEqual(child_job.billing_status, "reused")
         self.assertEqual(child_job.billing_ledger_id, self.ledger.id)
 

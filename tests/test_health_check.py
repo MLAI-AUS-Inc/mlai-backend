@@ -33,6 +33,7 @@ class HealthCheckTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "not_ready")
+        self.assertEqual(response.json()["pending_migration_labels"], ["core.0041"])
 
     @patch("mlai.views.connections")
     def test_health_live_does_not_touch_database(self, mock_connections):
@@ -78,6 +79,7 @@ class HealthCheckTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "not_ready")
         self.assertEqual(response.json()["pending_migrations"], 1)
+        self.assertEqual(response.json()["pending_migration_labels"], ["founder_tools.0002"])
         mock_cursor.execute.assert_called_once_with("SELECT 1")
 
     @patch("mlai.views.connections")
@@ -159,4 +161,52 @@ class PointsEndpointTimeoutMiddlewareTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response["X-Request-ID"], "mlai-timeout-request")
-        self.assertEqual(json.loads(response.content)["message"], "Points subsystem timed out")
+        payload = json.loads(response.content)
+        self.assertEqual(payload["message"], "Points subsystem timed out")
+        self.assertEqual(payload["error_code"], "points_timeout")
+        self.assertTrue(payload["retryable"])
+
+    @patch("core.middleware.transaction.atomic", return_value=nullcontext())
+    @patch("core.middleware.connection")
+    def test_points_connection_interruption_returns_503_and_closes_connection(
+        self,
+        mock_connection,
+        _mock_atomic,
+    ):
+        mock_connection.vendor = "postgresql"
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = OperationalError(
+            "terminating connection due to administrator command"
+        )
+        mock_connection.cursor.return_value.__enter__.return_value = mock_cursor
+        middleware = PointsEndpointTimeoutMiddleware(lambda request: HttpResponse("ok"))
+        request = self.factory.get("/api/v1/points/coworking/report/")
+        request.request_id = "mlai-admin-shutdown"
+
+        response = middleware(request)
+
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response["X-Request-ID"], "mlai-admin-shutdown")
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["message"], "Points subsystem is temporarily unavailable")
+        self.assertEqual(payload["error_code"], "database_connection_interrupted")
+        self.assertTrue(payload["retryable"])
+        self.assertIn("terminating connection", payload["error"])
+        mock_connection.close.assert_called_once()
+
+    @patch("core.middleware.transaction.atomic", return_value=nullcontext())
+    @patch("core.middleware.connection")
+    def test_points_non_transient_operational_error_still_raises(self, mock_connection, _mock_atomic):
+        mock_connection.vendor = "postgresql"
+        mock_connection.cursor.return_value.__enter__.return_value = MagicMock()
+        middleware = PointsEndpointTimeoutMiddleware(
+            lambda request: (_ for _ in ()).throw(
+                OperationalError("permission denied for relation coworking")
+            )
+        )
+        request = self.factory.get("/api/v1/points/coworking/report/")
+        request.request_id = "mlai-non-transient"
+
+        with self.assertRaises(OperationalError):
+            middleware(request)

@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    PointsAdmin, Minter, Task, Ledger, PointsAccount,
+    PointsAdmin, Minter, Task, Ledger, PointsAccount, PointsPurchase,
     TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     RewardsCatalog, RewardRedemption, TaskTemplate, QuestProgress,
 )
@@ -9,19 +9,86 @@ from .models import (
 
 @admin.register(PointsAdmin)
 class PointsAdminAdmin(admin.ModelAdmin):
-    list_display = ('slack_user_id', 'role', 'portfolio', 'is_active', 'created_at')
+    list_display = ('admin_name', 'slack_user_id', 'role', 'portfolio', 'is_active', 'created_at')
+    list_display_links = ('admin_name',)
+    list_select_related = ('user',)
     list_filter = ('role', 'portfolio', 'is_active')
-    search_fields = ('slack_user_id', 'user__email')
+    search_fields = ('slack_user_id', 'user__email', 'user__first_name', 'user__last_name')
     readonly_fields = ('created_at',)
+
+    def admin_name(self, obj):
+        if obj.user:
+            return obj.user.full_name or obj.user.email
+        return obj.slack_user_id
+    admin_name.short_description = 'Admin Name'
+    admin_name.admin_order_field = 'user__first_name'
 
 
 @admin.register(PointsAccount)
 class PointsAccountAdmin(admin.ModelAdmin):
-    list_display = ('user', 'balance', 'lifetime_earned', 'lifetime_spent', 'updated_at')
+    list_display = (
+        'user',
+        'balance',
+        'earned_balance',
+        'purchased_topup_balance',
+        'lifetime_earned',
+        'lifetime_purchased_topup',
+        'lifetime_spent',
+        'updated_at',
+    )
     list_filter = ('updated_at',)
     search_fields = ('user__email', 'user__slack_id')
     readonly_fields = ('user', 'created_at', 'updated_at')
     ordering = ('-balance',)
+
+
+@admin.register(PointsPurchase)
+class PointsPurchaseAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'slack_user_id',
+        'pack_id',
+        'points_amount',
+        'amount_cents',
+        'currency',
+        'status',
+        'expires_at',
+        'created_at',
+        'paid_at',
+    )
+    list_filter = ('status', 'currency', 'expires_at', 'created_at', 'paid_at')
+    search_fields = (
+        'id',
+        'user__email',
+        'user__slack_id',
+        'slack_user_id',
+        'pack_id',
+        'stripe_checkout_session_id',
+    )
+    readonly_fields = (
+        'id',
+        'user',
+        'slack_user_id',
+        'pack_id',
+        'points_amount',
+        'amount_cents',
+        'currency',
+        'status',
+        'stripe_checkout_session_id',
+        'terms_version_accepted',
+        'terms_accepted_at',
+        'privacy_version_accepted',
+        'privacy_accepted_at',
+        'purchase_from',
+        'ledger_entry',
+        'metadata',
+        'expires_at',
+        'paid_at',
+        'created_at',
+        'updated_at',
+    )
+    ordering = ('-created_at',)
 
 
 @admin.register(Task)
@@ -127,4 +194,3 @@ class QuestProgressAdmin(admin.ModelAdmin):
     search_fields = ('slack_user_id', 'quest_id')
     readonly_fields = ('first_progress_at', 'created_at', 'updated_at')
     ordering = ('-updated_at',)
-

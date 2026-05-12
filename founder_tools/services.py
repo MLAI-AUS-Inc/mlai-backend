@@ -39,8 +39,42 @@ def normalize_company_linkedin_url(value: str | None) -> str:
     return f"https://www.linkedin.com/company/{slug}"
 
 
-def founder_actor_id_for_user(user) -> str:
+def synthetic_actor_id_for_user(user) -> str:
     return f"mlai_user:{user.id}"
+
+
+def actor_ids_for_user(user) -> list[str]:
+    actor_ids = []
+    slack_id = str(getattr(user, "slack_id", "") or "").strip()
+    if slack_id:
+        actor_ids.append(slack_id)
+    actor_ids.append(synthetic_actor_id_for_user(user))
+    return list(dict.fromkeys(actor_ids))
+
+
+def founder_actor_id_for_user(user) -> str:
+    return actor_ids_for_user(user)[0]
+
+
+def _is_synthetic_actor_id(value: str | None) -> bool:
+    return str(value or "").strip().startswith("mlai_user:")
+
+
+def reconcile_user_slack_id_from_email(user) -> bool:
+    if getattr(user, "slack_id", None) or not getattr(user, "email", None):
+        return False
+    slack_backed_user = (
+        type(user).objects.filter(email__iexact=user.email)
+        .exclude(pk=user.pk)
+        .exclude(slack_id__isnull=True)
+        .exclude(slack_id="")
+        .first()
+    )
+    if slack_backed_user is None:
+        return False
+    user.slack_id = slack_backed_user.slack_id
+    user.save(update_fields=["slack_id"])
+    return True
 
 
 def string_list_from_value(value) -> list[str]:
@@ -60,6 +94,17 @@ def _first_value(data, *keys, default=None):
     return default
 
 
+def _has_any_key(data, *keys) -> bool:
+    return any(key in data for key in keys)
+
+
+def _submitted_value(data, *keys, default=""):
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return default
+
+
 def _bool_from_value(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -68,14 +113,25 @@ def _bool_from_value(value) -> bool:
     return bool(value)
 
 
+def _normalize_organization_kind(value) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"for-profit", "for profit", "profit", "commercial"}:
+        return "For-profit"
+    if raw in {"not-for-profit", "not for profit", "non-profit", "nonprofit", "nfp"}:
+        return "Not-for-profit"
+    return ""
+
+
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
     normalized_domain = normalize_company_domain(company.domain)
     if not normalized_domain:
         return None
 
+    company_update_fields = []
     if company.domain != normalized_domain:
         company.domain = normalized_domain
+        company_update_fields.append("domain")
 
     organization, created = Organization.objects.get_or_create(
         domain=normalized_domain,
@@ -87,9 +143,10 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
 
     if company.organization_id != organization.id:
         company.organization = organization
-        company.save(update_fields=["domain", "organization", "updated_at"])
-    elif company.domain == normalized_domain:
-        company.save(update_fields=["domain", "updated_at"])
+        company_update_fields.append("organization")
+
+    if company_update_fields:
+        company.save(update_fields=[*company_update_fields, "updated_at"])
 
     return organization
 
@@ -100,19 +157,31 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if organization is None:
         return None
 
-    brand_name = str(_first_value(data, "brandName", "brand_name", default="") or "").strip()
-    company_context = str(_first_value(data, "companyContext", "company_context", default="") or "").strip()
+    brand_name_provided = _has_any_key(data, "brandName", "brand_name")
+    company_context_provided = _has_any_key(data, "companyContext", "company_context")
+    competitors_provided = "competitors" in data
+    seed_keywords_provided = _has_any_key(data, "seedKeywords", "seed_keywords")
+    founder_names_provided = _has_any_key(data, "founderNames", "founder_names")
+    stage_provided = "stage" in data
+    organization_kind_provided = _has_any_key(data, "organizationKind", "organization_kind")
+    notes_provided = "notes" in data
+
+    brand_name = str(_submitted_value(data, "brandName", "brand_name", default="") or "").strip()
+    company_context = str(_submitted_value(data, "companyContext", "company_context", default="") or "").strip()
     linkedin_url = ""
     linkedin_url_provided = "companyLinkedInUrl" in data or "company_linkedin_url" in data
     if linkedin_url_provided:
         linkedin_url = normalize_company_linkedin_url(
-            _first_value(data, "companyLinkedInUrl", "company_linkedin_url", default="")
+            _submitted_value(data, "companyLinkedInUrl", "company_linkedin_url", default="")
         )
-    competitors = string_list_from_value(_first_value(data, "competitors", default=[]))
-    seed_keywords = string_list_from_value(_first_value(data, "seedKeywords", "seed_keywords", default=[]))
-    founder_names = string_list_from_value(_first_value(data, "founderNames", "founder_names", default=[]))
-    stage = str(_first_value(data, "stage", default="") or "").strip()
-    notes = str(_first_value(data, "notes", default="") or "").strip()
+    competitors = string_list_from_value(_submitted_value(data, "competitors", default=[]))
+    seed_keywords = string_list_from_value(_submitted_value(data, "seedKeywords", "seed_keywords", default=[]))
+    founder_names = string_list_from_value(_submitted_value(data, "founderNames", "founder_names", default=[]))
+    stage = str(_submitted_value(data, "stage", default="") or "").strip()
+    organization_kind = _normalize_organization_kind(
+        _submitted_value(data, "organizationKind", "organization_kind", default="")
+    )
+    notes = str(_submitted_value(data, "notes", default="") or "").strip()
 
     organization_update_fields = []
     if brand_name and organization.name != brand_name:
@@ -121,10 +190,10 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     elif company.name and not organization.name:
         organization.name = company.name
         organization_update_fields.append("name")
-    if "competitors" in data and organization.competitors != competitors:
+    if competitors_provided and organization.competitors != competitors:
         organization.competitors = competitors
         organization_update_fields.append("competitors")
-    if ("seedKeywords" in data or "seed_keywords" in data) and organization.seed_keywords != seed_keywords:
+    if seed_keywords_provided and organization.seed_keywords != seed_keywords:
         organization.seed_keywords = seed_keywords
         organization_update_fields.append("seed_keywords")
     if linkedin_url_provided and organization.company_linkedin_url != linkedin_url:
@@ -139,13 +208,26 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
     config_update_fields = []
     actor_id = founder_actor_id_for_user(user)
-    if config.connected_slack_user_id != actor_id:
+    actor_aliases = actor_ids_for_user(user)
+    connected_actor_id = str(config.connected_slack_user_id or "").strip()
+    if not connected_actor_id:
         config.connected_slack_user_id = actor_id
         config_update_fields.append("connected_slack_user_id")
-    if brand_name and config.brand_name != brand_name:
+    elif connected_actor_id not in actor_aliases and _is_synthetic_actor_id(connected_actor_id):
+        config.connected_slack_user_id = actor_id
+        config_update_fields.append("connected_slack_user_id")
+    elif (
+        connected_actor_id in actor_aliases
+        and connected_actor_id != actor_id
+        and not _is_synthetic_actor_id(actor_id)
+        and _is_synthetic_actor_id(connected_actor_id)
+    ):
+        config.connected_slack_user_id = actor_id
+        config_update_fields.append("connected_slack_user_id")
+    if brand_name_provided and config.brand_name != brand_name:
         config.brand_name = brand_name
         config_update_fields.append("brand_name")
-    if company_context and config.company_context != company_context:
+    if company_context_provided and config.company_context != company_context:
         config.company_context = company_context
         config_update_fields.append("company_context")
 
@@ -177,19 +259,22 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
 
     _, startup_profile = resolve_or_create_profile(domain=organization.domain)
     startup_update_fields = []
-    if founder_names and startup_profile.founder_names != founder_names:
+    if founder_names_provided and startup_profile.founder_names != founder_names:
         startup_profile.founder_names = founder_names
         startup_update_fields.append("founder_names")
-    if competitors and startup_profile.competitor_domains != competitors:
+    if competitors_provided and startup_profile.competitor_domains != competitors:
         startup_profile.competitor_domains = competitors
         startup_update_fields.append("competitor_domains")
-    if seed_keywords and startup_profile.positive_keywords != seed_keywords:
+    if seed_keywords_provided and startup_profile.positive_keywords != seed_keywords:
         startup_profile.positive_keywords = seed_keywords
         startup_update_fields.append("positive_keywords")
-    if stage and startup_profile.stage != stage:
+    if stage_provided and startup_profile.stage != stage:
         startup_profile.stage = stage
         startup_update_fields.append("stage")
-    if notes and startup_profile.notes != notes:
+    if organization_kind_provided and startup_profile.organization_kind != organization_kind:
+        startup_profile.organization_kind = organization_kind
+        startup_update_fields.append("organization_kind")
+    if notes_provided and startup_profile.notes != notes:
         startup_profile.notes = notes
         startup_update_fields.append("notes")
     if company.name and company.name not in startup_profile.company_aliases:
@@ -207,6 +292,7 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
 
 
 def get_or_create_founder_profile(user) -> VibeRaisingProfile:
+    reconcile_user_slack_id_from_email(user)
     profile, _created = VibeRaisingProfile.objects.get_or_create(
         user=user,
         defaults={"role": VibeRaisingProfile.ROLE_FOUNDER},

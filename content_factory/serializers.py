@@ -44,7 +44,7 @@ class ComponentMappingSerializer(serializers.ModelSerializer):
 
 from .models import (
     ResearchedKeyword, KeywordVelocity, AISaturation, PAQuestion,
-    SemanticCluster, TopicMap, WrittenArticle, ResearchSession
+    SemanticCluster, TopicMap, WrittenArticle, ResearchSession, TopicFeedback
 )
 
 
@@ -98,11 +98,11 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResearchedKeyword
         fields = [
-            'id', 'keyword', 'volume', 'difficulty', 'intent',
+            'id', 'keyword', 'volume', 'difficulty', 'difficulty_source', 'intent',
             'tier', 'opportunity_index', 'source', 'status',
             'times_shown', 'last_shown_at', 'times_rejected', 'last_rejected_at',
             'cooldown_until', 'times_selected', 'last_selected_at',
-            'cluster_fingerprint',
+            'cluster_fingerprint', 'related_keywords', 'monthly_searches',
             'latest_velocity', 'latest_saturation', 'paa_count',
             'discovered_at', 'metrics_updated_at'
         ]
@@ -144,9 +144,10 @@ class ResearchedKeywordDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResearchedKeyword
         fields = [
-            'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty',
+            'id', 'keyword', 'keyword_normalized', 'volume', 'difficulty', 'difficulty_source',
             'intent', 'tier', 'opportunity_index', 'source', 'source_detail',
-            'competitor_urls', 'status', 'times_shown', 'last_shown_at',
+            'competitor_urls', 'related_keywords', 'monthly_searches',
+            'status', 'times_shown', 'last_shown_at',
             'times_rejected', 'last_rejected_at', 'cooldown_until',
             'times_selected', 'last_selected_at', 'cluster_fingerprint',
             'discovered_at', 'metrics_updated_at',
@@ -277,6 +278,47 @@ class ResearchFeedbackSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
     )
+
+
+class TopicFeedbackRequestSerializer(serializers.Serializer):
+    """Serializer for explicit topic feedback such as a homepage thumbs-down."""
+    domain = serializers.CharField(required=False, allow_blank=True)
+    keyword = serializers.CharField()
+    session_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    feedback_type = serializers.CharField(required=False, allow_blank=True, default='declined')
+    reason_code = serializers.CharField(required=False, allow_blank=True, default='not_appropriate')
+    reason_text = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    decline_scope = serializers.CharField(required=False, allow_blank=True, default='similar')
+    source = serializers.CharField(required=False, allow_blank=True, default='homepage_topic_card')
+
+
+class TopicFeedbackSerializer(serializers.ModelSerializer):
+    """Serializer for stored topic feedback memory."""
+    domain = serializers.CharField(source='organization.domain', read_only=True)
+    active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TopicFeedback
+        fields = [
+            'id',
+            'domain',
+            'keyword',
+            'keyword_normalized',
+            'feedback_type',
+            'reason_code',
+            'reason_text',
+            'decline_scope',
+            'source',
+            'session_id',
+            'active',
+            'created_at',
+            'updated_at',
+            'restored_at',
+        ]
+        read_only_fields = fields
+
+    def get_active(self, obj):
+        return obj.restored_at is None
 
 
 class SEODashboardSerializer(serializers.Serializer):

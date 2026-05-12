@@ -5,11 +5,17 @@ from .models import (
     GmailMessageArtifact,
     GmailSyncCursor,
     GmailThreadArtifact,
+    LinearIssueArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LinearProjectUpdateArtifact,
     MonthlyUpdateDraft,
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
+    StartupDataDeletionRequest,
     StartupEvent,
+    StartupManualDocument,
     StartupMetricObservation,
     StartupProfile,
     UserStartupBinding,
@@ -28,6 +34,23 @@ class UserStartupBindingAdmin(admin.ModelAdmin):
     list_display = ("user", "organization", "google_connection", "role", "is_default_for_gmail", "updated_at")
     search_fields = ("user__email", "organization__domain", "role")
     list_filter = ("is_default_for_gmail", "updated_at")
+
+
+@admin.register(StartupManualDocument)
+class StartupManualDocumentAdmin(admin.ModelAdmin):
+    list_display = (
+        "organization",
+        "company",
+        "original_filename",
+        "content_type",
+        "file_size_bytes",
+        "extraction_status",
+        "created_by",
+        "created_at",
+    )
+    search_fields = ("organization__domain", "company__name", "original_filename", "created_by__email")
+    list_filter = ("extraction_status", "content_type", "created_at")
+    readonly_fields = ("storage_path", "parse_notes", "last_error", "metadata")
 
 
 @admin.register(GmailSyncCursor)
@@ -76,6 +99,7 @@ class GmailAttachmentArtifactAdmin(admin.ModelAdmin):
     list_display = ("organization", "filename", "mime_type", "size_bytes", "extraction_status", "updated_at")
     search_fields = ("organization__domain", "filename", "mime_type", "gmail_attachment_id")
     list_filter = ("extraction_status", "mime_type")
+    readonly_fields = ("last_error",)
 
 
 @admin.register(SlackChannelSelection)
@@ -94,9 +118,56 @@ class SlackMessageArtifactAdmin(admin.ModelAdmin):
 
 @admin.register(SlackThreadArtifact)
 class SlackThreadArtifactAdmin(admin.ModelAdmin):
-    list_display = ("organization", "channel_name", "thread_ts", "source_message_count", "extraction_status", "latest_message_at")
-    search_fields = ("organization__domain", "channel_name", "channel_id", "thread_ts")
-    list_filter = ("extraction_status", "channel_name", "latest_message_at")
+    list_display = (
+        "organization",
+        "channel_name",
+        "thread_ts",
+        "source_message_count",
+        "relevance_label",
+        "heuristic_score",
+        "relevance_score",
+        "extraction_status",
+        "latest_message_at",
+    )
+    search_fields = ("organization__domain", "channel_name", "channel_id", "thread_ts", "cleaned_text")
+    list_filter = ("relevance_label", "needs_extraction", "extraction_status", "channel_name", "latest_message_at")
+
+
+@admin.register(LinearProjectSelection)
+class LinearProjectSelectionAdmin(admin.ModelAdmin):
+    list_display = ("organization", "connection", "project_name", "linear_project_id", "selected", "last_synced_at")
+    search_fields = ("organization__domain", "project_name", "linear_project_id", "connection__account_label")
+    list_filter = ("selected", "project_status", "project_health", "last_synced_at", "updated_at")
+
+
+@admin.register(LinearProjectArtifact)
+class LinearProjectArtifactAdmin(admin.ModelAdmin):
+    list_display = (
+        "organization",
+        "name",
+        "status_name",
+        "health",
+        "relevance_label",
+        "relevance_score",
+        "extraction_status",
+        "target_date",
+    )
+    search_fields = ("organization__domain", "name", "linear_project_id", "description")
+    list_filter = ("status_type", "health", "relevance_label", "needs_extraction", "extraction_status")
+
+
+@admin.register(LinearIssueArtifact)
+class LinearIssueArtifactAdmin(admin.ModelAdmin):
+    list_display = ("organization", "identifier", "title", "state_name", "priority_label", "updated_at_linear")
+    search_fields = ("organization__domain", "identifier", "linear_issue_id", "title", "description")
+    list_filter = ("state_type", "priority_label", "team_name", "updated_at_linear")
+
+
+@admin.register(LinearProjectUpdateArtifact)
+class LinearProjectUpdateArtifactAdmin(admin.ModelAdmin):
+    list_display = ("organization", "project", "health", "author_name", "updated_at_linear")
+    search_fields = ("organization__domain", "linear_project_update_id", "body", "author_name")
+    list_filter = ("health", "updated_at_linear")
 
 
 @admin.register(StartupMetricObservation)
@@ -118,3 +189,11 @@ class MonthlyUpdateDraftAdmin(admin.ModelAdmin):
     list_display = ("organization", "month", "status", "groundedness_status", "model_name", "updated_at")
     search_fields = ("organization__domain", "title", "model_name")
     list_filter = ("status", "groundedness_status", "month")
+
+
+@admin.register(StartupDataDeletionRequest)
+class StartupDataDeletionRequestAdmin(admin.ModelAdmin):
+    list_display = ("organization", "provider", "status", "delete_derived_data", "google_account", "completed_at")
+    search_fields = ("organization__domain", "request_id", "google_account", "reason")
+    list_filter = ("provider", "status", "delete_derived_data", "created_at")
+    readonly_fields = ("request_id", "deleted_counts", "warnings", "metadata", "started_at", "completed_at")

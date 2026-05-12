@@ -3,17 +3,25 @@ Tests for the Points System.
 """
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Optional
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.utils import timezone
 from unittest.mock import patch
 
 from .models import (
     PointsAdmin, PointsAccount, Task, TaskSubmission, Ledger,
-    CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption
+    CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
+    PointsPurchase,
 )
-from .services import PointsService, CoworkingService, TaskService, RewardsService
-from .permissions import is_points_admin, InsufficientBalanceError, PermissionDeniedError
+from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService
+from .permissions import (
+    can_generate_coworking_reports,
+    is_points_admin,
+    InsufficientBalanceError,
+    PermissionDeniedError,
+)
 
 
 User = get_user_model()
@@ -42,8 +50,12 @@ class PointsServiceTests(TestCase):
         # Create account
         account = PointsService.get_or_create_account(self.user)
         self.assertEqual(account.balance, 0)
+        self.assertEqual(account.earned_balance, 0)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 0)
+        self.assertEqual(account.lifetime_purchased_topup, 0)
         self.assertEqual(account.lifetime_spent, 0)
+        self.assertEqual(account.expired_or_reversed_points, 0)
         
         # Second call returns same account
         account2 = PointsService.get_or_create_account(self.user)
@@ -66,8 +78,66 @@ class PointsServiceTests(TestCase):
         
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 10)
+        self.assertEqual(account.earned_balance, 10)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 10)
+        self.assertEqual(account.lifetime_purchased_topup, 0)
         self.assertEqual(account.lifetime_spent, 0)
+
+    def test_credit_purchased_topup_does_not_increase_lifetime_earned(self):
+        """Purchased top-up points are spendable but not contribution points."""
+        ledger, created = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            created_by_slack_id='STRIPE',
+            idempotency_key='test_topup_1',
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-1',
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(ledger.delta, 10)
+        self.assertEqual(ledger.kind, 'EARN')
+        self.assertEqual(ledger.source, 'purchased_topup')
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.earned_balance, 0)
+        self.assertEqual(account.purchased_topup_balance, 10)
+        self.assertEqual(account.lifetime_earned, 0)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+
+    def test_credit_purchased_topup_is_idempotent(self):
+        """Duplicate Stripe/webhook handling must not double-credit top-up points."""
+        key = 'test_topup_idempotent'
+
+        ledger1, created1 = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            idempotency_key=key,
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-2',
+        )
+        ledger2, created2 = PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Duplicate top-up Roo Points purchase',
+            idempotency_key=key,
+            reference_type='POINTS_PURCHASE',
+            reference_id='purchase-2',
+        )
+
+        self.assertTrue(created1)
+        self.assertFalse(created2)
+        self.assertEqual(ledger1.id, ledger2.id)
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.purchased_topup_balance, 10)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+        self.assertEqual(account.lifetime_earned, 0)
     
     def test_spend_decreases_balance_increases_lifetime_spent(self):
         """Test that spending points decreases balance and increases lifetime_spent."""
@@ -97,8 +167,44 @@ class PointsServiceTests(TestCase):
         
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 15)  # 20 - 5
+        self.assertEqual(account.earned_balance, 15)
+        self.assertEqual(account.purchased_topup_balance, 0)
         self.assertEqual(account.lifetime_earned, 20)
         self.assertEqual(account.lifetime_spent, 5)
+
+    def test_spend_debits_topup_balance_before_earned_balance(self):
+        """Spending keeps earned/top-up balances coherent."""
+        PointsService.credit_purchased_topup(
+            user=self.user,
+            delta=10,
+            description='Top-up Roo Points purchase',
+            idempotency_key='test_topup_before_spend',
+        )
+        PointsService.award(
+            user=self.user,
+            delta=20,
+            source='TASK',
+            description='Earned points',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='test_earned_before_spend',
+        )
+
+        PointsService.spend(
+            user=self.user,
+            delta=15,
+            source='MERCH',
+            description='Redeemed reward',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='test_mixed_spend',
+        )
+
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, 15)
+        self.assertEqual(account.purchased_topup_balance, 0)
+        self.assertEqual(account.earned_balance, 15)
+        self.assertEqual(account.lifetime_earned, 20)
+        self.assertEqual(account.lifetime_purchased_topup, 10)
+        self.assertEqual(account.lifetime_spent, 15)
     
     def test_spend_below_zero_raises_error(self):
         """Test that spending more than balance raises InsufficientBalanceError."""
@@ -196,6 +302,157 @@ class PointsServiceTests(TestCase):
         # Balance should be 15 (20 - 5), not 10
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 15)
+
+
+class PointsPurchaseModelTests(TestCase):
+    """Tests for the Top-up Roo Points purchase record."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='topup@example.com',
+            slack_id='UTOPUP123',
+        )
+
+    def test_purchase_defaults_and_origin_metadata(self):
+        before_create = timezone.now()
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id='UTOPUP123',
+            pack_id='topup_10',
+            points_amount=10,
+            amount_cents=3699,
+            purchase_from={
+                'source': 'slack',
+                'slack_user_id': 'UTOPUP123',
+                'slack_channel_id': 'C123',
+                'slack_thread_ts': '1712345678.000100',
+            },
+        )
+
+        self.assertEqual(purchase.status, 'pending')
+        self.assertEqual(purchase.currency, 'aud')
+        self.assertIsNone(purchase.ledger_entry)
+        self.assertIsNone(purchase.paid_at)
+        self.assertGreaterEqual(purchase.expires_at, before_create + timedelta(hours=24))
+        self.assertLessEqual(purchase.expires_at, timezone.now() + timedelta(hours=24, seconds=1))
+        self.assertEqual(purchase.purchase_from['source'], 'slack')
+        self.assertEqual(purchase.purchase_from['slack_thread_ts'], '1712345678.000100')
+        self.assertEqual(str(purchase), '10 Top-up Roo Points for UTOPUP123 (pending)')
+
+
+class PointsPurchaseLimitTests(TestCase):
+    """Task 3 purchase limit policy tests."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='limits@example.com',
+            slack_id='ULIMITS123',
+        )
+        self.user.date_joined = timezone.now() - timedelta(days=30)
+        self.user.save(update_fields=['date_joined'])
+
+    def _create_paid_purchase(
+        self,
+        points_amount: int,
+        days_ago: int,
+        *,
+        created_days_ago: Optional[int] = None,
+    ) -> PointsPurchase:
+        paid_at = timezone.now() - timedelta(days=days_ago)
+        purchase = PointsPurchase.objects.create(
+            user=self.user,
+            slack_user_id=self.user.slack_id,
+            pack_id=f'topup_{points_amount}',
+            points_amount=points_amount,
+            amount_cents=points_amount * 100,
+            status='paid',
+            paid_at=paid_at,
+        )
+        PointsPurchase.objects.filter(id=purchase.id).update(
+            created_at=timezone.now() - timedelta(days=created_days_ago or days_ago)
+        )
+        return PointsPurchase.objects.get(id=purchase.id)
+
+    def test_rejects_anonymous_purchase(self):
+        with self.assertRaises(PermissionDeniedError):
+            PointsPurchaseService.validate_purchase_limits(None, points_amount=10)
+
+    def test_rejects_guest_checkout_without_slack_link(self):
+        guest_like_user = User.objects.create_user(
+            email='guest@example.com',
+            slack_id=None,
+        )
+        guest_like_user.date_joined = timezone.now() - timedelta(days=30)
+        guest_like_user.save(update_fields=['date_joined'])
+
+        with self.assertRaises(PermissionDeniedError):
+            PointsPurchaseService.validate_purchase_limits(guest_like_user, points_amount=10)
+
+    def test_rejects_purchase_above_25_points(self):
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=26)
+        self.assertIn('25-point', str(ctx.exception))
+
+    def test_rejects_accounts_younger_than_7_days(self):
+        self.user.date_joined = timezone.now() - timedelta(days=3)
+        self.user.save(update_fields=['date_joined'])
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
+        self.assertIn('at least 7 days', str(ctx.exception))
+
+    def test_rejects_rolling_12_month_cap_above_50_points(self):
+        self._create_paid_purchase(points_amount=30, days_ago=20)
+        self._create_paid_purchase(points_amount=19, days_ago=10)
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=2)
+        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+
+    def test_ignores_purchases_older_than_12_month_window(self):
+        self._create_paid_purchase(points_amount=50, days_ago=370)
+        # Should be allowed because the old purchase is outside the rolling window.
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
+
+    def test_rolling_12_month_cap_uses_paid_at_not_created_at(self):
+        self._create_paid_purchase(points_amount=50, days_ago=20, created_days_ago=370)
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=1)
+        self.assertIn('50-point rolling 12-month', str(ctx.exception))
+
+    def test_validation_does_not_create_points_account(self):
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=10)
+
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+
+    def test_rejects_balance_cap_above_100_without_approval(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 90
+        account.save(update_fields=['balance'])
+
+        with self.assertRaises(ValueError) as ctx:
+            PointsPurchaseService.validate_purchase_limits(self.user, points_amount=11)
+        self.assertIn('100-point spendable balance cap', str(ctx.exception))
+
+    def test_allows_balance_cap_override_with_manual_approval(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 95
+        account.save(update_fields=['balance'])
+
+        PointsPurchaseService.validate_purchase_limits(
+            self.user,
+            points_amount=10,
+            manual_balance_approval=True,
+        )
+
+    def test_allows_purchase_when_all_limits_pass(self):
+        account = PointsService.get_or_create_account(self.user)
+        account.balance = 20
+        account.save(update_fields=['balance'])
+        self._create_paid_purchase(points_amount=10, days_ago=40)
+
+        PointsPurchaseService.validate_purchase_limits(self.user, points_amount=25)
 
 
 class CoworkingServiceTests(TestCase):
@@ -361,12 +618,33 @@ class PermissionTests(TestCase):
             is_active=False
         )
         self.assertFalse(is_points_admin('UINACTIVE'))
+
+    def test_partner_can_generate_reports_but_is_not_full_points_admin(self):
+        self.assertIn(('partner', 'Partner'), PointsAdmin.ROLE_CHOICES)
+        PointsAdmin.objects.create(
+            slack_user_id='UPARTNER',
+            role='partner',
+            is_active=True,
+        )
+
+        self.assertFalse(is_points_admin('UPARTNER'))
+        self.assertTrue(can_generate_coworking_reports('UPARTNER'))
+
+    def test_inactive_partner_cannot_generate_reports(self):
+        PointsAdmin.objects.create(
+            slack_user_id='UINACTIVEPARTNER',
+            role='partner',
+            is_active=False,
+        )
+
+        self.assertFalse(can_generate_coworking_reports('UINACTIVEPARTNER'))
     
     @patch('roo.permissions.settings')
     def test_bootstrap_admin_is_always_admin(self, mock_settings):
         """Test that bootstrap admins are always recognized."""
         mock_settings.POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = ['UBOOTSTRAP']
         self.assertTrue(is_points_admin('UBOOTSTRAP'))
+        self.assertTrue(can_generate_coworking_reports('UBOOTSTRAP'))
 
 
 class LedgerIntegrityTests(TestCase):

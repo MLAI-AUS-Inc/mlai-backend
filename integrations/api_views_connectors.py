@@ -1,8 +1,11 @@
+import logging
+
 from django.db import DatabaseError
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.permissions import HasRooApiKey
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     disconnect_external_connection,
@@ -10,19 +13,74 @@ from integrations.services.external_connectors import (
     serialize_bank_feed_accounts,
     serialize_bank_feed_transactions,
     serialize_gmail_preview,
+    serialize_linear_preview,
+    serialize_linear_projects,
     serialize_slack_channels,
     serialize_slack_preview,
     serialize_source_status,
     serialize_xero_invoices,
     serialize_xero_preview,
+    update_linear_project_selections,
     update_slack_channel_selections,
 )
+from integrations.services.linear_meeting_actions import (
+    LinearMeetingConfigurationError,
+    LinearMeetingGraphQLError,
+    LinearMeetingRateLimitError,
+    create_linear_meeting_issue,
+    create_linear_meeting_project_update,
+    get_linear_meeting_context,
+)
+from startup_updates.data_deletion import disconnect_gmail_for_user
 
 
 PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD = {
     "detail": "Connector preview storage is not available. Run backend migrations before syncing financial records.",
     "code": "preview_storage_unavailable",
 }
+logger = logging.getLogger(__name__)
+
+
+def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearMeetingConfigurationError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_not_configured",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, LinearMeetingRateLimitError):
+        response = Response(
+            {
+                "detail": str(exc),
+                "code": "linear_rate_limited",
+                "retryAfter": exc.retry_after_seconds,
+            },
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response["Retry-After"] = str(exc.retry_after_seconds)
+        return response
+    if isinstance(exc, LinearMeetingGraphQLError):
+        operation = getattr(exc, "operation", None)
+        logger.error(
+            "linear_meeting_actions_graphql_error operation=%s detail=%s",
+            operation,
+            str(exc),
+        )
+        payload = {
+            "detail": str(exc),
+            "code": "linear_graphql_error",
+        }
+        if operation:
+            payload["operation"] = operation
+        return Response(
+            payload,
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+    if isinstance(exc, ValueError):
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    raise exc
 
 
 def _requested_providers(request):
@@ -168,6 +226,21 @@ class GmailPreviewView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class GmailConnectionDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        raw_delete_derived = request.data.get("deleteDerivedData", request.data.get("delete_derived_data", False))
+        delete_derived_data = raw_delete_derived is True or str(raw_delete_derived).strip().lower() in {"1", "true", "yes"}
+        reason = str(request.data.get("reason") or "user_request").strip() or "user_request"
+        payload = disconnect_gmail_for_user(
+            request.user,
+            delete_derived_data=delete_derived_data,
+            reason=reason,
+        )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class SlackChannelListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -231,3 +304,120 @@ class SlackPreviewView(APIView):
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 100
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            payload = serialize_linear_projects(
+                request.user,
+                cursor=request.query_params.get("cursor") or None,
+                limit=limit,
+            )
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearProjectSelectionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        raw_project_ids = (
+            request.data.get("projectIds")
+            or request.data.get("project_ids")
+            or request.data.get("projects")
+            or []
+        )
+        if isinstance(raw_project_ids, str):
+            project_ids = [item.strip() for item in raw_project_ids.split(",") if item.strip()]
+        elif isinstance(raw_project_ids, (list, tuple)):
+            project_ids = [
+                str(
+                    item.get("projectId") or item.get("project_id") or item.get("linearProjectId") or item.get("id")
+                    if isinstance(item, dict)
+                    else item
+                ).strip()
+                for item in raw_project_ids
+            ]
+            project_ids = [item for item in project_ids if item]
+        else:
+            project_ids = []
+        try:
+            payload = update_linear_project_selections(request.user, project_ids)
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearPreviewView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 5
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            payload = serialize_linear_preview(request.user, limit=limit)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingContextView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        try:
+            payload = get_linear_meeting_context()
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingIssueCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_issue(request.data)
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearMeetingProjectUpdateCreateView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        try:
+            payload = create_linear_meeting_project_update(request.data)
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_201_CREATED)

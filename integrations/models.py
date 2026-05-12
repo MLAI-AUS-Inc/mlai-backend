@@ -37,6 +37,7 @@ class ExternalServiceProvider(models.TextChoices):
     NOTION = "notion", "Notion"
     GOOGLE_DRIVE = "google_drive", "Google Drive"
     SLACK = "slack", "Slack"
+    LINEAR = "linear", "Linear"
 
 
 class ExternalServiceConnectionStatus(models.TextChoices):

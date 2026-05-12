@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from jobs.models import JobListing, JobRun
+from jobs.conf import settings as jobs_settings
 from jobs.services import job_pipeline
 from jobs.services.slack import format_slack_message
 
@@ -165,3 +166,7 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(run.status, "completed_with_source_errors")
         self.assertIn("CareerOne", run.error_message)
         mock_post_failure_alert.assert_not_called()
+
+    @override_settings(SLACK_BOT_TOKEN="xoxb-primary", JOBS_SLACK_BOT_TOKEN="")
+    def test_jobs_settings_accepts_primary_slack_bot_token(self):
+        self.assertEqual(jobs_settings.slack_bot_token, "xoxb-primary")
