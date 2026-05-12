@@ -2146,6 +2146,104 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(config.github_repo, "acme/site")
         self.assertEqual(config.github_installation_id, "inst-1")
 
+    def test_github_repos_lists_connected_installation_repositories(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "github_token_encrypted": "org-token",
+                "github_token_expires_at": timezone.now() + timezone.timedelta(hours=1),
+                "github_installation_id": "inst-1",
+            },
+        )
+
+        def fake_github_request(method, path, *, token, body=None, expected=(200,)):
+            self.assertEqual(method, "GET")
+            self.assertEqual(token, "org-token")
+            self.assertIn("/user/installations/inst-1/repositories", path)
+            return {
+                "repositories": [
+                    {
+                        "full_name": "MLAI-AUS-Inc/mlai-au",
+                        "name": "mlai-au",
+                        "private": True,
+                        "default_branch": "main",
+                        "owner": {"login": "MLAI-AUS-Inc"},
+                    }
+                ]
+            }
+
+        with patch("content_factory.vibe_marketing_views._github_api_request", side_effect=fake_github_request):
+            response = self.client.get("/api/v1/vibe-marketing/github/repos/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "connected")
+        self.assertEqual(response.data["selectedRepo"], "MLAI-AUS-Inc/mlai-au")
+        self.assertEqual(response.data["repos"][0]["fullName"], "MLAI-AUS-Inc/mlai-au")
+        self.assertEqual(response.data["repos"][0]["defaultBranch"], "main")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_scan_forwards_article_surface_hint_to_content_factory(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={"github_repo": "acme/site"},
+        )
+
+        class FakeResponse:
+            status_code = 202
+            content = b"{}"
+
+            def json(self):
+                return {"run_id": "scan-hint-1", "status": "queued", "workflow": "repo_scan"}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertEqual(url, "https://content-factory.test/api/runs/scan")
+            self.assertEqual(json["github_repo"], "acme/site")
+            self.assertEqual(json["article_surface_mode"], "existing")
+            self.assertIs(json["auto_setup_preview"], True)
+            self.assertEqual(
+                json["article_surface_hint"],
+                {"source": "user_input", "listing_url": "https://www.acme.com/articles", "route_path": "/articles"},
+            )
+            return FakeResponse()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/scan/",
+                {
+                    "githubRepo": "acme/site",
+                    "articleSurfaceMode": "existing",
+                    "articleSurfaceUrl": "https://www.acme.com/articles",
+                    "autoSetupPreview": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "scan-hint-1")
+        run = ContentFactoryRun.objects.get(run_id="scan-hint-1")
+        self.assertEqual(run.run_request["article_surface_hint"]["route_path"], "/articles")
+
+    def test_scan_rejects_mismatched_article_surface_domain(self):
+        response = self.client.post(
+            "/api/v1/vibe-marketing/scan/",
+            {
+                "githubRepo": "acme/site",
+                "articleSurfaceMode": "existing",
+                "articleSurfaceUrl": "https://example.com/blog",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("company website domain", response.data["detail"])
+
     def test_unrelated_settings_update_not_blocked_by_enabled_daily_prerequisites(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization

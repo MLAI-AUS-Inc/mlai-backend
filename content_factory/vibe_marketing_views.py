@@ -99,6 +99,7 @@ class _AnyContentRenderer(BaseRenderer):
 VIBE_MARKETING_WORKFLOWS = {
     "repo_scan",
     "content_factory_scan",
+    "article_system_setup",
     "auto_discovery",
     "content_factory_discovery",
     "article_generation",
@@ -342,6 +343,102 @@ def _clean_github_repo(value) -> str:
 
 def _github_repo_matches(candidate: str, expected: str) -> bool:
     return bool(candidate and expected and candidate.casefold() == expected.casefold())
+
+
+def _domain_host_variants(domain: str) -> set[str]:
+    text = str(domain or "").strip().lower()
+    if not text:
+        return set()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", text):
+        text = f"https://{text}"
+    parsed = urlsplit(text)
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        return set()
+    base = host[4:] if host.startswith("www.") else host
+    return {base, f"www.{base}"}
+
+
+def _normalize_article_surface_route_path(value: str) -> str:
+    path = str(value or "").strip()
+    if not path:
+        return ""
+    if not path.startswith("/"):
+        raise ValueError("Article/blog path must start with '/'.")
+    path = path.split("?", 1)[0].split("#", 1)[0].strip()
+    path = re.sub(r"/+", "/", path)
+    if len(path) > 1:
+        path = path.rstrip("/")
+    return path or "/"
+
+
+def _article_surface_hint_from_request(data, *, domain: str) -> tuple[dict, str, str]:
+    mode = str(
+        _request_value(data, "articleSurfaceMode", "article_surface_mode", default="not_sure") or "not_sure"
+    ).strip()
+    if mode not in {"existing", "none", "not_sure"}:
+        raise ValueError("articleSurfaceMode must be existing, none, or not_sure.")
+
+    raw_url = str(_request_value(data, "articleSurfaceUrl", "article_surface_url", default="") or "").strip()
+    if mode == "existing" and not raw_url:
+        raise ValueError("Article/blog URL or path is required when using an existing page.")
+    if not raw_url:
+        return {}, mode, ""
+
+    if raw_url.startswith("/"):
+        route_path = _normalize_article_surface_route_path(raw_url)
+    elif re.match(r"^https?://", raw_url, flags=re.IGNORECASE):
+        parsed = urlsplit(raw_url)
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not parsed.scheme or parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Article/blog URL must be an http(s) URL or a site path.")
+        if host not in _domain_host_variants(domain):
+            raise ValueError("Article/blog URL must use the company website domain.")
+        route_path = _normalize_article_surface_route_path(parsed.path or "/")
+    else:
+        raise ValueError("Article/blog URL must be a full same-domain URL or a path starting with '/'.")
+
+    return {"source": "user_input", "listing_url": raw_url, "route_path": route_path}, mode, raw_url
+
+
+def _serialize_github_repo_payload(repo: dict, *, installation_id: str = "") -> dict:
+    owner = repo.get("owner") if isinstance(repo.get("owner"), dict) else {}
+    full_name = str(repo.get("full_name") or "").strip()
+    owner_name = str(owner.get("login") or (full_name.split("/", 1)[0] if "/" in full_name else "")).strip()
+    name = str(repo.get("name") or (full_name.split("/", 1)[-1] if full_name else "")).strip()
+    return {
+        "fullName": full_name,
+        "full_name": full_name,
+        "owner": owner_name,
+        "name": name,
+        "private": bool(repo.get("private")),
+        "defaultBranch": str(repo.get("default_branch") or "").strip(),
+        "default_branch": str(repo.get("default_branch") or "").strip(),
+        "installationId": str(installation_id or "").strip(),
+        "installation_id": str(installation_id or "").strip(),
+    }
+
+
+def _list_github_repositories_for_token(*, token: str, installation_id: str = "") -> list[dict]:
+    if installation_id:
+        payload = _github_api_request(
+            "GET",
+            f"/user/installations/{installation_id}/repositories?per_page=100",
+            token=token,
+        )
+        repos = payload.get("repositories") if isinstance(payload, dict) else []
+    else:
+        payload = _github_api_request(
+            "GET",
+            "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+            token=token,
+        )
+        repos = payload if isinstance(payload, list) else []
+    return [
+        _serialize_github_repo_payload(repo, installation_id=installation_id)
+        for repo in repos
+        if isinstance(repo, dict) and str(repo.get("full_name") or "").strip()
+    ]
 
 
 def _connected_github_response(config, *, status_value="already_connected"):
@@ -4507,6 +4604,50 @@ def _call_content_factory_component_revision(*, run_id, payload):
     }
 
 
+def _call_content_factory_article_system_revision(*, run_id, payload):
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning("content_factory_article_system_revision_blocked run_id=%s reason=%s", run_id, technical_error)
+        return _blocked_worker_payload(
+            workflow="article_system_setup",
+            technical_error=technical_error,
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_system_setup"),
+            retryable=True,
+        )
+
+    try:
+        response = http_client.post(
+            f"{remote_config['base_url']}/api/runs/{run_id}/article-system-revisions",
+            json=payload or {},
+            headers=_content_factory_headers(),
+            timeout=(5, 90),
+        )
+    except http_client.RequestException as exc:
+        return _blocked_worker_payload(
+            workflow="article_system_setup",
+            technical_error=str(exc),
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_system_setup"),
+            retryable=True,
+        )
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
 def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
@@ -5183,6 +5324,107 @@ class VibeMarketingGitHubConnectView(APIView):
         )
 
 
+class VibeMarketingGitHubReposView(APIView):
+    def get(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+
+        config = _get_config(context.organization)
+        actor_id = founder_actor_id_for_user(request.user)
+        token = ""
+        installation_id = str(config.github_installation_id or "").strip()
+        credential_source = "none"
+        connection_state = config.github_connection_state or "auth_required"
+        error_message = ""
+
+        if config.github_token_encrypted:
+            try:
+                token = ensure_valid_org_token(context.organization.domain)
+                config.refresh_from_db()
+                installation_id = str(config.github_installation_id or installation_id or "").strip()
+                credential_source = "org"
+                connection_state = "connected"
+            except (ArticleGenerationError, TokenRefreshError) as exc:
+                error_message = str(exc)
+
+        if not token:
+            integration = UserIntegration.objects.filter(slack_user_id=actor_id).first()
+            if integration and integration.github_access_token:
+                try:
+                    token = ensure_valid_token(actor_id)
+                    installation_id = str(integration.github_installation_id or installation_id or "").strip()
+                    credential_source = "user"
+                    connection_state = "connected"
+                except (ScanError, TokenRefreshError) as exc:
+                    error_message = str(exc)
+
+        if not token:
+            return Response(
+                {
+                    "status": "auth_required",
+                    "connectionState": connection_state,
+                    "connection_state": connection_state,
+                    "githubRepo": config.github_repo,
+                    "github_repo": config.github_repo,
+                    "selectedRepo": config.github_repo,
+                    "selected_repo": config.github_repo,
+                    "repos": [],
+                    "repositories": [],
+                    "error": error_message,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        try:
+            repos = _list_github_repositories_for_token(token=token, installation_id=installation_id)
+        except Exception as exc:
+            logger.warning(
+                "vibe_marketing_github_repo_list_failed domain=%s source=%s installation_id=%s error=%s",
+                context.organization.domain,
+                credential_source,
+                installation_id,
+                exc,
+            )
+            return Response(
+                {
+                    "status": "unavailable",
+                    "connectionState": connection_state,
+                    "connection_state": connection_state,
+                    "githubRepo": config.github_repo,
+                    "github_repo": config.github_repo,
+                    "selectedRepo": config.github_repo,
+                    "selected_repo": config.github_repo,
+                    "repos": [],
+                    "repositories": [],
+                    "error": str(exc),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        selected_repo = str(config.github_repo or "").strip()
+        if not selected_repo and len(repos) == 1:
+            selected_repo = str(repos[0].get("fullName") or "").strip()
+        return Response(
+            {
+                "status": "connected",
+                "connectionState": connection_state,
+                "connection_state": connection_state,
+                "credentialSource": credential_source,
+                "credential_source": credential_source,
+                "githubRepo": config.github_repo,
+                "github_repo": config.github_repo,
+                "selectedRepo": selected_repo,
+                "selected_repo": selected_repo,
+                "installationId": installation_id,
+                "installation_id": installation_id,
+                "repos": repos,
+                "repositories": repos,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class VibeMarketingScanView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -5192,14 +5434,35 @@ class VibeMarketingScanView(APIView):
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
+        try:
+            article_surface_hint, article_surface_mode, article_surface_url = _article_surface_hint_from_request(
+                request.data,
+                domain=context.organization.domain,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        auto_setup_preview = _bool_from_request(
+            _request_value(request.data, "autoSetupPreview", "auto_setup_preview", default=False)
+        )
+        if auto_setup_preview and not article_surface_hint:
+            return Response(
+                {"detail": "Article/blog URL or path is required before drafting an article system preview."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         payload = {
             "domain": context.organization.domain,
             "github_repo": config.github_repo,
             "slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
             "scaffold_if_missing": True,
+            "auto_setup_preview": auto_setup_preview,
             "generate_components": True,
+            "article_surface_mode": article_surface_mode,
         }
+        if article_surface_url:
+            payload["article_surface_url"] = article_surface_url
+        if article_surface_hint:
+            payload["article_surface_hint"] = article_surface_hint
         run = _queue_content_factory_run(
             endpoint="scan",
             workflow="repo_scan",
@@ -5397,6 +5660,72 @@ class VibeMarketingRunView(APIView):
             run = _ensure_article_live_preview(run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+
+class VibeMarketingArticleSystemRevisionsView(APIView):
+    def post(self, request, run_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=False)
+        if error_response:
+            return error_response
+        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        if not _run_belongs_to_context(run, context):
+            return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if run.workflow != "article_system_setup":
+            return Response({"detail": "Article system comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
+
+        body = str(
+            _request_value(request.data, "body", "comment", "comments", "reviewComments", default="") or ""
+        ).strip()
+        if not body:
+            return Response({"detail": "Add a review comment before requesting setup changes."}, status=status.HTTP_400_BAD_REQUEST)
+
+        feedback_batch_id = str(
+            _request_value(request.data, "feedbackBatchId", "feedback_batch_id", default="") or ""
+        ).strip() or f"article-system-{uuid.uuid4().hex[:12]}"
+        comment_id = str(
+            _request_value(request.data, "commentId", "comment_id", default="") or ""
+        ).strip() or f"comment-{uuid.uuid4().hex[:12]}"
+        remote_payload = {
+            "source_run_id": run.run_id,
+            "feedback_batch_id": feedback_batch_id,
+            "request_source": "founder_tools_article_system_feedback",
+            "comments": [
+                {
+                    "comment_id": comment_id,
+                    "file_path": str(_request_value(request.data, "filePath", "file_path", default="") or "").strip(),
+                    "selector": str(_request_value(request.data, "selector", default="") or "").strip(),
+                    "anchor": request.data.get("anchor") if isinstance(request.data.get("anchor"), dict) else {},
+                    "context": request.data.get("context") if isinstance(request.data.get("context"), dict) else {},
+                    "body": body,
+                }
+            ],
+        }
+        remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
+        if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
+            return Response({"detail": remote_data["error"], "remote": remote_data}, status=status.HTTP_409_CONFLICT)
+
+        result = dict(run.result or {})
+        comments = list(result.get("article_system_review_comments") or [])
+        comments.append(
+            {
+                "id": comment_id,
+                "feedbackBatchId": feedback_batch_id,
+                "body": body,
+                "submittedAt": timezone.now().isoformat(),
+            }
+        )
+        result["article_system_review_comments"] = comments
+        result["latest_article_system_revision_response"] = remote_data
+        if remote_data.get("livePreview") or remote_data.get("live_preview"):
+            result["livePreview"] = remote_data.get("livePreview") or remote_data.get("live_preview")
+        if remote_data.get("live_preview_url"):
+            result["live_preview_url"] = remote_data.get("live_preview_url")
+        run.result = result
+        if run.status in {ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED, ContentFactoryRunStatus.COMPLETED}:
+            run.status = ContentFactoryRunStatus.RUNNING
+            run.current_step = "revision_preview_building"
+        run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
 
 class VibeMarketingRunArtifactsView(APIView):
