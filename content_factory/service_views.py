@@ -3919,6 +3919,12 @@ class ContentFactoryCallbackView(APIView):
                         f"{error_message}\n\n"
                         f"Roo stopped before changing the repository. You can retry in content-only mode, or add a supported publish target such as `.content-factory/target.yml`."
                     )
+                elif error_code == 'CATALOG_MISSING_REQUIRED_COMPONENTS':
+                    message = (
+                        f"⚠️ *{domain} needs its article component catalog refreshed.*\n\n"
+                        f"{error_message}\n\n"
+                        f"Open the Connect repo & article system step and run the repository scan again."
+                    )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
                         f"❌ *Failed for {domain}*\n\n"

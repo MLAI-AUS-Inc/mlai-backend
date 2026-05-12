@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from integrations import http_client
-from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
+from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
@@ -124,6 +124,120 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(self.run.result["livePreview"]["previewUrl"], expected_preview_url)
         self.assertEqual(self.run.result["livePreview"]["internalPreviewUrl"], preview_payload["previewUrl"])
         self.assertEqual(self.run.result["livePreview"]["failedCommand"], "bun run typecheck")
+
+    def test_repo_scan_run_serializes_stale_retry_metadata(self):
+        scan_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-stale",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="load_repo_context",
+            resume_available=True,
+            result={
+                "stale": True,
+                "stale_reason": "scan_queue_not_started",
+                "retry_available": True,
+                "queue_name": "scan",
+                "queued_at": "2026-05-12T03:00:00+00:00",
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{scan_run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["stale"])
+        self.assertTrue(response.data["retryAvailable"])
+        self.assertEqual(response.data["staleReason"], "scan_queue_not_started")
+        self.assertEqual(response.data["queueName"], "scan")
+        self.assertEqual(response.data["queuedAt"], "2026-05-12T03:00:00+00:00")
+
+    def test_bootstrap_blocks_mlai_article_system_when_featured_catalog_missing(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.article_system = {"state": "existing", "confidence": "high"}
+        config.scan_summary = "{\"generated_components\": [{\"name\": \"ArticleHeroHeader\"}]}"
+        config.save(update_fields=["article_system", "scan_summary", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["passed"])
+        self.assertFalse(scaffold["componentCatalogReady"])
+        self.assertIn("ArticleDisclaimer", scaffold["missingComponents"])
+        self.assertNotIn("ArticleHeroHeader", scaffold["missingComponents"])
+
+    def test_bootstrap_allows_mlai_article_system_when_featured_catalog_present(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.article_system = {"state": "existing", "confidence": "high"}
+        config.save(update_fields=["article_system", "updated_at"])
+        for name in (
+            "ArticleDisclaimer",
+            "ArticleHeroHeader",
+            "ArticleReferences",
+            "ArticleResourceCTA",
+            "ArticleStepList",
+            "ArticleTocPlaceholder",
+            "MLAITemplateResourceCTA",
+        ):
+            GeneratedComponent.objects.create(
+                organization=self.organization,
+                name=name,
+                content=f"export function {name}() {{ return null; }}",
+                source="adapted",
+            )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertTrue(scaffold["passed"])
+        self.assertTrue(scaffold["componentCatalogReady"])
+        self.assertEqual(scaffold["missingComponents"], [])
+
+    def test_starting_new_scan_supersedes_stale_scan_run(self):
+        stale_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-stale-old",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="load_repo_context",
+            result={"stale": True, "stale_reason": "scan_queue_not_started", "retry_available": True},
+        )
+        queued_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-new",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.QUEUED,
+            current_step="load_repo_context",
+            result={},
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value={"status": "cancelled"}),
+            patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_run),
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/scan/",
+                {
+                    "githubRepo": "MLAI-AUS-Inc/mlai-au",
+                    "articleSurfaceUrl": "/articles",
+                    "autoSetupPreview": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        stale_run.refresh_from_db()
+        queued_run.refresh_from_db()
+        self.assertEqual(stale_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(stale_run.current_step, "cancelled")
+        self.assertEqual(queued_run.result["superseded_scan_run_ids"], ["repo-scan-stale-old"])
 
     def test_platform_deployment_preview_url_is_not_rewritten_to_backend_proxy(self):
         self.run.result = {
