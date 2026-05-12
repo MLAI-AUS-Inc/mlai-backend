@@ -1524,6 +1524,30 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_dm.assert_not_called()
         mock_send_message.assert_not_called()
 
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_catalog_missing_components_points_to_repo_scan(self, mock_send_dm):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "catalog-missing-run-1",
+                "run_id": "catalog-missing-run-1",
+                "workflow": "article_revision",
+                "domain": "mlai.au",
+                "slack_user_id": "U123",
+                "error_code": "CATALOG_MISSING_REQUIRED_COMPONENTS",
+                "error": "Missing required mlai.au featured components in catalog: ArticleDisclaimer",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_send_dm.assert_called_once()
+        message = mock_send_dm.call_args.args[1]
+        self.assertIn("article component catalog refreshed", message)
+        self.assertIn("Connect repo & article system", message)
+        self.assertNotIn("contact support", message)
+
     @patch('integrations.services.article_generation.upsert_live_progress_card')
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')

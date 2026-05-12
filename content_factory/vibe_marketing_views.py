@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import ipaddress
 import json
@@ -36,6 +37,7 @@ from content_factory.models import (
     ContentFactoryHealingRecord,
     AISaturation,
     ClusterMembership,
+    GeneratedComponent,
     KeywordStatus,
     KeywordVelocity,
     OrganizationContentConfig,
@@ -117,6 +119,15 @@ DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_dis
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
+MLAI_AU_FEATURED_REQUIRED_COMPONENTS = {
+    "ArticleDisclaimer",
+    "ArticleHeroHeader",
+    "ArticleReferences",
+    "ArticleResourceCTA",
+    "ArticleStepList",
+    "ArticleTocPlaceholder",
+    "MLAITemplateResourceCTA",
+}
 REMOTE_REQUIRED_WORKFLOWS = {
     "article_generation",
     "content_factory_article",
@@ -2935,6 +2946,45 @@ def _cancel_local_scan_run(*, run, remote_data=None):
         return locked_run
 
 
+def _scan_run_is_stale_retryable(run):
+    result = run.result or {}
+    return bool(
+        run.workflow in SCAN_WORKFLOWS
+        and run.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.BLOCKED}
+        and (result.get("stale") or result.get("retry_available") or result.get("stale_reason") == "scan_queue_not_started")
+    )
+
+
+def _supersede_stale_scan_runs(*, context, request_user):
+    stale_runs = list(
+        ContentFactoryRun.objects.filter(
+            domain=context.organization.domain,
+            workflow__in=SCAN_WORKFLOWS,
+            status__in=[ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.BLOCKED],
+        ).order_by("-updated_at")[:5]
+    )
+    superseded = []
+    for stale_run in stale_runs:
+        if not _scan_run_is_stale_retryable(stale_run):
+            continue
+        payload = {
+            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+            "slack_user_id": founder_actor_id_for_user(request_user),
+            "superseded_by_new_scan": True,
+        }
+        remote_data = _call_content_factory_run_action(
+            run_id=stale_run.run_id,
+            action="cancel",
+            payload=payload,
+            workflow=stale_run.workflow,
+            timeout=(2, 5),
+            transport_errors_are_pending=True,
+        )
+        _cancel_local_scan_run(run=stale_run, remote_data=remote_data)
+        superseded.append(stale_run.run_id)
+    return superseded
+
+
 def _restart_article_payload_from_run(*, run, context, config, actor_id):
     run_request = _run_mapping(run.run_request)
     result = _run_mapping(run.result)
@@ -3838,6 +3888,11 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
         "publishChildStatus": result.get("publish_child_status"),
         "publishChildRecoverable": result.get("publish_child_recoverable"),
         "publishChildWaitReason": result.get("publish_child_wait_reason"),
+        "stale": bool(result.get("stale")),
+        "staleReason": result.get("stale_reason"),
+        "retryAvailable": bool(result.get("retry_available") or run.resume_available),
+        "queueName": result.get("queue_name"),
+        "queuedAt": result.get("queued_at"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,
         "livePreview": live_preview,
@@ -3845,6 +3900,33 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": result,
     }
+
+
+def _missing_mlai_featured_components(*, organization, config):
+    domain = normalize_company_domain(organization.domain) if organization else ""
+    repo = str(getattr(config, "github_repo", "") or "").strip().lower()
+    if domain not in {"mlai.au", "www.mlai.au"} and repo != "mlai-aus-inc/mlai-au":
+        return []
+    existing = set(
+        GeneratedComponent.objects.filter(
+            organization=organization,
+            name__in=MLAI_AU_FEATURED_REQUIRED_COMPONENTS,
+        ).values_list("name", flat=True)
+    )
+    scan_summary = getattr(config, "scan_summary", None)
+    if isinstance(scan_summary, str) and scan_summary.strip():
+        try:
+            scan_summary = json.loads(scan_summary)
+        except json.JSONDecodeError:
+            try:
+                scan_summary = ast.literal_eval(scan_summary)
+            except (SyntaxError, ValueError):
+                scan_summary = None
+    scan_summary = scan_summary if isinstance(scan_summary, dict) else {}
+    for component in scan_summary.get("generated_components") or []:
+        if isinstance(component, dict) and component.get("name"):
+            existing.add(str(component["name"]))
+    return sorted(MLAI_AU_FEATURED_REQUIRED_COMPONENTS - existing)
 
 
 def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=None):
@@ -3855,12 +3937,17 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     baseline_ready = _baseline_requirement_satisfied(config, baseline_snapshot)
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
-    article_ready = article_system.get("state") in {
+    article_system_ready = article_system.get("state") in {
+        "existing",
+        "roo_scaffolded",
         "ready",
         "detected",
         "registry_driven_seo_ready",
         "article_system_ready",
     } or bool(config.publish_targets)
+    missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
+    component_catalog_ready = not missing_featured_components
+    article_ready = article_system_ready and component_catalog_ready
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
     discovery_run = _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
@@ -3938,7 +4025,12 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "skipped": bool(config.baseline_skipped_at),
         },
         "scan": {"passed": scan_ready},
-        "scaffold": {"passed": article_ready, "articleSystem": article_system},
+        "scaffold": {
+            "passed": article_ready,
+            "articleSystem": article_system,
+            "componentCatalogReady": component_catalog_ready,
+            "missingComponents": missing_featured_components,
+        },
         "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
         "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
         "contentPackage": {"passed": content_package_ready, "runId": article_run.run_id if article_run else None},
@@ -4417,6 +4509,12 @@ def _run_result_from_remote(remote_data):
         "repaired",
         "repair_requested",
         "previous_status",
+        "stale",
+        "stale_reason",
+        "retry_available",
+        "queue_name",
+        "queued_at",
+        "scan_queue",
     ):
         if remote_data.get(key) is not None and merged.get(key) is None:
             merged[key] = remote_data.get(key)
@@ -5787,6 +5885,7 @@ class VibeMarketingScanView(APIView):
             payload["article_surface_url"] = article_surface_url
         if article_surface_hint:
             payload["article_surface_hint"] = article_surface_hint
+        superseded_scan_run_ids = _supersede_stale_scan_runs(context=context, request_user=request.user)
         run = _queue_content_factory_run(
             endpoint="scan",
             workflow="repo_scan",
@@ -5794,6 +5893,11 @@ class VibeMarketingScanView(APIView):
             config=config,
             payload=payload,
         )
+        if superseded_scan_run_ids:
+            result = run.result or {}
+            result["superseded_scan_run_ids"] = superseded_scan_run_ids
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
 
 
