@@ -1475,6 +1475,152 @@ class VibeMarketingAutofillTests(TestCase):
         ]
         self.assertEqual(write_queries, [])
 
+    def test_bootstrap_includes_resumable_article_drafts(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+
+        ContentFactoryRun.objects.create(
+            run_id="article-running-draft-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="draft_section:intro",
+            run_request={"topic": "Running Draft", "target_keyword": "running draft"},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="article-blocked-draft-1",
+            workflow="confirmed_topic",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="verify_static",
+            resume_available=True,
+            run_request={"topic": "Blocked Draft", "target_keyword": "blocked draft"},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="article-ready-draft-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            result={
+                "delivery_package": {
+                    "title": "Ready Draft",
+                    "slug": "ready-draft",
+                    "target_keyword": "ready draft",
+                }
+            },
+        )
+        ContentFactoryRun.objects.create(
+            run_id="article-cancelled-draft-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.CANCELLED,
+            run_request={"topic": "Cancelled Draft", "target_keyword": "cancelled draft"},
+        )
+        WrittenArticle.objects.create(
+            organization=organization,
+            title="Published Article",
+            slug="published-article",
+            category="featured",
+            primary_keyword="published article",
+        )
+        ContentFactoryRun.objects.create(
+            run_id="article-published-memory-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            result={
+                "delivery_package": {
+                    "title": "Published Article",
+                    "slug": "published-article",
+                    "target_keyword": "published article",
+                }
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        drafts = response.data["draftArticles"]
+        draft_ids = {item["runId"] for item in drafts}
+        self.assertIn("article-running-draft-1", draft_ids)
+        self.assertIn("article-blocked-draft-1", draft_ids)
+        self.assertIn("article-ready-draft-1", draft_ids)
+        self.assertNotIn("article-cancelled-draft-1", draft_ids)
+        self.assertNotIn("article-published-memory-1", draft_ids)
+        blocked = next(item for item in drafts if item["runId"] == "article-blocked-draft-1")
+        self.assertEqual(blocked["actionKind"], "resume")
+        self.assertEqual(blocked["actionLabel"], "Resume")
+        ready = next(item for item in drafts if item["runId"] == "article-ready-draft-1")
+        self.assertEqual(ready["stageLabel"], "Ready for review")
+        self.assertEqual(ready["actionKind"], "continue")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_blocked_article_draft_restart_creates_replacement_run(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.save(update_fields=["github_repo", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-blocked-restart-1",
+            workflow="article_generation",
+            domain="acme.com",
+            github_repo="acme/site",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="collect_research_bundle",
+            resume_available=False,
+            run_request={
+                "run_id": "article-blocked-restart-1",
+                "topic": "Restartable Draft",
+                "target_keyword": "restartable draft",
+                "delivery_mode": "content_only",
+                "delivery_mode_explicit": True,
+                "context": "Keep this context",
+            },
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-restarted-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-restarted-1")
+        self.assertNotEqual(response.data["runId"], run.run_id)
+        self.assertEqual(captured["topic"], "Restartable Draft")
+        self.assertEqual(captured["target_keyword"], "restartable draft")
+        self.assertEqual(captured["restart_source_run_id"], run.run_id)
+        self.assertNotIn("run_id", captured)
+        run.refresh_from_db()
+        self.assertEqual(run.result["restart_child_run_id"], "article-restarted-1")
+
+    def test_nonrestartable_article_draft_returns_clear_error(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-revision-restart-1",
+            workflow="article_revision",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="apply_component_feedback",
+            resume_available=False,
+            run_request={"source_run_id": "article-source-1"},
+        )
+
+        response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Only article generation drafts", response.data["detail"])
+
     @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
     def test_article_start_blocks_when_content_factory_is_unconfigured_without_marking_keyword(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
