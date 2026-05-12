@@ -1583,6 +1583,144 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_timeout_preserves_local_running_state(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-status-timeout-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="draft_section:section-01",
+        )
+
+        timeout = http_client.exceptions.ReadTimeout(
+            "HTTPConnectionPool(host='10.126.0.4', port=8000): Read timed out. (read timeout=15.0)"
+        )
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=timeout),
+            patch("content_factory.vibe_marketing_views._ensure_article_live_preview", side_effect=lambda current: current),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(response.data["errors"], [])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "draft_section:section-01")
+        self.assertEqual(run.error, "")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_timeout_does_not_downgrade_completed_state(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-completed-status-timeout-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            result={
+                "delivery_package": {
+                    "title": "Reliable Content Harnesses",
+                    "slug": "reliable-content-harnesses",
+                    "target_keyword": "content harness",
+                }
+            },
+        )
+
+        timeout = http_client.exceptions.ReadTimeout(
+            "HTTPConnectionPool(host='10.126.0.4', port=8000): Read timed out. (read timeout=15.0)"
+        )
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=timeout),
+            patch("content_factory.vibe_marketing_views._ensure_article_live_preview", side_effect=lambda current: current),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(response.data["errors"], [])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(run.error, "")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_heals_stale_timeout_blocked_run_with_completed_artifacts(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        timeout_error = "HTTPConnectionPool(host='10.126.0.4', port=8000): Read timed out. (read timeout=15.0)"
+        run = ContentFactoryRun.objects.create(
+            run_id="article-stale-timeout-blocked-1",
+            workflow="article_revision",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="ready_for_review",
+            error=timeout_error,
+            result={
+                "errors": [timeout_error],
+                "delivery_package": {
+                    "title": "Reliable Content Harnesses",
+                    "slug": "reliable-content-harnesses",
+                    "target_keyword": "content harness",
+                },
+            },
+        )
+
+        timeout = http_client.exceptions.ReadTimeout(timeout_error)
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.get", side_effect=timeout),
+            patch("content_factory.vibe_marketing_views._ensure_article_live_preview", side_effect=lambda current: current),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(response.data["errors"], [])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(run.error, "")
+        self.assertEqual(run.result["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertNotIn("errors", run.result)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_run_status_persists_real_remote_blocked_status(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-real-remote-blocked-1",
+            workflow="article_generation",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_static",
+        )
+        remote_payload = {
+            "run_id": run.run_id,
+            "workflow": "article_generation",
+            "status": ContentFactoryRunStatus.BLOCKED,
+            "current_step": "verify_static",
+            "error": "Repository access token is missing.",
+        }
+
+        with (
+            patch("content_factory.vibe_marketing_views.http_client.get", return_value=_Response(status_code=200, payload=remote_payload)),
+            patch("content_factory.vibe_marketing_views._ensure_article_live_preview", side_effect=lambda current: current),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertIn("Repository access token", response.data["errors"][0])
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.error, "Repository access token is missing.")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_run_status_does_not_downgrade_terminal_local_state(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
