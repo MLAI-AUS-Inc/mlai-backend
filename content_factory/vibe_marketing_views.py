@@ -3319,6 +3319,99 @@ def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_c
     }
 
 
+def _status_poll_unavailable_payload(*, workflow, technical_error="", status_code=None, response_payload=None, diagnostics=None):
+    payload_diagnostics = {
+        "technical_error": str(technical_error or ""),
+        "retryable": True,
+        "status_poll_unavailable": True,
+    }
+    if isinstance(diagnostics, dict):
+        payload_diagnostics.update(diagnostics)
+    if status_code is not None:
+        payload_diagnostics["content_factory_status_code"] = status_code
+    if response_payload is not None:
+        payload_diagnostics["content_factory_response"] = response_payload
+    return {
+        "statusPollUnavailable": True,
+        "error": str(technical_error or "Content Factory status polling is temporarily unavailable."),
+        "errors": [str(technical_error or "Content Factory status polling is temporarily unavailable.")],
+        "diagnostics": payload_diagnostics,
+        "retryable": True,
+        "workflow": workflow,
+    }
+
+
+def _is_status_poll_unavailable_payload(remote_data):
+    return isinstance(remote_data, dict) and remote_data.get("statusPollUnavailable") is True
+
+
+def _is_status_poll_transport_error(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "httpconnectionpool",
+            "httpsconnectionpool",
+            "read timed out",
+            "connect timed out",
+            "connection aborted",
+            "connection reset",
+            "max retries exceeded",
+            "status polling is temporarily unavailable",
+        )
+    )
+
+
+def _article_run_has_completed_local_artifacts(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    result = run.result or {}
+    if str(result.get("status") or "").strip().lower() == ContentFactoryRunStatus.COMPLETED:
+        return True
+    if _content_package_from_run(run):
+        return True
+    return run.steps.filter(
+        step_key__in=("finalize", "ready_for_review"),
+        status=ContentFactoryStepStatus.COMPLETED,
+    ).exists()
+
+
+def _heal_stale_status_poll_timeout(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return run
+    if run.status != ContentFactoryRunStatus.BLOCKED:
+        return run
+    result = run.result or {}
+    result_errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+    timeout_text = run.error or result.get("error") or " ".join(str(error) for error in result_errors)
+    if not _is_status_poll_transport_error(timeout_text):
+        return run
+    if not _article_run_has_completed_local_artifacts(run):
+        return run
+
+    cleaned_result = dict(result)
+    if _is_status_poll_transport_error(cleaned_result.get("error")):
+        cleaned_result.pop("error", None)
+    if result_errors and all(_is_status_poll_transport_error(error) for error in result_errors):
+        cleaned_result.pop("errors", None)
+    cleaned_result["status"] = ContentFactoryRunStatus.COMPLETED
+
+    run.status = ContentFactoryRunStatus.COMPLETED
+    run.error = ""
+    run.result = cleaned_result
+    if not run.current_step:
+        run.current_step = "finalize"
+    run.save(update_fields=["status", "error", "result", "current_step", "updated_at"])
+    logger.info(
+        "content_factory_status_poll_timeout_healed run_id=%s workflow=%s",
+        run.run_id,
+        run.workflow,
+    )
+    return run
+
+
 def _parse_remote_datetime(value):
     if not value:
         return None
@@ -3461,20 +3554,17 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
             timeout=(3, 15),
         )
     except http_client.RequestException as exc:
-        if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
-            logger.warning(
-                "content_factory_status_poll_blocked run_id=%s workflow=%s reason=request_exception error=%s",
-                run_id,
-                workflow,
-                exc,
-            )
-            return _blocked_worker_payload(
-                workflow=workflow,
-                technical_error=str(exc),
-                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
-                retryable=True,
-            )
-        return {"error": str(exc), "errors": [str(exc)], "retryable": True}
+        logger.warning(
+            "content_factory_status_poll_unavailable run_id=%s workflow=%s reason=request_exception error=%s",
+            run_id,
+            workflow,
+            exc,
+        )
+        return _status_poll_unavailable_payload(
+            workflow=workflow,
+            technical_error=str(exc),
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+        )
 
     if response.status_code == 200:
         return response.json() if response.content else {}
@@ -3501,6 +3591,20 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
     except Exception:
         response_payload = {}
     detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    if response.status_code >= 500:
+        logger.warning(
+            "content_factory_status_poll_unavailable run_id=%s workflow=%s status_code=%s",
+            run_id,
+            workflow,
+            response.status_code,
+        )
+        return _status_poll_unavailable_payload(
+            workflow=workflow,
+            technical_error=str(detail or f"Content Factory returned {response.status_code}."),
+            status_code=response.status_code,
+            response_payload=response_payload,
+            diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+        )
     if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
         logger.warning(
             "content_factory_status_poll_blocked run_id=%s workflow=%s status_code=%s",
@@ -4674,7 +4778,16 @@ class VibeMarketingRunView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
         remote_data = _call_content_factory_run_status(run.run_id, workflow=run.workflow)
-        if remote_data:
+        if _is_status_poll_unavailable_payload(remote_data):
+            run = _heal_stale_status_poll_timeout(run)
+            logger.warning(
+                "content_factory_status_poll_preserved_local_state run_id=%s workflow=%s status=%s error=%s",
+                run.run_id,
+                run.workflow,
+                run.status,
+                remote_data.get("error"),
+            )
+        elif remote_data:
             max_attempts = 3 if connection.vendor == "sqlite" else 1
             for attempt in range(max_attempts):
                 try:
