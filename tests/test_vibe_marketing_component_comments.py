@@ -1121,6 +1121,14 @@ class VibeMarketingComponentCommentTests(TestCase):
             opportunity_index=80,
             status=KeywordStatus.PENDING,
         )
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
         self.run.run_request = {"delivery_mode": "content_only"}
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
@@ -1335,3 +1343,84 @@ class VibeMarketingComponentCommentTests(TestCase):
         revision_run.refresh_from_db()
         self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-from-revision")
         self.assertEqual(revision_run.result["publish_child_run_id"], "article-publish-child-from-revision")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_timeout_preserves_completed_source_state(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self.run.run_request = {
+            "domain": "mlai.au",
+            "topic": "Australian founders",
+            "target_keyword": "australian founders",
+            "delivery_mode": "content_only",
+        }
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
+
+        timeout = http_client.exceptions.ReadTimeout(
+            "HTTPConnectionPool(host='10.126.0.4', port=8000): Read timed out. (read timeout=60.0)"
+        )
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=timeout):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertTrue(self.run.result["publish_handoff_pending"])
+        self.assertTrue(self.run.result["latest_control_response"]["content_factory_transport_error"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["publish"]["status"], "running")
+
+    def test_merge_publish_pr_refuses_pending_checks(self):
+        self.run.result = {
+            "draft_pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/123",
+            "draft_pr_number": 123,
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        with (
+            patch("content_factory.vibe_marketing_views.ensure_valid_org_token", return_value="github-token"),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
+                ),
+            ),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/merge-publish-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("GitHub Actions checks are still running", response.data["detail"])
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["merge_status"], "pending")
+        self.assertEqual(self.run.result["checks_status"], "pending")

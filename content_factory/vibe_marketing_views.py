@@ -2415,7 +2415,10 @@ def _publish_evidence_from_run(run):
         "status": run.status,
         "approvalState": run.approval_state,
         "previewUrl": result.get("preview_url") or result.get("article_url") or result.get("url"),
-        "prUrl": result.get("pr_url") or result.get("pull_request_url"),
+        "prUrl": result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url"),
+        "prNumber": result.get("pr_number") or result.get("pull_request_number") or result.get("draft_pr_number"),
+        "mergeStatus": result.get("merge_status"),
+        "checksStatus": result.get("checks_status"),
         "routePath": result.get("route_path") or result.get("path"),
         "screenshots": result.get("screenshots") or diagnostics.get("screenshots") or [],
         "changedFiles": result.get("changed_files") or result.get("files") or diagnostics.get("changed_files") or [],
@@ -2436,6 +2439,130 @@ def _run_has_external_publish_evidence(run):
         or result.get("pull_request_url")
         or result.get("pullRequestUrl")
     )
+
+
+def _pull_request_number_from_run(run):
+    result = _run_mapping(run.result)
+    for key in ("pr_number", "pull_request_number", "draft_pr_number"):
+        value = result.get(key)
+        if value:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    pr_url = str(
+        result.get("pr_url")
+        or result.get("pull_request_url")
+        or result.get("draft_pr_url")
+        or _publish_evidence_from_run(run).get("prUrl")
+        or ""
+    ).strip()
+    match = re.search(r"/pull/(\d+)", pr_url)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _github_api_request(method, path, *, token, body=None, expected=(200,)):
+    url = f"https://api.github.com{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    response = http_client.request(method, url, headers=headers, json=body, timeout=(3, 20))
+    try:
+        payload = response.json() if response.content else {}
+    except Exception:
+        payload = {}
+    if response.status_code not in expected:
+        detail = payload.get("message") if isinstance(payload, dict) else ""
+        raise ValueError(detail or f"GitHub returned {response.status_code}.")
+    return payload
+
+
+def _github_pull_checks_state(*, repo, pr_number, token):
+    pull = _github_api_request("GET", f"/repos/{repo}/pulls/{pr_number}", token=token)
+    if pull.get("merged"):
+        return pull, {"state": "merged", "ready": False, "message": "Pull request is already merged."}
+    if pull.get("state") != "open":
+        return pull, {"state": "closed", "ready": False, "message": "Pull request is not open."}
+    head_sha = ((pull.get("head") or {}).get("sha") or "").strip()
+    if not head_sha:
+        return pull, {"state": "unknown", "ready": False, "message": "Pull request head SHA is unavailable."}
+
+    combined = _github_api_request("GET", f"/repos/{repo}/commits/{head_sha}/status", token=token)
+    check_runs = _github_api_request("GET", f"/repos/{repo}/commits/{head_sha}/check-runs", token=token)
+    status_count = int(combined.get("total_count") or 0)
+    status_state = str(combined.get("state") or "").lower()
+    runs = check_runs.get("check_runs") if isinstance(check_runs.get("check_runs"), list) else []
+    incomplete_runs = [item for item in runs if item.get("status") != "completed"]
+    failed_runs = [
+        item
+        for item in runs
+        if item.get("status") == "completed"
+        and item.get("conclusion") not in {"success", "neutral", "skipped"}
+    ]
+    if status_count and status_state != "success":
+        return pull, {"state": status_state or "pending", "ready": False, "message": "Commit status checks have not passed."}
+    if incomplete_runs:
+        return pull, {"state": "pending", "ready": False, "message": "GitHub Actions checks are still running."}
+    if failed_runs:
+        return pull, {"state": "failed", "ready": False, "message": "One or more GitHub Actions checks failed."}
+    return pull, {"state": "success", "ready": True, "message": "Checks are passing."}
+
+
+def _merge_publish_pr_for_run(*, run, context):
+    repo = run.github_repo or _get_config(context.organization).github_repo
+    if not repo:
+        return None, Response({"detail": "No GitHub repository is configured for this publish run."}, status=status.HTTP_400_BAD_REQUEST)
+    pr_number = _pull_request_number_from_run(run)
+    if not pr_number:
+        return None, Response({"detail": "No publish pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
+    try:
+        token = ensure_valid_org_token(context.organization.domain)
+        pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
+        if pull.get("merged"):
+            result = run.result or {}
+            result["merge_status"] = "merged"
+            result["checks_status"] = "merged"
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return run, None
+        if not checks.get("ready"):
+            result = run.result or {}
+            result["merge_status"] = str(checks.get("state") or "blocked")
+            result["checks_status"] = str(checks.get("state") or "blocked")
+            result["merge_blocked_reason"] = checks.get("message")
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return None, Response(
+                {"detail": checks.get("message") or "Publish PR checks are not ready.", "checks": checks},
+                status=status.HTTP_409_CONFLICT,
+            )
+        merge_payload = {
+            "commit_title": f"Publish Content Factory article from {run.run_id}",
+            "merge_method": "squash",
+        }
+        merged = _github_api_request(
+            "PUT",
+            f"/repos/{repo}/pulls/{pr_number}/merge",
+            token=token,
+            body=merge_payload,
+            expected=(200, 201),
+        )
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+    result = run.result or {}
+    result["merge_status"] = "merged"
+    result["checks_status"] = "success"
+    result["merged_at"] = timezone.now().isoformat()
+    result["merge_response"] = merged
+    run.result = result
+    run.status = ContentFactoryRunStatus.COMPLETED
+    run.save(update_fields=["status", "result", "updated_at"])
+    return run, None
 
 
 def _article_keyword_from_run(run):
@@ -2833,7 +2960,11 @@ def _run_url(run):
 def _latest_publish_child_run(latest_runs, article_run):
     if not article_run:
         return None
-    explicit_child_run_id = str(_run_mapping(article_run.result).get("publish_child_run_id") or "").strip()
+    explicit_child_run_id = str(
+        _run_mapping(article_run.result).get("publish_child_run_id")
+        or _run_mapping(article_run.result).get("promoted_publish_job_id")
+        or ""
+    ).strip()
     if explicit_child_run_id:
         for candidate in latest_runs or []:
             if candidate.run_id == explicit_child_run_id:
@@ -2851,6 +2982,46 @@ def _latest_publish_child_run(latest_runs, article_run):
             continue
         candidates.append(candidate)
     return candidates[0] if candidates else None
+
+
+def _local_publish_child_for_run(run, *, context=None):
+    if not run:
+        return None
+    result = _run_mapping(run.result)
+    explicit_child_run_id = str(
+        result.get("publish_child_run_id")
+        or result.get("promoted_publish_job_id")
+        or ""
+    ).strip()
+    if not explicit_child_run_id:
+        return None
+    child = ContentFactoryRun.objects.filter(run_id=explicit_child_run_id).prefetch_related("steps").first()
+    if not child:
+        return None
+    if context is not None and not _run_belongs_to_context(child, context):
+        return None
+    return child
+
+
+def _accepted_revision_source_run(run):
+    if not run or run.workflow != "article_revision":
+        return None
+    source_run_id = _run_source_run_id(run)
+    if not source_run_id:
+        return None
+    return ContentFactoryRun.objects.filter(run_id=source_run_id).prefetch_related("steps").first()
+
+
+def _source_accepts_revision(source_run, revision_run):
+    if not source_run or not revision_run:
+        return False
+    latest_batch = _component_feedback_from_run(source_run).get("latestBatch") or {}
+    revision_run_id = str(
+        latest_batch.get("revisionRunId")
+        or latest_batch.get("revision_run_id")
+        or ""
+    ).strip()
+    return latest_batch.get("status") == "accepted" and revision_run_id == revision_run.run_id
 
 
 def _run_can_promote_package(run, config=None):
@@ -2915,11 +3086,14 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         publish_child_run = run
     else:
         publish_child_run = _latest_publish_child_run(latest_runs, article_run)
+    revision_source_run = _accepted_revision_source_run(article_run)
     publish_evidence_run = publish_child_run or article_run
     publish_evidence = _publish_evidence_from_run(publish_evidence_run)
     content_package = _content_package_from_run(article_run) if article_run else None
     content_package_ready = bool(content_package and content_package.get("contentPackaged"))
     component_feedback = _component_feedback_from_run(article_run) if article_run else {"comments": [], "latestBatch": None}
+    if _source_accepts_revision(revision_source_run, article_run):
+        component_feedback = _component_feedback_from_run(revision_source_run)
     comments = component_feedback.get("comments") or []
     latest_batch = component_feedback.get("latestBatch") or {}
     draft_comment_count = len([comment for comment in comments if comment.get("status") == "draft" and str(comment.get("body") or "").strip()])
@@ -2941,7 +3115,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     )
     package_can_promote = _run_can_promote_package(article_run, config=config)
     publish_complete = bool(publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
-    publish_running = bool(publish_child_run and publish_child_run.status in RUNNING_RUN_STATUSES)
+    article_result = _run_mapping(article_run.result) if article_run else {}
+    publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
+    publish_running = bool(
+        (publish_child_run and publish_child_run.status in RUNNING_RUN_STATUSES)
+        or (publish_handoff_pending and not publish_complete)
+    )
     review_surface_ready = bool(content_package_ready and article_run and _component_manifest_from_run(article_run))
     review_is_finished = bool(
         publish_complete
@@ -3077,9 +3256,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         summary_by_id["publish"] = "PR or preview evidence is ready."
     elif publish_running:
         status_by_id["publish"] = "running"
-        href_by_id["publish"] = _run_url(publish_child_run)
-        run_by_id["publish"] = publish_child_run.run_id
-        summary_by_id["publish"] = "Publishing child run is in progress."
+        href_by_id["publish"] = _run_url(publish_child_run or article_run)
+        run_by_id["publish"] = (publish_child_run or article_run).run_id
+        summary_by_id["publish"] = "Publishing child run is in progress." if publish_child_run else "Publish handoff is pending."
     elif content_package_ready and package_can_promote:
         status_by_id["publish"] = "ready"
         href_by_id["publish"] = _run_url(article_run)
@@ -3146,7 +3325,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
 
     result = run.result or {}
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
-    pr_url = result.get("pr_url") or result.get("pull_request_url")
+    pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
     live_preview = _live_preview_from_run(run)
@@ -3235,7 +3414,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         and (publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     )
     delivery_mode = _effective_article_delivery_mode(config, github_ready=github_ready, article_ready=article_ready)
-    daily_ready = (
+    daily_prerequisites_ready = (
         domain_ok
         and context_ok
         and keywords_ok
@@ -3245,6 +3424,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         and bool(config.connected_slack_user_id)
         and (delivery_mode != "publish_code" or github_ready)
     )
+    daily_ready = daily_prerequisites_ready and bool(config.daily_discovery_enabled)
     return {
         "account": {"passed": True},
         "websiteProfile": {
@@ -3274,7 +3454,11 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
         "contentPackage": {"passed": content_package_ready, "runId": article_run.run_id if article_run else None},
         "publish": {"passed": publish_ready, "runId": article_run.run_id if article_run else None},
-        "dailyAutomation": {"passed": daily_ready},
+        "dailyAutomation": {
+            "passed": daily_ready,
+            "ready": daily_prerequisites_ready,
+            "enabled": bool(config.daily_discovery_enabled),
+        },
     }
 
 
@@ -3656,6 +3840,13 @@ def _article_run_has_completed_local_artifacts(run):
     if str(result.get("status") or "").strip().lower() == ContentFactoryRunStatus.COMPLETED:
         return True
     if _content_package_from_run(run):
+        return True
+    if _component_manifest_from_run(run) and _live_preview_from_run(run).get("previewUrl"):
+        return True
+    if _local_publish_child_for_run(run):
+        return True
+    source_run = _accepted_revision_source_run(run)
+    if _source_accepts_revision(source_run, run):
         return True
     return run.steps.filter(
         step_key__in=("finalize", "ready_for_review"),
@@ -4120,7 +4311,15 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     )
 
 
-def _call_content_factory_run_action(*, run_id, action, payload, workflow="article_generation"):
+def _call_content_factory_run_action(
+    *,
+    run_id,
+    action,
+    payload,
+    workflow="article_generation",
+    timeout=(3, 15),
+    transport_errors_are_pending=False,
+):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -4143,9 +4342,24 @@ def _call_content_factory_run_action(*, run_id, action, payload, workflow="artic
             f"{remote_config['base_url']}/api/runs/{run_id}/{action}",
             json=payload or {},
             headers=_content_factory_headers(),
-            timeout=(3, 15),
+            timeout=timeout,
         )
     except http_client.RequestException as exc:
+        if transport_errors_are_pending:
+            return {
+                "status": "action_pending",
+                "action": action,
+                "error": str(exc),
+                "errors": [str(exc)],
+                "content_factory_transport_error": True,
+                "retryable": True,
+                "diagnostics": _content_factory_diagnostics(
+                    remote_config,
+                    run_id=run_id,
+                    workflow=workflow,
+                    action=action,
+                ),
+            }
         return _blocked_worker_payload(
             workflow=workflow,
             technical_error=str(exc),
@@ -4168,6 +4382,10 @@ def _call_content_factory_run_action(*, run_id, action, payload, workflow="artic
         "content_factory_response": response_payload,
         "retryable": response.status_code >= 500,
     }
+
+
+def _content_factory_action_transport_pending(remote_data):
+    return isinstance(remote_data, dict) and bool(remote_data.get("content_factory_transport_error"))
 
 
 def _call_content_factory_component_revision(*, run_id, payload):
@@ -5637,6 +5855,37 @@ class VibeMarketingRunControlView(APIView):
                 return restart_error
             return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
 
+        if action == "enable-daily-automation":
+            config = _get_config(context.organization)
+            _assign_config_actor(config, request.user)
+            if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
+                config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
+            config.daily_discovery_enabled = True
+            checks = _profile_checks(
+                context.organization,
+                config,
+                _latest_runs_for_org(context.organization),
+                _latest_baseline_snapshot(context.organization),
+            )
+            if not checks["dailyAutomation"]["passed"]:
+                return Response(
+                    {"detail": "Daily generation prerequisites are not complete.", "checks": checks},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            config.save(update_fields=["daily_discovery_enabled", "default_timezone", "updated_at"])
+            result = run.result or {}
+            result["daily_automation_enabled_at"] = timezone.now().isoformat()
+            result["daily_automation_timezone"] = config.default_timezone
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
+        if action == "merge-publish-pr":
+            merged_run, merge_error = _merge_publish_pr_for_run(run=run, context=context)
+            if merge_error:
+                return merge_error
+            return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
+
         remote_run = run
         if action in {"promote-bundle", "publish-pr"}:
             accepted_revision = _accepted_component_revision_for_publish(run, context)
@@ -5644,11 +5893,16 @@ class VibeMarketingRunControlView(APIView):
                 remote_run = accepted_revision
                 payload.setdefault("review_source_run_id", run.run_id)
                 payload.setdefault("source_run_id", accepted_revision.run_id)
+            existing_publish_run = _local_publish_child_for_run(run, context=context) or _local_publish_child_for_run(remote_run, context=context)
+            if existing_publish_run is not None:
+                return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
             action=action,
             payload=payload,
             workflow=remote_run.workflow,
+            timeout=(3, 60) if action in {"promote-bundle", "publish-pr"} else (3, 15),
+            transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
         )
 
         if action == "revise":
@@ -5711,6 +5965,7 @@ class VibeMarketingRunControlView(APIView):
                 result["publish_child_run_id"] = publish_run.run_id
                 result["latest_control_response"] = remote_data
                 result["promote_bundle_requested_at"] = timezone.now().isoformat()
+                result["publish_handoff_pending"] = False
                 run.result = result
                 run.save(update_fields=["result", "updated_at"])
                 if remote_run.run_id != run.run_id:
@@ -5718,9 +5973,25 @@ class VibeMarketingRunControlView(APIView):
                     remote_result["publish_child_run_id"] = publish_run.run_id
                     remote_result["latest_control_response"] = remote_data
                     remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
+                    remote_result["publish_handoff_pending"] = False
                     remote_run.result = remote_result
                     remote_run.save(update_fields=["result", "updated_at"])
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
+            if _content_factory_action_transport_pending(remote_data):
+                result = run.result or {}
+                result["promote_bundle_requested_at"] = timezone.now().isoformat()
+                result["latest_control_response"] = remote_data
+                result["publish_handoff_pending"] = True
+                run.result = result
+                run.save(update_fields=["result", "updated_at"])
+                if remote_run.run_id != run.run_id:
+                    remote_result = remote_run.result or {}
+                    remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
+                    remote_result["latest_control_response"] = remote_data
+                    remote_result["publish_handoff_pending"] = True
+                    remote_run.result = remote_result
+                    remote_run.save(update_fields=["result", "updated_at"])
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
             run.approval_state = ContentFactoryApprovalState.APPROVED
@@ -5746,7 +6017,7 @@ class VibeMarketingRunControlView(APIView):
         if remote_data:
             result = run.result or {}
             result["latest_control_response"] = remote_data
-            if remote_data.get("status"):
+            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data):
                 run.status = remote_data["status"]
             if remote_data.get("current_step"):
                 run.current_step = remote_data["current_step"]
