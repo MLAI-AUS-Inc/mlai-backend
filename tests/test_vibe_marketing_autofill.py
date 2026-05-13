@@ -2084,6 +2084,40 @@ class VibeMarketingAutofillTests(TestCase):
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertTrue(bootstrap.data["checks"]["github"]["passed"])
 
+    def test_github_connect_force_reconnect_returns_auth_url_without_overwriting_repo(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "github_token_encrypted": "org-token",
+                "github_token_expires_at": timezone.now() + timezone.timedelta(hours=1),
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views.ensure_valid_org_token") as mock_ensure_valid_org_token,
+            patch("content_factory.vibe_marketing_views.build_github_auth_url", return_value="https://github.example/install") as mock_auth_url,
+        ):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/github/connect/",
+                {"githubRepo": "other/site", "forceReconnect": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "auth_required")
+        self.assertEqual(response.data["connection_state"], "auth_required")
+        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertEqual(response.data["auth_url"], "https://github.example/install")
+        mock_ensure_valid_org_token.assert_not_called()
+        mock_auth_url.assert_called_once()
+
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        self.assertEqual(config.github_repo, "acme/site")
+
     def test_github_connect_refreshes_expired_org_credentials_server_side(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
