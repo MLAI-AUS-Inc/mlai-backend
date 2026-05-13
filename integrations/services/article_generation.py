@@ -1688,6 +1688,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
             "slack_user_id": slack_user_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if isinstance(article_request.get("notification_context"), dict):
+            payload["notification_context"] = article_request["notification_context"]
         if requested_by_slack_user_id and requested_by_slack_user_id != str(slack_user_id or "").strip():
             payload["requested_by_slack_user_id"] = requested_by_slack_user_id
 
@@ -1840,6 +1842,8 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         payload["skip_alternatives"] = article_request["skip_alternatives"]
     if article_request.get("source_run_id"):
         payload["source_run_id"] = article_request["source_run_id"]
+    if isinstance(article_request.get("notification_context"), dict):
+        payload["notification_context"] = article_request["notification_context"]
 
     masked_payload = payload.copy()
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")
@@ -2384,6 +2388,7 @@ def confirm_topic(
     delivery_mode: str = None,
     delivery_mode_confirmed: Optional[bool] = None,
     request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+    notification_context: Optional[dict] = None,
 ) -> dict:
     """
     Confirm topic selection and trigger Phase 2 generation.
@@ -2492,6 +2497,8 @@ def confirm_topic(
         "custom_title": custom_title,
         "request_source": request_source,
     }
+    if isinstance(notification_context, dict) and notification_context:
+        payload["notification_context"] = notification_context
     if resolved_requested_by_slack_user_id and resolved_requested_by_slack_user_id != str(slack_user_id or "").strip():
         payload["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
     if github_repo:
@@ -2547,6 +2554,7 @@ def confirm_topic(
                         "slack_channel_id": slack_channel_id or "",
                         "slack_thread_ts": slack_thread_ts or "",
                         "slack_root_message_ts": slack_root_message_ts or slack_thread_ts or "",
+                        **({"notification_context": notification_context} if isinstance(notification_context, dict) and notification_context else {}),
                     },
                     slack_channel_id=slack_channel_id,
                     slack_thread_ts=slack_thread_ts,
