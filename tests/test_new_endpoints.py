@@ -1076,7 +1076,12 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "parent_run_id": "scan-run-parent",
                 "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
                 "preview_url": "https://preview.example/articles",
-                "live_preview": {"available": True, "previewUrl": "https://preview.example/articles"},
+                "live_preview": {
+                    "available": True,
+                    "previewUrl": "https://preview.example/articles",
+                    "inspectorProtocolVersion": 2,
+                    "inspectorMode": "comment",
+                },
                 "live_preview_url": "/api/runs/setup-run-2/live-preview",
                 "article_system_setup": {"status": "preview_ready", "setup_run_id": "setup-run-2"},
             },
@@ -1087,6 +1092,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         setup_run = ContentFactoryRun.objects.get(run_id="setup-run-2")
         self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
         self.assertEqual(setup_run.result["livePreview"]["previewUrl"], "https://preview.example/articles")
+        self.assertEqual(setup_run.result["livePreview"]["inspectorMode"], "comment")
         parent = ContentFactoryRun.objects.get(run_id="scan-run-parent")
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
