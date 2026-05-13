@@ -132,6 +132,20 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
             displayName
             email
           }
+          lastUpdate {
+            id
+            url
+            body
+            health
+            createdAt
+            updatedAt
+            user {
+              id
+              name
+              displayName
+              email
+            }
+          }
           teams {
             nodes {
               id

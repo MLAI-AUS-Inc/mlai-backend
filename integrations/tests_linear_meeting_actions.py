@@ -97,6 +97,20 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                                         "displayName": "Jane",
                                         "email": "jane@example.com",
                                     },
+                                    "lastUpdate": {
+                                        "id": "update-1",
+                                        "url": "https://linear.app/acme/project-update/update-1",
+                                        "body": "Last update body",
+                                        "health": "onTrack",
+                                        "createdAt": "2026-05-01T00:00:00Z",
+                                        "updatedAt": "2026-05-01T00:00:00Z",
+                                        "user": {
+                                            "id": "user-1",
+                                            "name": "Sam",
+                                            "displayName": "Sam",
+                                            "email": "sam@example.com",
+                                        },
+                                    },
                                     "teams": {
                                         "nodes": [{"id": "team-1", "key": "ENG", "name": "Engineering"}]
                                     },
@@ -128,6 +142,8 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(payload["teams"][0]["id"], "team-1")
         self.assertEqual(payload["users"][0]["id"], "user-1")
         self.assertEqual(payload["projects"][0]["id"], "project-1")
+        self.assertEqual(payload["projects"][0]["lastUpdate"]["id"], "update-1")
+        self.assertEqual(payload["projects"][0]["lastUpdate"]["user"]["email"], "sam@example.com")
         self.assertEqual(len(payload["projects"]), 1)
         self.assertEqual(
             [member["id"] for member in payload["projects"][0]["members"]["nodes"]],
@@ -144,6 +160,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertIn("status", project_request["query"])
         self.assertIn("completedAt", project_request["query"])
         self.assertIn("canceledAt", project_request["query"])
+        self.assertIn("lastUpdate", project_request["query"])
         self.assertNotIn("\n          state\n", project_request["query"])
         self.assertNotIn("\n          members", project_request["query"])
 
