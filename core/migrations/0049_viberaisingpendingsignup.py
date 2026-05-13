@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0048_seed_innovate_connect_alliance_hackathon'),
+        ('core', '0047_organizationcontentconfig_daily_discovery_fields'),
     ]
 
     operations = [
