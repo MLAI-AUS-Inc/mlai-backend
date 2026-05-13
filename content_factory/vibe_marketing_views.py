@@ -5919,21 +5919,25 @@ class VibeMarketingGitHubConnectView(APIView):
         config = _get_config(context.organization)
         actor_id = founder_actor_id_for_user(request.user)
         config_update_fields = _assign_config_actor(config, request.user)
+        force_reconnect = _bool_from_request(
+            _request_value(request.data, "force_reconnect", "forceReconnect", default=False)
+        )
         requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
-        if requested_repo:
+        if requested_repo and not force_reconnect:
             config.github_repo = requested_repo
             config_update_fields.append("github_repo")
         config_update_fields.append("updated_at")
         config.save(update_fields=list(dict.fromkeys(config_update_fields)))
 
-        existing_connection = _connect_with_existing_github_credentials(
-            config,
-            domain=context.organization.domain,
-            actor_id=actor_id,
-            requested_repo=requested_repo,
-        )
-        if existing_connection:
-            return Response(existing_connection, status=status.HTTP_200_OK)
+        if not force_reconnect:
+            existing_connection = _connect_with_existing_github_credentials(
+                config,
+                domain=context.organization.domain,
+                actor_id=actor_id,
+                requested_repo=requested_repo,
+            )
+            if existing_connection:
+                return Response(existing_connection, status=status.HTTP_200_OK)
 
         return Response(
             {
