@@ -1845,7 +1845,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["primaryAction"]["label"], "Resume publish PR")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_promote_bundle_existing_child_id_recovers_local_child_without_dispatch(self):
+    def test_promote_bundle_existing_child_id_dispatches_when_child_missing_locally(self):
         self.run.acceptance_summary = {"content_packaged": True}
         self.run.result = {
             "delivery_mode": "content_only",
@@ -1858,15 +1858,194 @@ class VibeMarketingComponentCommentTests(TestCase):
         }
         self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
 
-        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["timeout"] = timeout
+            return _Response(
+                status_code=202,
+                payload={"run_id": "article-publish-child-existing", "status": "queued", "publish_child_status": "queued"},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post) as post:
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data["runId"], "article-publish-child-existing")
-        post.assert_not_called()
+        post.assert_called_once()
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/promote-bundle")
+        self.assertEqual(captured["timeout"], (3, 20))
         publish_run = ContentFactoryRun.objects.get(run_id="article-publish-child-existing")
         self.assertEqual(publish_run.run_request["source_run_id"], self.run.run_id)
         self.assertEqual(publish_run.run_request["delivery_mode"], "publish_code")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_completed_article_status_surfaces_recoverable_missing_publish_child(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_child_run_id": "article-publish-child-missing",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="article-publish-child-missing",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={
+                "source_run_id": self.run.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={
+                "error": "Content Factory run article-publish-child-missing was not found.",
+                "diagnostics": {"content_factory_status_code": 404},
+            },
+            error="Content Factory run article-publish-child-missing was not found.",
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(response.data["result"]["publish_child_status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(response.data["result"]["publish_child_recoverable"])
+        self.assertEqual(response.data["result"]["publish_handoff_status"], "recoverable_missing_child")
+        self.assertIn("not found in Content Factory", response.data["result"]["publish_child_wait_reason"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["publish"]["status"], "ready")
+        self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
+        self.assertEqual(steps["publish"]["primaryAction"]["label"], "Retry creating PR")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_retries_local_child_missing_remotely(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_child_run_id": "article-publish-child-ghost",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="article-publish-child-ghost",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.QUEUED,
+            run_request={
+                "source_run_id": self.run.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={"status": "queued"},
+        )
+        captured = {}
+
+        def fake_status(run_id, workflow=""):
+            if run_id == "article-publish-child-ghost":
+                return {
+                    "status": ContentFactoryRunStatus.BLOCKED,
+                    "error": "Content Factory run article-publish-child-ghost was not found.",
+                    "diagnostics": {"content_factory_status_code": 404},
+                }
+            return {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            return _Response(
+                status_code=202,
+                payload={"run_id": "article-publish-child-ghost", "status": "queued", "publish_child_status": "queued"},
+            )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", side_effect=fake_status),
+            patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/promote-bundle")
+        self.assertEqual(response.data["runId"], "article-publish-child-ghost")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_from_missing_publish_child_route_dispatches_source(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "publish_child_run_id": "article-publish-child-route",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "article_markdown": "article.md",
+            },
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="article-publish-child-route",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={
+                "source_run_id": self.run.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={
+                "error": "Content Factory run article-publish-child-route was not found.",
+                "diagnostics": {"content_factory_status_code": 404},
+            },
+            error="Content Factory run article-publish-child-route was not found.",
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(
+                status_code=202,
+                payload={"run_id": "article-publish-child-route", "status": "queued", "publish_child_status": "queued"},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post("/api/v1/vibe-marketing/runs/article-publish-child-route/promote-bundle", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/promote-bundle")
+        self.assertEqual(captured["payload"]["source_run_id"], self.run.run_id)
+        self.assertEqual(captured["payload"]["publish_child_run_id"], "article-publish-child-route")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_retries_recoverable_existing_child(self):
