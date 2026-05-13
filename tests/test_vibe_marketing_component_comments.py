@@ -1162,6 +1162,120 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(comment.status, "submitted")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_revision_submits_setup_pinned_comments(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-comments",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            result={
+                "livePreview": {
+                    "available": True,
+                    "status": "running",
+                    "previewUrl": "https://preview.example/articles?cfInspector=1",
+                    "inspectorProtocolVersion": 2,
+                    "inspectorMode": "comment",
+                },
+            },
+        )
+        comment = VibeMarketingComponentComment.objects.create(
+            run=setup_run,
+            actor=self.user,
+            component_id="article-system-boundary-main",
+            component_type="section",
+            component_label="Articles listing",
+            selector='[data-cf-component-id="article-system-boundary-main"]',
+            anchor={"x": 0.4, "y": 0.2, "createdFrom": "live_preview_click"},
+            context={
+                "domPath": "body > main:nth-of-type(1)",
+                "textExcerpt": "Articles",
+                "click": {"x": 500, "y": 240},
+                "viewport": {"width": 1440, "height": 900},
+                "pageUrl": "https://preview.example/articles?cfInspector=1",
+                "previewMode": "platform_deployment",
+            },
+            body="Make the article cards denser.",
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(
+                status_code=202,
+                payload={
+                    "run_id": setup_run.run_id,
+                    "status": "revision_preview_building",
+                    "livePreview": {
+                        "available": True,
+                        "status": "running",
+                        "previewUrl": "https://preview.example/articles?cfInspector=1",
+                        "inspectorProtocolVersion": 2,
+                        "inspectorMode": "comment",
+                    },
+                },
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/article-system-revisions",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-system-setup-comments/article-system-revisions")
+        self.assertEqual(captured["payload"]["source_run_id"], setup_run.run_id)
+        self.assertEqual(captured["payload"]["request_source"], "founder_tools_article_system_feedback")
+        remote_comment = captured["payload"]["comments"][0]
+        self.assertEqual(remote_comment["comment_id"], str(comment.id))
+        self.assertEqual(remote_comment["selector"], '[data-cf-component-id="article-system-boundary-main"]')
+        self.assertEqual(remote_comment["anchor"]["createdFrom"], "live_preview_click")
+        self.assertEqual(remote_comment["context"]["previewMode"], "platform_deployment")
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "submitted")
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(setup_run.current_step, "revision_preview_building")
+        self.assertEqual(setup_run.result["component_feedback_latest_batch"]["status"], "running")
+        self.assertEqual(response.data["componentFeedback"]["latestBatch"]["status"], "running")
+        self.assertEqual(response.data["livePreview"]["inspectorMode"], "comment")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_revision_keeps_freeform_body_compatibility(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-freeform",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": setup_run.run_id, "status": "revision_preview_building"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/article-system-revisions",
+                {
+                    "body": "Add more spacing around the hero.",
+                    "feedbackBatchId": "freeform-batch-1",
+                    "selector": '[data-cf-component-id="article-system-hero"]',
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["payload"]["feedback_batch_id"], "freeform-batch-1")
+        self.assertEqual(captured["payload"]["comments"][0]["body"], "Add more spacing around the hero.")
+        self.assertEqual(captured["payload"]["comments"][0]["selector"], '[data-cf-component-id="article-system-hero"]')
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_retries_latest_submitted_batch(self):
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,

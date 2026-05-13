@@ -2393,6 +2393,43 @@ def _remote_comment_payload(comment):
     }
 
 
+def _article_system_remote_comment_payload(comment):
+    context = comment.context if isinstance(comment.context, dict) else {}
+    file_path = str(
+        context.get("filePath")
+        or context.get("file_path")
+        or context.get("sourceFilePath")
+        or context.get("source_file_path")
+        or ""
+    ).strip()
+    return {
+        "comment_id": str(comment.id),
+        "file_path": file_path,
+        "selector": comment.selector or _selector_for_component(comment.component_id),
+        "anchor": comment.anchor or {},
+        "context": context,
+        "body": comment.body,
+    }
+
+
+def _article_system_remote_comment_from_request(data):
+    if not isinstance(data, dict):
+        return None
+    body = str(_request_value(data, "body", "comment", default="") or "").strip()
+    if not body:
+        return None
+    comment_id = str(_request_value(data, "commentId", "comment_id", "id", default="") or "").strip()
+    component_id = str(_request_value(data, "componentId", "component_id", default="article-system-setup") or "").strip()
+    return {
+        "comment_id": comment_id or f"comment-{uuid.uuid4().hex[:12]}",
+        "file_path": str(_request_value(data, "filePath", "file_path", default="") or "").strip(),
+        "selector": str(_request_value(data, "selector", default="") or "").strip() or _selector_for_component(component_id),
+        "anchor": _comment_anchor_from_request(data),
+        "context": _comment_context_from_request(data),
+        "body": body,
+    }
+
+
 def _normalized_component_feedback_rule(comment):
     label = comment.component_label or comment.component_id
     component_type = comment.component_type or "component"
@@ -6112,49 +6149,148 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
         if run.workflow != "article_system_setup":
             return Response({"detail": "Article system comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
 
-        body = str(
-            _request_value(request.data, "body", "comment", "comments", "reviewComments", default="") or ""
-        ).strip()
-        if not body:
-            return Response({"detail": "Add a review comment before requesting setup changes."}, status=status.HTTP_400_BAD_REQUEST)
-
         feedback_batch_id = str(
             _request_value(request.data, "feedbackBatchId", "feedback_batch_id", default="") or ""
-        ).strip() or f"article-system-{uuid.uuid4().hex[:12]}"
-        comment_id = str(
-            _request_value(request.data, "commentId", "comment_id", default="") or ""
-        ).strip() or f"comment-{uuid.uuid4().hex[:12]}"
+        ).strip()
+        raw_comments = request.data.get("comments") if hasattr(request.data, "get") else None
+        explicit_remote_comments = []
+        if isinstance(raw_comments, list):
+            explicit_remote_comments = [
+                payload
+                for payload in (_article_system_remote_comment_from_request(item) for item in raw_comments)
+                if payload
+            ]
+        body = str(
+            _request_value(request.data, "body", "comment", "reviewComments", default="") or ""
+        ).strip()
+
+        draft_comments = list(
+            VibeMarketingComponentComment.objects.filter(
+                run=run,
+                status=VibeMarketingComponentCommentStatus.DRAFT,
+            )
+            .order_by("created_at", "id")
+        )
+        draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        retry_existing_batch = False
+        submitted_local_comments = []
+        if draft_comments:
+            feedback_batch_id = feedback_batch_id or f"article-system-{uuid.uuid4().hex[:12]}"
+            with transaction.atomic():
+                VibeMarketingComponentComment.objects.filter(
+                    id__in=[comment.id for comment in draft_comments],
+                    status=VibeMarketingComponentCommentStatus.DRAFT,
+                ).update(status=VibeMarketingComponentCommentStatus.SUBMITTED, batch_id=feedback_batch_id, updated_at=timezone.now())
+                submitted_local_comments = list(
+                    VibeMarketingComponentComment.objects.filter(id__in=[comment.id for comment in draft_comments])
+                    .order_by("created_at", "id")
+                )
+            remote_comments = [_article_system_remote_comment_payload(comment) for comment in submitted_local_comments]
+        elif explicit_remote_comments:
+            feedback_batch_id = feedback_batch_id or f"article-system-{uuid.uuid4().hex[:12]}"
+            remote_comments = explicit_remote_comments
+        elif body:
+            feedback_batch_id = feedback_batch_id or f"article-system-{uuid.uuid4().hex[:12]}"
+            remote_comment = _article_system_remote_comment_from_request(
+                {
+                    "body": body,
+                    "commentId": _request_value(request.data, "commentId", "comment_id", default=""),
+                    "filePath": _request_value(request.data, "filePath", "file_path", default=""),
+                    "selector": _request_value(request.data, "selector", default=""),
+                    "anchor": request.data.get("anchor") if hasattr(request.data, "get") else None,
+                    "context": request.data.get("context") if hasattr(request.data, "get") else None,
+                }
+            )
+            remote_comments = [remote_comment] if remote_comment else []
+        else:
+            latest_submitted = (
+                VibeMarketingComponentComment.objects.filter(
+                    run=run,
+                    status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                )
+                .exclude(batch_id="")
+                .order_by("-updated_at", "-created_at", "-id")
+                .first()
+            )
+            if not latest_submitted:
+                return Response({"detail": "Add at least one draft setup comment before requesting setup changes."}, status=status.HTTP_400_BAD_REQUEST)
+            feedback_batch_id = latest_submitted.batch_id
+            submitted_local_comments = list(
+                VibeMarketingComponentComment.objects.filter(
+                    run=run,
+                    status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                    batch_id=feedback_batch_id,
+                ).order_by("created_at", "id")
+            )
+            retry_existing_batch = True
+            remote_comments = [_article_system_remote_comment_payload(comment) for comment in submitted_local_comments]
+
+        if not feedback_batch_id or not remote_comments:
+            return Response({"detail": "Add a review comment before requesting setup changes."}, status=status.HTTP_400_BAD_REQUEST)
+
         remote_payload = {
             "source_run_id": run.run_id,
             "feedback_batch_id": feedback_batch_id,
             "request_source": "founder_tools_article_system_feedback",
-            "comments": [
-                {
-                    "comment_id": comment_id,
-                    "file_path": str(_request_value(request.data, "filePath", "file_path", default="") or "").strip(),
-                    "selector": str(_request_value(request.data, "selector", default="") or "").strip(),
-                    "anchor": request.data.get("anchor") if isinstance(request.data.get("anchor"), dict) else {},
-                    "context": request.data.get("context") if isinstance(request.data.get("context"), dict) else {},
-                    "body": body,
-                }
-            ],
+            "comments": remote_comments,
         }
         remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
         if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
+            result = dict(run.result or {})
+            result["latest_article_system_revision_response"] = remote_data
+            result["component_feedback_latest_batch"] = {
+                "id": feedback_batch_id,
+                "sourceRunId": run.run_id,
+                "status": "failed",
+                "error": remote_data.get("error"),
+                "retryable": bool(remote_data.get("retryable")),
+            }
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
             return Response({"detail": remote_data["error"], "remote": remote_data}, status=status.HTTP_409_CONFLICT)
+        if remote_data.get("error"):
+            result = dict(run.result or {})
+            retryable = bool(remote_data.get("retryable"))
+            result["latest_article_system_revision_response"] = remote_data
+            result["component_feedback_latest_batch"] = {
+                "id": feedback_batch_id,
+                "sourceRunId": run.run_id,
+                "status": "submitted" if retryable else "failed",
+                "error": remote_data.get("error"),
+                "retryable": retryable,
+            }
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            if retryable:
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+            return Response(
+                {"detail": remote_data.get("error") or "Content Factory could not queue setup changes.", "remote": remote_data},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         result = dict(run.result or {})
         comments = list(result.get("article_system_review_comments") or [])
-        comments.append(
-            {
-                "id": comment_id,
-                "feedbackBatchId": feedback_batch_id,
-                "body": body,
-                "submittedAt": timezone.now().isoformat(),
-            }
-        )
+        submitted_at = timezone.now().isoformat()
+        for comment in remote_comments:
+            comments.append(
+                {
+                    "id": comment.get("comment_id"),
+                    "feedbackBatchId": feedback_batch_id,
+                    "body": comment.get("body"),
+                    "selector": comment.get("selector"),
+                    "anchor": comment.get("anchor"),
+                    "context": comment.get("context"),
+                    "submittedAt": submitted_at,
+                }
+            )
         result["article_system_review_comments"] = comments
         result["latest_article_system_revision_response"] = remote_data
+        result["component_feedback_latest_batch"] = {
+            "id": feedback_batch_id,
+            "sourceRunId": run.run_id,
+            "status": "running",
+            "retry": retry_existing_batch,
+        }
         if remote_data.get("livePreview") or remote_data.get("live_preview"):
             result["livePreview"] = remote_data.get("livePreview") or remote_data.get("live_preview")
         if remote_data.get("live_preview_url"):
