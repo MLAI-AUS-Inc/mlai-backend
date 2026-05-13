@@ -137,7 +137,8 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
             self.assertEqual(json["min_direct_competitors"], 3)
-            self.assertEqual(json["min_seed_keywords"], 20)
+            self.assertEqual(json["min_seed_keywords"], 8)
+            self.assertEqual(json["target_seed_keywords"], 12)
             return _Response(status_code=202, payload={"run_id": "autofill-run-1", "status": "queued"})
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
@@ -192,7 +193,8 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
             self.assertEqual(json["min_direct_competitors"], 3)
-            self.assertEqual(json["min_seed_keywords"], 20)
+            self.assertEqual(json["min_seed_keywords"], 8)
+            self.assertEqual(json["target_seed_keywords"], 12)
             self.assertEqual(json["min_public_sources"], 3)
             return _Response(status_code=202, payload={"run_id": "autofill-run-persist", "status": "queued"})
 
