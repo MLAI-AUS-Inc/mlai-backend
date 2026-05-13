@@ -1531,6 +1531,9 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
             "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
             "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
+            "scan_purpose": str(data.get("scan_purpose") or "").strip(),
+            "article_surface_mode": str(data.get("article_surface_mode") or "").strip(),
+            "article_surface_resolution": data.get("article_surface_resolution") if isinstance(data.get("article_surface_resolution"), dict) else {},
             "matched_article_surface": data.get("matched_article_surface"),
             "publish_targets": data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else [],
             "default_publish_target_id": data.get("default_publish_target_id"),
@@ -1609,6 +1612,24 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     return run
 
 
+def _clear_pending_article_system_setup_for_domain(domain: str) -> None:
+    normalized_domain = str(domain or "").strip().lower()
+    if not normalized_domain:
+        return
+    organization = Organization.objects.filter(domain__iexact=normalized_domain).first()
+    if organization is None:
+        return
+    config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    if config is None or not isinstance(config.article_system, dict):
+        return
+    state = dict(config.article_system)
+    if "pending_article_system_setup" not in state:
+        return
+    state.pop("pending_article_system_setup", None)
+    config.article_system = state
+    config.save(update_fields=["article_system", "updated_at"])
+
+
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -1648,6 +1669,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "completed"
         error = ""
+        _clear_pending_article_system_setup_for_domain(result["domain"])
     elif event_type == "article_system_setup_manual_merge_required":
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED

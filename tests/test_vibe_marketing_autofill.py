@@ -2241,6 +2241,8 @@ class VibeMarketingAutofillTests(TestCase):
         def fake_post(url, json=None, headers=None, timeout=None):
             self.assertEqual(url, "https://content-factory.test/api/runs/scan")
             self.assertEqual(json["github_repo"], "acme/site")
+            self.assertEqual(json["scan_purpose"], "setup")
+            self.assertIs(json["scaffold_if_missing"], True)
             self.assertEqual(json["article_surface_mode"], "existing")
             self.assertIs(json["auto_setup_preview"], True)
             self.assertEqual(
@@ -2265,6 +2267,55 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.data["runId"], "scan-hint-1")
         run = ContentFactoryRun.objects.get(run_id="scan-hint-1")
         self.assertEqual(run.run_request["article_surface_hint"]["route_path"], "/articles")
+        self.assertEqual(run.run_request["scan_purpose"], "setup")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["routePath"], "/articles")
+        self.assertEqual(pending["sourceScanRunId"], "scan-hint-1")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_inventory_scan_does_not_require_article_surface_url(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={"github_repo": "acme/site"},
+        )
+
+        class FakeResponse:
+            status_code = 202
+            content = b"{}"
+
+            def json(self):
+                return {"run_id": "scan-inventory-1", "status": "queued", "workflow": "repo_scan"}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertEqual(url, "https://content-factory.test/api/runs/scan")
+            self.assertEqual(json["github_repo"], "acme/site")
+            self.assertEqual(json["scan_purpose"], "inventory")
+            self.assertIs(json["scaffold_if_missing"], False)
+            self.assertIs(json["auto_setup_preview"], False)
+            self.assertEqual(json["article_surface_mode"], "not_sure")
+            self.assertNotIn("article_surface_hint", json)
+            return FakeResponse()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/scan/",
+                {
+                    "githubRepo": "acme/site",
+                    "scanPurpose": "inventory",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "scan-inventory-1")
+        run = ContentFactoryRun.objects.get(run_id="scan-inventory-1")
+        self.assertEqual(run.run_request["scan_purpose"], "inventory")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        self.assertNotIn("pending_article_system_setup", config.article_system or {})
 
     def test_scan_rejects_mismatched_article_surface_domain(self):
         response = self.client.post(
