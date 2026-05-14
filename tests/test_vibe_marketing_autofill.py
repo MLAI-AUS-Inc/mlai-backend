@@ -836,8 +836,18 @@ class VibeMarketingAutofillTests(TestCase):
                     "collectedAt": "2026-04-25T00:00:00+00:00",
                     "overallScore": 78,
                     "summary": "Website baseline is workable.",
-                    "metrics": {"technicalHealth": {"status": "measured", "score": 82}},
-                    "sourceStatus": {"technicalHealth": "measured", "traffic": "needs_connection"},
+                    "metrics": {
+                        "technicalHealth": {"status": "measured", "score": 82},
+                        "aiVisibility": {
+                            "status": "measured",
+                            "score": 75,
+                            "providers": [
+                                {"key": "chatgpt", "label": "ChatGPT", "status": "measured", "score": 80},
+                                {"key": "claude", "label": "Claude", "status": "measured", "score": 70},
+                            ],
+                        },
+                    },
+                    "sourceStatus": {"technicalHealth": "measured", "aiVisibility": "measured", "traffic": "needs_connection"},
                     "recommendations": [{"title": "Connect Google", "source": "traffic"}],
                 }
             },
@@ -863,6 +873,9 @@ class VibeMarketingAutofillTests(TestCase):
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertTrue(bootstrap.data["checks"]["baseline"]["passed"])
         self.assertEqual(bootstrap.data["websiteBaseline"]["overallScore"], 78)
+        providers = bootstrap.data["websiteBaseline"]["metrics"]["aiVisibility"]["providers"]
+        self.assertEqual(providers[0]["key"], "chatgpt")
+        self.assertEqual(providers[1]["score"], 70)
 
     def test_bootstrap_returns_topic_candidates_from_selection_options(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
