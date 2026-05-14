@@ -168,11 +168,11 @@ WORKFLOW_STEP_DEFS = [
     },
     {
         "id": "article_system",
-        "label": "Article system",
+        "label": "Articles location",
         "phase": "Setup",
         "href": "/founder-tools/marketing/create?step=articleSystem",
         "check": "scaffold",
-        "summary": "Detect or prepare the article route, registry, and publish target.",
+        "summary": "Detect or prepare the articles/blogs route and repo location.",
     },
     {
         "id": "research",
@@ -3939,15 +3939,15 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         status_by_id["article_system"] = "running"
         run_by_id["article_system"] = pending_setup_scan_run.run_id
         href_by_id["article_system"] = _run_url(pending_setup_scan_run)
-        summary_by_id["article_system"] = "Article system setup scan is running."
+        summary_by_id["article_system"] = "Articles setup scan is running."
         status_by_id["generate"] = "locked"
     elif pending_article_system_setup and not setup_run:
         status_by_id["article_system"] = "complete"
-        summary_by_id["article_system"] = "Article system target confirmed."
+        summary_by_id["article_system"] = "Articles/blogs location confirmed."
         status_by_id["generate"] = "ready"
         href_by_id["generate"] = "/founder-tools/marketing/create?step=writeCheck"
         action_by_id["generate"] = _workflow_step_action(
-            "Generate article system",
+            "Generate articles setup preview",
             href=href_by_id["generate"],
             intent="start-article-system-setup",
         )
@@ -3962,21 +3962,21 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         href_by_id["publish"] = _run_url(setup_run)
         if setup_run.status in RUNNING_RUN_STATUSES:
             status_by_id["generate"] = "running"
-            summary_by_id["generate"] = "Article system setup is being generated."
+            summary_by_id["generate"] = "Articles setup preview is being generated."
         elif setup_run.status in FAILED_RUN_STATUSES:
             status_by_id["generate"] = "blocked"
             action_by_id["generate"] = _workflow_step_action("Open failed setup run", href=_run_url(setup_run))
         elif setup_run.status in {ContentFactoryRunStatus.AWAITING_CONFIRMATION, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "needs_action"
-            action_by_id["review"] = _workflow_step_action("Review articles page preview", href=_run_url(setup_run))
+            action_by_id["review"] = _workflow_step_action("Review articles setup preview", href=_run_url(setup_run))
             status_by_id["publish"] = "ready"
-            action_by_id["publish"] = _workflow_step_action("Approve article system", href=_run_url(setup_run))
+            action_by_id["publish"] = _workflow_step_action("Approve articles setup", href=_run_url(setup_run))
         elif setup_run.status == ContentFactoryRunStatus.COMPLETED:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "complete"
             status_by_id["publish"] = "complete"
-            summary_by_id["publish"] = "Article system setup is complete."
+            summary_by_id["publish"] = "Articles setup is complete."
 
     if setup_mode_active:
         status_by_id["research"] = "locked"
@@ -4536,7 +4536,7 @@ def _guided_steps(checks):
         ("baseline", "Website baseline", "baseline"),
         ("github", "Connect GitHub", "github"),
         ("scan", "Scan repository", "scan"),
-        ("articleSystem", "Prepare article system", "scaffold"),
+        ("articleSystem", "Prepare articles location", "scaffold"),
         ("research", "Research topics", "research"),
         ("chooseArticle", "Choose article", "research"),
         ("writeCheck", "Write + check", "write"),
@@ -6288,7 +6288,7 @@ class VibeMarketingArticleView(APIView):
             )
             if not scan_run or not _run_belongs_to_context(scan_run, context):
                 return Response(
-                    {"detail": "Run the repository scan before generating the article system setup."},
+                    {"detail": "Run the repository scan before generating the articles setup."},
                     status=status.HTTP_409_CONFLICT,
                 )
             remote_data = _call_content_factory_run_action(
@@ -6331,7 +6331,7 @@ class VibeMarketingArticleView(APIView):
                 scan_run.save(update_fields=["result", "status", "approval_state", "updated_at"])
                 return Response(_serialize_run(setup_run, context=context), status=status.HTTP_202_ACCEPTED)
             return Response(
-                {"detail": str(remote_data.get("detail") or remote_data.get("error") or "Article system setup could not be started.")},
+                {"detail": str(remote_data.get("detail") or remote_data.get("error") or "Articles setup could not be started.")},
                 status=status.HTTP_409_CONFLICT,
             )
         selected_title = str(
@@ -6516,7 +6516,7 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
         if run.workflow != "article_system_setup":
-            return Response({"detail": "Article system comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Articles setup comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
 
         feedback_batch_id = str(
             _request_value(request.data, "feedbackBatchId", "feedback_batch_id", default="") or ""
