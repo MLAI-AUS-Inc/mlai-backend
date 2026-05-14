@@ -190,6 +190,15 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["existing_fields"]["companyContext"], "AI workflow automation for founders.")
             self.assertEqual(json["existing_fields"]["competitors"], ["buildclub.ai", "aussiefoundersclub.com"])
             self.assertEqual(json["existing_fields"]["seedKeywords"], ["ai events melbourne", "founder automation"])
+            self.assertEqual(json["startup_profile"]["short_description"], "Manual founder-authored description.")
+            self.assertEqual(json["startup_profile"]["problem_solved"], "Manual problem statement.")
+            self.assertEqual(json["startup_profile"]["target_audience"], "Founder tools for marketing and monthly updates.")
+            self.assertEqual(json["startup_profile"]["founder_names"], ["Sam Donegan"])
+            self.assertEqual(json["startup_profile"]["stage"], "Seed")
+            self.assertEqual(json["startup_profile"]["organization_kind"], "For-profit")
+            self.assertEqual(json["existing_fields"]["profileFields"]["shortDescription"], "Manual founder-authored description.")
+            self.assertEqual(json["existing_fields"]["profileFields"]["problemSolved"], "Manual problem statement.")
+            self.assertEqual(json["existing_fields"]["profileFields"]["targetAudience"], "Founder tools for marketing and monthly updates.")
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
             self.assertEqual(json["min_direct_competitors"], 3)
@@ -209,10 +218,14 @@ class VibeMarketingAutofillTests(TestCase):
                     "abn": "94 807 394 137",
                     "brandName": "MLAI",
                     "companyContext": "AI workflow automation for founders.",
+                    "shortDescription": "Manual founder-authored description.",
+                    "problemSolved": "Manual problem statement.",
+                    "targetAudience": "Founder tools for marketing and monthly updates.",
                     "competitors": ["buildclub.ai", "aussiefoundersclub.com"],
                     "seedKeywords": ["ai events melbourne", "founder automation"],
                     "founderNames": ["Sam Donegan"],
                     "stage": "Seed",
+                    "organizationKind": "For-profit",
                     "notes": "Founder tools for marketing and monthly updates.",
                 },
                 format="json",
@@ -243,6 +256,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(startup_profile.competitor_domains, ["buildclub.ai", "aussiefoundersclub.com"])
         self.assertEqual(startup_profile.positive_keywords, ["ai events melbourne", "founder automation"])
         self.assertEqual(startup_profile.stage, "Seed")
+        self.assertEqual(startup_profile.organization_kind, "For-profit")
+        self.assertEqual(startup_profile.short_description, "Manual founder-authored description.")
+        self.assertEqual(startup_profile.problem_solved, "Manual problem statement.")
+        self.assertEqual(startup_profile.target_audience, "Founder tools for marketing and monthly updates.")
         self.assertEqual(startup_profile.notes, "Founder tools for marketing and monthly updates.")
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
@@ -256,6 +273,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(bootstrap.data["organization"]["seedKeywords"], ["ai events melbourne", "founder automation"])
         self.assertEqual(bootstrap.data["startupProfile"]["founderNames"], ["Sam Donegan"])
         self.assertEqual(bootstrap.data["startupProfile"]["stage"], "Seed")
+        self.assertEqual(bootstrap.data["startupProfile"]["organizationKind"], "For-profit")
+        self.assertEqual(bootstrap.data["startupProfile"]["shortDescription"], "Manual founder-authored description.")
+        self.assertEqual(bootstrap.data["startupProfile"]["problemSolved"], "Manual problem statement.")
+        self.assertEqual(bootstrap.data["startupProfile"]["targetAudience"], "Founder tools for marketing and monthly updates.")
         self.assertEqual(bootstrap.data["startupProfile"]["notes"], "Founder tools for marketing and monthly updates.")
 
     def test_settings_save_accepts_organization_kind_without_clearing_brand_or_notes(self):

@@ -3377,6 +3377,9 @@ def _serialize_startup_profile(organization):
             "founderNames": [],
             "stage": "",
             "organizationKind": "",
+            "shortDescription": "",
+            "problemSolved": "",
+            "targetAudience": "",
             "notes": "",
             "companyAliases": [],
             "domainAliases": [],
@@ -3385,6 +3388,9 @@ def _serialize_startup_profile(organization):
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
         "organizationKind": getattr(profile, "organization_kind", ""),
+        "shortDescription": getattr(profile, "short_description", ""),
+        "problemSolved": getattr(profile, "problem_solved", ""),
+        "targetAudience": getattr(profile, "target_audience", ""),
         "notes": profile.notes,
         "companyAliases": list(profile.company_aliases or []),
         "domainAliases": list(profile.domain_aliases or []),
@@ -4945,6 +4951,13 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
             workflow,
             exc,
         )
+        if workflow == "startup_autofill":
+            return _blocked_worker_payload(
+                workflow=workflow,
+                technical_error=str(exc),
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+                retryable=True,
+            )
         return _status_poll_unavailable_payload(
             workflow=workflow,
             technical_error=str(exc),
@@ -5920,12 +5933,34 @@ class VibeMarketingAutofillView(APIView):
         organization = context.organization
         config = _get_config(organization)
         actor_id = founder_actor_id_for_user(request.user)
+        startup_profile = _serialize_startup_profile(organization)
+        startup_profile_payload = {
+            "founder_names": startup_profile.get("founderNames", []),
+            "stage": startup_profile.get("stage", ""),
+            "organization_kind": startup_profile.get("organizationKind", ""),
+            "short_description": startup_profile.get("shortDescription", ""),
+            "problem_solved": startup_profile.get("problemSolved", ""),
+            "target_audience": startup_profile.get("targetAudience", ""),
+            "notes": startup_profile.get("notes", ""),
+        }
+        profile_fields = {
+            "shortDescription": startup_profile.get("shortDescription", ""),
+            "problemSolved": startup_profile.get("problemSolved", ""),
+            "targetAudience": startup_profile.get("targetAudience", ""),
+            "location": company.location,
+            "abn": company.abn,
+            "founderNames": startup_profile.get("founderNames", []),
+            "stage": startup_profile.get("stage", ""),
+            "organizationKind": startup_profile.get("organizationKind", ""),
+        }
         existing_fields = {
             "brandName": config.brand_name or organization.name,
             "companyContext": config.company_context or "",
             "competitors": _camel_list(organization.competitors),
             "seedKeywords": _camel_list(organization.seed_keywords),
             "companyLinkedInUrl": organization.company_linkedin_url,
+            "startupProfile": startup_profile,
+            "profileFields": profile_fields,
         }
         payload = {
             "domain": organization.domain,
@@ -5935,6 +5970,8 @@ class VibeMarketingAutofillView(APIView):
             "location": company.location,
             "abn": company.abn,
             "existing_fields": existing_fields,
+            "startup_profile": startup_profile_payload,
+            "profile_fields": profile_fields,
             "research_depth": "deep",
             "strict_deep_research": True,
             "min_direct_competitors": 3,
