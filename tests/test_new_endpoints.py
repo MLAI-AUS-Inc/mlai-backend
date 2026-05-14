@@ -1551,7 +1551,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_dm.assert_called_once()
         message = mock_send_dm.call_args.args[1]
         self.assertIn("article component catalog refreshed", message)
-        self.assertIn("Connect repo & article system", message)
+        self.assertIn("Connect repo & articles location", message)
         self.assertNotIn("contact support", message)
 
     @patch('integrations.services.article_generation.upsert_live_progress_card')

@@ -1806,7 +1806,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "manual_merge_required"
-        error = str(data.get("message") or "Manual merge is required for this article system setup.")
+        error = str(data.get("message") or "Manual merge is required for this articles setup.")
     else:
         run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
         approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -4127,7 +4127,7 @@ class ContentFactoryCallbackView(APIView):
                     message = (
                         f"⚠️ *{domain} needs its article component catalog refreshed.*\n\n"
                         f"{error_message}\n\n"
-                        f"Open the Connect repo & article system step and run the repository scan again."
+                        f"Open the Connect repo & articles location step and run the repository scan again."
                     )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
