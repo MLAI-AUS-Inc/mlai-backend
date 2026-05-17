@@ -1802,6 +1802,27 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         current_step = "completed"
         error = ""
         _clear_pending_article_system_setup_for_domain(result["domain"])
+    elif event_type == "article_system_setup_preview_failed":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "preview_failed"
+        setup_payload["setup_run_id"] = run_id
+        preview_error = str(
+            data.get("error")
+            or setup_payload.get("error")
+            or live_preview.get("error")
+            or "Articles setup preview could not be prepared."
+        ).strip()
+        setup_payload["error"] = preview_error
+        if "retryable" not in setup_payload:
+            setup_payload["retryable"] = live_preview.get("retryable", True)
+        result["status"] = "preview_failed"
+        result["article_system_setup"] = setup_payload
+        result["preview_url"] = ""
+        result["error"] = preview_error
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "preview_failed"
+        error = preview_error
     elif event_type == "article_system_setup_manual_merge_required":
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
@@ -1859,7 +1880,11 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             )
             parent.result = parent_result
             if parent.status == ContentFactoryRunStatus.RUNNING:
-                parent.current_step = "article_system_setup_preview"
+                parent.current_step = (
+                    "article_system_setup_preview_failed"
+                    if event_type == "article_system_setup_preview_failed"
+                    else "article_system_setup_preview"
+                )
             parent.save(update_fields=["result", "current_step", "updated_at"])
 
     return run
@@ -1922,6 +1947,7 @@ class ContentFactoryCallbackView(APIView):
             elif event_type in {
                 'article_system_setup_preview_ready',
                 'article_system_setup_revision_ready',
+                'article_system_setup_preview_failed',
                 'article_system_setup_completed',
                 'article_system_setup_manual_merge_required',
             }:
