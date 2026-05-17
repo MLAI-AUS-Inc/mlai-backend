@@ -2675,8 +2675,8 @@ def _publish_child_has_real_approval_gate(run):
 
 
 PUBLISH_CHILD_MISSING_REMOTE_WAIT_REASON = (
-    "Publish child was recorded locally but was not found in Content Factory. "
-    "Retry will recreate the same publish PR run."
+    "Publish job was queued but did not start. "
+    "Retry will safely recreate the same PR job."
 )
 
 
@@ -6494,7 +6494,8 @@ class VibeMarketingRunView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
-        skip_remote_status = bool(
+        skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
+        skip_remote_status = skipped_missing_publish_child or bool(
             run.workflow in ARTICLE_WORKFLOWS
             and run.status == ContentFactoryRunStatus.COMPLETED
             and _article_run_has_completed_local_artifacts(run)
@@ -6504,7 +6505,8 @@ class VibeMarketingRunView(APIView):
         remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
         if skip_remote_status:
             logger.info(
-                "content_factory_status_poll_skipped_terminal_article run_id=%s workflow=%s status=%s",
+                "content_factory_status_poll_skipped_%s run_id=%s workflow=%s status=%s",
+                "missing_publish_child_recoverable" if skipped_missing_publish_child else "terminal_article",
                 run.run_id,
                 run.workflow,
                 run.status,
