@@ -870,6 +870,42 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
 
+    def test_article_system_live_preview_failure_blocks_setup_run(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-preview-failed",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "article_system_setup": {"status": "preview_building"},
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+            },
+        )
+        preview_payload = {
+            "available": False,
+            "status": "failed",
+            "platformStatus": "failed",
+            "previewUrl": "",
+            "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+            "errorCode": "platform_preview_failed",
+            "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+            "retryable": True,
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/live-preview")
+
+        self.assertEqual(response.status_code, 200)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+
     def test_live_preview_retry_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"

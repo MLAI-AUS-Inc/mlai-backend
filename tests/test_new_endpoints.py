@@ -1097,6 +1097,58 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_failed_callback_blocks_run(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-parent-failed-preview",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-run-preview-failed",
+                "run_id": "setup-run-preview-failed",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-parent-failed-preview",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+                "live_preview": {
+                    "available": False,
+                    "status": "failed",
+                    "platformStatus": "failed",
+                    "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+                    "errorCode": "platform_preview_failed",
+                    "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+                    "retryable": True,
+                },
+                "live_preview_url": "/api/runs/setup-run-preview-failed/live-preview",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-failed",
+                    "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-preview-failed")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.error, "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.")
+        self.assertEqual(setup_run.result["livePreview"]["status"], "failed")
+        self.assertEqual(setup_run.result["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-parent-failed-preview")
+        self.assertEqual(parent.current_step, "article_system_setup_preview_failed")
+        self.assertEqual(parent.result["article_system_setup"]["status"], "preview_failed")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
         config = OrganizationContentConfig.objects.create(

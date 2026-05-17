@@ -2118,8 +2118,27 @@ def _persist_live_preview_payload(run, payload):
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         result = dict(run.result or {})
         result["livePreview"] = payload
+        update_fields = ["result", "updated_at"]
+        if run.workflow == "article_system_setup" and (
+            str(payload.get("status") or "").strip().lower() in {"failed", "blocked", "expired"}
+            or str(payload.get("platformStatus") or payload.get("platform_status") or "").strip().lower() in {"failed", "blocked", "expired"}
+            or payload.get("error")
+        ):
+            result["status"] = "preview_failed"
+            result["preview_url"] = ""
+            result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
+            setup_payload = dict(result.get("article_system_setup") or {})
+            setup_payload["status"] = "preview_failed"
+            setup_payload["error"] = result["error"]
+            setup_payload["retryable"] = payload.get("retryable", True)
+            result["article_system_setup"] = setup_payload
+            run.status = ContentFactoryRunStatus.BLOCKED
+            run.current_step = "preview_failed"
+            run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+            run.error = result["error"]
+            update_fields.extend(["status", "current_step", "approval_state", "error"])
         run.result = result
-        run.save(update_fields=["result", "updated_at"])
+        run.save(update_fields=update_fields)
     return run
 
 
