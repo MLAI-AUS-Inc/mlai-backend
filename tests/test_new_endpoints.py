@@ -1202,6 +1202,95 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.current_step, "article_system_setup_preview_failed")
         self.assertEqual(parent.result["article_system_setup"]["status"], "preview_failed")
 
+    def test_article_system_live_preview_retry_progress_clears_stale_failure_state(self):
+        from content_factory.vibe_marketing_views import _persist_live_preview_payload
+
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-run-preview-retry",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            error="Hosted preview workflow failed.",
+            result={
+                "status": "preview_failed",
+                "error": "Hosted preview workflow failed.",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-retry",
+                    "error": "Hosted preview workflow failed.",
+                },
+                "livePreview": {
+                    "available": False,
+                    "status": "failed",
+                    "platformStatus": "failed",
+                    "error": "Hosted preview workflow failed.",
+                },
+            },
+        )
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": False,
+                "status": "building",
+                "platformStatus": "queued",
+                "previewMode": "platform_deployment",
+                "previewUrl": "",
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(setup_run.current_step, "start_hosted_preview")
+        self.assertEqual(setup_run.error, "")
+        self.assertEqual(setup_run.result["status"], "preview_building")
+        self.assertNotIn("error", setup_run.result)
+        self.assertNotIn("error", setup_run.result["article_system_setup"])
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_building")
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": True,
+                "status": "running",
+                "platformStatus": "ready",
+                "previewMode": "platform_deployment",
+                "previewUrl": "https://preview.example/articles",
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.APPROVAL_REQUIRED)
+        self.assertEqual(setup_run.error, "")
+        self.assertEqual(setup_run.result["status"], "preview_ready")
+        self.assertEqual(setup_run.result["preview_url"], "https://preview.example/articles")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_ready")
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": False,
+                "status": "failed",
+                "platformStatus": "failed",
+                "previewMode": "platform_deployment",
+                "previewUrl": "",
+                "error": "Hosted preview workflow failed again.",
+                "retryable": True,
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.error, "Hosted preview workflow failed again.")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(setup_run.result["article_system_setup"]["error"], "Hosted preview workflow failed again.")
+
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")

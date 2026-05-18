@@ -2113,6 +2113,17 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
     return rewritten.encode("utf-8")
 
 
+LIVE_PREVIEW_ACTIVE_STATUSES = {"queued", "pending", "preparing", "starting", "building", "running"}
+LIVE_PREVIEW_FAILURE_STATUSES = {"failed", "blocked", "expired", "cancelled", "canceled", "timeout", "timed_out"}
+
+
+def _live_preview_statuses(payload):
+    return {
+        str(payload.get("status") or "").strip().lower(),
+        str(payload.get("platformStatus") or payload.get("platform_status") or "").strip().lower(),
+    } - {""}
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _normalize_live_preview_payload(payload)
@@ -2120,24 +2131,52 @@ def _persist_live_preview_payload(run, payload):
         result = dict(run.result or {})
         result["livePreview"] = payload
         update_fields = ["result", "updated_at"]
-        if run.workflow == "article_system_setup" and (
-            str(payload.get("status") or "").strip().lower() in {"failed", "blocked", "expired"}
-            or str(payload.get("platformStatus") or payload.get("platform_status") or "").strip().lower() in {"failed", "blocked", "expired"}
-            or payload.get("error")
-        ):
-            result["status"] = "preview_failed"
-            result["preview_url"] = ""
-            result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
+        if run.workflow == "article_system_setup":
+            preview_statuses = _live_preview_statuses(payload)
+            preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+            failed = bool(preview_statuses.intersection(LIVE_PREVIEW_FAILURE_STATUSES) or payload.get("error"))
+            ready = bool(preview_url)
+            active = bool(preview_statuses.intersection(LIVE_PREVIEW_ACTIVE_STATUSES))
             setup_payload = dict(result.get("article_system_setup") or {})
-            setup_payload["status"] = "preview_failed"
-            setup_payload["error"] = result["error"]
-            setup_payload["retryable"] = payload.get("retryable", True)
-            result["article_system_setup"] = setup_payload
-            run.status = ContentFactoryRunStatus.BLOCKED
-            run.current_step = "preview_failed"
-            run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
-            run.error = result["error"]
-            update_fields.extend(["status", "current_step", "approval_state", "error"])
+
+            if failed:
+                result["status"] = "preview_failed"
+                result["preview_url"] = ""
+                result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
+                setup_payload["status"] = "preview_failed"
+                setup_payload["error"] = result["error"]
+                setup_payload["retryable"] = payload.get("retryable", True)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.BLOCKED
+                run.current_step = "preview_failed"
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.error = result["error"]
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
+            elif ready:
+                result["status"] = "preview_ready"
+                result["preview_url"] = preview_url
+                result.pop("error", None)
+                setup_payload["status"] = "preview_ready"
+                setup_payload["preview_url"] = preview_url
+                setup_payload.pop("error", None)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
+                run.current_step = "await_review"
+                run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+                run.error = ""
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
+            elif active:
+                result["status"] = "preview_building"
+                result["preview_url"] = ""
+                result.pop("error", None)
+                setup_payload["status"] = "preview_building"
+                setup_payload.pop("error", None)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.RUNNING
+                run.current_step = "start_hosted_preview"
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.error = ""
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
         run.result = result
         run.save(update_fields=update_fields)
     return run
