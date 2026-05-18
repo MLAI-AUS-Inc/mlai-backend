@@ -2124,11 +2124,38 @@ def _live_preview_statuses(payload):
     } - {""}
 
 
+def _live_preview_identity(payload):
+    if not isinstance(payload, dict):
+        return ()
+    return tuple(
+        str(payload.get(key) or "").strip()
+        for key in (
+            "startedAt",
+            "started_at",
+            "expiresAt",
+            "expires_at",
+            "commitSha",
+            "commit_sha",
+            "builderRunUrl",
+            "builder_run_url",
+            "deploymentId",
+            "deployment_id",
+        )
+    )
+
+
+def _active_live_preview_payload_is_newer(previous_payload, next_payload):
+    previous_identity = _live_preview_identity(previous_payload)
+    next_identity = _live_preview_identity(next_payload)
+    return bool(any(next_identity)) and next_identity != previous_identity
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         result = dict(run.result or {})
+        previous_preview = result.get("livePreview") if isinstance(result.get("livePreview"), dict) else result.get("live_preview")
         result["livePreview"] = payload
         update_fields = ["result", "updated_at"]
         if run.workflow == "article_system_setup":
@@ -2138,6 +2165,7 @@ def _persist_live_preview_payload(run, payload):
             ready = bool(preview_url)
             active = bool(preview_statuses.intersection(LIVE_PREVIEW_ACTIVE_STATUSES))
             setup_payload = dict(result.get("article_system_setup") or {})
+            terminal_local = run.status in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.CANCELLED}
 
             if failed:
                 result["status"] = "preview_failed"
@@ -2166,17 +2194,18 @@ def _persist_live_preview_payload(run, payload):
                 run.error = ""
                 update_fields.extend(["status", "current_step", "approval_state", "error"])
             elif active:
-                result["status"] = "preview_building"
-                result["preview_url"] = ""
-                result.pop("error", None)
-                setup_payload["status"] = "preview_building"
-                setup_payload.pop("error", None)
-                result["article_system_setup"] = setup_payload
-                run.status = ContentFactoryRunStatus.RUNNING
-                run.current_step = "start_hosted_preview"
-                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
-                run.error = ""
-                update_fields.extend(["status", "current_step", "approval_state", "error"])
+                if not terminal_local or _active_live_preview_payload_is_newer(previous_preview, payload):
+                    result["status"] = "preview_building"
+                    result["preview_url"] = ""
+                    result.pop("error", None)
+                    setup_payload["status"] = "preview_building"
+                    setup_payload.pop("error", None)
+                    result["article_system_setup"] = setup_payload
+                    run.status = ContentFactoryRunStatus.RUNNING
+                    run.current_step = "start_hosted_preview"
+                    run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                    run.error = ""
+                    update_fields.extend(["status", "current_step", "approval_state", "error"])
         run.result = result
         run.save(update_fields=update_fields)
     return run
