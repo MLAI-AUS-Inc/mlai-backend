@@ -880,10 +880,16 @@ class ContentFactoryTokenView(APIView):
     def get(self, request):
         from integrations.services.github import ensure_valid_token, TokenRefreshError
         from integrations.services.article_generation import ensure_valid_org_token, ArticleGenerationError
+        from integrations.services.github_app import (
+            GitHubAppTokenError,
+            create_installation_access_token,
+            github_app_credentials_configured,
+        )
         from integrations.models import UserIntegration
 
         domain = request.query_params.get('domain')
         slack_user_id = request.query_params.get('slack_user_id')
+        requested_repo = str(request.query_params.get('github_repo') or '').strip()
 
         if not domain and not slack_user_id:
             return Response(
@@ -895,17 +901,65 @@ class ContentFactoryTokenView(APIView):
         if domain:
             normalized_domain = self._normalize_domain(domain)
             try:
-                fresh_token = ensure_valid_org_token(normalized_domain)
-
                 # Fetch config for additional context
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
+                github_repo = requested_repo or str(config.github_repo or '').strip()
 
+                if config.github_installation_id and github_repo:
+                    if not github_app_credentials_configured():
+                        logger.warning("GitHub App credentials are not configured for installation token lookup.")
+                        return Response(
+                            {
+                                'error': 'GitHub App credentials are not configured',
+                                'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
+                                'action_required': 'server_configuration_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+                    try:
+                        installation_token = create_installation_access_token(
+                            installation_id=config.github_installation_id,
+                            repository=github_repo,
+                            permission_mode='write',
+                        )
+                    except GitHubAppTokenError as exc:
+                        logger.warning(
+                            "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
+                            normalized_domain,
+                            github_repo,
+                            config.github_installation_id,
+                            exc,
+                        )
+                        return Response(
+                            {
+                                'error': 'GitHub App installation access failed',
+                                'message': str(exc),
+                                'action_required': 'auth_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+
+                    response_data = installation_token.as_content_factory_payload(domain=normalized_domain)
+                    logger.info(
+                        "Provided GitHub App installation token for %s repo=%s installation_id=%s",
+                        normalized_domain,
+                        github_repo,
+                        config.github_installation_id,
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+
+                fresh_token = ensure_valid_org_token(normalized_domain)
                 response_data = {
                     'github_token': fresh_token,
-                    'github_repo': config.github_repo,
+                    'github_repo': github_repo or config.github_repo,
                     'domain': normalized_domain,
                     'source': 'org',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if config.github_token_expires_at:
@@ -946,6 +1000,7 @@ class ContentFactoryTokenView(APIView):
                     'github_repo': integration.github_repo,
                     'slack_user_id': slack_user_id,
                     'source': 'user',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if integration.github_token_expires_at:
