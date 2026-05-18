@@ -1151,6 +1151,106 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_completed_waits_for_verification_scan(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_ready",
+                    "setup_run_id": "setup-run-complete",
+                    "setupRunId": "setup-run-complete",
+                }
+            },
+        )
+
+        completed_response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_completed",
+                "job_id": "setup-run-complete",
+                "run_id": "setup-run-complete",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-parent-complete",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/9",
+                "rescan_run_id": "verify-setup-complete",
+                "merge_status": "merged",
+            },
+            format='json',
+        )
+
+        self.assertEqual(completed_response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "merged_verifying")
+        self.assertEqual(pending["rescan_run_id"], "verify-setup-complete")
+        self.assertFalse(config.articles_scaffolded)
+
+        scan_response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "verify-setup-complete",
+                "run_id": "verify-setup-complete",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "article_system": {"state": "existing", "confidence": "high", "directory_name": "articles"},
+                "publish_targets": [{"id": "articles", "label": "Articles"}],
+                "default_publish_target_id": "articles",
+            },
+            format='json',
+        )
+
+        self.assertEqual(scan_response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.article_system["state"], "existing")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scaffold_complete_persists_preview_metadata_without_publishing(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "pending_generation",
+                    "setup_run_id": "setup-run-scaffold",
+                    "setupRunId": "setup-run-scaffold",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scaffold_complete",
+                "job_id": "setup-run-scaffold",
+                "parent_run_id": "scan-run-scaffold",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10",
+                "preview_url": "https://preview.example/articles",
+                "already_exists": False,
+                "build_verified": True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "preview_ready")
+        self.assertEqual(pending["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10")
+        self.assertFalse(config.articles_scaffolded)
+        self.assertNotEqual(config.article_system.get("state"), "roo_scaffolded")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_preview_failed_callback_blocks_run(self, mock_send_dm):
         Organization.objects.create(name="MLAI", domain="mlai.au")
         ContentFactoryRun.objects.create(

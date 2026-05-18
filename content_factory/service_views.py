@@ -1718,8 +1718,8 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
             "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
             "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
-            "scan_purpose": str(data.get("scan_purpose") or "").strip(),
             "article_surface_mode": str(data.get("article_surface_mode") or "").strip(),
+            "scan_purpose": str(data.get("scan_purpose") or "").strip(),
             "article_surface_resolution": data.get("article_surface_resolution") if isinstance(data.get("article_surface_resolution"), dict) else {},
             "matched_article_surface": data.get("matched_article_surface"),
             "publish_targets": data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else [],
@@ -1800,21 +1800,45 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
 
 
 def _clear_pending_article_system_setup_for_domain(domain: str) -> None:
-    normalized_domain = str(domain or "").strip().lower()
-    if not normalized_domain:
+    domain = str(domain or "").strip()
+    if not domain:
         return
-    organization = Organization.objects.filter(domain__iexact=normalized_domain).first()
-    if organization is None:
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = dict(config.article_system or {})
+        if "pending_article_system_setup" not in article_system:
+            return
+        article_system.pop("pending_article_system_setup", None)
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to clear pending article system setup for %s: %s", domain, exc)
+
+
+def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> None:
+    domain = str(domain or "").strip()
+    if not domain:
         return
-    config = OrganizationContentConfig.objects.filter(organization=organization).first()
-    if config is None or not isinstance(config.article_system, dict):
-        return
-    state = dict(config.article_system)
-    if "pending_article_system_setup" not in state:
-        return
-    state.pop("pending_article_system_setup", None)
-    config.article_system = state
-    config.save(update_fields=["article_system", "updated_at"])
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = dict(config.article_system or {})
+        pending = dict(article_system.get("pending_article_system_setup") or {})
+        pending.update({key: value for key, value in updates.items() if value not in (None, "")})
+        if not pending:
+            return
+        pending["updatedAt"] = timezone.now().isoformat()
+        pending["updated_at"] = pending["updatedAt"]
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
 
 
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
@@ -1838,6 +1862,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "parent_run_id": data.get("parent_run_id"),
             "scan_run_id": data.get("scan_run_id") or data.get("parent_run_id"),
             "setup_run_id": run_id,
+            "source_setup_run_id": data.get("source_setup_run_id") or data.get("setup_run_id") or run_id,
+            "rescan_run_id": data.get("rescan_run_id") or setup_payload.get("rescan_run_id"),
+            "merge_status": data.get("merge_status") or setup_payload.get("merge_status"),
             "article_system_setup": setup_payload,
             "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
             "preview_url": data.get("preview_url") or setup_payload.get("preview_url"),
@@ -1848,15 +1875,40 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "review_comments_path": data.get("review_comments_path") or result.get("review_comments_path"),
             "livePreview": live_preview,
             "live_preview": live_preview,
+            "error_code": data.get("error_code") or setup_payload.get("error_code") or result.get("error_code"),
+            "retryable": (
+                data.get("retryable")
+                if data.get("retryable") is not None
+                else setup_payload.get("retryable", result.get("retryable"))
+            ),
+            "retry_available": (
+                data.get("retry_available")
+                if data.get("retry_available") is not None
+                else setup_payload.get("retry_available", result.get("retry_available"))
+            ),
+            "stale": data.get("stale") if data.get("stale") is not None else result.get("stale"),
+            "stale_reason": data.get("stale_reason") or result.get("stale_reason"),
+            "queue_name": data.get("queue_name") or setup_payload.get("queue_name") or result.get("queue_name"),
+            "queued_at": data.get("queued_at") or setup_payload.get("queued_at") or result.get("queued_at"),
+            "setup_queue": data.get("setup_queue") or result.get("setup_queue"),
         }
     )
 
     if event_type == "article_system_setup_completed":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "merged_verifying"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["merge_status"] = result.get("merge_status") or "merged"
+        if result.get("rescan_run_id"):
+            setup_payload["rescan_run_id"] = result.get("rescan_run_id")
+        result["status"] = "completed"
+        result["merge_status"] = setup_payload["merge_status"]
+        result["article_system_setup"] = setup_payload
         run_status = ContentFactoryRunStatus.COMPLETED
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "completed"
         error = ""
-        _clear_pending_article_system_setup_for_domain(result["domain"])
     elif event_type == "article_system_setup_preview_failed":
         setup_payload = dict(setup_payload)
         setup_payload["status"] = "preview_failed"
@@ -1868,22 +1920,44 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             or "Articles setup preview could not be prepared."
         ).strip()
         setup_payload["error"] = preview_error
+        setup_payload["error_code"] = data.get("error_code") or setup_payload.get("error_code")
         if "retryable" not in setup_payload:
             setup_payload["retryable"] = live_preview.get("retryable", True)
+        setup_payload["retry_available"] = bool(
+            data.get("retry_available")
+            if data.get("retry_available") is not None
+            else setup_payload.get("retryable", True)
+        )
         result["status"] = "preview_failed"
         result["article_system_setup"] = setup_payload
         result["preview_url"] = ""
         result["error"] = preview_error
+        result["error_code"] = setup_payload.get("error_code")
+        result["retryable"] = bool(setup_payload.get("retryable", True))
+        result["retry_available"] = bool(setup_payload.get("retry_available", True))
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "preview_failed"
         error = preview_error
     elif event_type == "article_system_setup_manual_merge_required":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "manual_merge_required"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["merge_status"] = result.get("merge_status") or "manual_required"
+        result["status"] = "manual_merge_required"
+        result["merge_status"] = setup_payload["merge_status"]
+        result["article_system_setup"] = setup_payload
         run_status = ContentFactoryRunStatus.BLOCKED
-        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "manual_merge_required"
-        error = str(data.get("message") or "Manual merge is required for this articles setup.")
+        error = str(data.get("message") or "Manual merge is required for this article system setup.")
     else:
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = setup_payload.get("status") or "preview_ready"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        result["article_system_setup"] = setup_payload
         run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
         approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
         current_step = "await_review"
@@ -1912,7 +1986,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             },
             "result": result,
             "error": error,
-            "resume_available": bool(existing_run.resume_available if existing_run else False),
+            "resume_available": bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
         },
     )
 
@@ -1927,6 +2001,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             parent_result.update(
                 {
                     "setup_run_id": run_id,
+                    "source_setup_run_id": result.get("source_setup_run_id") or run_id,
+                    "rescan_run_id": result.get("rescan_run_id"),
+                    "merge_status": result.get("merge_status"),
                     "article_system_setup": parent_setup,
                     "preview_url": result.get("preview_url"),
                     "pr_url": result.get("pr_url"),
@@ -1934,14 +2011,33 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                 }
             )
             parent.result = parent_result
-            if parent.status == ContentFactoryRunStatus.RUNNING:
+            if parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
+                parent.status = ContentFactoryRunStatus.COMPLETED
                 parent.current_step = (
                     "article_system_setup_preview_failed"
                     if event_type == "article_system_setup_preview_failed"
                     else "article_system_setup_preview"
                 )
-            parent.save(update_fields=["result", "current_step", "updated_at"])
+            parent.save(update_fields=["status", "result", "current_step", "updated_at"])
 
+    _update_pending_article_system_setup_for_domain(
+        result["domain"],
+        setupRunId=run_id,
+        setup_run_id=run_id,
+        status=setup_payload.get("status") or result.get("status"),
+        setupStatus=setup_payload.get("status") or result.get("status"),
+        setup_status=setup_payload.get("status") or result.get("status"),
+        rescanRunId=result.get("rescan_run_id"),
+        rescan_run_id=result.get("rescan_run_id"),
+        prUrl=result.get("pr_url"),
+        pr_url=result.get("pr_url"),
+        previewUrl=result.get("preview_url") or result.get("live_preview_url"),
+        preview_url=result.get("preview_url") or result.get("live_preview_url"),
+        livePreviewUrl=result.get("live_preview_url"),
+        live_preview_url=result.get("live_preview_url"),
+        mergeStatus=result.get("merge_status"),
+        merge_status=result.get("merge_status"),
+    )
     return run
 
 
@@ -3777,12 +3873,19 @@ class ContentFactoryCallbackView(APIView):
         # Persist and resolve article-system readiness for messaging and auto-resume.
         has_pillars = False
         article_system = normalize_article_system(data.get('article_system'))
+        setup_pending_after_scan = False
         try:
             from integrations.utils import normalize_domain
 
             org = Organization.objects.get(domain=normalize_domain(domain))
             config = org.content_config
             has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
+            raw_article_system = dict(config.article_system or {})
+            pending_setup = dict(raw_article_system.get('pending_article_system_setup') or {})
+            pending_rescan_run_id = str(
+                pending_setup.get('rescanRunId') or pending_setup.get('rescan_run_id') or ''
+            ).strip()
+            is_setup_verification_scan = bool(pending_rescan_run_id and str(run_id) == pending_rescan_run_id)
             if data.get('article_system') is not None:
                 current_article_system = resolve_article_system(config)
                 incoming_article_system = normalize_article_system(data.get('article_system'))
@@ -3805,6 +3908,24 @@ class ContentFactoryCallbackView(APIView):
                     merged_article_system = merge_article_system(current_article_system, incoming_article_system)
 
                 update_fields = []
+                verification_published = bool(
+                    is_setup_verification_scan
+                    and (article_system_ready(merged_article_system) or bool(publish_targets))
+                )
+                if pending_setup:
+                    if verification_published:
+                        merged_article_system.pop('pending_article_system_setup', None)
+                        if not config.articles_scaffolded:
+                            config.articles_scaffolded = True
+                            update_fields.append('articles_scaffolded')
+                        if pending_setup.get('prUrl') or pending_setup.get('pr_url'):
+                            config.articles_scaffold_pr_url = pending_setup.get('prUrl') or pending_setup.get('pr_url')
+                            update_fields.append('articles_scaffold_pr_url')
+                        if pending_setup.get('previewUrl') or pending_setup.get('preview_url'):
+                            config.articles_scaffold_preview_url = pending_setup.get('previewUrl') or pending_setup.get('preview_url')
+                            update_fields.append('articles_scaffold_preview_url')
+                    else:
+                        merged_article_system['pending_article_system_setup'] = pending_setup
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
@@ -3821,6 +3942,14 @@ class ContentFactoryCallbackView(APIView):
                 article_system = merged_article_system
             else:
                 update_fields = []
+                if pending_setup and is_setup_verification_scan and publish_targets:
+                    next_article_system = dict(config.article_system or {})
+                    next_article_system.pop('pending_article_system_setup', None)
+                    config.article_system = next_article_system
+                    update_fields.append('article_system')
+                    if not config.articles_scaffolded:
+                        config.articles_scaffolded = True
+                        update_fields.append('articles_scaffolded')
                 if publish_targets != (config.publish_targets or []):
                     config.publish_targets = publish_targets
                     update_fields.append('publish_targets')
@@ -3832,6 +3961,7 @@ class ContentFactoryCallbackView(APIView):
                     update_fields.append('updated_at')
                     config.save(update_fields=update_fields)
                 article_system = resolve_article_system(config)
+            setup_pending_after_scan = bool((config.article_system or {}).get('pending_article_system_setup'))
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
             pass
 
@@ -3844,7 +3974,7 @@ class ContentFactoryCallbackView(APIView):
 
         try:
             pending_resumed = False
-            if slack_user_id and destination_summary and not approval_required and not scaffold_queued:
+            if slack_user_id and destination_summary and not approval_required and not scaffold_queued and not setup_pending_after_scan:
                 try:
                     from integrations.models import UserIntegration
                     from integrations.services.article_generation import trigger_article_generation
@@ -4396,16 +4526,16 @@ class ContentFactoryCallbackView(APIView):
                 'job_id': job_id,
             }, status=status.HTTP_200_OK)
 
-        # Persist canonical article-system state from scaffold results.
+        # Persist scaffold PR/preview metadata. A newly created setup PR is not
+        # a usable articles surface until it is merged and a verification scan
+        # sees the article system on the default branch.
         normalized_domain = ''
         try:
             normalized_domain = normalize_domain(domain)
             org = Organization.objects.get(domain=normalized_domain)
             config = org.content_config
-            incoming_article_system = data.get('article_system')
-            if incoming_article_system is not None:
-                config.article_system = merge_article_system(resolve_article_system(config), incoming_article_system)
-            elif already_exists:
+            article_system_payload = dict(config.article_system or {})
+            if already_exists:
                 existing_system = resolve_article_system(config)
                 existing_system.update(
                     {
@@ -4413,33 +4543,45 @@ class ContentFactoryCallbackView(APIView):
                         'source': existing_system.get('source') or 'scan',
                     }
                 )
-                config.article_system = normalize_article_system(existing_system)
+                next_article_system = normalize_article_system(existing_system)
+                next_article_system.pop('pending_article_system_setup', None)
+                config.article_system = next_article_system
+                config.articles_scaffolded = True
             else:
-                scaffolded_system = resolve_article_system(config)
-                scaffolded_system.update(
+                pending = dict(article_system_payload.get('pending_article_system_setup') or {})
+                pending.update(
                     {
-                        'state': 'roo_scaffolded',
-                        'confidence': 'high',
-                        'source': 'scaffold',
-                        'reason': scaffolded_system.get('reason') or 'Roo scaffolded the article system for this repository',
+                        'status': 'preview_ready',
+                        'setupStatus': 'preview_ready',
+                        'setup_status': 'preview_ready',
+                        'setupRunId': job_id,
+                        'setup_run_id': job_id,
+                        'sourceScanRunId': parent_run_id or pending.get('sourceScanRunId') or pending.get('source_scan_run_id') or '',
+                        'source_scan_run_id': parent_run_id or pending.get('source_scan_run_id') or pending.get('sourceScanRunId') or '',
+                        'prUrl': pr_url,
+                        'pr_url': pr_url,
+                        'previewUrl': preview_url,
+                        'preview_url': preview_url,
+                        'buildVerified': bool(build_verified),
+                        'build_verified': bool(build_verified),
+                        'updatedAt': timezone.now().isoformat(),
+                        'updated_at': timezone.now().isoformat(),
                     }
                 )
-                config.article_system = normalize_article_system(scaffolded_system)
-
-            if not already_exists:
-                config.articles_scaffolded = True
+                article_system_payload['pending_article_system_setup'] = pending
+                config.article_system = article_system_payload
             if pr_url:
                 config.articles_scaffold_pr_url = pr_url
             if preview_url:
                 config.articles_scaffold_preview_url = preview_url
             config.save()
-            logger.info(f"Updated article_system for {domain} after scaffold callback")
+            logger.info(f"Updated article setup metadata for {domain} after scaffold callback")
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
-            logger.warning(f"Could not update article_system for {domain}: {e}")
+            logger.warning(f"Could not update article setup metadata for {domain}: {e}")
 
         # Check for pending article intent to auto-resume
         pending_resumed = False
-        if slack_user_id:
+        if slack_user_id and already_exists:
             try:
                 from integrations.models import UserIntegration
                 integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
@@ -4506,46 +4648,8 @@ class ContentFactoryCallbackView(APIView):
                     f"  • {build_status}\n\n"
                     f"*Review the PR:* {pr_url}{preview_line}"
                 )
-                if pending_resumed:
-                    text_body += (
-                        f"\n\n🔄 *Resuming your article request automatically!* "
-                        f"You'll get a notification shortly."
-                    )
-                    _send(text_body)
-                else:
-                    text_body += "\n\nOnce merged, I can write your first article."
-                    blocks = [
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": text_body}
-                        },
-                        {
-                            "type": "actions",
-                            "block_id": f"write_article_{domain}",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "Write First Article"},
-                                    "style": "primary",
-                                    "action_id": "write_first_article",
-                                    "value": _json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": slack_user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                    })
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "Skip for now"},
-                                    "action_id": "write_article_skip",
-                                    "value": _json.dumps({"domain": domain})
-                                }
-                            ]
-                        }
-                    ]
-                    fallback_text = f"📁 Articles directory created for {domain}! Review the PR: {pr_url}"
-                    _send(fallback_text, blocks=blocks)
+                text_body += "\n\nApprove and merge this setup PR. Topic research will unlock after the merged directory is verified on the default branch."
+                _send(text_body)
             else:
                 _send(
                     f"📁 Articles directory scaffolded for *{domain}*, but "
