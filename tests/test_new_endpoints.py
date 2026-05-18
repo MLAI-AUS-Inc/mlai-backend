@@ -206,6 +206,60 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             {"type": "write_article", "article_request": {"domain": "mlai.au"}},
         )
 
+    def test_content_factory_token_prefers_github_app_installation_token(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            github_token_encrypted="legacy-user-token",
+            github_installation_id="12345",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_installation",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="12345",
+            repository="acme/site",
+        )
+
+        with patch("integrations.services.github_app.github_app_credentials_configured", return_value=True), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "acme.com", "github_repo": "acme/site"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_token"], "ghs_installation")
+        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertEqual(response.data["github_installation_id"], "12345")
+        self.assertEqual(response.data["token_source"], "github_app_installation")
+        create_token.assert_called_once_with(
+            installation_id="12345",
+            repository="acme/site",
+            permission_mode="write",
+        )
+
+    def test_content_factory_token_blocks_when_installation_app_credentials_missing(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            github_token_encrypted="legacy-user-token",
+            github_installation_id="12345",
+        )
+
+        with patch("integrations.services.github_app.github_app_credentials_configured", return_value=False):
+            response = self.client.get(reverse("content_factory_token"), {"domain": "acme.com"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["action_required"], "server_configuration_required")
+        self.assertEqual(response.data["github_installation_id"], "12345")
+        self.assertNotIn("legacy-user-token", str(response.data))
+
     @patch('integrations.services.github.http_requests.post')
     def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
         ContentFactoryJob.objects.create(

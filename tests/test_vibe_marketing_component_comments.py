@@ -405,7 +405,66 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": False, "github_token": "org-live-preview-token"},
+            payload={
+                "force": False,
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
+        )
+
+    def test_completed_article_run_auto_prepare_prefers_github_app_installation_token(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "legacy-org-live-preview-token"
+        config.github_installation_id = "12345"
+        config.save(update_fields=["github_token_encrypted", "github_installation_id", "updated_at"])
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+        app_token = GitHubInstallationToken(
+            token="ghs_installation",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+        )
+        preview_payload = {"available": False, "status": "starting", "previewUrl": ""}
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True),
+            patch(
+                "content_factory.vibe_marketing_views.create_installation_access_token",
+                return_value=app_token,
+            ) as create_token,
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={
+                "force": False,
+                "github_token": "ghs_installation",
+                "github_installation_id": "12345",
+                "token_source": "github_app_installation",
+            },
+        )
+        create_token.assert_called_once_with(
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+            permission_mode="write",
         )
 
     def test_completed_article_run_refreshes_starting_preview_failure(self):
@@ -927,7 +986,12 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": True, "local_repo_path": "", "github_token": "org-live-preview-token"},
+            payload={
+                "force": True,
+                "local_repo_path": "",
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
         )
 
     @override_settings(

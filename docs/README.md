@@ -17,5 +17,6 @@ Existing docs:
 - [Jobs Daily Setup](./JOBS_DAILY_SETUP.md)
 - [Community Bridge Setup](./community_bridge_setup.md)
 - [Content Factory GitHub Reconnect](./CONTENT_FACTORY_GITHUB_RECONNECT.md)
+- [Content Factory GitHub App Env](./CONTENT_FACTORY_GITHUB_APP_ENV.md)
 - [Local Live DB Docker](./local-live-db-docker.md)
 - [MLAI Tech Charts](./MLAI_TECH_CHARTS.md)

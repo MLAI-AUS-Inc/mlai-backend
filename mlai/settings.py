@@ -554,6 +554,7 @@ BASIQ_API_VERSION = os.environ.get("BASIQ_API_VERSION", "3.0")
 
 # GitHub App Settings (for GitHub App installation flow)
 GITHUB_APP_ID = os.environ.get("GITHUB_APP_ID")
+GITHUB_APP_PRIVATE_KEY = os.environ.get("GITHUB_APP_PRIVATE_KEY")
 GITHUB_OAUTH_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID")
 GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET")
 GITHUB_OAUTH_REDIRECT_URI = os.environ.get(

@@ -74,6 +74,7 @@ from integrations import http_client
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
 from integrations.services.github import ScanError, TokenRefreshError, build_github_auth_url, ensure_valid_token
+from integrations.services.github_app import GitHubAppTokenError, create_installation_access_token, github_app_credentials_configured
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -2177,11 +2178,76 @@ def _article_preview_should_refresh(run):
     return preview_status in {"running", "starting"}
 
 
+def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permission_mode: str = "write") -> dict:
+    normalized_domain = normalize_company_domain(domain or "")
+    repo = str(github_repo or "").strip()
+    if not normalized_domain or not repo or not github_app_credentials_configured():
+        return {}
+    try:
+        organization = Organization.objects.get(domain=normalized_domain)
+        config = _get_config(organization)
+    except Organization.DoesNotExist:
+        return {}
+    installation_id = str(config.github_installation_id or "").strip()
+    if not installation_id:
+        return {}
+    token = create_installation_access_token(
+        installation_id=installation_id,
+        repository=repo,
+        permission_mode=permission_mode,
+    )
+    return token.as_content_factory_payload(domain=normalized_domain)
+
+
+def _github_token_for_repo_operation(*, domain: str, github_repo: str, permission_mode: str = "write") -> tuple[str, str]:
+    try:
+        payload = _github_app_token_payload_for_domain(
+            domain=domain,
+            github_repo=github_repo,
+            permission_mode=permission_mode,
+        )
+        token = str(payload.get("github_token") or "").strip()
+        if token:
+            return token, str(payload.get("token_source") or "github_app_installation")
+    except GitHubAppTokenError as exc:
+        logger.warning(
+            "github_app_installation_token_unavailable_falling_back domain=%s github_repo=%s error=%s",
+            domain,
+            github_repo,
+            exc,
+        )
+
+    token = ensure_valid_org_token(domain)
+    return token, "github_oauth_user_token"
+
+
 def _live_preview_github_token_payload(run):
     domain = normalize_company_domain(getattr(run, "domain", "") or "")
     github_repo = str(getattr(run, "github_repo", "") or "").strip()
     if not domain or not github_repo:
         return {}
+    try:
+        token_payload = _github_app_token_payload_for_domain(
+            domain=domain,
+            github_repo=github_repo,
+            permission_mode="write",
+        )
+        github_token = str(token_payload.get("github_token") or "").strip()
+        if github_token:
+            return {
+                "github_token": github_token,
+                "github_installation_id": token_payload.get("github_installation_id"),
+                "token_source": token_payload.get("token_source") or "github_app_installation",
+            }
+    except GitHubAppTokenError as exc:
+        logger.warning(
+            "content_factory_live_preview_github_app_token_unavailable_falling_back run_id=%s domain=%s github_repo=%s error=%s",
+            getattr(run, "run_id", ""),
+            domain,
+            github_repo,
+            exc,
+        )
+
     try:
         github_token = ensure_valid_org_token(domain)
     except (ArticleGenerationError, TokenRefreshError) as exc:
@@ -2194,7 +2260,7 @@ def _live_preview_github_token_payload(run):
         )
         return {}
     github_token = str(github_token or "").strip()
-    return {"github_token": github_token} if github_token else {}
+    return {"github_token": github_token, "token_source": "github_oauth_user_token"} if github_token else {}
 
 
 def _ensure_article_live_preview(run):
@@ -2898,7 +2964,17 @@ def _merge_publish_pr_for_run(*, run, context):
     if not pr_number:
         return None, Response({"detail": "No publish pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
     try:
-        token = ensure_valid_org_token(context.organization.domain)
+        token, token_source = _github_token_for_repo_operation(
+            domain=context.organization.domain,
+            github_repo=repo,
+            permission_mode="write",
+        )
+        logger.info(
+            "vibe_marketing_publish_merge_token_source run_id=%s repo=%s token_source=%s",
+            run.run_id,
+            repo,
+            token_source,
+        )
         pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
         if pull.get("merged"):
             result = run.result or {}
