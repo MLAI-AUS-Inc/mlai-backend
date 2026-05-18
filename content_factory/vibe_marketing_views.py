@@ -979,11 +979,11 @@ def _serialize_written_article(article):
     }
 
 
-def _written_topic_memory(organization):
-    keywords = {
-        keyword.keyword_normalized: keyword
-        for keyword in ResearchedKeyword.objects.filter(organization=organization).select_related("written_article")
-    }
+def _written_topic_memory(organization, *, keyword_limit=None):
+    keyword_qs = ResearchedKeyword.objects.filter(organization=organization).select_related("written_article")
+    if keyword_limit:
+        keyword_qs = keyword_qs.order_by("-metrics_updated_at")[:keyword_limit]
+    keywords = {keyword.keyword_normalized: keyword for keyword in keyword_qs}
     articles = list(WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:50])
     written_by_keyword = {
         _normalize_keyword_memory(article.primary_keyword): article
@@ -1080,6 +1080,7 @@ def _topic_candidates_from_runs(
     *,
     organization=None,
     include_written=False,
+    limit=None,
     declined_keyword_keys=None,
     coverage_memory=None,
     written_memory=None,
@@ -1101,6 +1102,7 @@ def _topic_candidates_from_runs(
     stored_candidates = _stored_keyword_topic_candidates(
         organization,
         include_written=include_written,
+        limit=limit or 50,
         declined_keyword_keys=declined_keyword_keys,
         coverage_memory=coverage_memory,
     )
@@ -1133,7 +1135,7 @@ def _topic_candidates_from_runs(
         else:
             merged[key] = candidate
 
-    return sorted(
+    sorted_candidates = sorted(
         merged.values(),
         key=lambda candidate: (
             -_safe_number(candidate.get("opportunityScore")),
@@ -1142,6 +1144,7 @@ def _topic_candidates_from_runs(
             str(candidate.get("keyword") or ""),
         ),
     )
+    return sorted_candidates[:limit] if limit else sorted_candidates
 
 
 def _recent_written_topics(organization, *, limit=8):
@@ -2745,12 +2748,12 @@ def _promote_editorial_feedback_batch(*, run, batch_id, revision_run_id=""):
     return promoted_count
 
 
-def _publish_evidence_from_run(run):
+def _publish_evidence_from_run(run, *, compact=False):
     if not run:
         return {}
     result = run.result or {}
     diagnostics = result.get("diagnostics") or run.verification_summary or {}
-    return {
+    evidence = {
         "runId": run.run_id,
         "status": run.status,
         "approvalState": run.approval_state,
@@ -2766,6 +2769,24 @@ def _publish_evidence_from_run(run):
         "diagnostics": diagnostics,
         "contentPackage": _content_package_from_run(run),
     }
+    if compact:
+        return {
+            key: evidence.get(key)
+            for key in (
+                "runId",
+                "status",
+                "approvalState",
+                "previewUrl",
+                "prUrl",
+                "prNumber",
+                "mergeStatus",
+                "checksStatus",
+                "routePath",
+                "warnings",
+                "contentPackage",
+            )
+        }
+    return evidence
 
 
 def _run_has_external_publish_evidence(run):
@@ -3467,7 +3488,17 @@ def _baseline_requirement_satisfied(config, snapshot) -> bool:
     return bool(config.baseline_skipped_at or _baseline_is_fresh(snapshot))
 
 
-def _serialize_baseline_snapshot(snapshot, config=None):
+def _compact_baseline_metric(metric):
+    if not isinstance(metric, dict):
+        return metric
+    return {
+        key: value
+        for key, value in metric.items()
+        if key in {"status", "score", "message", "verified", "last28Days", "last90Days"}
+    }
+
+
+def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
     if not snapshot:
         return {
             "status": "missing",
@@ -3476,6 +3507,15 @@ def _serialize_baseline_snapshot(snapshot, config=None):
             "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
             "skipReason": config.baseline_skip_reason if config else "",
         }
+    metrics = snapshot.metrics
+    recommendations = snapshot.recommendations
+    if compact:
+        metrics = {
+            key: _compact_baseline_metric(value)
+            for key, value in (snapshot.metrics or {}).items()
+            if key in {"technical", "content", "authority", "traffic"}
+        }
+        recommendations = list(snapshot.recommendations or [])[:3]
     return {
         "id": snapshot.id,
         "runId": snapshot.run_id,
@@ -3486,9 +3526,9 @@ def _serialize_baseline_snapshot(snapshot, config=None):
         "collectedAt": snapshot.collected_at.isoformat(),
         "overallScore": snapshot.overall_score,
         "summary": snapshot.summary,
-        "metrics": snapshot.metrics,
+        "metrics": metrics,
         "sourceStatus": snapshot.source_status,
-        "recommendations": snapshot.recommendations,
+        "recommendations": recommendations,
         "skipped": bool(config and config.baseline_skipped_at),
         "skippedAt": config.baseline_skipped_at.isoformat() if config and config.baseline_skipped_at else None,
         "skipReason": config.baseline_skip_reason if config else "",
@@ -4343,7 +4383,106 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     }
 
 
-def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
+COMPACT_RUN_RESULT_KEYS = {
+    "article_surface_hint",
+    "articleSurfaceHint",
+    "article_surface_hint_status",
+    "article_system_readiness",
+    "article_system_setup",
+    "detected_candidates",
+    "delivery_mode",
+    "deliveryMode",
+    "draft_pr_url",
+    "path",
+    "preview_url",
+    "previewUrl",
+    "pr_url",
+    "prUrl",
+    "promote_bundle_requested_at",
+    "promoted_publish_job_id",
+    "publish_child_recoverable",
+    "publish_child_run_id",
+    "publish_child_status",
+    "publish_child_wait_reason",
+    "publish_handoff_pending",
+    "pull_request_url",
+    "requested_action",
+    "resolved_delivery_mode",
+    "route_path",
+    "scan_purpose",
+    "scanPurpose",
+    "scaffold_job_id",
+    "scaffoldJobId",
+    "scaffold_plan",
+    "setup_requested_action",
+    "setup_run_id",
+    "setupRunId",
+    "stale",
+    "stale_reason",
+    "url",
+}
+
+COMPACT_DISCOVERY_RESULT_KEYS = {
+    "candidates",
+    "keyword_options",
+    "keywords",
+    "options",
+    "selected",
+    "selection",
+    "selection_data",
+    "topic_candidates",
+    "topic_options",
+    "topics",
+}
+
+COMPACT_AUTOFILL_RESULT_KEYS = {
+    "adjacentOrganizations",
+    "brandName",
+    "companyContext",
+    "companyLinkedInUrl",
+    "competitorGroups",
+    "competitorSuggestions",
+    "competitors",
+    "directCompetitors",
+    "linkedinProfile",
+    "partial",
+    "profileFields",
+    "researchSummary",
+    "seedKeywords",
+    "seoCompetitors",
+    "sources",
+    "warnings",
+}
+
+
+def _compact_result_for_run(run):
+    result = _run_mapping(run.result)
+    compact = {}
+    sources = [result, _run_mapping(result.get("result")), _run_mapping(result.get("latest_control_response"))]
+    keys = set(COMPACT_RUN_RESULT_KEYS)
+    if run.workflow in DISCOVERY_WORKFLOWS:
+        keys.update(COMPACT_DISCOVERY_RESULT_KEYS)
+    if run.workflow == "startup_autofill":
+        keys.update(COMPACT_AUTOFILL_RESULT_KEYS)
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                if isinstance(value, list):
+                    value = value[:12]
+                compact.setdefault(key, value)
+    run_request = _run_mapping(result.get("run_request") or result.get("request"))
+    request_compact = {
+        key: run_request.get(key)
+        for key in ("scan_purpose", "scanPurpose", "article_surface_mode", "articleSurfaceMode")
+        if run_request.get(key) not in (None, "", [], {})
+    }
+    if request_compact:
+        compact["run_request"] = request_compact
+    return compact
+
+
+def _serialize_run_steps(run, *, compact=False):
     step_states = []
     for step in run.steps.order_by("display_order", "id"):
         step_states.append(
@@ -4355,18 +4494,57 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None):
                 "attempts": step.attempts,
                 "message": step.message or "",
                 "error": step.error or "",
-                "artifacts": step.artifacts or [],
+                "artifacts": [] if compact else step.artifacts or [],
                 "startedAt": step.started_at.isoformat() if step.started_at else None,
                 "completedAt": step.completed_at.isoformat() if step.completed_at else None,
             }
         )
+    return step_states
 
+
+def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
+    compact = mode in {"summary", "status"}
+    step_states = _serialize_run_steps(run, compact=compact)
     result = run.result or {}
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
+    live_preview = _live_preview_from_run(run)
+    if compact:
+        return {
+            "runId": run.run_id,
+            "workflow": run.workflow,
+            "domain": run.domain,
+            "githubRepo": run.github_repo,
+            "status": run.status,
+            "currentStep": run.current_step,
+            "approvalState": run.approval_state,
+            "sourceRunId": _run_source_run_id(run) or None,
+            "resumeAvailable": run.resume_available,
+            "createdAt": run.created_at.isoformat(),
+            "updatedAt": run.updated_at.isoformat(),
+            "stepOrder": run.step_order or [],
+            "steps": step_states,
+            "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
+            "errors": [run.error] if run.error else result.get("errors") or [],
+            "artifacts": [],
+            "previewUrl": preview_url,
+            "prUrl": pr_url,
+            "routePath": result.get("route_path") or result.get("path"),
+            "diagnostics": {},
+            "publishChildStatus": result.get("publish_child_status"),
+            "publishChildRecoverable": result.get("publish_child_recoverable"),
+            "publishChildWaitReason": result.get("publish_child_wait_reason"),
+            "stale": bool(result.get("stale")),
+            "staleReason": result.get("stale_reason"),
+            "retryAvailable": bool(result.get("retry_available") or run.resume_available),
+            "queueName": result.get("queue_name"),
+            "queuedAt": result.get("queued_at"),
+            "livePreview": live_preview,
+            "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
+            "result": _compact_result_for_run(run),
+        }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
-    live_preview = _live_preview_from_run(run)
     return {
         "runId": run.run_id,
         "workflow": run.workflow,
@@ -4545,20 +4723,24 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     }
 
 
-def _serialize_bootstrap(context, request=None):
+def _serialize_bootstrap(context, request=None, *, view="full"):
+    compact = view == "summary"
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
-    declined_topic_feedback = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
+    topic_limit = 8 if compact else None
+    declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
+    declined_topic_feedback = declined_topic_feedback_all[:8] if compact else declined_topic_feedback_all
     declined_keyword_keys = {
         normalize_topic_feedback_keyword(item.keyword)
-        for item in declined_topic_feedback
+        for item in declined_topic_feedback_all
         if normalize_topic_feedback_keyword(item.keyword)
     }
-    coverage_memory = build_topic_coverage_memory(context.organization)
-    written_memory = _written_topic_memory(context.organization)
+    coverage_memory = build_topic_coverage_memory(context.organization, article_limit=100 if compact else None)
+    written_memory = _written_topic_memory(context.organization, keyword_limit=500 if compact else None)
     topic_candidates = _topic_candidates_from_runs(
         latest_runs,
         organization=context.organization,
+        limit=topic_limit,
         declined_keyword_keys=declined_keyword_keys,
         coverage_memory=coverage_memory,
         written_memory=written_memory,
@@ -4567,6 +4749,7 @@ def _serialize_bootstrap(context, request=None):
         latest_runs,
         organization=context.organization,
         include_written=True,
+        limit=topic_limit,
         declined_keyword_keys=declined_keyword_keys,
         coverage_memory=coverage_memory,
         written_memory=written_memory,
@@ -4575,10 +4758,11 @@ def _serialize_bootstrap(context, request=None):
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
+    run_mode = "summary" if compact else "full"
     for run in latest_runs:
         latest_runs_by_workflow.setdefault(
             run.workflow,
-            _serialize_run(run, context=context, latest_runs=latest_runs, checks=checks),
+            _serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode),
         )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user)
@@ -4619,17 +4803,17 @@ def _serialize_bootstrap(context, request=None):
             "pending_article_system_setup": pending_article_system_setup,
         },
         "startupProfile": _serialize_startup_profile(context.organization),
-        "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config),
+        "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
-        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks) for run in latest_runs],
+        "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
-        "draftArticles": _recent_article_drafts(context.organization),
+        "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
         "writtenTopics": _recent_written_topics(context.organization),
-        "publishEvidence": _publish_evidence_from_run(latest_article_run),
+        "publishEvidence": _publish_evidence_from_run(latest_article_run, compact=compact),
         "guidedSteps": guided_steps,
         "currentGuidedStep": current_guided_step,
         "recommendedNextAction": _recommended_next_action(checks),
@@ -4717,6 +4901,32 @@ def _serialize_bootstrap_without_domain(company):
         "hasCompletedArticleFlow": False,
         "startPageMode": "first_article_setup",
     }
+
+
+def _timed_vibe_response(payload, *, started_at, metric_name, view=None, response_status=status.HTTP_200_OK):
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    payload_bytes = 0
+    try:
+        payload_bytes = len(json.dumps(payload, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        payload_bytes = 0
+    logger.info(
+        "vibe_marketing_response metric=%s view=%s status=%s bytes=%s duration_ms=%.1f",
+        metric_name,
+        view or "",
+        response_status,
+        payload_bytes,
+        elapsed_ms,
+    )
+    headers = {
+        "Server-Timing": f"{metric_name};dur={elapsed_ms:.1f}",
+        "X-MLAI-Serialize-MS": f"{elapsed_ms:.1f}",
+    }
+    if view:
+        headers["X-MLAI-View"] = str(view)
+    if payload_bytes:
+        headers["X-MLAI-Payload-Bytes"] = str(payload_bytes)
+    return Response(payload, status=response_status, headers=headers)
 
 
 def _recommended_next_action(checks):
@@ -5908,6 +6118,8 @@ class VibeMarketingAbnLookupView(APIView):
 
 class VibeMarketingBootstrapView(APIView):
     def get(self, request):
+        started_at = time.perf_counter()
+        view = "summary" if str(request.query_params.get("view") or "").strip().lower() == "summary" else "full"
         profile = get_or_create_founder_profile(request.user)
         company = resolve_active_company(profile)
         if company is None:
@@ -5916,11 +6128,17 @@ class VibeMarketingBootstrapView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not normalize_company_domain(company.domain):
-            return Response(_serialize_bootstrap_without_domain(company), status=status.HTTP_200_OK)
+            return _timed_vibe_response(
+                _serialize_bootstrap_without_domain(company),
+                started_at=started_at,
+                metric_name="vibe_bootstrap",
+                view=view,
+            )
         context, error_response = _resolve_context_or_response(request, require_domain=True)
         if error_response:
             return error_response
-        return Response(_serialize_bootstrap(context, request=request), status=status.HTTP_200_OK)
+        payload = _serialize_bootstrap(context, request=request, view=view)
+        return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
 
 
 class VibeMarketingTopicFeedbackView(APIView):
@@ -6718,6 +6936,8 @@ class VibeMarketingArticleView(APIView):
 
 class VibeMarketingRunView(APIView):
     def get(self, request, run_id):
+        started_at = time.perf_counter()
+        view = "status" if str(request.query_params.get("view") or "").strip().lower() == "status" else "full"
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
             return error_response
@@ -6781,7 +7001,8 @@ class VibeMarketingRunView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
-        return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+        payload = _serialize_run(run, context=context, mode=view)
+        return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_run", view=view)
 
 
 class VibeMarketingArticleSystemRevisionsView(APIView):
