@@ -44,6 +44,17 @@ ssh $USER@$DROPLET_IP <<EOF
         grep -Eq "^\${key}=.+" .env
     }
 
+    print_redacted_env_status() {
+        echo "🔐 Required production env status (values redacted):"
+        for key in "\$@"; do
+            if env_has_value "\$key"; then
+                echo "   \${key}=present"
+            else
+                echo "   \${key}=missing"
+            fi
+        done
+    }
+
     # Install Docker if not exists
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -83,6 +94,7 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -144,6 +156,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
 
     echo "🔗 Validating production URL configuration and service connectivity..."
     compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
+
+    echo "🔐 Verifying GitHub App server credentials..."
+    compose_run_web python manage.py check_github_app_credentials
 
     echo "🔍 Inspecting for stale generated migrations..."
     inspect_stale_migration \

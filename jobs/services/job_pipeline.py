@@ -499,7 +499,7 @@ def run_daily_jobs(
         run.error_message = _summarize_run_issues(source_errors, slack_error)
         run.completed_at = timezone.now()
         run.save()
-        if source_errors:
+        if run.status == "completed_no_results_with_source_errors":
             try:
                 post_failure_alert(run.run_id, run.error_message or "Run completed with source errors")
             except Exception:

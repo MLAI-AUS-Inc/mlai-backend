@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 from datetime import date
 from typing import Any
 from urllib.parse import urljoin
@@ -10,6 +12,19 @@ from bs4 import BeautifulSoup
 
 from jobs.services.logos import absolute_image_url, logo_url_for_company
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-AU,en;q=0.9",
+}
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_RETRIES = 3
+logger = logging.getLogger(__name__)
+
 
 def collect_getro_jobs(
     base_url: str,
@@ -18,12 +33,7 @@ def collect_getro_jobs(
     source_quality_score: float = 0.9,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
-    response = requests.get(
-        f"{base_url.rstrip('/')}/jobs",
-        headers={"User-Agent": "RooJobsDaily/0.1 (+https://roo.jobs)"},
-        timeout=25,
-    )
-    response.raise_for_status()
+    response = get_getro_response(f"{base_url.rstrip('/')}/jobs", source_name)
 
     soup = BeautifulSoup(response.text, "html.parser")
     cards = soup.select('[data-testid="job-list-item"], .job-card')
@@ -70,6 +80,41 @@ def collect_getro_jobs(
         )
 
     return jobs
+
+
+def get_getro_response(url: str, source_name: str) -> requests.Response:
+    with requests.Session() as session:
+        session.trust_env = False
+        session.headers.update(HEADERS)
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = session.get(url, timeout=30)
+            except requests.Timeout:
+                if attempt == MAX_RETRIES:
+                    raise
+                delay = min(2**attempt, 30)
+                logger.warning("%s timed out; retrying in %ss", source_name, delay)
+                time.sleep(delay)
+                continue
+            if response.status_code not in RETRY_STATUS_CODES or attempt == MAX_RETRIES:
+                response.raise_for_status()
+                return response
+            delay = retry_delay_seconds(response, attempt)
+            logger.warning(
+                "%s returned HTTP %s; retrying in %ss",
+                source_name,
+                response.status_code,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError(f"{source_name} request retry loop exited unexpectedly")
+
+
+def retry_delay_seconds(response: requests.Response, attempt: int) -> int:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after and retry_after.isdigit():
+        return min(int(retry_after), 60)
+    return min(2**attempt, 30)
 
 
 def first_job_link(card):

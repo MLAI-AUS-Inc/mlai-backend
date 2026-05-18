@@ -164,6 +164,9 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     founder_names_provided = _has_any_key(data, "founderNames", "founder_names")
     stage_provided = "stage" in data
     organization_kind_provided = _has_any_key(data, "organizationKind", "organization_kind")
+    short_description_provided = _has_any_key(data, "shortDescription", "short_description")
+    problem_solved_provided = _has_any_key(data, "problemSolved", "problem_solved")
+    target_audience_provided = _has_any_key(data, "targetAudience", "target_audience")
     notes_provided = "notes" in data
 
     brand_name = str(_submitted_value(data, "brandName", "brand_name", default="") or "").strip()
@@ -181,6 +184,9 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     organization_kind = _normalize_organization_kind(
         _submitted_value(data, "organizationKind", "organization_kind", default="")
     )
+    short_description = str(_submitted_value(data, "shortDescription", "short_description", default="") or "").strip()
+    problem_solved = str(_submitted_value(data, "problemSolved", "problem_solved", default="") or "").strip()
+    target_audience = str(_submitted_value(data, "targetAudience", "target_audience", default="") or "").strip()
     notes = str(_submitted_value(data, "notes", default="") or "").strip()
 
     organization_update_fields = []
@@ -274,6 +280,15 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     if organization_kind_provided and startup_profile.organization_kind != organization_kind:
         startup_profile.organization_kind = organization_kind
         startup_update_fields.append("organization_kind")
+    if short_description_provided and startup_profile.short_description != short_description:
+        startup_profile.short_description = short_description
+        startup_update_fields.append("short_description")
+    if problem_solved_provided and startup_profile.problem_solved != problem_solved:
+        startup_profile.problem_solved = problem_solved
+        startup_update_fields.append("problem_solved")
+    if target_audience_provided and startup_profile.target_audience != target_audience:
+        startup_profile.target_audience = target_audience
+        startup_update_fields.append("target_audience")
     if notes_provided and startup_profile.notes != notes:
         startup_profile.notes = notes
         startup_update_fields.append("notes")

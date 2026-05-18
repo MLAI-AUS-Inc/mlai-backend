@@ -21,6 +21,24 @@ from .services.slack import format_slack_message
 VALID_BUCKETS = {"australian_ai", "australian_startup", "remote_ai", "remote_startup"}
 
 
+class HasJobsTriggerToken(HasRooApiKey):
+    """
+    Allows Roo's daily scheduler to trigger jobs with JOBS_TRIGGER_TOKEN.
+
+    Roo sends Authorization: Bearer <token>. We also keep the existing Roo API
+    key permission path so older/internal callers using X-API-Key still work.
+    """
+
+    def has_permission(self, request, view):
+        trigger_token = settings.jobs_trigger_token
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        if trigger_token and auth_header.startswith("Bearer "):
+            candidate = auth_header.split("Bearer ", 1)[1].strip()
+            if candidate == trigger_token:
+                return True
+        return super().has_permission(request, view)
+
+
 def _bucket_filter(request) -> str | None:
     bucket = str(request.query_params.get("bucket") or request.GET.get("bucket") or "").strip()
     return bucket if bucket in VALID_BUCKETS else None
@@ -57,7 +75,7 @@ def _render_job_card(job: JobListing) -> str:
     """
 @method_decorator(csrf_exempt, name="dispatch")
 class DailyRunTriggerView(APIView):
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasJobsTriggerToken]
 
     def post(self, request):
         serializer = DailyRunRequestSerializer(data=request.data)
@@ -183,7 +201,6 @@ class DailyJobsHtmlView(APIView):
             <section>
               <h2>Filters</h2>
               <div class="filters">
-                <a href="#australian_ai">Australian AI</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}">All</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_ai">Australian AI</a>
                 <a href="/api/v1/jobs/daily/{escape(run_date)}?bucket=australian_startup">Australian Startup</a>

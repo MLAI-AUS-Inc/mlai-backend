@@ -67,7 +67,7 @@ PHASE_1_SOURCES: tuple[SourceConfig, ...] = (
     # Tier 2 expansion sources are registered but disabled until we add an
     # allowed API/feed path or custom connector.
     SourceConfig("Jora", "broad_board", 0.58, False, ("AI", "startup", "machine learning")),
-    SourceConfig("Adzuna", "broad_board_api", 0.66, True, ("AI", "startup", "machine learning")),
+    SourceConfig("Adzuna", "broad_board_api", 0.66, False, ("AI", "startup", "machine learning")),
     SourceConfig("CareerOne", "broad_board", 0.56, True, ("AI", "startup", "machine learning")),
     SourceConfig("Glassdoor", "broad_board", 0.5, False, ("AI", "startup", "machine learning")),
     SourceConfig("Workforce Australia", "government_board", 0.62, True, ("AI", "startup", "machine learning")),

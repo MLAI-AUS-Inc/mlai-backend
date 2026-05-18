@@ -7,6 +7,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from jobs.models import JobListing, JobRun
 from jobs.conf import settings as jobs_settings
@@ -24,6 +25,7 @@ from jobs.services.slack import format_slack_message
     JOBS_SCHEDULER_MAX_PAGES=1,
     JOBS_SCHEDULER_PER_KEYWORD_LIMIT=1,
     JOBS_TOP_PICK_LIMIT=7,
+    JOBS_TRIGGER_TOKEN="jobs-trigger-secret",
 )
 class JobsSchedulerTests(TestCase):
     @staticmethod
@@ -89,6 +91,81 @@ class JobsSchedulerTests(TestCase):
         self.assertIn("7. AI role 7", payload["text"])
         self.assertNotIn("8. AI role 8", payload["text"])
         self.assertNotIn("9. AI role 9", payload["text"])
+
+    def test_daily_run_trigger_accepts_jobs_trigger_bearer_token(self):
+        client = APIClient()
+
+        response = client.post(
+            "/api/v1/jobs/daily-run",
+            {"collect_live": False, "post_to_slack": False, "post_to_notion": False},
+            format="json",
+            HTTP_AUTHORIZATION="Bearer jobs-trigger-secret",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(JobRun.objects.count(), 1)
+        run = JobRun.objects.get()
+        self.assertEqual(run.status, "queued")
+        self.assertFalse(run.collect_live)
+
+    def test_daily_run_trigger_rejects_invalid_bearer_token(self):
+        client = APIClient()
+
+        response = client.post(
+            "/api/v1/jobs/daily-run",
+            {"collect_live": False, "post_to_slack": False, "post_to_notion": False},
+            format="json",
+            HTTP_AUTHORIZATION="Bearer wrong-token",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(JobRun.objects.count(), 0)
+
+    @patch("jobs.services.job_pipeline.post_failure_alert")
+    @patch("jobs.services.job_pipeline.select_top_jobs")
+    @patch("jobs.services.job_pipeline.insert_matched_jobs")
+    @patch("jobs.services.job_pipeline.fetch_raw_jobs")
+    def test_partial_source_errors_do_not_send_failure_alert(
+        self,
+        mock_fetch_raw_jobs,
+        mock_insert_matched_jobs,
+        mock_select_top_jobs,
+        mock_post_failure_alert,
+    ):
+        run = JobRun.objects.create(
+            run_date="2026-05-04",
+            run_id="2026-05-04-partial-source-errors",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        job = JobListing.objects.create(
+            run=run,
+            run_date=run.run_date,
+            title="AI Engineer",
+            company_name="Example Co",
+            location="Melbourne VIC",
+            job_url="https://example.com/jobs/ai-engineer",
+            source_name="SEEK",
+            dedupe_key="ai-engineer|example-co|melbourne",
+        )
+        mock_fetch_raw_jobs.return_value = (
+            [{"title": "AI Engineer", "job_url": "https://example.com/jobs/ai-engineer"}],
+            ["CareerOne: 403 Client Error: Forbidden"],
+        )
+        mock_insert_matched_jobs.return_value = [job]
+        mock_select_top_jobs.return_value = [job]
+
+        job_pipeline.run_daily_jobs(
+            run.run_id,
+            collect_live=True,
+            post_to_slack=False,
+            post_to_notion=False,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed_with_source_errors")
+        self.assertIn("CareerOne", run.error_message)
+        mock_post_failure_alert.assert_not_called()
 
     @override_settings(SLACK_BOT_TOKEN="xoxb-primary", JOBS_SLACK_BOT_TOKEN="")
     def test_jobs_settings_accepts_primary_slack_bot_token(self):
