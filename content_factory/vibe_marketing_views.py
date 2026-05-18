@@ -74,6 +74,7 @@ from integrations import http_client
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
 from integrations.services.github import ScanError, TokenRefreshError, build_github_auth_url, ensure_valid_token
+from integrations.services.github_app import GitHubAppTokenError, create_installation_access_token, github_app_credentials_configured
 from organizations.models import Organization
 from workflow_runs.models import (
     ContentFactoryApprovalState,
@@ -162,17 +163,17 @@ WORKFLOW_STEP_DEFS = [
         "id": "repo",
         "label": "Repository",
         "phase": "Setup",
-        "href": "/founder-tools/marketing/create?step=github",
+        "href": "/founder-tools/marketing/create?step=articleSystem",
         "check": "github",
         "summary": "Connect the repository used for exact article previews and publishing.",
     },
     {
         "id": "article_system",
-        "label": "Article system",
+        "label": "Articles location",
         "phase": "Setup",
         "href": "/founder-tools/marketing/create?step=articleSystem",
         "check": "scaffold",
-        "summary": "Detect or prepare the article route, registry, and publish target.",
+        "summary": "Detect or prepare the articles/blogs route and repo location.",
     },
     {
         "id": "research",
@@ -410,6 +411,33 @@ def _article_surface_hint_from_request(data, *, domain: str) -> tuple[dict, str,
         raise ValueError("Article/blog URL must be a full same-domain URL or a path starting with '/'.")
 
     return {"source": "user_input", "listing_url": raw_url, "route_path": route_path}, mode, raw_url
+
+
+def _pending_article_system_setup_from_config(config) -> dict:
+    article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
+    pending = article_system.get("pending_article_system_setup")
+    return pending if isinstance(pending, dict) else {}
+
+
+def _store_pending_article_system_setup(config, *, mode: str, route_path: str, source_scan_run_id: str = "", article_surface_hint=None):
+    article_system = dict(config.article_system or {})
+    saved_at = timezone.now().isoformat()
+    pending = {
+        "mode": str(mode or "not_sure"),
+        "routePath": str(route_path or ""),
+        "route_path": str(route_path or ""),
+        "sourceScanRunId": str(source_scan_run_id or ""),
+        "source_scan_run_id": str(source_scan_run_id or ""),
+        "articleSurfaceHint": article_surface_hint or {},
+        "article_surface_hint": article_surface_hint or {},
+        "status": "pending_generation",
+        "savedAt": saved_at,
+        "saved_at": saved_at,
+    }
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = article_system
+    config.save(update_fields=["article_system", "updated_at"])
+    return pending
 
 
 def _serialize_github_repo_payload(repo: dict, *, installation_id: str = "") -> dict:
@@ -2070,14 +2098,73 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
     return rewritten.encode("utf-8")
 
 
+LIVE_PREVIEW_ACTIVE_STATUSES = {"queued", "pending", "preparing", "starting", "building", "running"}
+LIVE_PREVIEW_FAILURE_STATUSES = {"failed", "blocked", "expired", "cancelled", "canceled", "timeout", "timed_out"}
+
+
+def _live_preview_statuses(payload):
+    return {
+        str(payload.get("status") or "").strip().lower(),
+        str(payload.get("platformStatus") or payload.get("platform_status") or "").strip().lower(),
+    } - {""}
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
         result = dict(run.result or {})
         result["livePreview"] = payload
+        update_fields = ["result", "updated_at"]
+
+        if run.workflow == "article_system_setup":
+            preview_statuses = _live_preview_statuses(payload)
+            preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+            failed = bool(preview_statuses.intersection(LIVE_PREVIEW_FAILURE_STATUSES) or payload.get("error"))
+            ready = bool(preview_url)
+            active = bool(preview_statuses.intersection(LIVE_PREVIEW_ACTIVE_STATUSES))
+            setup_payload = dict(result.get("article_system_setup") or {})
+
+            if failed:
+                result["status"] = "preview_failed"
+                result["preview_url"] = ""
+                result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
+                setup_payload["status"] = "preview_failed"
+                setup_payload["error"] = result["error"]
+                setup_payload["retryable"] = payload.get("retryable", True)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.BLOCKED
+                run.current_step = "preview_failed"
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.error = result["error"]
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
+            elif ready:
+                result["status"] = "preview_ready"
+                result["preview_url"] = preview_url
+                result.pop("error", None)
+                setup_payload["status"] = "preview_ready"
+                setup_payload["preview_url"] = preview_url
+                setup_payload.pop("error", None)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
+                run.current_step = "await_review"
+                run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+                run.error = ""
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
+            elif active:
+                result["status"] = "preview_building"
+                result["preview_url"] = ""
+                result.pop("error", None)
+                setup_payload["status"] = "preview_building"
+                setup_payload.pop("error", None)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.RUNNING
+                run.current_step = "start_hosted_preview"
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.error = ""
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
         run.result = result
-        run.save(update_fields=["result", "updated_at"])
+        run.save(update_fields=update_fields)
     return run
 
 
@@ -2116,11 +2203,76 @@ def _article_preview_should_refresh(run):
     return preview_status in {"running", "starting"}
 
 
+def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permission_mode: str = "write") -> dict:
+    normalized_domain = normalize_company_domain(domain or "")
+    repo = str(github_repo or "").strip()
+    if not normalized_domain or not repo or not github_app_credentials_configured():
+        return {}
+    try:
+        organization = Organization.objects.get(domain=normalized_domain)
+        config = _get_config(organization)
+    except Organization.DoesNotExist:
+        return {}
+    installation_id = str(config.github_installation_id or "").strip()
+    if not installation_id:
+        return {}
+    token = create_installation_access_token(
+        installation_id=installation_id,
+        repository=repo,
+        permission_mode=permission_mode,
+    )
+    return token.as_content_factory_payload(domain=normalized_domain)
+
+
+def _github_token_for_repo_operation(*, domain: str, github_repo: str, permission_mode: str = "write") -> tuple[str, str]:
+    try:
+        payload = _github_app_token_payload_for_domain(
+            domain=domain,
+            github_repo=github_repo,
+            permission_mode=permission_mode,
+        )
+        token = str(payload.get("github_token") or "").strip()
+        if token:
+            return token, str(payload.get("token_source") or "github_app_installation")
+    except GitHubAppTokenError as exc:
+        logger.warning(
+            "github_app_installation_token_unavailable_falling_back domain=%s github_repo=%s error=%s",
+            domain,
+            github_repo,
+            exc,
+        )
+
+    token = ensure_valid_org_token(domain)
+    return token, "github_oauth_user_token"
+
+
 def _live_preview_github_token_payload(run):
     domain = normalize_company_domain(getattr(run, "domain", "") or "")
     github_repo = str(getattr(run, "github_repo", "") or "").strip()
     if not domain or not github_repo:
         return {}
+    try:
+        token_payload = _github_app_token_payload_for_domain(
+            domain=domain,
+            github_repo=github_repo,
+            permission_mode="write",
+        )
+        github_token = str(token_payload.get("github_token") or "").strip()
+        if github_token:
+            return {
+                "github_token": github_token,
+                "github_installation_id": token_payload.get("github_installation_id"),
+                "token_source": token_payload.get("token_source") or "github_app_installation",
+            }
+    except GitHubAppTokenError as exc:
+        logger.warning(
+            "content_factory_live_preview_github_app_token_unavailable_falling_back run_id=%s domain=%s github_repo=%s error=%s",
+            getattr(run, "run_id", ""),
+            domain,
+            github_repo,
+            exc,
+        )
+
     try:
         github_token = ensure_valid_org_token(domain)
     except (ArticleGenerationError, TokenRefreshError) as exc:
@@ -2133,7 +2285,7 @@ def _live_preview_github_token_payload(run):
         )
         return {}
     github_token = str(github_token or "").strip()
-    return {"github_token": github_token} if github_token else {}
+    return {"github_token": github_token, "token_source": "github_oauth_user_token"} if github_token else {}
 
 
 def _ensure_article_live_preview(run):
@@ -2633,8 +2785,7 @@ def _publish_child_has_real_approval_gate(run):
 
 
 PUBLISH_CHILD_MISSING_REMOTE_WAIT_REASON = (
-    "Publish child was recorded locally but was not found in Content Factory. "
-    "Retry will recreate the same publish PR run."
+    "Publish job was queued but did not start. Retry will safely recreate the same PR job."
 )
 
 
@@ -2837,7 +2988,17 @@ def _merge_publish_pr_for_run(*, run, context):
     if not pr_number:
         return None, Response({"detail": "No publish pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
     try:
-        token = ensure_valid_org_token(context.organization.domain)
+        token, token_source = _github_token_for_repo_operation(
+            domain=context.organization.domain,
+            github_repo=repo,
+            permission_mode="write",
+        )
+        logger.info(
+            "vibe_marketing_publish_merge_token_source run_id=%s repo=%s token_source=%s",
+            run.run_id,
+            repo,
+            token_source,
+        )
         pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
         if pull.get("merged"):
             result = run.result or {}
@@ -3765,6 +3926,26 @@ def _workflow_progress_context(*, context=None, run=None, latest_runs=None, chec
     return organization, config, latest_runs, checks or {}
 
 
+def _scan_run_is_pending_article_system_generation(run) -> bool:
+    if not run or run.workflow not in SCAN_WORKFLOWS:
+        return False
+    run_request = _run_mapping(run.run_request)
+    result = _run_mapping(run.result)
+    nested = _run_mapping(result.get("result"))
+    setup = _run_mapping(result.get("article_system_setup") or nested.get("article_system_setup"))
+    if run_request.get("scan_purpose") == "setup" or result.get("pending_article_system_setup"):
+        return True
+    requested_action = str(
+        result.get("requested_action")
+        or result.get("setup_requested_action")
+        or nested.get("requested_action")
+        or nested.get("setup_requested_action")
+        or setup.get("requested_action")
+        or ""
+    ).strip()
+    return requested_action in {"article_system_setup", "scaffold_publish_route"}
+
+
 def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
     organization, config, latest_runs, checks = _workflow_progress_context(
         context=context,
@@ -3868,7 +4049,24 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     if scan_run and not checks.get("scaffold", {}).get("passed"):
         run_by_id["article_system"] = scan_run.run_id
         href_by_id["article_system"] = _run_url(scan_run)
-        if scan_run.status in RUNNING_RUN_STATUSES:
+        pending_setup_generation = _scan_run_is_pending_article_system_generation(scan_run)
+        if pending_setup_generation:
+            status_by_id["article_system"] = "complete"
+            href_by_id["generate"] = _run_url(scan_run)
+            run_by_id["generate"] = scan_run.run_id
+            if scan_run.status in RUNNING_RUN_STATUSES:
+                status_by_id["generate"] = "running"
+                summary_by_id["generate"] = "Articles setup scan is preparing the setup plan."
+            elif scan_run.status in FAILED_RUN_STATUSES:
+                status_by_id["generate"] = "blocked"
+                action_by_id["generate"] = _workflow_step_action("Open failed setup scan", href=_run_url(scan_run))
+            elif scan_run.status in {ContentFactoryRunStatus.AWAITING_CONFIRMATION, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+                status_by_id["generate"] = "needs_action"
+                action_by_id["generate"] = _workflow_step_action("Generate articles setup preview", href=_run_url(scan_run), intent="build-article-system-preview")
+            else:
+                status_by_id["generate"] = "ready"
+                action_by_id["generate"] = _workflow_step_action("Generate articles setup preview", href=_run_url(scan_run), intent="build-article-system-preview")
+        elif scan_run.status in RUNNING_RUN_STATUSES:
             status_by_id["article_system"] = "running"
             summary_by_id["article_system"] = "Repository scan is running."
         elif scan_run.status in FAILED_RUN_STATUSES:
@@ -4146,8 +4344,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
     discovery_run = _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
-    topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
-    research_ready = bool(topic_candidates) or bool(
+    research_ready = bool(article_run) or bool(
         discovery_run and discovery_run.status in {
             ContentFactoryRunStatus.AWAITING_CONFIRMATION,
             ContentFactoryRunStatus.COMPLETED,
@@ -4301,6 +4498,8 @@ def _serialize_bootstrap(context, request=None):
             "articleDeliveryMode": _stored_article_delivery_mode(config) or "content_only",
             "articleDeliveryModeEffective": _effective_article_delivery_mode(config),
             "githubRepo": config.github_repo,
+            "pendingArticleSystemSetup": _pending_article_system_setup_from_config(config),
+            "pending_article_system_setup": _pending_article_system_setup_from_config(config),
             "dailyDiscoveryEnabled": config.daily_discovery_enabled,
             "dailyDiscoveryPriority": config.daily_discovery_priority,
             "defaultTimezone": config.default_timezone,
@@ -4431,7 +4630,7 @@ def _guided_steps(checks):
         ("baseline", "Website baseline", "baseline"),
         ("github", "Connect GitHub", "github"),
         ("scan", "Scan repository", "scan"),
-        ("articleSystem", "Prepare article system", "scaffold"),
+        ("articleSystem", "Prepare articles location", "scaffold"),
         ("research", "Research topics", "research"),
         ("chooseArticle", "Choose article", "research"),
         ("writeCheck", "Write + check", "write"),
@@ -4714,6 +4913,13 @@ def _run_result_from_remote(remote_data):
         "queue_name",
         "queued_at",
         "scan_queue",
+        "scan_purpose",
+        "article_surface_mode",
+        "article_surface_hint",
+        "article_surface_url",
+        "article_surface_resolution",
+        "matched_article_surface",
+        "detected_candidates",
     ):
         if remote_data.get(key) is not None and merged.get(key) is None:
             merged[key] = remote_data.get(key)
@@ -5939,12 +6145,31 @@ class VibeMarketingGitHubConnectView(APIView):
             if existing_connection:
                 return Response(existing_connection, status=status.HTTP_200_OK)
 
+        try:
+            auth_url = build_github_auth_url(actor_id, domain=context.organization.domain, request=request)
+        except Exception as exc:
+            logger.exception(
+                "vibe_marketing_github_auth_url_failed domain=%s actor_id=%s",
+                context.organization.domain,
+                actor_id,
+            )
+            return Response(
+                {
+                    "status": "auth_unavailable",
+                    "connection_state": "auth_required",
+                    "github_repo": config.github_repo,
+                    "detail": "GitHub authorization could not be opened. Check GitHub App configuration.",
+                    "error": "github_auth_url_failed",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         return Response(
             {
                 "status": "auth_required",
                 "connection_state": "auth_required",
                 "github_repo": config.github_repo,
-                "auth_url": build_github_auth_url(actor_id, domain=context.organization.domain, request=request),
+                "auth_url": auth_url,
             },
             status=status.HTTP_200_OK,
         )
@@ -6060,6 +6285,13 @@ class VibeMarketingScanView(APIView):
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
+        explicit_scan_purpose = _request_value(request.data, "scanPurpose", "scan_purpose", default=None)
+        scan_purpose = str(
+            explicit_scan_purpose
+            or ("setup" if _request_value(request.data, "articleSurfaceUrl", "article_surface_url", default="") else "inventory")
+        ).strip().lower()
+        if scan_purpose not in {"inventory", "setup"}:
+            return Response({"detail": "scanPurpose must be inventory or setup."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             article_surface_hint, article_surface_mode, article_surface_url = _article_surface_hint_from_request(
                 request.data,
@@ -6072,18 +6304,25 @@ class VibeMarketingScanView(APIView):
         )
         if auto_setup_preview and not article_surface_hint:
             return Response(
-                {"detail": "Article/blog URL or path is required before drafting an article system preview."},
+                {"detail": "Article/blog URL or path is required before drafting an articles setup preview."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if scan_purpose == "setup" and not article_surface_hint:
+            return Response(
+                {"detail": "Choose or create an article/blog route before generating the articles setup."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        scaffold_if_missing = scan_purpose == "setup"
         payload = {
             "domain": context.organization.domain,
             "github_repo": config.github_repo,
             "slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
-            "scaffold_if_missing": True,
+            "scaffold_if_missing": scaffold_if_missing,
             "auto_setup_preview": auto_setup_preview,
             "generate_components": True,
             "article_surface_mode": article_surface_mode,
+            "scan_purpose": scan_purpose,
         }
         if article_surface_url:
             payload["article_surface_url"] = article_surface_url
@@ -6097,9 +6336,29 @@ class VibeMarketingScanView(APIView):
             config=config,
             payload=payload,
         )
+        result = run.result or {}
+        result["scan_purpose"] = scan_purpose
+        result["article_surface_mode"] = article_surface_mode
+        if article_surface_hint:
+            result["article_surface_hint"] = article_surface_hint
+        run.result = result
+        run.save(update_fields=["result", "updated_at"])
         if superseded_scan_run_ids:
             result = run.result or {}
             result["superseded_scan_run_ids"] = superseded_scan_run_ids
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+        if scan_purpose == "setup" and article_surface_hint:
+            route_path = str(article_surface_hint.get("route_path") or article_surface_url or "").strip()
+            pending = _store_pending_article_system_setup(
+                config,
+                mode=article_surface_mode,
+                route_path=route_path,
+                source_scan_run_id=str(_request_value(request.data, "sourceScanRunId", "source_scan_run_id", default="") or ""),
+                article_surface_hint=article_surface_hint,
+            )
+            result = run.result or {}
+            result["pending_article_system_setup"] = pending
             run.result = result
             run.save(update_fields=["result", "updated_at"])
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
@@ -6262,13 +6521,17 @@ class VibeMarketingRunView(APIView):
             and not _local_publish_child_for_run(run, context=context)
             and not _publish_handoff_pending_for_run(run)
         )
+        skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
+        if skipped_missing_publish_child:
+            skip_remote_status = True
         remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
         if skip_remote_status:
             logger.info(
-                "content_factory_status_poll_skipped_terminal_article run_id=%s workflow=%s status=%s",
+                "content_factory_status_poll_skipped run_id=%s workflow=%s status=%s reason=%s",
                 run.run_id,
                 run.workflow,
                 run.status,
+                "missing_publish_child_recoverable" if skipped_missing_publish_child else "terminal_article",
             )
         if _is_status_poll_unavailable_payload(remote_data):
             run = _heal_stale_status_poll_timeout(run)
@@ -6314,7 +6577,7 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
         if run.workflow != "article_system_setup":
-            return Response({"detail": "Article system comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Articles setup comments can only be sent for setup preview runs."}, status=status.HTTP_400_BAD_REQUEST)
 
         feedback_batch_id = str(
             _request_value(request.data, "feedbackBatchId", "feedback_batch_id", default="") or ""

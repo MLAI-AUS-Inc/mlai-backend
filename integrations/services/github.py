@@ -48,7 +48,7 @@ def build_github_auth_url(slack_user_id: str, domain: str = None, request=None) 
     normalized_domain = normalize_domain(domain) if domain else ''
 
     if normalized_domain:
-        return build_github_oauth_url(normalized_domain, slack_user_id)
+        return build_github_oauth_url(normalized_domain, slack_user_id, request=request)
 
     connect_path = reverse('github_connect')
     if request is not None:
