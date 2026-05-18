@@ -4,6 +4,7 @@ import time
 from datetime import date as calendar_date
 from typing import Any, Optional
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import OperationalError, connection, transaction
@@ -879,10 +880,16 @@ class ContentFactoryTokenView(APIView):
     def get(self, request):
         from integrations.services.github import ensure_valid_token, TokenRefreshError
         from integrations.services.article_generation import ensure_valid_org_token, ArticleGenerationError
+        from integrations.services.github_app import (
+            GitHubAppTokenError,
+            create_installation_access_token,
+            github_app_credentials_configured,
+        )
         from integrations.models import UserIntegration
 
         domain = request.query_params.get('domain')
         slack_user_id = request.query_params.get('slack_user_id')
+        requested_repo = str(request.query_params.get('github_repo') or '').strip()
 
         if not domain and not slack_user_id:
             return Response(
@@ -894,17 +901,65 @@ class ContentFactoryTokenView(APIView):
         if domain:
             normalized_domain = self._normalize_domain(domain)
             try:
-                fresh_token = ensure_valid_org_token(normalized_domain)
-
                 # Fetch config for additional context
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
+                github_repo = requested_repo or str(config.github_repo or '').strip()
 
+                if config.github_installation_id and github_repo:
+                    if not github_app_credentials_configured():
+                        logger.warning("GitHub App credentials are not configured for installation token lookup.")
+                        return Response(
+                            {
+                                'error': 'GitHub App credentials are not configured',
+                                'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
+                                'action_required': 'server_configuration_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+                    try:
+                        installation_token = create_installation_access_token(
+                            installation_id=config.github_installation_id,
+                            repository=github_repo,
+                            permission_mode='write',
+                        )
+                    except GitHubAppTokenError as exc:
+                        logger.warning(
+                            "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
+                            normalized_domain,
+                            github_repo,
+                            config.github_installation_id,
+                            exc,
+                        )
+                        return Response(
+                            {
+                                'error': 'GitHub App installation access failed',
+                                'message': str(exc),
+                                'action_required': 'auth_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+
+                    response_data = installation_token.as_content_factory_payload(domain=normalized_domain)
+                    logger.info(
+                        "Provided GitHub App installation token for %s repo=%s installation_id=%s",
+                        normalized_domain,
+                        github_repo,
+                        config.github_installation_id,
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+
+                fresh_token = ensure_valid_org_token(normalized_domain)
                 response_data = {
                     'github_token': fresh_token,
-                    'github_repo': config.github_repo,
+                    'github_repo': github_repo or config.github_repo,
                     'domain': normalized_domain,
                     'source': 'org',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if config.github_token_expires_at:
@@ -945,6 +1000,7 @@ class ContentFactoryTokenView(APIView):
                     'github_repo': integration.github_repo,
                     'slack_user_id': slack_user_id,
                     'source': 'user',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if integration.github_token_expires_at:
@@ -1172,6 +1228,137 @@ class ScheduledDiscoveryReplayView(APIView):
         result_status = str(result.get("status") or "").strip().lower()
         http_status = status.HTTP_202_ACCEPTED if result_status == "queued" else status.HTTP_200_OK
         return Response(result, status=http_status)
+
+
+class ResearchAutomationView(APIView):
+    """Create or update a scheduled research automation and notification route."""
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from content_factory.models import NotificationChannelType, NotificationConsentState
+        from integrations.services.research_automations import create_or_update_research_automation
+
+        domain = str(request.data.get("domain") or "").strip()
+        channel_type = str(request.data.get("channel_type") or "").strip().lower()
+        route_id = str(request.data.get("route_id") or request.data.get("email") or request.data.get("phone") or "").strip()
+        timezone_name = str(request.data.get("timezone") or "Australia/Melbourne").strip()
+        frequency_per_day = request.data.get("frequency_per_day") or request.data.get("frequency") or 1
+        local_send_times = request.data.get("local_send_times") or []
+        name = str(request.data.get("name") or "").strip()
+        consented = bool(request.data.get("consented") or request.data.get("verified"))
+        user = None
+
+        if not domain:
+            return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if channel_type not in NotificationChannelType.values:
+            return Response(
+                {"error": "channel_type must be slack, whatsapp, or email"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not route_id:
+            return Response({"error": "route_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if local_send_times is not None and not isinstance(local_send_times, list):
+            return Response({"error": "local_send_times must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_email = str(request.data.get("user_email") or (route_id if channel_type == "email" else "") or "").strip().lower()
+        if user_email:
+            UserModel = get_user_model()
+            user, _created = UserModel.objects.get_or_create(email=user_email, defaults={"is_active": True})
+
+        try:
+            automation = create_or_update_research_automation(
+                domain=domain,
+                channel_type=channel_type,
+                route_id=route_id,
+                user=user,
+                timezone_name=timezone_name,
+                frequency_per_day=int(frequency_per_day),
+                local_send_times=local_send_times,
+                consent_state=(
+                    NotificationConsentState.ACTIVE
+                    if consented
+                    else NotificationConsentState.PENDING
+                ),
+                name=name,
+            )
+        except Organization.DoesNotExist:
+            return Response({"error": "Organization not found"}, status=status.HTTP_404_NOT_FOUND)
+        except (TypeError, ValueError) as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        channel = automation.notification_channel
+        return Response(
+            {
+                "status": "active" if channel.consent_state == NotificationConsentState.ACTIVE else "pending_consent",
+                "automation_id": str(automation.id),
+                "channel_id": str(channel.id),
+                "channel_type": channel.channel_type,
+                "consent_state": channel.consent_state,
+                "timezone": automation.timezone,
+                "frequency_per_day": automation.frequency_per_day,
+                "local_send_times": automation.local_send_times,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ResearchAutomationActionView(APIView):
+    """Public signed action endpoint for email, WhatsApp, and Slack action URLs."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        return self._handle(request)
+
+    def post(self, request):
+        return self._handle(request)
+
+    def _handle(self, request):
+        from django.core import signing as django_signing
+        from integrations.services.notification_adapters import handle_automation_action_token
+
+        token = str(request.query_params.get("token") or request.data.get("token") or "").strip()
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = handle_automation_action_token(token)
+        except django_signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class ResearchAutomationWhatsAppWebhookView(APIView):
+    """Meta WhatsApp Cloud API webhook for statuses and STOP opt-outs."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        verify_token = str(getattr(settings, "WHATSAPP_WEBHOOK_VERIFY_TOKEN", "") or "").strip()
+        mode = request.query_params.get("hub.mode")
+        token = request.query_params.get("hub.verify_token")
+        challenge = request.query_params.get("hub.challenge")
+        if mode == "subscribe" and verify_token and token == verify_token:
+            return HttpResponse(challenge or "", status=200)
+        return Response({"error": "Invalid verification token"}, status=status.HTTP_403_FORBIDDEN)
+
+    def post(self, request):
+        from integrations.services.notification_adapters import (
+            handle_whatsapp_webhook,
+            verify_whatsapp_webhook_signature,
+        )
+
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if not verify_whatsapp_webhook_signature(body=request.body, signature=signature):
+            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
+        result = handle_whatsapp_webhook(request.data if isinstance(request.data, dict) else {})
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class ContentFactoryOAuthInitiateView(APIView):
@@ -1531,6 +1718,9 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
             "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
             "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
+            "scan_purpose": str(data.get("scan_purpose") or "").strip(),
+            "article_surface_mode": str(data.get("article_surface_mode") or "").strip(),
+            "article_surface_resolution": data.get("article_surface_resolution") if isinstance(data.get("article_surface_resolution"), dict) else {},
             "matched_article_surface": data.get("matched_article_surface"),
             "publish_targets": data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else [],
             "default_publish_target_id": data.get("default_publish_target_id"),
@@ -1609,6 +1799,24 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     return run
 
 
+def _clear_pending_article_system_setup_for_domain(domain: str) -> None:
+    normalized_domain = str(domain or "").strip().lower()
+    if not normalized_domain:
+        return
+    organization = Organization.objects.filter(domain__iexact=normalized_domain).first()
+    if organization is None:
+        return
+    config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    if config is None or not isinstance(config.article_system, dict):
+        return
+    state = dict(config.article_system)
+    if "pending_article_system_setup" not in state:
+        return
+    state.pop("pending_article_system_setup", None)
+    config.article_system = state
+    config.save(update_fields=["article_system", "updated_at"])
+
+
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -1648,11 +1856,33 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "completed"
         error = ""
+        _clear_pending_article_system_setup_for_domain(result["domain"])
+    elif event_type == "article_system_setup_preview_failed":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "preview_failed"
+        setup_payload["setup_run_id"] = run_id
+        preview_error = str(
+            data.get("error")
+            or setup_payload.get("error")
+            or live_preview.get("error")
+            or "Articles setup preview could not be prepared."
+        ).strip()
+        setup_payload["error"] = preview_error
+        if "retryable" not in setup_payload:
+            setup_payload["retryable"] = live_preview.get("retryable", True)
+        result["status"] = "preview_failed"
+        result["article_system_setup"] = setup_payload
+        result["preview_url"] = ""
+        result["error"] = preview_error
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "preview_failed"
+        error = preview_error
     elif event_type == "article_system_setup_manual_merge_required":
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "manual_merge_required"
-        error = str(data.get("message") or "Manual merge is required for this article system setup.")
+        error = str(data.get("message") or "Manual merge is required for this articles setup.")
     else:
         run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
         approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -1705,7 +1935,11 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             )
             parent.result = parent_result
             if parent.status == ContentFactoryRunStatus.RUNNING:
-                parent.current_step = "article_system_setup_preview"
+                parent.current_step = (
+                    "article_system_setup_preview_failed"
+                    if event_type == "article_system_setup_preview_failed"
+                    else "article_system_setup_preview"
+                )
             parent.save(update_fields=["result", "current_step", "updated_at"])
 
     return run
@@ -1768,6 +2002,7 @@ class ContentFactoryCallbackView(APIView):
             elif event_type in {
                 'article_system_setup_preview_ready',
                 'article_system_setup_revision_ready',
+                'article_system_setup_preview_failed',
                 'article_system_setup_completed',
                 'article_system_setup_manual_merge_required',
             }:
@@ -1829,6 +2064,15 @@ class ContentFactoryCallbackView(APIView):
             defaults['error_message'] = error_message
 
         requested_by_slack_user_id = str((self.request.data or {}).get('requested_by_slack_user_id') or '').strip()
+        try:
+            from integrations.services.notification_adapters import (
+                normalize_notification_context,
+                resolve_automation_run,
+            )
+
+            notification_context = normalize_notification_context((self.request.data or {}).get('notification_context'))
+        except Exception:
+            notification_context = {}
         max_attempts = 3 if connection.vendor == 'sqlite' else 1
         last_error = None
         for attempt in range(max_attempts):
@@ -1843,6 +2087,27 @@ class ContentFactoryCallbackView(APIView):
                         request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                         job.request_meta = request_meta
                         job.save(update_fields=['request_meta', 'updated_at'])
+                if notification_context:
+                    request_meta = dict(job.request_meta or {})
+                    request_meta["notification_context"] = notification_context
+                    try:
+                        automation_run = resolve_automation_run(notification_context)
+                    except Exception:
+                        automation_run = None
+                    if automation_run:
+                        request_meta.setdefault("trigger_source", "research_automation")
+                        request_meta["automation_id"] = str(automation_run.automation_id)
+                        request_meta["automation_run_id"] = str(automation_run.id)
+                        if automation_run.request_payload:
+                            request_meta.update(
+                                {
+                                    key: value
+                                    for key, value in automation_run.request_payload.items()
+                                    if key in {"user_email", "recipient_user_id"}
+                                }
+                            )
+                    job.request_meta = request_meta
+                    job.save(update_fields=['request_meta', 'updated_at'])
                 return job
             except OperationalError as exc:
                 last_error = exc
@@ -2442,6 +2707,11 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_delivery_mode_required(self, data):
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_delivery_mode_required,
+        )
+
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -2460,6 +2730,8 @@ class ContentFactoryCallbackView(APIView):
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
+        if normalize_notification_context(data.get("notification_context")):
+            send_delivery_mode_required(data)
 
         return Response(
             {
@@ -2912,6 +3184,10 @@ class ContentFactoryCallbackView(APIView):
             )
 
     def _handle_content_ready(self, data):
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_content_ready,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -2981,8 +3257,11 @@ class ContentFactoryCallbackView(APIView):
             fallback_slack_user_id=slack_user_id,
         )
         requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        notification_context = normalize_notification_context(data.get("notification_context"))
 
-        if recipient_slack_user_id:
+        if notification_context:
+            send_content_ready(data)
+        elif recipient_slack_user_id:
             channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
             publish_button_value = None
             if job_id and channel_id and thread_ts:
@@ -3799,6 +4078,10 @@ class ContentFactoryCallbackView(APIView):
             is_scheduled_daily_job,
             mark_scheduled_dispatch_failed,
         )
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_error,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -3872,7 +4155,9 @@ class ContentFactoryCallbackView(APIView):
                 'scheduled_daily_suppressed': True,
             }, status=status.HTTP_200_OK)
 
-        if slack_user_id:
+        if normalize_notification_context(data.get("notification_context")):
+            send_error(data)
+        elif slack_user_id:
             try:
                 if error_code == 'PREREQUISITE_MISSING':
                     missing_step = data.get('missing_step', 'unknown')
@@ -3923,7 +4208,7 @@ class ContentFactoryCallbackView(APIView):
                     message = (
                         f"⚠️ *{domain} needs its article component catalog refreshed.*\n\n"
                         f"{error_message}\n\n"
-                        f"Open the Connect repo & article system step and run the repository scan again."
+                        f"Open the Connect repo & articles location step and run the repository scan again."
                     )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
@@ -4356,6 +4641,11 @@ class ContentFactoryCallbackView(APIView):
             mark_scheduled_dispatch_failed,
             mark_scheduled_dispatch_topic_selection_sent,
         )
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            resolve_automation_run,
+            send_topic_selection,
+        )
         from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
@@ -4396,6 +4686,25 @@ class ContentFactoryCallbackView(APIView):
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
         job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        notification_context = normalize_notification_context(data.get("notification_context"))
+        if notification_context:
+            request_meta = dict(job.request_meta or {})
+            request_meta["notification_context"] = notification_context
+            automation_run = resolve_automation_run(notification_context)
+            if automation_run:
+                request_meta.setdefault("trigger_source", "research_automation")
+                request_meta["automation_id"] = str(automation_run.automation_id)
+                request_meta["automation_run_id"] = str(automation_run.id)
+                if automation_run.request_payload:
+                    request_meta.update(
+                        {
+                            key: value
+                            for key, value in automation_run.request_payload.items()
+                            if key in {"user_email", "recipient_user_id"}
+                        }
+                    )
+            job.request_meta = request_meta
+            job.save(update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -4414,7 +4723,14 @@ class ContentFactoryCallbackView(APIView):
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
-        if slack_user_id and options:
+        if notification_context and options:
+            upsert_live_progress_card(
+                job,
+                data=data,
+                summary_text="Research complete. Choose one of the topic options below to continue.",
+            )
+            send_topic_selection(data)
+        elif slack_user_id and options:
             # Fetch organization context for explanations
             company_context = None
             competitors = []
@@ -4627,6 +4943,10 @@ class ContentFactoryCallbackView(APIView):
     def _handle_article_complete(self, data):
         """Handle article_complete event from content-factory."""
         from content_factory.models import ContentFactoryJob
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_content_ready,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -4660,7 +4980,9 @@ class ContentFactoryCallbackView(APIView):
             summary_text="Article published and ready for review.",
         )
 
-        if slack_user_id:
+        if normalize_notification_context(data.get("notification_context")):
+            send_content_ready(data)
+        elif slack_user_id:
             title_line = f"*{article_title}*\n\n" if article_title else ""
             blocks = [
                 {
@@ -4698,6 +5020,10 @@ class ContentFactoryCallbackView(APIView):
     def _handle_error(self, data):
         """Handle error event from content-factory."""
         from content_factory.models import ContentFactoryJob
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_error,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -4718,8 +5044,10 @@ class ContentFactoryCallbackView(APIView):
 
         logger.error(f"Error callback for job {job_id}: {error_message}")
 
-        # Notify user via Slack
-        if slack_user_id:
+        # Notify user via the routed channel, falling back to Slack for legacy jobs.
+        if normalize_notification_context(data.get("notification_context")):
+            send_error(data)
+        elif slack_user_id:
             try:
                 blocks = [
                     {

@@ -190,6 +190,15 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(json["existing_fields"]["companyContext"], "AI workflow automation for founders.")
             self.assertEqual(json["existing_fields"]["competitors"], ["buildclub.ai", "aussiefoundersclub.com"])
             self.assertEqual(json["existing_fields"]["seedKeywords"], ["ai events melbourne", "founder automation"])
+            self.assertEqual(json["startup_profile"]["short_description"], "Manual founder-authored description.")
+            self.assertEqual(json["startup_profile"]["problem_solved"], "Manual problem statement.")
+            self.assertEqual(json["startup_profile"]["target_audience"], "Founder tools for marketing and monthly updates.")
+            self.assertEqual(json["startup_profile"]["founder_names"], ["Sam Donegan"])
+            self.assertEqual(json["startup_profile"]["stage"], "Seed")
+            self.assertEqual(json["startup_profile"]["organization_kind"], "For-profit")
+            self.assertEqual(json["existing_fields"]["profileFields"]["shortDescription"], "Manual founder-authored description.")
+            self.assertEqual(json["existing_fields"]["profileFields"]["problemSolved"], "Manual problem statement.")
+            self.assertEqual(json["existing_fields"]["profileFields"]["targetAudience"], "Founder tools for marketing and monthly updates.")
             self.assertEqual(json["research_depth"], "deep")
             self.assertTrue(json["strict_deep_research"])
             self.assertEqual(json["min_direct_competitors"], 3)
@@ -209,10 +218,14 @@ class VibeMarketingAutofillTests(TestCase):
                     "abn": "94 807 394 137",
                     "brandName": "MLAI",
                     "companyContext": "AI workflow automation for founders.",
+                    "shortDescription": "Manual founder-authored description.",
+                    "problemSolved": "Manual problem statement.",
+                    "targetAudience": "Founder tools for marketing and monthly updates.",
                     "competitors": ["buildclub.ai", "aussiefoundersclub.com"],
                     "seedKeywords": ["ai events melbourne", "founder automation"],
                     "founderNames": ["Sam Donegan"],
                     "stage": "Seed",
+                    "organizationKind": "For-profit",
                     "notes": "Founder tools for marketing and monthly updates.",
                 },
                 format="json",
@@ -243,6 +256,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(startup_profile.competitor_domains, ["buildclub.ai", "aussiefoundersclub.com"])
         self.assertEqual(startup_profile.positive_keywords, ["ai events melbourne", "founder automation"])
         self.assertEqual(startup_profile.stage, "Seed")
+        self.assertEqual(startup_profile.organization_kind, "For-profit")
+        self.assertEqual(startup_profile.short_description, "Manual founder-authored description.")
+        self.assertEqual(startup_profile.problem_solved, "Manual problem statement.")
+        self.assertEqual(startup_profile.target_audience, "Founder tools for marketing and monthly updates.")
         self.assertEqual(startup_profile.notes, "Founder tools for marketing and monthly updates.")
 
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
@@ -256,6 +273,10 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(bootstrap.data["organization"]["seedKeywords"], ["ai events melbourne", "founder automation"])
         self.assertEqual(bootstrap.data["startupProfile"]["founderNames"], ["Sam Donegan"])
         self.assertEqual(bootstrap.data["startupProfile"]["stage"], "Seed")
+        self.assertEqual(bootstrap.data["startupProfile"]["organizationKind"], "For-profit")
+        self.assertEqual(bootstrap.data["startupProfile"]["shortDescription"], "Manual founder-authored description.")
+        self.assertEqual(bootstrap.data["startupProfile"]["problemSolved"], "Manual problem statement.")
+        self.assertEqual(bootstrap.data["startupProfile"]["targetAudience"], "Founder tools for marketing and monthly updates.")
         self.assertEqual(bootstrap.data["startupProfile"]["notes"], "Founder tools for marketing and monthly updates.")
 
     def test_settings_save_accepts_organization_kind_without_clearing_brand_or_notes(self):
@@ -836,8 +857,18 @@ class VibeMarketingAutofillTests(TestCase):
                     "collectedAt": "2026-04-25T00:00:00+00:00",
                     "overallScore": 78,
                     "summary": "Website baseline is workable.",
-                    "metrics": {"technicalHealth": {"status": "measured", "score": 82}},
-                    "sourceStatus": {"technicalHealth": "measured", "traffic": "needs_connection"},
+                    "metrics": {
+                        "technicalHealth": {"status": "measured", "score": 82},
+                        "aiVisibility": {
+                            "status": "measured",
+                            "score": 75,
+                            "providers": [
+                                {"key": "chatgpt", "label": "ChatGPT", "status": "measured", "score": 80},
+                                {"key": "claude", "label": "Claude", "status": "measured", "score": 70},
+                            ],
+                        },
+                    },
+                    "sourceStatus": {"technicalHealth": "measured", "aiVisibility": "measured", "traffic": "needs_connection"},
                     "recommendations": [{"title": "Connect Google", "source": "traffic"}],
                 }
             },
@@ -863,6 +894,9 @@ class VibeMarketingAutofillTests(TestCase):
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertTrue(bootstrap.data["checks"]["baseline"]["passed"])
         self.assertEqual(bootstrap.data["websiteBaseline"]["overallScore"], 78)
+        providers = bootstrap.data["websiteBaseline"]["metrics"]["aiVisibility"]["providers"]
+        self.assertEqual(providers[0]["key"], "chatgpt")
+        self.assertEqual(providers[1]["score"], 70)
 
     def test_bootstrap_returns_topic_candidates_from_selection_options(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -2256,7 +2290,7 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(url, "https://content-factory.test/api/runs/scan")
             self.assertEqual(json["github_repo"], "acme/site")
             self.assertEqual(json["scan_purpose"], "setup")
-            self.assertTrue(json["scaffold_if_missing"])
+            self.assertIs(json["scaffold_if_missing"], True)
             self.assertEqual(json["article_surface_mode"], "existing")
             self.assertIs(json["auto_setup_preview"], True)
             self.assertEqual(
@@ -2282,10 +2316,12 @@ class VibeMarketingAutofillTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id="scan-hint-1")
         self.assertEqual(run.run_request["article_surface_hint"]["route_path"], "/articles")
         self.assertEqual(run.result["scan_purpose"], "setup")
+        self.assertEqual(run.run_request["scan_purpose"], "setup")
         config = OrganizationContentConfig.objects.get(organization=organization)
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["mode"], "existing")
         self.assertEqual(pending["routePath"], "/articles")
+        self.assertEqual(pending["sourceScanRunId"], "scan-hint-1")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_inventory_scan_does_not_require_article_surface_url(self):
@@ -2308,7 +2344,8 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(url, "https://content-factory.test/api/runs/scan")
             self.assertEqual(json["github_repo"], "acme/site")
             self.assertEqual(json["scan_purpose"], "inventory")
-            self.assertFalse(json["scaffold_if_missing"])
+            self.assertIs(json["scaffold_if_missing"], False)
+            self.assertIs(json["auto_setup_preview"], False)
             self.assertEqual(json["article_surface_mode"], "not_sure")
             self.assertNotIn("article_surface_hint", json)
             return FakeResponse()
@@ -2324,9 +2361,12 @@ class VibeMarketingAutofillTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "scan-inventory-1")
         run = ContentFactoryRun.objects.get(run_id="scan-inventory-1")
         self.assertEqual(run.run_request["scan_purpose"], "inventory")
         self.assertEqual(run.result["scan_purpose"], "inventory")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        self.assertNotIn("pending_article_system_setup", config.article_system or {})
 
     def test_scan_rejects_mismatched_article_surface_domain(self):
         response = self.client.post(

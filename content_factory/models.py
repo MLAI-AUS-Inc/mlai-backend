@@ -387,6 +387,243 @@ class ScheduledDiscoveryDispatch(models.Model):
 
     def __str__(self):
         return f"{self.domain}/{self.slack_user_id}/{self.local_date} ({self.state})"
+
+
+class NotificationChannelType(models.TextChoices):
+    SLACK = "slack", "Slack"
+    WHATSAPP = "whatsapp", "WhatsApp"
+    EMAIL = "email", "Email"
+
+
+class NotificationConsentState(models.TextChoices):
+    PENDING = "pending", "Pending"
+    ACTIVE = "active", "Active"
+    OPTED_OUT = "opted_out", "Opted Out"
+    REVOKED = "revoked", "Revoked"
+
+
+class ResearchAutomationStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    DISABLED = "disabled", "Disabled"
+
+
+class AutomationRunStatus(models.TextChoices):
+    SCHEDULED = "scheduled", "Scheduled"
+    QUEUED = "queued", "Queued"
+    TOPIC_SELECTION_SENT = "topic_selection_sent", "Topic Selection Sent"
+    DELIVERY_MODE_REQUIRED = "delivery_mode_required", "Delivery Mode Required"
+    GENERATING = "generating", "Generating"
+    COMPLETED = "completed", "Completed"
+    CANCELLED = "cancelled", "Cancelled"
+    FAILED = "failed", "Failed"
+
+
+class NotificationDeliveryStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SENT = "sent", "Sent"
+    FAILED = "failed", "Failed"
+    BOUNCED = "bounced", "Bounced"
+    OPTED_OUT = "opted_out", "Opted Out"
+
+
+class NotificationChannel(models.Model):
+    """A consented route that can receive scheduled research notifications."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="notification_channels",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="content_notification_channels",
+        null=True,
+        blank=True,
+    )
+    channel_type = models.CharField(max_length=20, choices=NotificationChannelType.choices, db_index=True)
+    route_id = models.CharField(
+        max_length=255,
+        db_index=True,
+        help_text="Slack user ID, E.164 WhatsApp number, or email address.",
+    )
+    display_name = models.CharField(max_length=255, blank=True, default="")
+    consent_state = models.CharField(
+        max_length=20,
+        choices=NotificationConsentState.choices,
+        default=NotificationConsentState.PENDING,
+        db_index=True,
+    )
+    provider_connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="content_notification_channels",
+    )
+    provider_metadata = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(blank=True, null=True)
+    opted_out_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_notification_channel"
+        ordering = ["organization_id", "channel_type", "route_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "channel_type", "route_id"],
+                name="content_notify_channel_unique_route",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["channel_type", "consent_state"], name="cf_notify_channel_consent_idx"),
+            models.Index(fields=["user", "channel_type"], name="cf_notify_channel_user_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.channel_type}:{self.route_id} ({self.consent_state})"
+
+
+class ResearchAutomation(models.Model):
+    """User-configured scheduled research cadence for one organization."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="research_automations",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="content_research_automations",
+        null=True,
+        blank=True,
+    )
+    notification_channel = models.ForeignKey(
+        NotificationChannel,
+        on_delete=models.PROTECT,
+        related_name="research_automations",
+    )
+    name = models.CharField(max_length=255, blank=True, default="")
+    timezone = models.CharField(max_length=64, default="Australia/Melbourne")
+    frequency_per_day = models.PositiveSmallIntegerField(default=1)
+    local_send_times = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=ResearchAutomationStatus.choices,
+        default=ResearchAutomationStatus.ACTIVE,
+        db_index=True,
+    )
+    last_scheduled_for_at = models.DateTimeField(blank=True, null=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_research_automation"
+        ordering = ["organization_id", "created_at"]
+        indexes = [
+            models.Index(fields=["status", "updated_at"], name="cf_research_auto_status_idx"),
+            models.Index(fields=["organization", "status"], name="cf_research_auto_org_idx"),
+        ]
+
+    def __str__(self):
+        return self.name or f"{self.organization_id} research automation"
+
+
+class AutomationRun(models.Model):
+    """One scheduled slot/run for a research automation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    automation = models.ForeignKey(
+        ResearchAutomation,
+        on_delete=models.CASCADE,
+        related_name="runs",
+    )
+    scheduled_for_at = models.DateTimeField(db_index=True)
+    local_date = models.DateField(db_index=True)
+    slot_index = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(
+        max_length=32,
+        choices=AutomationRunStatus.choices,
+        default=AutomationRunStatus.SCHEDULED,
+        db_index=True,
+    )
+    content_factory_run_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    article_content_factory_run_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=255, unique=True, db_index=True)
+    selected_topic = models.JSONField(default=dict, blank=True)
+    selected_delivery_mode = models.CharField(max_length=32, blank=True, default="")
+    request_payload = models.JSONField(default=dict, blank=True)
+    callback_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_automation_run"
+        ordering = ["-scheduled_for_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["automation", "local_date", "slot_index"],
+                name="content_auto_run_unique_slot",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "scheduled_for_at"], name="cf_auto_run_due_idx"),
+            models.Index(fields=["content_factory_run_id"], name="cf_auto_run_cf_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.automation_id}:{self.local_date}:{self.slot_index} ({self.status})"
+
+
+class NotificationDelivery(models.Model):
+    """Provider delivery attempt for an automation event."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    automation_run = models.ForeignKey(
+        AutomationRun,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+    )
+    channel = models.ForeignKey(
+        NotificationChannel,
+        on_delete=models.PROTECT,
+        related_name="deliveries",
+    )
+    event_type = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=NotificationDeliveryStatus.choices,
+        default=NotificationDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    idempotency_key = models.CharField(max_length=255, unique=True, db_index=True)
+    provider_message_id = models.CharField(max_length=255, blank=True, default="")
+    request_payload = models.JSONField(default=dict, blank=True)
+    response_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    delivered_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_notification_delivery"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["event_type", "status"], name="cf_notify_delivery_event_idx"),
+            models.Index(fields=["channel", "status"], name="cf_notify_delivery_channel_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type}:{self.channel_id}:{self.status}"
+
+
 class ContentFactoryHealingPromotionState(models.TextChoices):
     CANDIDATE = "candidate", "Candidate"
     PROMOTED = "promoted", "Promoted"

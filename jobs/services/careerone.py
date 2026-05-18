@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import date
 from typing import Any
 from urllib.parse import quote_plus, urljoin
@@ -12,14 +14,30 @@ from jobs.services.public_pages import clean_text, infer_location, infer_posted,
 
 BASE_URL = "https://www.careerone.com.au"
 QUERIES = ("ai", "machine-learning", "data-scientist", "startup-software-engineer")
-HEADERS = {"User-Agent": "RooJobsDaily/0.1 (+https://roo.jobs)"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-AU,en;q=0.9",
+    "Referer": BASE_URL,
+}
+RETRY_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+MAX_RETRIES = 3
+CAREERONE_ENABLED = True
+logger = logging.getLogger(__name__)
 
 
 def collect_careerone_jobs(per_query_limit: int = 10) -> list[dict[str, Any]]:
+    if not CAREERONE_ENABLED:
+        return []
     jobs: list[dict[str, Any]] = []
     seen: set[str] = set()
     for query in QUERIES:
-        for job in fetch_query_jobs(query, per_query_limit):
+        query_jobs = fetch_query_jobs(query, per_query_limit)
+        for job in query_jobs:
             key = job["job_url"]
             if key in seen:
                 continue
@@ -30,8 +48,7 @@ def collect_careerone_jobs(per_query_limit: int = 10) -> list[dict[str, Any]]:
 
 def fetch_query_jobs(query: str, limit: int) -> list[dict[str, Any]]:
     url = f"{BASE_URL}/{quote_plus(query).replace('+', '-')}-jobs/in-australia"
-    response = requests.get(url, headers=HEADERS, timeout=25)
-    response.raise_for_status()
+    response = get_careerone_response(url, query)
     soup = BeautifulSoup(response.text, "html.parser")
 
     jobs: list[dict[str, Any]] = []
@@ -70,6 +87,33 @@ def fetch_query_jobs(query: str, limit: int) -> list[dict[str, Any]]:
             }
         )
     return jobs
+
+
+def get_careerone_response(url: str, query: str) -> requests.Response:
+    with requests.Session() as session:
+        session.trust_env = False
+        session.headers.update(HEADERS)
+        for attempt in range(1, MAX_RETRIES + 1):
+            response = session.get(url, timeout=25)
+            if response.status_code not in RETRY_STATUS_CODES or attempt == MAX_RETRIES:
+                response.raise_for_status()
+                return response
+            delay = retry_delay_seconds(response, attempt)
+            logger.warning(
+                "CareerOne query %s returned HTTP %s; retrying in %ss",
+                query,
+                response.status_code,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError("CareerOne request retry loop exited unexpectedly")
+
+
+def retry_delay_seconds(response: requests.Response, attempt: int) -> int:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after and retry_after.isdigit():
+        return min(int(retry_after), 60)
+    return min(2**attempt, 30)
 
 
 def nearest_job_card(link):

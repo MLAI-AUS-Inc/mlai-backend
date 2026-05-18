@@ -414,28 +414,43 @@ def _article_surface_hint_from_request(data, *, domain: str) -> tuple[dict, str,
 
 
 def _pending_article_system_setup_from_config(config) -> dict:
-    article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
-    pending = article_system.get("pending_article_system_setup")
+    state = getattr(config, "article_system", None)
+    state = state if isinstance(state, dict) else {}
+    pending = state.get("pending_article_system_setup")
     return pending if isinstance(pending, dict) else {}
 
 
-def _store_pending_article_system_setup(config, *, mode: str, route_path: str, source_scan_run_id: str = "", article_surface_hint=None):
-    article_system = dict(config.article_system or {})
-    saved_at = timezone.now().isoformat()
+def _store_pending_article_system_setup(
+    config,
+    *,
+    github_repo: str,
+    mode: str,
+    route_path: str,
+    article_surface_url: str = "",
+    source_scan_run_id: str = "",
+    matched_article_surface=None,
+    detected_candidates=None,
+) -> dict:
+    state = getattr(config, "article_system", None)
+    state = dict(state) if isinstance(state, dict) else {}
     pending = {
-        "mode": str(mode or "not_sure"),
-        "routePath": str(route_path or ""),
-        "route_path": str(route_path or ""),
-        "sourceScanRunId": str(source_scan_run_id or ""),
-        "source_scan_run_id": str(source_scan_run_id or ""),
-        "articleSurfaceHint": article_surface_hint or {},
-        "article_surface_hint": article_surface_hint or {},
-        "status": "pending_generation",
-        "savedAt": saved_at,
-        "saved_at": saved_at,
+        "githubRepo": str(github_repo or "").strip(),
+        "github_repo": str(github_repo or "").strip(),
+        "mode": str(mode or "").strip() or "existing",
+        "routePath": str(route_path or "").strip(),
+        "route_path": str(route_path or "").strip(),
+        "articleSurfaceUrl": str(article_surface_url or "").strip(),
+        "article_surface_url": str(article_surface_url or "").strip(),
+        "sourceScanRunId": str(source_scan_run_id or "").strip(),
+        "source_scan_run_id": str(source_scan_run_id or "").strip(),
+        "matchedArticleSurface": matched_article_surface if isinstance(matched_article_surface, dict) else None,
+        "matched_article_surface": matched_article_surface if isinstance(matched_article_surface, dict) else None,
+        "detectedCandidates": detected_candidates if isinstance(detected_candidates, list) else [],
+        "detected_candidates": detected_candidates if isinstance(detected_candidates, list) else [],
+        "createdAt": timezone.now().isoformat(),
     }
-    article_system["pending_article_system_setup"] = pending
-    config.article_system = article_system
+    state["pending_article_system_setup"] = pending
+    config.article_system = state
     config.save(update_fields=["article_system", "updated_at"])
     return pending
 
@@ -2116,7 +2131,6 @@ def _persist_live_preview_payload(run, payload):
         result = dict(run.result or {})
         result["livePreview"] = payload
         update_fields = ["result", "updated_at"]
-
         if run.workflow == "article_system_setup":
             preview_statuses = _live_preview_statuses(payload)
             preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
@@ -2785,7 +2799,8 @@ def _publish_child_has_real_approval_gate(run):
 
 
 PUBLISH_CHILD_MISSING_REMOTE_WAIT_REASON = (
-    "Publish job was queued but did not start. Retry will safely recreate the same PR job."
+    "Publish job was queued but did not start. "
+    "Retry will safely recreate the same PR job."
 )
 
 
@@ -3496,6 +3511,9 @@ def _serialize_startup_profile(organization):
             "founderNames": [],
             "stage": "",
             "organizationKind": "",
+            "shortDescription": "",
+            "problemSolved": "",
+            "targetAudience": "",
             "notes": "",
             "companyAliases": [],
             "domainAliases": [],
@@ -3504,6 +3522,9 @@ def _serialize_startup_profile(organization):
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
         "organizationKind": getattr(profile, "organization_kind", ""),
+        "shortDescription": getattr(profile, "short_description", ""),
+        "problemSolved": getattr(profile, "problem_solved", ""),
+        "targetAudience": getattr(profile, "target_audience", ""),
         "notes": profile.notes,
         "companyAliases": list(profile.company_aliases or []),
         "domainAliases": list(profile.domain_aliases or []),
@@ -3954,6 +3975,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         checks=checks,
     )
     scan_run = run if run and run.workflow in SCAN_WORKFLOWS else _latest_run_matching(latest_runs, SCAN_WORKFLOWS)
+    setup_run = run if run and run.workflow == "article_system_setup" else _latest_run_matching(latest_runs, {"article_system_setup"})
     discovery_run = run if run and run.workflow in DISCOVERY_WORKFLOWS else _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = run if run and run.workflow in ARTICLE_WORKFLOWS else _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     active_run_source_id = _run_source_run_id(run) if run else ""
@@ -4022,6 +4044,17 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         or revision_needs_acceptance
         or latest_batch.get("status") == "accepted"
     )
+    pending_article_system_setup = _pending_article_system_setup_from_config(config) if config is not None else {}
+    setup_mode_active = bool(pending_article_system_setup or setup_run)
+    pending_setup_scan_id = str(
+        pending_article_system_setup.get("sourceScanRunId")
+        or pending_article_system_setup.get("source_scan_run_id")
+        or ""
+    ).strip()
+    pending_setup_scan_run = next(
+        (candidate for candidate in latest_runs if pending_setup_scan_id and candidate.run_id == pending_setup_scan_id),
+        None,
+    )
 
     status_by_id = {}
     action_by_id = {}
@@ -4079,7 +4112,53 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         status_by_id["article_system"] = "ready"
         action_by_id["article_system"] = _workflow_step_action("Run repository scan", href=href_by_id["article_system"])
 
-    if discovery_run and not checks.get("research", {}).get("passed"):
+    if pending_article_system_setup and pending_setup_scan_run and pending_setup_scan_run.status in RUNNING_RUN_STATUSES:
+        status_by_id["article_system"] = "running"
+        run_by_id["article_system"] = pending_setup_scan_run.run_id
+        href_by_id["article_system"] = _run_url(pending_setup_scan_run)
+        summary_by_id["article_system"] = "Articles setup scan is running."
+        status_by_id["generate"] = "locked"
+    elif pending_article_system_setup and not setup_run:
+        status_by_id["article_system"] = "complete"
+        summary_by_id["article_system"] = "Articles/blogs location confirmed."
+        status_by_id["generate"] = "ready"
+        href_by_id["generate"] = "/founder-tools/marketing/create?step=writeCheck"
+        action_by_id["generate"] = _workflow_step_action(
+            "Generate articles setup preview",
+            href=href_by_id["generate"],
+            intent="start-article-system-setup",
+        )
+        summary_by_id["generate"] = "Generate the articles/blog page setup before writing the first article."
+    elif setup_run:
+        status_by_id["article_system"] = "complete" if setup_run.status == ContentFactoryRunStatus.COMPLETED else "needs_action"
+        run_by_id["generate"] = setup_run.run_id
+        href_by_id["generate"] = _run_url(setup_run)
+        run_by_id["review"] = setup_run.run_id
+        href_by_id["review"] = _run_url(setup_run)
+        run_by_id["publish"] = setup_run.run_id
+        href_by_id["publish"] = _run_url(setup_run)
+        if setup_run.status in RUNNING_RUN_STATUSES:
+            status_by_id["generate"] = "running"
+            summary_by_id["generate"] = "Articles setup preview is being generated."
+        elif setup_run.status in FAILED_RUN_STATUSES:
+            status_by_id["generate"] = "blocked"
+            action_by_id["generate"] = _workflow_step_action("Open failed setup run", href=_run_url(setup_run))
+        elif setup_run.status in {ContentFactoryRunStatus.AWAITING_CONFIRMATION, ContentFactoryRunStatus.AWAITING_APPROVAL, ContentFactoryRunStatus.APPROVAL_REQUIRED}:
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "needs_action"
+            action_by_id["review"] = _workflow_step_action("Review articles setup preview", href=_run_url(setup_run))
+            status_by_id["publish"] = "ready"
+            action_by_id["publish"] = _workflow_step_action("Approve articles setup", href=_run_url(setup_run))
+        elif setup_run.status == ContentFactoryRunStatus.COMPLETED:
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "complete"
+            summary_by_id["publish"] = "Articles setup is complete."
+
+    if setup_mode_active:
+        status_by_id["research"] = "locked"
+        status_by_id["choose_topic"] = "locked"
+    elif discovery_run and not checks.get("research", {}).get("passed"):
         run_by_id["research"] = discovery_run.run_id
         href_by_id["research"] = _run_url(discovery_run)
         if discovery_run.status in RUNNING_RUN_STATUSES:
@@ -4094,7 +4173,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
     if topic_candidates is None:
         topic_candidates = _topic_candidates_from_runs(latest_runs, organization=organization)
-    if article_run:
+    if setup_mode_active:
+        pass
+    elif article_run:
         status_by_id["choose_topic"] = "complete"
         run_by_id["choose_topic"] = article_run.run_id
     elif checks.get("research", {}).get("passed"):
@@ -4474,6 +4555,7 @@ def _serialize_bootstrap(context, request=None):
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
     has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs)
+    pending_article_system_setup = _pending_article_system_setup_from_config(config)
     return {
         "company": {
             "id": str(context.company.id),
@@ -4504,6 +4586,8 @@ def _serialize_bootstrap(context, request=None):
             "dailyDiscoveryPriority": config.daily_discovery_priority,
             "defaultTimezone": config.default_timezone,
             "githubConnectionState": config.github_connection_state,
+            "pendingArticleSystemSetup": pending_article_system_setup,
+            "pending_article_system_setup": pending_article_system_setup,
         },
         "startupProfile": _serialize_startup_profile(context.organization),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config),
@@ -4916,10 +5000,14 @@ def _run_result_from_remote(remote_data):
         "scan_purpose",
         "article_surface_mode",
         "article_surface_hint",
+        "article_surface_hint_status",
         "article_surface_url",
         "article_surface_resolution",
         "matched_article_surface",
         "detected_candidates",
+        "article_system_readiness",
+        "article_system_setup",
+        "setup_run_id",
     ):
         if remote_data.get(key) is not None and merged.get(key) is None:
             merged[key] = remote_data.get(key)
@@ -5035,6 +5123,13 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
             workflow,
             exc,
         )
+        if workflow == "startup_autofill":
+            return _blocked_worker_payload(
+                workflow=workflow,
+                technical_error=str(exc),
+                diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow=workflow),
+                retryable=True,
+            )
         return _status_poll_unavailable_payload(
             workflow=workflow,
             technical_error=str(exc),
@@ -6010,12 +6105,34 @@ class VibeMarketingAutofillView(APIView):
         organization = context.organization
         config = _get_config(organization)
         actor_id = founder_actor_id_for_user(request.user)
+        startup_profile = _serialize_startup_profile(organization)
+        startup_profile_payload = {
+            "founder_names": startup_profile.get("founderNames", []),
+            "stage": startup_profile.get("stage", ""),
+            "organization_kind": startup_profile.get("organizationKind", ""),
+            "short_description": startup_profile.get("shortDescription", ""),
+            "problem_solved": startup_profile.get("problemSolved", ""),
+            "target_audience": startup_profile.get("targetAudience", ""),
+            "notes": startup_profile.get("notes", ""),
+        }
+        profile_fields = {
+            "shortDescription": startup_profile.get("shortDescription", ""),
+            "problemSolved": startup_profile.get("problemSolved", ""),
+            "targetAudience": startup_profile.get("targetAudience", ""),
+            "location": company.location,
+            "abn": company.abn,
+            "founderNames": startup_profile.get("founderNames", []),
+            "stage": startup_profile.get("stage", ""),
+            "organizationKind": startup_profile.get("organizationKind", ""),
+        }
         existing_fields = {
             "brandName": config.brand_name or organization.name,
             "companyContext": config.company_context or "",
             "competitors": _camel_list(organization.competitors),
             "seedKeywords": _camel_list(organization.seed_keywords),
             "companyLinkedInUrl": organization.company_linkedin_url,
+            "startupProfile": startup_profile,
+            "profileFields": profile_fields,
         }
         payload = {
             "domain": organization.domain,
@@ -6025,6 +6142,8 @@ class VibeMarketingAutofillView(APIView):
             "location": company.location,
             "abn": company.abn,
             "existing_fields": existing_fields,
+            "startup_profile": startup_profile_payload,
+            "profile_fields": profile_fields,
             "research_depth": "deep",
             "strict_deep_research": True,
             "min_direct_competitors": 3,
@@ -6302,7 +6421,12 @@ class VibeMarketingScanView(APIView):
         auto_setup_preview = _bool_from_request(
             _request_value(request.data, "autoSetupPreview", "auto_setup_preview", default=False)
         )
-        if auto_setup_preview and not article_surface_hint:
+        if scan_purpose == "inventory":
+            article_surface_hint = {}
+            article_surface_mode = "not_sure"
+            article_surface_url = ""
+            auto_setup_preview = False
+        elif not article_surface_hint:
             return Response(
                 {"detail": "Article/blog URL or path is required before drafting an articles setup preview."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -6321,8 +6445,8 @@ class VibeMarketingScanView(APIView):
             "scaffold_if_missing": scaffold_if_missing,
             "auto_setup_preview": auto_setup_preview,
             "generate_components": True,
-            "article_surface_mode": article_surface_mode,
             "scan_purpose": scan_purpose,
+            "article_surface_mode": article_surface_mode,
         }
         if article_surface_url:
             payload["article_surface_url"] = article_surface_url
@@ -6352,13 +6476,15 @@ class VibeMarketingScanView(APIView):
             route_path = str(article_surface_hint.get("route_path") or article_surface_url or "").strip()
             pending = _store_pending_article_system_setup(
                 config,
+                github_repo=config.github_repo,
                 mode=article_surface_mode,
                 route_path=route_path,
-                source_scan_run_id=str(_request_value(request.data, "sourceScanRunId", "source_scan_run_id", default="") or ""),
-                article_surface_hint=article_surface_hint,
+                article_surface_url=article_surface_url,
+                source_scan_run_id=run.run_id,
             )
-            result = run.result or {}
+            result = dict(run.result or {})
             result["pending_article_system_setup"] = pending
+            result["pending_article_system_generation"] = True
             run.result = result
             run.save(update_fields=["result", "updated_at"])
         return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
@@ -6391,6 +6517,66 @@ class VibeMarketingArticleView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        pending_setup = _pending_article_system_setup_from_config(config)
+        if pending_setup:
+            source_scan_run_id = str(
+                pending_setup.get("sourceScanRunId") or pending_setup.get("source_scan_run_id") or ""
+            ).strip()
+            scan_run = (
+                ContentFactoryRun.objects.filter(run_id=source_scan_run_id, workflow__in=SCAN_WORKFLOWS)
+                .prefetch_related("steps")
+                .first()
+                if source_scan_run_id
+                else None
+            )
+            if not scan_run or not _run_belongs_to_context(scan_run, context):
+                return Response(
+                    {"detail": "Run the repository scan before generating the articles setup."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            remote_data = _call_content_factory_run_action(
+                run_id=scan_run.run_id,
+                action="approve",
+                payload={},
+                workflow=scan_run.workflow,
+            )
+            setup_run_id = str(remote_data.get("setup_run_id") or remote_data.get("run_id") or remote_data.get("job_id") or "").strip()
+            if setup_run_id:
+                setup_payload = remote_data.get("article_system_setup")
+                setup_payload = dict(setup_payload) if isinstance(setup_payload, dict) else _run_result_from_remote(remote_data)
+                setup_payload.setdefault("setup_run_id", setup_run_id)
+                setup_payload.setdefault("parent_run_id", scan_run.run_id)
+                setup_run = _create_local_run(
+                    workflow="article_system_setup",
+                    domain=context.organization.domain,
+                    github_repo=config.github_repo or scan_run.github_repo or "",
+                    actor_id=founder_actor_id_for_user(request.user),
+                    payload={
+                        "workflow": "article_system_setup",
+                        "domain": context.organization.domain,
+                        "github_repo": config.github_repo or scan_run.github_repo or "",
+                        "parent_run_id": scan_run.run_id,
+                        "scan_run_id": scan_run.run_id,
+                        "pending_article_system_setup": pending_setup,
+                    },
+                    remote_data={**remote_data, "run_id": setup_run_id, "workflow": "article_system_setup"},
+                )
+                setup_result = dict(setup_run.result or {})
+                setup_result["pending_article_system_setup"] = pending_setup
+                setup_run.result = setup_result
+                setup_run.save(update_fields=["result", "updated_at"])
+                scan_result = dict(scan_run.result or {})
+                scan_result["setup_run_id"] = setup_run_id
+                scan_result["scaffold_status"] = remote_data.get("scaffold_status") or "queued"
+                scan_run.result = scan_result
+                scan_run.status = ContentFactoryRunStatus.RUNNING
+                scan_run.approval_state = ContentFactoryApprovalState.APPROVED
+                scan_run.save(update_fields=["result", "status", "approval_state", "updated_at"])
+                return Response(_serialize_run(setup_run, context=context), status=status.HTTP_202_ACCEPTED)
+            return Response(
+                {"detail": str(remote_data.get("detail") or remote_data.get("error") or "Articles setup could not be started.")},
+                status=status.HTTP_409_CONFLICT,
+            )
         selected_title = str(
             _request_value(request.data, "selected_title", "selectedTitle", "candidate_title", "candidateTitle", default="")
             or ""
@@ -6514,7 +6700,8 @@ class VibeMarketingRunView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
-        skip_remote_status = bool(
+        skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
+        skip_remote_status = skipped_missing_publish_child or bool(
             run.workflow in ARTICLE_WORKFLOWS
             and run.status == ContentFactoryRunStatus.COMPLETED
             and _article_run_has_completed_local_artifacts(run)

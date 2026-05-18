@@ -405,7 +405,66 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": False, "github_token": "org-live-preview-token"},
+            payload={
+                "force": False,
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
+        )
+
+    def test_completed_article_run_auto_prepare_prefers_github_app_installation_token(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "legacy-org-live-preview-token"
+        config.github_installation_id = "12345"
+        config.save(update_fields=["github_token_encrypted", "github_installation_id", "updated_at"])
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+        app_token = GitHubInstallationToken(
+            token="ghs_installation",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+        )
+        preview_payload = {"available": False, "status": "starting", "previewUrl": ""}
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True),
+            patch(
+                "content_factory.vibe_marketing_views.create_installation_access_token",
+                return_value=app_token,
+            ) as create_token,
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={
+                "force": False,
+                "github_token": "ghs_installation",
+                "github_installation_id": "12345",
+                "token_source": "github_app_installation",
+            },
+        )
+        create_token.assert_called_once_with(
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+            permission_mode="write",
         )
 
     def test_completed_article_run_refreshes_starting_preview_failure(self):
@@ -870,6 +929,42 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
 
+    def test_article_system_live_preview_failure_blocks_setup_run(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-preview-failed",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "article_system_setup": {"status": "preview_building"},
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+            },
+        )
+        preview_payload = {
+            "available": False,
+            "status": "failed",
+            "platformStatus": "failed",
+            "previewUrl": "",
+            "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+            "errorCode": "platform_preview_failed",
+            "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+            "retryable": True,
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/live-preview")
+
+        self.assertEqual(response.status_code, 200)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+
     def test_live_preview_retry_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
@@ -891,7 +986,12 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": True, "local_repo_path": "", "github_token": "org-live-preview-token"},
+            payload={
+                "force": True,
+                "local_repo_path": "",
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
         )
 
     @override_settings(
@@ -1939,11 +2039,40 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["result"]["publish_child_status"], ContentFactoryRunStatus.BLOCKED)
         self.assertTrue(response.data["result"]["publish_child_recoverable"])
         self.assertEqual(response.data["result"]["publish_handoff_status"], "recoverable_missing_child")
-        self.assertIn("not found in Content Factory", response.data["result"]["publish_child_wait_reason"])
+        self.assertIn("queued but did not start", response.data["result"]["publish_child_wait_reason"])
         steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
         self.assertEqual(steps["publish"]["status"], "ready")
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertEqual(steps["publish"]["primaryAction"]["label"], "Retry creating PR")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_missing_publish_child_route_does_not_poll_remote_repeatedly(self):
+        child_run = ContentFactoryRun.objects.create(
+            run_id="article-publish-child-route-missing",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={
+                "source_run_id": self.run.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={
+                "error": "Content Factory run article-publish-child-route-missing was not found.",
+                "diagnostics": {"content_factory_status_code": 404},
+            },
+            error="Content Factory run article-publish-child-route-missing was not found.",
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}) as status_call:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{child_run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        status_call.assert_not_called()
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(response.data["result"]["publish_child_recoverable"])
+        self.assertIn("queued but did not start", response.data["result"]["publish_child_wait_reason"])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_retries_local_child_missing_remotely(self):

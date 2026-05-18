@@ -106,6 +106,9 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
         "companyId": ("company_id",),
         "companyLinkedInUrl": ("company_linkedin_url",),
         "organizationKind": ("organization_kind",),
+        "shortDescription": ("short_description",),
+        "problemSolved": ("problem_solved",),
+        "targetAudience": ("target_audience",),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -122,6 +125,9 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     founderNames = serializers.JSONField(required=False)
     stage = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     organizationKind = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    shortDescription = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    problemSolved = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    targetAudience = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     notes = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     githubRepo = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     articleDeliveryMode = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -223,6 +229,9 @@ def _serialize_startup_profile(organization):
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
         "organizationKind": getattr(profile, "organization_kind", ""),
+        "shortDescription": getattr(profile, "short_description", ""),
+        "problemSolved": getattr(profile, "problem_solved", ""),
+        "targetAudience": getattr(profile, "target_audience", ""),
         "notes": profile.notes,
         "companyAliases": list(profile.company_aliases or []),
         "domainAliases": list(profile.domain_aliases or []),

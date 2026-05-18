@@ -519,6 +519,8 @@ class ContentGenerateView(APIView):
             "user_last_name": request.data.get("user_last_name"),
             "user_avatar_url": request.data.get("user_avatar_url"),
         }
+        if request.data.get("notification_context"):
+            article_request["notification_context"] = request.data.get("notification_context")
         requested_by_slack_user_id = _resolve_explicit_requested_by_slack_user_id(
             slack_user_id=slack_user_id,
             request_data=request.data,
@@ -793,6 +795,8 @@ class ContentConfirmView(APIView):
                 "delivery_mode_confirmed": request.data.get("delivery_mode_confirmed"),
                 "request_source": request.data.get("request_source"),
             }
+            if request.data.get("notification_context"):
+                confirm_kwargs["notification_context"] = request.data.get("notification_context")
             if requested_by_slack_user_id:
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
 
@@ -803,25 +807,28 @@ class ContentConfirmView(APIView):
             if source_run_id and new_job_id:
                 source_job = ContentFactoryJob.objects.filter(job_id=source_run_id).first()
                 if source_job:
+                    child_request_meta = {
+                        "domain": domain,
+                        "topic": custom_title or confirmed_keyword,
+                        "target_keyword": confirmed_keyword,
+                        "custom_title": custom_title,
+                        "skip_alternatives": skip_alternatives,
+                        "source_run_id": source_run_id,
+                        "request_source": request.data.get("request_source"),
+                        "requested_by_slack_user_id": requested_by_slack_user_id,
+                        "slack_channel_id": slack_channel_id,
+                        "slack_thread_ts": slack_thread_ts,
+                        "slack_root_message_ts": slack_root_message_ts,
+                    }
+                    if request.data.get("notification_context"):
+                        child_request_meta["notification_context"] = request.data.get("notification_context")
                     ContentFactoryJob.objects.update_or_create(
                         job_id=new_job_id,
                         defaults={
                             "domain": domain,
                             "slack_user_id": slack_user_id,
                             "status": "generating",
-                            "request_meta": {
-                                "domain": domain,
-                                "topic": custom_title or confirmed_keyword,
-                                "target_keyword": confirmed_keyword,
-                                "custom_title": custom_title,
-                                "skip_alternatives": skip_alternatives,
-                                "source_run_id": source_run_id,
-                                "request_source": request.data.get("request_source"),
-                                "requested_by_slack_user_id": requested_by_slack_user_id,
-                                "slack_channel_id": slack_channel_id,
-                                "slack_thread_ts": slack_thread_ts,
-                                "slack_root_message_ts": slack_root_message_ts,
-                            },
+                            "request_meta": child_request_meta,
                             "slack_channel_id": slack_channel_id or source_job.slack_channel_id,
                             "slack_thread_ts": slack_thread_ts or source_job.slack_thread_ts,
                             "slack_root_message_ts": (
@@ -992,6 +999,9 @@ class ContentJobConfirmView(APIView):
                 "delivery_mode_confirmed": request.data.get("delivery_mode_confirmed"),
                 "request_source": request.data.get("request_source"),
             }
+            notification_context = request.data.get("notification_context") or request_meta.get("notification_context")
+            if notification_context:
+                confirm_kwargs["notification_context"] = notification_context
             if requested_by_slack_user_id:
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
 
@@ -1000,25 +1010,28 @@ class ContentJobConfirmView(APIView):
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
             if new_job_id and new_job_id != job.job_id:
+                child_request_meta = {
+                    "domain": resolved_domain,
+                    "topic": custom_title or confirmed_keyword,
+                    "target_keyword": confirmed_keyword,
+                    "custom_title": custom_title,
+                    "skip_alternatives": skip_alternatives,
+                    "source_run_id": job_id,
+                    "request_source": request.data.get("request_source"),
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                    "slack_channel_id": job.slack_channel_id,
+                    "slack_thread_ts": job.slack_thread_ts,
+                    "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
+                }
+                if notification_context:
+                    child_request_meta["notification_context"] = notification_context
                 ContentFactoryJob.objects.update_or_create(
                     job_id=new_job_id,
                     defaults={
                         "domain": resolved_domain,
                         "slack_user_id": slack_user_id,
                         "status": "generating",
-                        "request_meta": {
-                            "domain": resolved_domain,
-                            "topic": custom_title or confirmed_keyword,
-                            "target_keyword": confirmed_keyword,
-                            "custom_title": custom_title,
-                            "skip_alternatives": skip_alternatives,
-                            "source_run_id": job_id,
-                            "request_source": request.data.get("request_source"),
-                            "requested_by_slack_user_id": requested_by_slack_user_id,
-                            "slack_channel_id": job.slack_channel_id,
-                            "slack_thread_ts": job.slack_thread_ts,
-                            "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
-                        },
+                        "request_meta": child_request_meta,
                         "slack_channel_id": job.slack_channel_id,
                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
