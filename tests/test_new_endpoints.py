@@ -206,6 +206,60 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             {"type": "write_article", "article_request": {"domain": "mlai.au"}},
         )
 
+    def test_content_factory_token_prefers_github_app_installation_token(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            github_token_encrypted="legacy-user-token",
+            github_installation_id="12345",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_installation",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="12345",
+            repository="acme/site",
+        )
+
+        with patch("integrations.services.github_app.github_app_credentials_configured", return_value=True), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "acme.com", "github_repo": "acme/site"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_token"], "ghs_installation")
+        self.assertEqual(response.data["github_repo"], "acme/site")
+        self.assertEqual(response.data["github_installation_id"], "12345")
+        self.assertEqual(response.data["token_source"], "github_app_installation")
+        create_token.assert_called_once_with(
+            installation_id="12345",
+            repository="acme/site",
+            permission_mode="write",
+        )
+
+    def test_content_factory_token_blocks_when_installation_app_credentials_missing(self):
+        organization = Organization.objects.create(name="Acme", domain="acme.com")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            github_token_encrypted="legacy-user-token",
+            github_installation_id="12345",
+        )
+
+        with patch("integrations.services.github_app.github_app_credentials_configured", return_value=False):
+            response = self.client.get(reverse("content_factory_token"), {"domain": "acme.com"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["action_required"], "server_configuration_required")
+        self.assertEqual(response.data["github_installation_id"], "12345")
+        self.assertNotIn("legacy-user-token", str(response.data))
+
     @patch('integrations.services.github.http_requests.post')
     def test_scaffold_decision_endpoint_queues_scaffold_job(self, mock_post):
         ContentFactoryJob.objects.create(
@@ -1097,6 +1151,247 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_completed_waits_for_verification_scan(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_ready",
+                    "setup_run_id": "setup-run-complete",
+                    "setupRunId": "setup-run-complete",
+                }
+            },
+        )
+
+        completed_response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_completed",
+                "job_id": "setup-run-complete",
+                "run_id": "setup-run-complete",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-parent-complete",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/9",
+                "rescan_run_id": "verify-setup-complete",
+                "merge_status": "merged",
+            },
+            format='json',
+        )
+
+        self.assertEqual(completed_response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "merged_verifying")
+        self.assertEqual(pending["rescan_run_id"], "verify-setup-complete")
+        self.assertFalse(config.articles_scaffolded)
+
+        scan_response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "verify-setup-complete",
+                "run_id": "verify-setup-complete",
+                "workflow": "repo_scan",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "article_system": {"state": "existing", "confidence": "high", "directory_name": "articles"},
+                "publish_targets": [{"id": "articles", "label": "Articles"}],
+                "default_publish_target_id": "articles",
+            },
+            format='json',
+        )
+
+        self.assertEqual(scan_response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.article_system["state"], "existing")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scaffold_complete_persists_preview_metadata_without_publishing(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "pending_generation",
+                    "setup_run_id": "setup-run-scaffold",
+                    "setupRunId": "setup-run-scaffold",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scaffold_complete",
+                "job_id": "setup-run-scaffold",
+                "parent_run_id": "scan-run-scaffold",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10",
+                "preview_url": "https://preview.example/articles",
+                "already_exists": False,
+                "build_verified": True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "preview_ready")
+        self.assertEqual(pending["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10")
+        self.assertFalse(config.articles_scaffolded)
+        self.assertNotEqual(config.article_system.get("state"), "roo_scaffolded")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_failed_callback_blocks_run(self, mock_send_dm):
+        Organization.objects.create(name="MLAI", domain="mlai.au")
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-parent-failed-preview",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-run-preview-failed",
+                "run_id": "setup-run-preview-failed",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-parent-failed-preview",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+                "live_preview": {
+                    "available": False,
+                    "status": "failed",
+                    "platformStatus": "failed",
+                    "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+                    "errorCode": "platform_preview_failed",
+                    "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+                    "retryable": True,
+                },
+                "live_preview_url": "/api/runs/setup-run-preview-failed/live-preview",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-failed",
+                    "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-preview-failed")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.error, "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.")
+        self.assertEqual(setup_run.result["livePreview"]["status"], "failed")
+        self.assertEqual(setup_run.result["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-parent-failed-preview")
+        self.assertEqual(parent.current_step, "article_system_setup_preview_failed")
+        self.assertEqual(parent.result["article_system_setup"]["status"], "preview_failed")
+
+    def test_article_system_live_preview_retry_progress_clears_stale_failure_state(self):
+        from content_factory.vibe_marketing_views import _persist_live_preview_payload
+
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-run-preview-retry",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            error="Hosted preview workflow failed.",
+            result={
+                "status": "preview_failed",
+                "error": "Hosted preview workflow failed.",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-retry",
+                    "error": "Hosted preview workflow failed.",
+                },
+                "livePreview": {
+                    "available": False,
+                    "status": "failed",
+                    "platformStatus": "failed",
+                    "error": "Hosted preview workflow failed.",
+                },
+            },
+        )
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": False,
+                "status": "building",
+                "platformStatus": "queued",
+                "previewMode": "platform_deployment",
+                "previewUrl": "",
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(setup_run.current_step, "start_hosted_preview")
+        self.assertEqual(setup_run.error, "")
+        self.assertEqual(setup_run.result["status"], "preview_building")
+        self.assertNotIn("error", setup_run.result)
+        self.assertNotIn("error", setup_run.result["article_system_setup"])
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_building")
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": True,
+                "status": "running",
+                "platformStatus": "ready",
+                "previewMode": "platform_deployment",
+                "previewUrl": "https://preview.example/articles",
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.APPROVAL_REQUIRED)
+        self.assertEqual(setup_run.error, "")
+        self.assertEqual(setup_run.result["status"], "preview_ready")
+        self.assertEqual(setup_run.result["preview_url"], "https://preview.example/articles")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_ready")
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": False,
+                "status": "failed",
+                "platformStatus": "failed",
+                "previewMode": "platform_deployment",
+                "previewUrl": "",
+                "error": "Hosted preview workflow failed again.",
+                "retryable": True,
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.error, "Hosted preview workflow failed again.")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(setup_run.result["article_system_setup"]["error"], "Hosted preview workflow failed again.")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")
         config = OrganizationContentConfig.objects.create(
@@ -1551,7 +1846,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         mock_send_dm.assert_called_once()
         message = mock_send_dm.call_args.args[1]
         self.assertIn("article component catalog refreshed", message)
-        self.assertIn("Connect repo & article system", message)
+        self.assertIn("Connect repo & articles location", message)
         self.assertNotIn("contact support", message)
 
     @patch('integrations.services.article_generation.upsert_live_progress_card')

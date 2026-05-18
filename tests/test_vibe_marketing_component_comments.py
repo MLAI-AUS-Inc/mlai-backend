@@ -58,6 +58,70 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.client.force_authenticate(user=self.user)
 
+    def _create_mlai_featured_components(self):
+        for name in (
+            "ArticleDisclaimer",
+            "ArticleHeroHeader",
+            "ArticleReferences",
+            "ArticleResourceCTA",
+            "ArticleStepList",
+            "ArticleTocPlaceholder",
+            "MLAITemplateResourceCTA",
+        ):
+            GeneratedComponent.objects.get_or_create(
+                organization=self.organization,
+                name=name,
+                defaults={
+                    "content": f"export function {name}() {{ return null; }}",
+                    "source": "adapted",
+                },
+            )
+
+    def _prepare_articles_setup_gate(self, *, status="preview_ready", rescan_run_id=""):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        pending = {
+            "status": status,
+            "setupStatus": status,
+            "setup_run_id": "setup-gate-run",
+            "setupRunId": "setup-gate-run",
+            "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/12",
+            "prUrl": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/12",
+            "preview_url": "https://preview.example/articles",
+            "previewUrl": "https://preview.example/articles",
+        }
+        if rescan_run_id:
+            pending["rescan_run_id"] = rescan_run_id
+            pending["rescanRunId"] = rescan_run_id
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "publish_code"
+        config.baseline_skipped_at = timezone.now()
+        config.article_system = {
+            "state": "missing",
+            "confidence": "low",
+            "pending_article_system_setup": pending,
+        }
+        config.publish_targets = []
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self._create_mlai_featured_components()
+        self.run.status = ContentFactoryRunStatus.CANCELLED
+        self.run.save(update_fields=["status", "updated_at"])
+        return config
+
     def test_completed_article_run_auto_prepares_live_preview(self):
         self.run.result = {
             "componentManifest": {
@@ -152,6 +216,102 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["staleReason"], "scan_queue_not_started")
         self.assertEqual(response.data["queueName"], "scan")
         self.assertEqual(response.data["queuedAt"], "2026-05-12T03:00:00+00:00")
+
+    def test_completed_repo_scan_status_ignores_stale_remote_processing(self):
+        scan_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-completed-local",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            result={"status": "completed", "scaffold_status": "not_needed"},
+        )
+        remote_payload = {
+            "run_id": scan_run.run_id,
+            "workflow": "repo_scan",
+            "status": "processing",
+            "current_step": "scan_structure",
+            "result": {"status": "processing"},
+        }
+
+        with (
+            self.assertLogs("content_factory.vibe_marketing_views", level="INFO") as logs,
+            patch(
+                "content_factory.vibe_marketing_views._call_content_factory_run_status",
+                return_value=remote_payload,
+            ) as status_poll,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{scan_run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        status_poll.assert_called_once_with(scan_run.run_id, workflow="repo_scan")
+        scan_run.refresh_from_db()
+        self.assertEqual(scan_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(scan_run.current_step, "finalize")
+        self.assertIn("content_factory_scan_status_poll_preserved_local_terminal_state", "\n".join(logs.output))
+
+    def test_awaiting_confirmation_repo_scan_status_ignores_stale_remote_processing(self):
+        scan_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-awaiting-local",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "status": "awaiting_confirmation",
+                "requested_action": "scaffold_publish_route",
+                "scaffold_status": "approval_required",
+            },
+        )
+        remote_payload = {
+            "run_id": scan_run.run_id,
+            "workflow": "repo_scan",
+            "status": "processing",
+            "current_step": "scan_structure",
+            "result": {"status": "processing"},
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value=remote_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{scan_run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(response.data["approvalState"], ContentFactoryApprovalState.APPROVAL_REQUIRED)
+        scan_run.refresh_from_db()
+        self.assertEqual(scan_run.status, ContentFactoryRunStatus.AWAITING_CONFIRMATION)
+        self.assertEqual(scan_run.current_step, "finalize")
+
+    def test_active_repo_scan_status_updates_from_remote_completed(self):
+        scan_run = ContentFactoryRun.objects.create(
+            run_id="repo-scan-running-local",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="scan_structure",
+            result={"status": "processing"},
+        )
+        remote_payload = {
+            "run_id": scan_run.run_id,
+            "workflow": "repo_scan",
+            "status": "completed",
+            "current_step": "finalize",
+            "result": {"status": "completed", "scaffold_status": "not_needed"},
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value=remote_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{scan_run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        scan_run.refresh_from_db()
+        self.assertEqual(scan_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(scan_run.current_step, "finalize")
+        self.assertEqual(scan_run.result["scaffold_status"], "not_needed")
 
     def test_bootstrap_blocks_mlai_article_system_when_featured_catalog_missing(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
@@ -405,7 +565,66 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": False, "github_token": "org-live-preview-token"},
+            payload={
+                "force": False,
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
+        )
+
+    def test_completed_article_run_auto_prepare_prefers_github_app_installation_token(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "legacy-org-live-preview-token"
+        config.github_installation_id = "12345"
+        config.save(update_fields=["github_token_encrypted", "github_installation_id", "updated_at"])
+        self.run.result = {
+            "componentManifest": {
+                "components": [
+                    {
+                        "id": "title",
+                        "type": "title",
+                        "label": "Title",
+                    }
+                ]
+            }
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+        app_token = GitHubInstallationToken(
+            token="ghs_installation",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+        )
+        preview_payload = {"available": False, "status": "starting", "previewUrl": ""}
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True),
+            patch(
+                "content_factory.vibe_marketing_views.create_installation_access_token",
+                return_value=app_token,
+            ) as create_token,
+            patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload) as preview_call,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        preview_call.assert_called_once_with(
+            run_id=self.run.run_id,
+            method="POST",
+            payload={
+                "force": False,
+                "github_token": "ghs_installation",
+                "github_installation_id": "12345",
+                "token_source": "github_app_installation",
+            },
+        )
+        create_token.assert_called_once_with(
+            installation_id="12345",
+            repository="MLAI-AUS-Inc/mlai-au",
+            permission_mode="write",
         )
 
     def test_completed_article_run_refreshes_starting_preview_failure(self):
@@ -870,6 +1089,42 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.assertEqual(response.data["livePreview"]["status"], "failed")
 
+    def test_article_system_live_preview_failure_blocks_setup_run(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-preview-failed",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "article_system_setup": {"status": "preview_building"},
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+            },
+        )
+        preview_payload = {
+            "available": False,
+            "status": "failed",
+            "platformStatus": "failed",
+            "previewUrl": "",
+            "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
+            "errorCode": "platform_preview_failed",
+            "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
+            "retryable": True,
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/live-preview")
+
+        self.assertEqual(response.status_code, 200)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+
     def test_live_preview_retry_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
@@ -891,7 +1146,12 @@ class VibeMarketingComponentCommentTests(TestCase):
         preview_call.assert_called_once_with(
             run_id=self.run.run_id,
             method="POST",
-            payload={"force": True, "local_repo_path": "", "github_token": "org-live-preview-token"},
+            payload={
+                "force": True,
+                "local_repo_path": "",
+                "github_token": "org-live-preview-token",
+                "token_source": "github_oauth_user_token",
+            },
         )
 
     @override_settings(
@@ -1431,6 +1691,201 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertNotEqual(steps["publish"]["status"], "complete")
 
+    def test_workflow_progress_keeps_research_ready_when_only_stored_candidates_exist(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self._create_mlai_featured_components()
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
+        self.run.status = ContentFactoryRunStatus.CANCELLED
+        self.run.save(update_fields=["status", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(response.data["topicCandidates"]), 0)
+        self.assertFalse(response.data["checks"]["research"]["passed"])
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(progress["currentStepId"], "research")
+        self.assertEqual(steps["research"]["status"], "ready")
+        self.assertEqual(steps["research"]["primaryAction"]["label"], "Start topic research")
+        self.assertEqual(steps["choose_topic"]["status"], "locked")
+        self.assertIsNone(steps["choose_topic"]["primaryAction"])
+
+    def test_first_time_articles_setup_preview_blocks_research_and_article_actions(self):
+        self._prepare_articles_setup_gate(status="preview_ready")
+        ContentFactoryRun.objects.create(
+            run_id="setup-gate-run",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "status": "preview_ready",
+                "setup_run_id": "setup-gate-run",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/12",
+                "preview_url": "https://preview.example/articles",
+                "article_system_setup": {"status": "preview_ready", "setup_run_id": "setup-gate-run"},
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["passed"])
+        self.assertFalse(scaffold["published"])
+        self.assertTrue(scaffold["setupBlocked"])
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(steps["research"]["status"], "locked")
+        self.assertEqual(steps["choose_topic"]["status"], "locked")
+
+        discovery_response = self.client.post("/api/v1/vibe-marketing/discovery/", {}, format="json")
+        self.assertEqual(discovery_response.status_code, 409)
+        self.assertEqual(discovery_response.data["code"], "article_system_setup_blocked")
+
+        article_response = self.client.post(
+            "/api/v1/vibe-marketing/article/",
+            {"topic": "AI adoption", "targetKeyword": "ai adoption"},
+            format="json",
+        )
+        self.assertEqual(article_response.status_code, 409)
+        self.assertEqual(article_response.data["code"], "article_system_setup_blocked")
+
+    def test_first_time_articles_setup_verification_rescan_unlocks_research(self):
+        config = self._prepare_articles_setup_gate(status="merged_verifying", rescan_run_id="verify-setup-run")
+        article_system = dict(config.article_system)
+        article_system.update({"state": "existing", "confidence": "high", "directory_name": "articles"})
+        config.article_system = article_system
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(update_fields=["article_system", "publish_targets", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="setup-gate-run",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="completed",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "completed",
+                "setup_run_id": "setup-gate-run",
+                "rescan_run_id": "verify-setup-run",
+                "article_system_setup": {
+                    "status": "merged_verifying",
+                    "setup_run_id": "setup-gate-run",
+                    "rescan_run_id": "verify-setup-run",
+                },
+            },
+        )
+        ContentFactoryRun.objects.create(
+            run_id="verify-setup-run",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={"status": "completed"},
+        )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertTrue(scaffold["passed"])
+        self.assertTrue(scaffold["published"])
+        self.assertFalse(scaffold["setupBlocked"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["research"]["status"], "ready")
+
+    def test_workflow_progress_completes_research_after_discovery_run(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self._create_mlai_featured_components()
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="australian founders",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.PENDING,
+        )
+        self.run.status = ContentFactoryRunStatus.CANCELLED
+        self.run.save(update_fields=["status", "updated_at"])
+        discovery_run = ContentFactoryRun.objects.create(
+            run_id="topic-discovery-complete",
+            workflow="auto_discovery",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={},
+        )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["checks"]["research"]["passed"])
+        self.assertEqual(response.data["checks"]["research"]["runId"], discovery_run.run_id)
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(progress["currentStepId"], "choose_topic")
+        self.assertEqual(steps["research"]["status"], "complete")
+        self.assertEqual(steps["choose_topic"]["status"], "needs_action")
+        self.assertEqual(steps["choose_topic"]["primaryAction"]["label"], "Choose article topic")
+
     def test_workflow_progress_keeps_completed_article_on_review_step(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "encrypted-token"
@@ -1454,6 +1909,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         )
         self.organization.seed_keywords = ["australian founders"]
         self.organization.save(update_fields=["seed_keywords"])
+        self._create_mlai_featured_components()
         ResearchedKeyword.objects.create(
             organization=self.organization,
             keyword="australian founders",
@@ -1497,6 +1953,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         progress = response.data["workflowProgress"]
         steps = {step["id"]: step for step in progress["steps"]}
         self.assertEqual(progress["currentStepId"], "review")
+        self.assertEqual(steps["research"]["status"], "complete")
+        self.assertEqual(steps["choose_topic"]["status"], "complete")
         self.assertEqual(steps["generate"]["status"], "complete")
         self.assertEqual(steps["review"]["status"], "ready")
         self.assertEqual(steps["publish"]["status"], "ready")
@@ -1939,11 +2397,42 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["result"]["publish_child_status"], ContentFactoryRunStatus.BLOCKED)
         self.assertTrue(response.data["result"]["publish_child_recoverable"])
         self.assertEqual(response.data["result"]["publish_handoff_status"], "recoverable_missing_child")
-        self.assertIn("not found in Content Factory", response.data["result"]["publish_child_wait_reason"])
+        self.assertIn("queued but did not start", response.data["result"]["publish_child_wait_reason"])
         steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
         self.assertEqual(steps["publish"]["status"], "ready")
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertEqual(steps["publish"]["primaryAction"]["label"], "Retry creating PR")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_missing_publish_child_route_does_not_poll_remote_repeatedly(self):
+        child = ContentFactoryRun.objects.create(
+            run_id="article-publish-child-missing-route",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="queued",
+            run_request={
+                "source_run_id": self.run.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={
+                "error": "Content Factory run article-publish-child-missing-route was not found.",
+                "diagnostics": {"content_factory_status_code": 404},
+            },
+            error="Content Factory run article-publish-child-missing-route was not found.",
+        )
+        self.run.result = {"publish_child_run_id": child.run_id}
+        self.run.save(update_fields=["result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status") as status_mock:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{child.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        status_mock.assert_not_called()
+        self.assertTrue(response.data["publishChildRecoverable"])
+        self.assertIn("queued but did not start", response.data["publishChildWaitReason"])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_retries_local_child_missing_remotely(self):

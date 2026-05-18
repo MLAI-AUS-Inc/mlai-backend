@@ -4,6 +4,7 @@ import time
 from datetime import date as calendar_date
 from typing import Any, Optional
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import OperationalError, connection, transaction
@@ -879,10 +880,16 @@ class ContentFactoryTokenView(APIView):
     def get(self, request):
         from integrations.services.github import ensure_valid_token, TokenRefreshError
         from integrations.services.article_generation import ensure_valid_org_token, ArticleGenerationError
+        from integrations.services.github_app import (
+            GitHubAppTokenError,
+            create_installation_access_token,
+            github_app_credentials_configured,
+        )
         from integrations.models import UserIntegration
 
         domain = request.query_params.get('domain')
         slack_user_id = request.query_params.get('slack_user_id')
+        requested_repo = str(request.query_params.get('github_repo') or '').strip()
 
         if not domain and not slack_user_id:
             return Response(
@@ -894,17 +901,65 @@ class ContentFactoryTokenView(APIView):
         if domain:
             normalized_domain = self._normalize_domain(domain)
             try:
-                fresh_token = ensure_valid_org_token(normalized_domain)
-
                 # Fetch config for additional context
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
+                github_repo = requested_repo or str(config.github_repo or '').strip()
 
+                if config.github_installation_id and github_repo:
+                    if not github_app_credentials_configured():
+                        logger.warning("GitHub App credentials are not configured for installation token lookup.")
+                        return Response(
+                            {
+                                'error': 'GitHub App credentials are not configured',
+                                'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
+                                'action_required': 'server_configuration_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+                    try:
+                        installation_token = create_installation_access_token(
+                            installation_id=config.github_installation_id,
+                            repository=github_repo,
+                            permission_mode='write',
+                        )
+                    except GitHubAppTokenError as exc:
+                        logger.warning(
+                            "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
+                            normalized_domain,
+                            github_repo,
+                            config.github_installation_id,
+                            exc,
+                        )
+                        return Response(
+                            {
+                                'error': 'GitHub App installation access failed',
+                                'message': str(exc),
+                                'action_required': 'auth_required',
+                                'github_repo': github_repo,
+                                'github_installation_id': config.github_installation_id,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+
+                    response_data = installation_token.as_content_factory_payload(domain=normalized_domain)
+                    logger.info(
+                        "Provided GitHub App installation token for %s repo=%s installation_id=%s",
+                        normalized_domain,
+                        github_repo,
+                        config.github_installation_id,
+                    )
+                    return Response(response_data, status=status.HTTP_200_OK)
+
+                fresh_token = ensure_valid_org_token(normalized_domain)
                 response_data = {
                     'github_token': fresh_token,
-                    'github_repo': config.github_repo,
+                    'github_repo': github_repo or config.github_repo,
                     'domain': normalized_domain,
                     'source': 'org',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if config.github_token_expires_at:
@@ -945,6 +1000,7 @@ class ContentFactoryTokenView(APIView):
                     'github_repo': integration.github_repo,
                     'slack_user_id': slack_user_id,
                     'source': 'user',
+                    'token_source': 'github_oauth_user_token',
                 }
 
                 if integration.github_token_expires_at:
@@ -1172,6 +1228,137 @@ class ScheduledDiscoveryReplayView(APIView):
         result_status = str(result.get("status") or "").strip().lower()
         http_status = status.HTTP_202_ACCEPTED if result_status == "queued" else status.HTTP_200_OK
         return Response(result, status=http_status)
+
+
+class ResearchAutomationView(APIView):
+    """Create or update a scheduled research automation and notification route."""
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request):
+        from content_factory.models import NotificationChannelType, NotificationConsentState
+        from integrations.services.research_automations import create_or_update_research_automation
+
+        domain = str(request.data.get("domain") or "").strip()
+        channel_type = str(request.data.get("channel_type") or "").strip().lower()
+        route_id = str(request.data.get("route_id") or request.data.get("email") or request.data.get("phone") or "").strip()
+        timezone_name = str(request.data.get("timezone") or "Australia/Melbourne").strip()
+        frequency_per_day = request.data.get("frequency_per_day") or request.data.get("frequency") or 1
+        local_send_times = request.data.get("local_send_times") or []
+        name = str(request.data.get("name") or "").strip()
+        consented = bool(request.data.get("consented") or request.data.get("verified"))
+        user = None
+
+        if not domain:
+            return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if channel_type not in NotificationChannelType.values:
+            return Response(
+                {"error": "channel_type must be slack, whatsapp, or email"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not route_id:
+            return Response({"error": "route_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if local_send_times is not None and not isinstance(local_send_times, list):
+            return Response({"error": "local_send_times must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user_email = str(request.data.get("user_email") or (route_id if channel_type == "email" else "") or "").strip().lower()
+        if user_email:
+            UserModel = get_user_model()
+            user, _created = UserModel.objects.get_or_create(email=user_email, defaults={"is_active": True})
+
+        try:
+            automation = create_or_update_research_automation(
+                domain=domain,
+                channel_type=channel_type,
+                route_id=route_id,
+                user=user,
+                timezone_name=timezone_name,
+                frequency_per_day=int(frequency_per_day),
+                local_send_times=local_send_times,
+                consent_state=(
+                    NotificationConsentState.ACTIVE
+                    if consented
+                    else NotificationConsentState.PENDING
+                ),
+                name=name,
+            )
+        except Organization.DoesNotExist:
+            return Response({"error": "Organization not found"}, status=status.HTTP_404_NOT_FOUND)
+        except (TypeError, ValueError) as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        channel = automation.notification_channel
+        return Response(
+            {
+                "status": "active" if channel.consent_state == NotificationConsentState.ACTIVE else "pending_consent",
+                "automation_id": str(automation.id),
+                "channel_id": str(channel.id),
+                "channel_type": channel.channel_type,
+                "consent_state": channel.consent_state,
+                "timezone": automation.timezone,
+                "frequency_per_day": automation.frequency_per_day,
+                "local_send_times": automation.local_send_times,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ResearchAutomationActionView(APIView):
+    """Public signed action endpoint for email, WhatsApp, and Slack action URLs."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        return self._handle(request)
+
+    def post(self, request):
+        return self._handle(request)
+
+    def _handle(self, request):
+        from django.core import signing as django_signing
+        from integrations.services.notification_adapters import handle_automation_action_token
+
+        token = str(request.query_params.get("token") or request.data.get("token") or "").strip()
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = handle_automation_action_token(token)
+        except django_signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class ResearchAutomationWhatsAppWebhookView(APIView):
+    """Meta WhatsApp Cloud API webhook for statuses and STOP opt-outs."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        verify_token = str(getattr(settings, "WHATSAPP_WEBHOOK_VERIFY_TOKEN", "") or "").strip()
+        mode = request.query_params.get("hub.mode")
+        token = request.query_params.get("hub.verify_token")
+        challenge = request.query_params.get("hub.challenge")
+        if mode == "subscribe" and verify_token and token == verify_token:
+            return HttpResponse(challenge or "", status=200)
+        return Response({"error": "Invalid verification token"}, status=status.HTTP_403_FORBIDDEN)
+
+    def post(self, request):
+        from integrations.services.notification_adapters import (
+            handle_whatsapp_webhook,
+            verify_whatsapp_webhook_signature,
+        )
+
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if not verify_whatsapp_webhook_signature(body=request.body, signature=signature):
+            return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
+        result = handle_whatsapp_webhook(request.data if isinstance(request.data, dict) else {})
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class ContentFactoryOAuthInitiateView(APIView):
@@ -1531,6 +1718,9 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
             "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
             "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
+            "article_surface_mode": str(data.get("article_surface_mode") or "").strip(),
+            "scan_purpose": str(data.get("scan_purpose") or "").strip(),
+            "article_surface_resolution": data.get("article_surface_resolution") if isinstance(data.get("article_surface_resolution"), dict) else {},
             "matched_article_surface": data.get("matched_article_surface"),
             "publish_targets": data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else [],
             "default_publish_target_id": data.get("default_publish_target_id"),
@@ -1609,6 +1799,48 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     return run
 
 
+def _clear_pending_article_system_setup_for_domain(domain: str) -> None:
+    domain = str(domain or "").strip()
+    if not domain:
+        return
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = dict(config.article_system or {})
+        if "pending_article_system_setup" not in article_system:
+            return
+        article_system.pop("pending_article_system_setup", None)
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to clear pending article system setup for %s: %s", domain, exc)
+
+
+def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> None:
+    domain = str(domain or "").strip()
+    if not domain:
+        return
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = dict(config.article_system or {})
+        pending = dict(article_system.get("pending_article_system_setup") or {})
+        pending.update({key: value for key, value in updates.items() if value not in (None, "")})
+        if not pending:
+            return
+        pending["updatedAt"] = timezone.now().isoformat()
+        pending["updated_at"] = pending["updatedAt"]
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
+
+
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -1630,6 +1862,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "parent_run_id": data.get("parent_run_id"),
             "scan_run_id": data.get("scan_run_id") or data.get("parent_run_id"),
             "setup_run_id": run_id,
+            "source_setup_run_id": data.get("source_setup_run_id") or data.get("setup_run_id") or run_id,
+            "rescan_run_id": data.get("rescan_run_id") or setup_payload.get("rescan_run_id"),
+            "merge_status": data.get("merge_status") or setup_payload.get("merge_status"),
             "article_system_setup": setup_payload,
             "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
             "preview_url": data.get("preview_url") or setup_payload.get("preview_url"),
@@ -1640,20 +1875,89 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "review_comments_path": data.get("review_comments_path") or result.get("review_comments_path"),
             "livePreview": live_preview,
             "live_preview": live_preview,
+            "error_code": data.get("error_code") or setup_payload.get("error_code") or result.get("error_code"),
+            "retryable": (
+                data.get("retryable")
+                if data.get("retryable") is not None
+                else setup_payload.get("retryable", result.get("retryable"))
+            ),
+            "retry_available": (
+                data.get("retry_available")
+                if data.get("retry_available") is not None
+                else setup_payload.get("retry_available", result.get("retry_available"))
+            ),
+            "stale": data.get("stale") if data.get("stale") is not None else result.get("stale"),
+            "stale_reason": data.get("stale_reason") or result.get("stale_reason"),
+            "queue_name": data.get("queue_name") or setup_payload.get("queue_name") or result.get("queue_name"),
+            "queued_at": data.get("queued_at") or setup_payload.get("queued_at") or result.get("queued_at"),
+            "setup_queue": data.get("setup_queue") or result.get("setup_queue"),
         }
     )
 
     if event_type == "article_system_setup_completed":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "merged_verifying"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["merge_status"] = result.get("merge_status") or "merged"
+        if result.get("rescan_run_id"):
+            setup_payload["rescan_run_id"] = result.get("rescan_run_id")
+        result["status"] = "completed"
+        result["merge_status"] = setup_payload["merge_status"]
+        result["article_system_setup"] = setup_payload
         run_status = ContentFactoryRunStatus.COMPLETED
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "completed"
         error = ""
-    elif event_type == "article_system_setup_manual_merge_required":
+    elif event_type == "article_system_setup_preview_failed":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "preview_failed"
+        setup_payload["setup_run_id"] = run_id
+        preview_error = str(
+            data.get("error")
+            or setup_payload.get("error")
+            or live_preview.get("error")
+            or "Articles setup preview could not be prepared."
+        ).strip()
+        setup_payload["error"] = preview_error
+        setup_payload["error_code"] = data.get("error_code") or setup_payload.get("error_code")
+        if "retryable" not in setup_payload:
+            setup_payload["retryable"] = live_preview.get("retryable", True)
+        setup_payload["retry_available"] = bool(
+            data.get("retry_available")
+            if data.get("retry_available") is not None
+            else setup_payload.get("retryable", True)
+        )
+        result["status"] = "preview_failed"
+        result["article_system_setup"] = setup_payload
+        result["preview_url"] = ""
+        result["error"] = preview_error
+        result["error_code"] = setup_payload.get("error_code")
+        result["retryable"] = bool(setup_payload.get("retryable", True))
+        result["retry_available"] = bool(setup_payload.get("retry_available", True))
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "preview_failed"
+        error = preview_error
+    elif event_type == "article_system_setup_manual_merge_required":
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "manual_merge_required"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["merge_status"] = result.get("merge_status") or "manual_required"
+        result["status"] = "manual_merge_required"
+        result["merge_status"] = setup_payload["merge_status"]
+        result["article_system_setup"] = setup_payload
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "manual_merge_required"
         error = str(data.get("message") or "Manual merge is required for this article system setup.")
     else:
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = setup_payload.get("status") or "preview_ready"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        result["article_system_setup"] = setup_payload
         run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
         approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
         current_step = "await_review"
@@ -1682,7 +1986,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             },
             "result": result,
             "error": error,
-            "resume_available": bool(existing_run.resume_available if existing_run else False),
+            "resume_available": bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
         },
     )
 
@@ -1697,6 +2001,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             parent_result.update(
                 {
                     "setup_run_id": run_id,
+                    "source_setup_run_id": result.get("source_setup_run_id") or run_id,
+                    "rescan_run_id": result.get("rescan_run_id"),
+                    "merge_status": result.get("merge_status"),
                     "article_system_setup": parent_setup,
                     "preview_url": result.get("preview_url"),
                     "pr_url": result.get("pr_url"),
@@ -1704,10 +2011,33 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                 }
             )
             parent.result = parent_result
-            if parent.status == ContentFactoryRunStatus.RUNNING:
-                parent.current_step = "article_system_setup_preview"
-            parent.save(update_fields=["result", "current_step", "updated_at"])
+            if parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
+                parent.status = ContentFactoryRunStatus.COMPLETED
+                parent.current_step = (
+                    "article_system_setup_preview_failed"
+                    if event_type == "article_system_setup_preview_failed"
+                    else "article_system_setup_preview"
+                )
+            parent.save(update_fields=["status", "result", "current_step", "updated_at"])
 
+    _update_pending_article_system_setup_for_domain(
+        result["domain"],
+        setupRunId=run_id,
+        setup_run_id=run_id,
+        status=setup_payload.get("status") or result.get("status"),
+        setupStatus=setup_payload.get("status") or result.get("status"),
+        setup_status=setup_payload.get("status") or result.get("status"),
+        rescanRunId=result.get("rescan_run_id"),
+        rescan_run_id=result.get("rescan_run_id"),
+        prUrl=result.get("pr_url"),
+        pr_url=result.get("pr_url"),
+        previewUrl=result.get("preview_url") or result.get("live_preview_url"),
+        preview_url=result.get("preview_url") or result.get("live_preview_url"),
+        livePreviewUrl=result.get("live_preview_url"),
+        live_preview_url=result.get("live_preview_url"),
+        mergeStatus=result.get("merge_status"),
+        merge_status=result.get("merge_status"),
+    )
     return run
 
 
@@ -1768,6 +2098,7 @@ class ContentFactoryCallbackView(APIView):
             elif event_type in {
                 'article_system_setup_preview_ready',
                 'article_system_setup_revision_ready',
+                'article_system_setup_preview_failed',
                 'article_system_setup_completed',
                 'article_system_setup_manual_merge_required',
             }:
@@ -1829,6 +2160,15 @@ class ContentFactoryCallbackView(APIView):
             defaults['error_message'] = error_message
 
         requested_by_slack_user_id = str((self.request.data or {}).get('requested_by_slack_user_id') or '').strip()
+        try:
+            from integrations.services.notification_adapters import (
+                normalize_notification_context,
+                resolve_automation_run,
+            )
+
+            notification_context = normalize_notification_context((self.request.data or {}).get('notification_context'))
+        except Exception:
+            notification_context = {}
         max_attempts = 3 if connection.vendor == 'sqlite' else 1
         last_error = None
         for attempt in range(max_attempts):
@@ -1843,6 +2183,27 @@ class ContentFactoryCallbackView(APIView):
                         request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                         job.request_meta = request_meta
                         job.save(update_fields=['request_meta', 'updated_at'])
+                if notification_context:
+                    request_meta = dict(job.request_meta or {})
+                    request_meta["notification_context"] = notification_context
+                    try:
+                        automation_run = resolve_automation_run(notification_context)
+                    except Exception:
+                        automation_run = None
+                    if automation_run:
+                        request_meta.setdefault("trigger_source", "research_automation")
+                        request_meta["automation_id"] = str(automation_run.automation_id)
+                        request_meta["automation_run_id"] = str(automation_run.id)
+                        if automation_run.request_payload:
+                            request_meta.update(
+                                {
+                                    key: value
+                                    for key, value in automation_run.request_payload.items()
+                                    if key in {"user_email", "recipient_user_id"}
+                                }
+                            )
+                    job.request_meta = request_meta
+                    job.save(update_fields=['request_meta', 'updated_at'])
                 return job
             except OperationalError as exc:
                 last_error = exc
@@ -2442,6 +2803,11 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_delivery_mode_required(self, data):
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_delivery_mode_required,
+        )
+
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -2460,6 +2826,8 @@ class ContentFactoryCallbackView(APIView):
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
+        if normalize_notification_context(data.get("notification_context")):
+            send_delivery_mode_required(data)
 
         return Response(
             {
@@ -2912,6 +3280,10 @@ class ContentFactoryCallbackView(APIView):
             )
 
     def _handle_content_ready(self, data):
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_content_ready,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -2981,8 +3353,11 @@ class ContentFactoryCallbackView(APIView):
             fallback_slack_user_id=slack_user_id,
         )
         requested_by_slack_user_id = self._callback_requested_by_slack_user_id(job=job, data=data)
+        notification_context = normalize_notification_context(data.get("notification_context"))
 
-        if recipient_slack_user_id:
+        if notification_context:
+            send_content_ready(data)
+        elif recipient_slack_user_id:
             channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
             publish_button_value = None
             if job_id and channel_id and thread_ts:
@@ -3498,12 +3873,19 @@ class ContentFactoryCallbackView(APIView):
         # Persist and resolve article-system readiness for messaging and auto-resume.
         has_pillars = False
         article_system = normalize_article_system(data.get('article_system'))
+        setup_pending_after_scan = False
         try:
             from integrations.utils import normalize_domain
 
             org = Organization.objects.get(domain=normalize_domain(domain))
             config = org.content_config
             has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
+            raw_article_system = dict(config.article_system or {})
+            pending_setup = dict(raw_article_system.get('pending_article_system_setup') or {})
+            pending_rescan_run_id = str(
+                pending_setup.get('rescanRunId') or pending_setup.get('rescan_run_id') or ''
+            ).strip()
+            is_setup_verification_scan = bool(pending_rescan_run_id and str(run_id) == pending_rescan_run_id)
             if data.get('article_system') is not None:
                 current_article_system = resolve_article_system(config)
                 incoming_article_system = normalize_article_system(data.get('article_system'))
@@ -3526,6 +3908,24 @@ class ContentFactoryCallbackView(APIView):
                     merged_article_system = merge_article_system(current_article_system, incoming_article_system)
 
                 update_fields = []
+                verification_published = bool(
+                    is_setup_verification_scan
+                    and (article_system_ready(merged_article_system) or bool(publish_targets))
+                )
+                if pending_setup:
+                    if verification_published:
+                        merged_article_system.pop('pending_article_system_setup', None)
+                        if not config.articles_scaffolded:
+                            config.articles_scaffolded = True
+                            update_fields.append('articles_scaffolded')
+                        if pending_setup.get('prUrl') or pending_setup.get('pr_url'):
+                            config.articles_scaffold_pr_url = pending_setup.get('prUrl') or pending_setup.get('pr_url')
+                            update_fields.append('articles_scaffold_pr_url')
+                        if pending_setup.get('previewUrl') or pending_setup.get('preview_url'):
+                            config.articles_scaffold_preview_url = pending_setup.get('previewUrl') or pending_setup.get('preview_url')
+                            update_fields.append('articles_scaffold_preview_url')
+                    else:
+                        merged_article_system['pending_article_system_setup'] = pending_setup
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
@@ -3542,6 +3942,14 @@ class ContentFactoryCallbackView(APIView):
                 article_system = merged_article_system
             else:
                 update_fields = []
+                if pending_setup and is_setup_verification_scan and publish_targets:
+                    next_article_system = dict(config.article_system or {})
+                    next_article_system.pop('pending_article_system_setup', None)
+                    config.article_system = next_article_system
+                    update_fields.append('article_system')
+                    if not config.articles_scaffolded:
+                        config.articles_scaffolded = True
+                        update_fields.append('articles_scaffolded')
                 if publish_targets != (config.publish_targets or []):
                     config.publish_targets = publish_targets
                     update_fields.append('publish_targets')
@@ -3553,6 +3961,7 @@ class ContentFactoryCallbackView(APIView):
                     update_fields.append('updated_at')
                     config.save(update_fields=update_fields)
                 article_system = resolve_article_system(config)
+            setup_pending_after_scan = bool((config.article_system or {}).get('pending_article_system_setup'))
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist):
             pass
 
@@ -3565,7 +3974,7 @@ class ContentFactoryCallbackView(APIView):
 
         try:
             pending_resumed = False
-            if slack_user_id and destination_summary and not approval_required and not scaffold_queued:
+            if slack_user_id and destination_summary and not approval_required and not scaffold_queued and not setup_pending_after_scan:
                 try:
                     from integrations.models import UserIntegration
                     from integrations.services.article_generation import trigger_article_generation
@@ -3799,6 +4208,10 @@ class ContentFactoryCallbackView(APIView):
             is_scheduled_daily_job,
             mark_scheduled_dispatch_failed,
         )
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_error,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -3872,7 +4285,9 @@ class ContentFactoryCallbackView(APIView):
                 'scheduled_daily_suppressed': True,
             }, status=status.HTTP_200_OK)
 
-        if slack_user_id:
+        if normalize_notification_context(data.get("notification_context")):
+            send_error(data)
+        elif slack_user_id:
             try:
                 if error_code == 'PREREQUISITE_MISSING':
                     missing_step = data.get('missing_step', 'unknown')
@@ -3923,7 +4338,7 @@ class ContentFactoryCallbackView(APIView):
                     message = (
                         f"⚠️ *{domain} needs its article component catalog refreshed.*\n\n"
                         f"{error_message}\n\n"
-                        f"Open the Connect repo & article system step and run the repository scan again."
+                        f"Open the Connect repo & articles location step and run the repository scan again."
                     )
                 elif error_code in ('INVALID_CREDENTIALS', 'REPO_NOT_FOUND'):
                     message = (
@@ -4111,16 +4526,16 @@ class ContentFactoryCallbackView(APIView):
                 'job_id': job_id,
             }, status=status.HTTP_200_OK)
 
-        # Persist canonical article-system state from scaffold results.
+        # Persist scaffold PR/preview metadata. A newly created setup PR is not
+        # a usable articles surface until it is merged and a verification scan
+        # sees the article system on the default branch.
         normalized_domain = ''
         try:
             normalized_domain = normalize_domain(domain)
             org = Organization.objects.get(domain=normalized_domain)
             config = org.content_config
-            incoming_article_system = data.get('article_system')
-            if incoming_article_system is not None:
-                config.article_system = merge_article_system(resolve_article_system(config), incoming_article_system)
-            elif already_exists:
+            article_system_payload = dict(config.article_system or {})
+            if already_exists:
                 existing_system = resolve_article_system(config)
                 existing_system.update(
                     {
@@ -4128,33 +4543,45 @@ class ContentFactoryCallbackView(APIView):
                         'source': existing_system.get('source') or 'scan',
                     }
                 )
-                config.article_system = normalize_article_system(existing_system)
+                next_article_system = normalize_article_system(existing_system)
+                next_article_system.pop('pending_article_system_setup', None)
+                config.article_system = next_article_system
+                config.articles_scaffolded = True
             else:
-                scaffolded_system = resolve_article_system(config)
-                scaffolded_system.update(
+                pending = dict(article_system_payload.get('pending_article_system_setup') or {})
+                pending.update(
                     {
-                        'state': 'roo_scaffolded',
-                        'confidence': 'high',
-                        'source': 'scaffold',
-                        'reason': scaffolded_system.get('reason') or 'Roo scaffolded the article system for this repository',
+                        'status': 'preview_ready',
+                        'setupStatus': 'preview_ready',
+                        'setup_status': 'preview_ready',
+                        'setupRunId': job_id,
+                        'setup_run_id': job_id,
+                        'sourceScanRunId': parent_run_id or pending.get('sourceScanRunId') or pending.get('source_scan_run_id') or '',
+                        'source_scan_run_id': parent_run_id or pending.get('source_scan_run_id') or pending.get('sourceScanRunId') or '',
+                        'prUrl': pr_url,
+                        'pr_url': pr_url,
+                        'previewUrl': preview_url,
+                        'preview_url': preview_url,
+                        'buildVerified': bool(build_verified),
+                        'build_verified': bool(build_verified),
+                        'updatedAt': timezone.now().isoformat(),
+                        'updated_at': timezone.now().isoformat(),
                     }
                 )
-                config.article_system = normalize_article_system(scaffolded_system)
-
-            if not already_exists:
-                config.articles_scaffolded = True
+                article_system_payload['pending_article_system_setup'] = pending
+                config.article_system = article_system_payload
             if pr_url:
                 config.articles_scaffold_pr_url = pr_url
             if preview_url:
                 config.articles_scaffold_preview_url = preview_url
             config.save()
-            logger.info(f"Updated article_system for {domain} after scaffold callback")
+            logger.info(f"Updated article setup metadata for {domain} after scaffold callback")
         except (Organization.DoesNotExist, OrganizationContentConfig.DoesNotExist) as e:
-            logger.warning(f"Could not update article_system for {domain}: {e}")
+            logger.warning(f"Could not update article setup metadata for {domain}: {e}")
 
         # Check for pending article intent to auto-resume
         pending_resumed = False
-        if slack_user_id:
+        if slack_user_id and already_exists:
             try:
                 from integrations.models import UserIntegration
                 integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
@@ -4221,46 +4648,8 @@ class ContentFactoryCallbackView(APIView):
                     f"  • {build_status}\n\n"
                     f"*Review the PR:* {pr_url}{preview_line}"
                 )
-                if pending_resumed:
-                    text_body += (
-                        f"\n\n🔄 *Resuming your article request automatically!* "
-                        f"You'll get a notification shortly."
-                    )
-                    _send(text_body)
-                else:
-                    text_body += "\n\nOnce merged, I can write your first article."
-                    blocks = [
-                        {
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": text_body}
-                        },
-                        {
-                            "type": "actions",
-                            "block_id": f"write_article_{domain}",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "Write First Article"},
-                                    "style": "primary",
-                                    "action_id": "write_first_article",
-                                    "value": _json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": slack_user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                    })
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "Skip for now"},
-                                    "action_id": "write_article_skip",
-                                    "value": _json.dumps({"domain": domain})
-                                }
-                            ]
-                        }
-                    ]
-                    fallback_text = f"📁 Articles directory created for {domain}! Review the PR: {pr_url}"
-                    _send(fallback_text, blocks=blocks)
+                text_body += "\n\nApprove and merge this setup PR. Topic research will unlock after the merged directory is verified on the default branch."
+                _send(text_body)
             else:
                 _send(
                     f"📁 Articles directory scaffolded for *{domain}*, but "
@@ -4356,6 +4745,11 @@ class ContentFactoryCallbackView(APIView):
             mark_scheduled_dispatch_failed,
             mark_scheduled_dispatch_topic_selection_sent,
         )
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            resolve_automation_run,
+            send_topic_selection,
+        )
         from integrations.services.slack import SlackService
         
         job_id = data.get('job_id')
@@ -4396,6 +4790,25 @@ class ContentFactoryCallbackView(APIView):
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
         job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        notification_context = normalize_notification_context(data.get("notification_context"))
+        if notification_context:
+            request_meta = dict(job.request_meta or {})
+            request_meta["notification_context"] = notification_context
+            automation_run = resolve_automation_run(notification_context)
+            if automation_run:
+                request_meta.setdefault("trigger_source", "research_automation")
+                request_meta["automation_id"] = str(automation_run.automation_id)
+                request_meta["automation_run_id"] = str(automation_run.id)
+                if automation_run.request_payload:
+                    request_meta.update(
+                        {
+                            key: value
+                            for key, value in automation_run.request_payload.items()
+                            if key in {"user_email", "recipient_user_id"}
+                        }
+                    )
+            job.request_meta = request_meta
+            job.save(update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -4414,7 +4827,14 @@ class ContentFactoryCallbackView(APIView):
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
-        if slack_user_id and options:
+        if notification_context and options:
+            upsert_live_progress_card(
+                job,
+                data=data,
+                summary_text="Research complete. Choose one of the topic options below to continue.",
+            )
+            send_topic_selection(data)
+        elif slack_user_id and options:
             # Fetch organization context for explanations
             company_context = None
             competitors = []
@@ -4627,6 +5047,10 @@ class ContentFactoryCallbackView(APIView):
     def _handle_article_complete(self, data):
         """Handle article_complete event from content-factory."""
         from content_factory.models import ContentFactoryJob
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_content_ready,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -4660,7 +5084,9 @@ class ContentFactoryCallbackView(APIView):
             summary_text="Article published and ready for review.",
         )
 
-        if slack_user_id:
+        if normalize_notification_context(data.get("notification_context")):
+            send_content_ready(data)
+        elif slack_user_id:
             title_line = f"*{article_title}*\n\n" if article_title else ""
             blocks = [
                 {
@@ -4698,6 +5124,10 @@ class ContentFactoryCallbackView(APIView):
     def _handle_error(self, data):
         """Handle error event from content-factory."""
         from content_factory.models import ContentFactoryJob
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_error,
+        )
         from integrations.services.slack import SlackService
 
         job_id = data.get('job_id')
@@ -4718,8 +5148,10 @@ class ContentFactoryCallbackView(APIView):
 
         logger.error(f"Error callback for job {job_id}: {error_message}")
 
-        # Notify user via Slack
-        if slack_user_id:
+        # Notify user via the routed channel, falling back to Slack for legacy jobs.
+        if normalize_notification_context(data.get("notification_context")):
+            send_error(data)
+        elif slack_user_id:
             try:
                 blocks = [
                     {
