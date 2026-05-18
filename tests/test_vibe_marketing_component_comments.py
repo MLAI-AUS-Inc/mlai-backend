@@ -965,6 +965,54 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
         self.assertEqual(response.data["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
 
+    def test_stale_active_article_system_preview_does_not_revive_blocked_run(self):
+        preview_identity = {
+            "startedAt": "2026-05-18T01:00:00Z",
+            "expiresAt": "2026-05-18T01:15:00Z",
+            "commitSha": "abc123",
+            "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/22",
+        }
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-stale-active-preview",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            error="Hosted preview deployment timed out.",
+            result={
+                "status": "preview_failed",
+                "error": "Hosted preview deployment timed out.",
+                "article_system_setup": {"status": "preview_failed", "error": "Hosted preview deployment timed out."},
+                "livePreview": {
+                    **preview_identity,
+                    "status": "expired",
+                    "platformStatus": "expired",
+                    "previewUrl": "",
+                    "error": "Hosted preview deployment timed out.",
+                },
+            },
+        )
+        preview_payload = {
+            **preview_identity,
+            "available": True,
+            "status": "building",
+            "platformStatus": "running",
+            "previewUrl": "",
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_live_preview", return_value=preview_payload):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/live-preview")
+
+        self.assertEqual(response.status_code, 200)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "preview_failed")
+        self.assertEqual(setup_run.error, "Hosted preview deployment timed out.")
+        self.assertEqual(setup_run.result["status"], "preview_failed")
+        self.assertEqual(setup_run.result["livePreview"]["status"], "building")
+
     def test_live_preview_retry_forwards_org_github_token(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "org-live-preview-token"
