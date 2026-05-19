@@ -2161,11 +2161,14 @@ def _persist_live_preview_payload(run, payload):
             setup_payload = dict(result.get("article_system_setup") or {})
 
             if failed:
+                error_code = payload.get("errorCode") or payload.get("error_code") or ""
                 result["status"] = "preview_failed"
                 result["preview_url"] = ""
                 result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
+                result["error_code"] = error_code
                 setup_payload["status"] = "preview_failed"
                 setup_payload["error"] = result["error"]
+                setup_payload["error_code"] = error_code
                 setup_payload["retryable"] = payload.get("retryable", True)
                 result["article_system_setup"] = setup_payload
                 run.status = ContentFactoryRunStatus.BLOCKED
@@ -5464,8 +5467,32 @@ def _empty_preview_payload(payload):
     )
 
 
+def _preview_payload_is_terminal_failure(payload):
+    if not isinstance(payload, dict) or not payload:
+        return False
+    statuses = _live_preview_statuses(payload)
+    return bool(statuses.intersection(LIVE_PREVIEW_FAILURE_STATUSES) or payload.get("error"))
+
+
+def _result_has_current_failure(result):
+    if not isinstance(result, dict) or not result:
+        return False
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    status = str(result.get("status") or setup.get("status") or "").strip().lower()
+    return bool(
+        result.get("error")
+        or result.get("error_code")
+        or result.get("errors")
+        or setup.get("error")
+        or setup.get("error_code")
+        or status in {"failed", "blocked", "preview_failed"}
+    )
+
+
 def _merge_preserved_live_preview(local_result, remote_result):
     if not isinstance(remote_result, dict):
+        return remote_result
+    if _result_has_current_failure(remote_result):
         return remote_result
     local_preview = _preview_payload_from_result(local_result)
     if _empty_preview_payload(local_preview):
@@ -5473,10 +5500,30 @@ def _merge_preserved_live_preview(local_result, remote_result):
     remote_preview = _preview_payload_from_result(remote_result)
     if not _empty_preview_payload(remote_preview):
         return remote_result
+    if _preview_payload_is_terminal_failure(local_preview):
+        return remote_result
     merged = dict(remote_result)
     merged["livePreview"] = local_preview
     merged.pop("live_preview", None)
     return merged
+
+
+def _clear_article_system_setup_retry_state(result):
+    cleaned = dict(result or {})
+    for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
+        cleaned.pop(key, None)
+    if str(cleaned.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
+        cleaned["status"] = "queued"
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    if setup_payload:
+        setup_payload = dict(setup_payload)
+        for key in ("error", "error_code", "livePreview", "live_preview"):
+            setup_payload.pop(key, None)
+        if str(setup_payload.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
+            setup_payload["status"] = "queued"
+        setup_payload["retry_available"] = False
+        cleaned["article_system_setup"] = setup_payload
+    return cleaned
 
 
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
@@ -8113,6 +8160,9 @@ class VibeMarketingRunControlView(APIView):
             run.resume_available = True
             if run.status in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
                 run.status = ContentFactoryRunStatus.QUEUED
+            if run.workflow == "article_system_setup":
+                run.result = _clear_article_system_setup_retry_state(run.result or {})
+                run.error = ""
         elif action == "delivery-mode":
             result = run.result or {}
             result["delivery_mode"] = request.data.get("delivery_mode") or request.data.get("deliveryMode")
@@ -8181,7 +8231,7 @@ class VibeMarketingRunControlView(APIView):
             if remote_data.get("current_step"):
                 run.current_step = remote_data["current_step"]
             run.result = result
-        run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "updated_at"])
+        run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
