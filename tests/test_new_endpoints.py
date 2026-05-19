@@ -1455,6 +1455,92 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_failed")
         self.assertEqual(setup_run.result["article_system_setup"]["error"], "Hosted preview workflow failed again.")
 
+    def test_run_status_merge_does_not_preserve_stale_terminal_preview_failure(self):
+        from content_factory.vibe_marketing_views import _merge_preserved_live_preview
+
+        merged = _merge_preserved_live_preview(
+            {
+                "livePreview": {
+                    "available": False,
+                    "status": "failed",
+                    "error": "Write access denied for repository drsamdonegan/studynash",
+                    "errorCode": "GITHUB_APP_WRITE_ACCESS_REQUIRED",
+                }
+            },
+            {
+                "status": "preview_failed",
+                "error": "Content Factory detected a Next.js App Router project but could not confirm a root app/layout.* file.",
+                "error_code": "NEXT_APP_ROOT_LAYOUT_MISSING",
+            },
+        )
+
+        self.assertNotIn("livePreview", merged)
+        self.assertEqual(merged["error_code"], "NEXT_APP_ROOT_LAYOUT_MISSING")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_failed_callback_overwrites_stale_error(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="setup-run-preview-overwrite",
+            workflow="article_system_setup",
+            domain="studynash.co",
+            github_repo="drsamdonegan/studynash",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            error="Write access denied for repository drsamdonegan/studynash",
+            result={
+                "status": "preview_failed",
+                "error": "Write access denied for repository drsamdonegan/studynash",
+                "error_code": "GITHUB_APP_WRITE_ACCESS_REQUIRED",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-overwrite",
+                    "error": "Write access denied for repository drsamdonegan/studynash",
+                    "error_code": "GITHUB_APP_WRITE_ACCESS_REQUIRED",
+                },
+                "livePreview": {
+                    "available": False,
+                    "status": "failed",
+                    "error": "Write access denied for repository drsamdonegan/studynash",
+                    "errorCode": "GITHUB_APP_WRITE_ACCESS_REQUIRED",
+                },
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-run-preview-overwrite",
+                "run_id": "setup-run-preview-overwrite",
+                "workflow": "article_system_setup",
+                "domain": "studynash.co",
+                "github_repo": "drsamdonegan/studynash",
+                "status": "failed",
+                "error": "Content Factory detected a Next.js App Router project but could not confirm a root app/layout.* file.",
+                "error_code": "NEXT_APP_ROOT_LAYOUT_MISSING",
+                "live_preview": {
+                    "available": False,
+                    "status": "failed",
+                    "error": "Content Factory detected a Next.js App Router project but could not confirm a root app/layout.* file.",
+                    "errorCode": "NEXT_APP_ROOT_LAYOUT_MISSING",
+                    "retryable": True,
+                },
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-preview-overwrite",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-preview-overwrite")
+        self.assertEqual(setup_run.result["error_code"], "NEXT_APP_ROOT_LAYOUT_MISSING")
+        self.assertEqual(setup_run.result["livePreview"]["errorCode"], "NEXT_APP_ROOT_LAYOUT_MISSING")
+        self.assertEqual(setup_run.result["article_system_setup"]["error_code"], "NEXT_APP_ROOT_LAYOUT_MISSING")
+        self.assertNotIn("Write access denied", setup_run.error)
+
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_overwrites_stale_scan_article_system_metadata(self, mock_send_dm):
         organization = Organization.objects.create(name="Woofya", domain="woofya.com.au")

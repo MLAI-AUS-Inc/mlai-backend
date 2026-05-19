@@ -1913,6 +1913,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload = dict(setup_payload)
         setup_payload["status"] = "preview_failed"
         setup_payload["setup_run_id"] = run_id
+        error_code = (
+            data.get("error_code")
+            or setup_payload.get("error_code")
+            or live_preview.get("errorCode")
+            or live_preview.get("error_code")
+        )
         preview_error = str(
             data.get("error")
             or setup_payload.get("error")
@@ -1920,7 +1926,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             or "Articles setup preview could not be prepared."
         ).strip()
         setup_payload["error"] = preview_error
-        setup_payload["error_code"] = data.get("error_code") or setup_payload.get("error_code")
+        setup_payload["error_code"] = error_code
+        if live_preview:
+            live_preview = dict(live_preview)
+            live_preview.setdefault("error", preview_error)
+            if error_code:
+                live_preview.setdefault("errorCode", error_code)
         if "retryable" not in setup_payload:
             setup_payload["retryable"] = live_preview.get("retryable", True)
         setup_payload["retry_available"] = bool(
@@ -1933,6 +1944,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         result["preview_url"] = ""
         result["error"] = preview_error
         result["error_code"] = setup_payload.get("error_code")
+        result["livePreview"] = live_preview
+        result["live_preview"] = live_preview
         result["retryable"] = bool(setup_payload.get("retryable", True))
         result["retry_available"] = bool(setup_payload.get("retry_available", True))
         run_status = ContentFactoryRunStatus.BLOCKED
@@ -2039,6 +2052,24 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         merge_status=result.get("merge_status"),
     )
     return run
+
+
+def _clear_article_system_setup_retry_state(result):
+    cleaned = dict(result or {})
+    for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
+        cleaned.pop(key, None)
+    if str(cleaned.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
+        cleaned["status"] = "queued"
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    if setup_payload:
+        setup_payload = dict(setup_payload)
+        for key in ("error", "error_code", "livePreview", "live_preview"):
+            setup_payload.pop(key, None)
+        if str(setup_payload.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
+            setup_payload["status"] = "queued"
+        setup_payload["retry_available"] = False
+        cleaned["article_system_setup"] = setup_payload
+    return cleaned
 
 
 class ContentFactoryCallbackView(APIView):
@@ -6457,10 +6488,13 @@ class ContentFactoryRunControlView(APIView):
                 ContentFactoryRunStatus.DENIED,
             }:
                 run.status = ContentFactoryRunStatus.QUEUED
+            if run.workflow == "article_system_setup":
+                run.result = _clear_article_system_setup_retry_state(run.result or {})
+                run.error = ""
         else:
             return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
 
-        run.save(update_fields=["approval_state", "status", "resume_available", "updated_at"])
+        run.save(update_fields=["approval_state", "status", "resume_available", "result", "error", "updated_at"])
         return Response(
             {
                 "run_id": run_id,
