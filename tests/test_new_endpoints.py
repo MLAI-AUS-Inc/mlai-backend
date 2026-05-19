@@ -221,6 +221,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             expires_at=timezone.now() + timedelta(minutes=50),
             installation_id="12345",
             repository="acme/site",
+            permissions={"contents": "write", "pull_requests": "write"},
         )
 
         with patch("integrations.services.github_app.github_app_credentials_configured", return_value=True), patch(
@@ -237,11 +238,47 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(response.data["github_repo"], "acme/site")
         self.assertEqual(response.data["github_installation_id"], "12345")
         self.assertEqual(response.data["token_source"], "github_app_installation")
+        self.assertEqual(response.data["github_permissions"], {"contents": "write", "pull_requests": "write"})
         create_token.assert_called_once_with(
             installation_id="12345",
             repository="acme/site",
             permission_mode="write",
         )
+
+    def test_github_app_installation_token_cache_preserves_permissions(self):
+        from django.core.cache import cache
+
+        from integrations.services.github_app import create_installation_access_token
+
+        cache.clear()
+        expires_at = (timezone.now() + timedelta(minutes=50)).isoformat()
+        response = MagicMock(status_code=201)
+        response.json.return_value = {
+            "token": "ghs_installation",
+            "expires_at": expires_at,
+            "permissions": {"contents": "write", "pull_requests": "write"},
+        }
+
+        with patch("integrations.services.github_app._github_app_jwt", return_value="jwt"), patch(
+            "integrations.services.github_app.http_requests.post",
+            return_value=response,
+        ) as post:
+            first = create_installation_access_token(
+                installation_id="12345",
+                repository="acme/site",
+                permission_mode="write",
+            )
+            second = create_installation_access_token(
+                installation_id="12345",
+                repository="acme/site",
+                permission_mode="write",
+            )
+
+        self.assertEqual(first.permissions, {"contents": "write", "pull_requests": "write"})
+        self.assertEqual(second.permissions, {"contents": "write", "pull_requests": "write"})
+        self.assertEqual(second.as_content_factory_payload()["github_permissions"], {"contents": "write", "pull_requests": "write"})
+        post.assert_called_once()
+        cache.clear()
 
     def test_content_factory_token_blocks_when_installation_app_credentials_missing(self):
         organization = Organization.objects.create(name="Acme", domain="acme.com")
