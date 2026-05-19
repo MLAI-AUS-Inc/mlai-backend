@@ -1142,6 +1142,133 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertTrue(candidate["paaQuestions"][0]["hasAiOverview"])
         self.assertTrue(candidate["aiSaturation"]["aiOverviewPresent"])
         self.assertEqual(candidate["aiSaturation"]["serpFeatures"], ["featured_snippet"])
+        self.assertEqual(candidate["pillarSlug"], "best-crm-for-ai-startups")
+        self.assertEqual(candidate["pillarName"], "best crm for ai startups")
+        self.assertEqual(candidate["pillarKeyword"], "best crm for ai startups")
+
+    def test_bootstrap_returns_topic_pillars_from_semantic_clusters(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "brand_name": "Acme",
+                "pillar_strategy": {
+                    "pillars": [
+                        {
+                            "name": "AI Growth Systems",
+                            "slug": "ai-growth-systems",
+                            "keyword": "ai startup growth",
+                            "description": "Growth strategy, automation, and startup execution ideas.",
+                        }
+                    ]
+                },
+            },
+        )
+        cluster = SemanticCluster.objects.create(
+            organization=organization,
+            cluster_id=7,
+            pillar_keyword="ai startup growth",
+            total_volume=5000,
+        )
+        available_one = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="ai startup growth playbook",
+            volume=1200,
+            difficulty=22,
+            opportunity_index=92,
+            status=KeywordStatus.PENDING,
+        )
+        available_two = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="machine learning startup strategy",
+            volume=900,
+            difficulty=28,
+            opportunity_index=84,
+            status=KeywordStatus.PENDING,
+        )
+        unavailable = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="ai startup launch checklist",
+            volume=700,
+            difficulty=30,
+            opportunity_index=80,
+            status=KeywordStatus.IN_PROGRESS,
+        )
+        declined = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="ai startup funding",
+            volume=650,
+            difficulty=35,
+            opportunity_index=79,
+            status=KeywordStatus.PENDING,
+        )
+        ClusterMembership.objects.create(keyword=available_one, cluster=cluster, is_pillar=True, similarity_score=1)
+        ClusterMembership.objects.create(keyword=available_two, cluster=cluster, similarity_score=0.94)
+        ClusterMembership.objects.create(keyword=unavailable, cluster=cluster, similarity_score=0.89)
+        ClusterMembership.objects.create(keyword=declined, cluster=cluster, similarity_score=0.85)
+        TopicFeedback.objects.create(
+            organization=organization,
+            keyword="ai startup funding",
+            feedback_type="declined",
+            reason_code="not_appropriate",
+            decline_scope="similar",
+            source="homepage_topic_card",
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        pillars = response.data["topicPillars"]
+        self.assertEqual(len(pillars), 1)
+        pillar = pillars[0]
+        self.assertEqual(pillar["source"], "semantic_cluster")
+        self.assertEqual(pillar["slug"], "ai-growth-systems")
+        self.assertEqual(pillar["name"], "AI Growth Systems")
+        self.assertEqual(pillar["ideaCount"], 2)
+        self.assertEqual(pillar["iconKey"], "brain")
+        self.assertEqual(pillar["colorKey"], "green")
+        self.assertEqual(
+            [candidate["keyword"] for candidate in pillar["topicCandidates"]],
+            ["ai startup growth playbook", "machine learning startup strategy"],
+        )
+        self.assertEqual(pillar["topicCandidates"][0]["pillarSlug"], "ai-growth-systems")
+        self.assertEqual(pillar["topicCandidates"][0]["pillarName"], "AI Growth Systems")
+        self.assertEqual(pillar["topicCandidates"][0]["pillarKeyword"], "ai startup growth")
+
+    def test_bootstrap_falls_back_to_pillar_strategy_without_clusters(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "brand_name": "Acme",
+                "pillar_strategy": {
+                    "pillars": [
+                        {
+                            "name": "Machine Learning Fundamentals",
+                            "slug": "machine-learning-fundamentals",
+                            "description": "Educational content about ML concepts, algorithms, and techniques.",
+                            "topics": ["what is supervised learning", "machine learning examples for founders"],
+                        }
+                    ]
+                },
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        pillars = response.data["topicPillars"]
+        self.assertEqual(len(pillars), 1)
+        pillar = pillars[0]
+        self.assertEqual(pillar["source"], "pillar_strategy")
+        self.assertEqual(pillar["slug"], "machine-learning-fundamentals")
+        self.assertEqual(pillar["ideaCount"], 2)
+        self.assertEqual(pillar["topicCandidates"][0]["keyword"], "what is supervised learning")
+        self.assertEqual(pillar["topicCandidates"][0]["pillarSlug"], "machine-learning-fundamentals")
 
     def test_bootstrap_excludes_close_variants_of_written_topics(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
