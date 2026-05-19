@@ -1,5 +1,5 @@
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone as datetime_timezone
 from typing import Optional
 
@@ -22,6 +22,7 @@ class GitHubInstallationToken:
     expires_at: Optional[datetime]
     installation_id: str
     repository: str
+    permissions: dict[str, str] = field(default_factory=dict)
     token_source: str = "github_app_installation"
 
     def as_content_factory_payload(self, *, domain: str = "") -> dict:
@@ -33,6 +34,9 @@ class GitHubInstallationToken:
             "token_source": self.token_source,
             "source": self.token_source,
         }
+        if self.permissions:
+            payload["github_permissions"] = dict(self.permissions)
+            payload["permissions"] = dict(self.permissions)
         if domain:
             payload["domain"] = domain
         if self.expires_at:
@@ -87,6 +91,18 @@ def _token_ttl_seconds(expires_at: Optional[datetime]) -> int:
     return max(60, seconds)
 
 
+def _normalize_permissions(value) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    permissions: dict[str, str] = {}
+    for key, permission in value.items():
+        key_text = str(key or "").strip()
+        permission_text = str(permission or "").strip().lower()
+        if key_text and permission_text:
+            permissions[key_text] = permission_text
+    return permissions
+
+
 def create_installation_access_token(
     *,
     installation_id: str,
@@ -106,12 +122,19 @@ def create_installation_access_token(
     if use_cache:
         cached = cache.get(key)
         if isinstance(cached, dict) and cached.get("github_token"):
+            permissions = _normalize_permissions(cached.get("github_permissions") or cached.get("permissions"))
+            if not permissions:
+                permissions = _normalize_permissions(cached.get("granted_permissions"))
+            if not permissions:
+                cached = None
+        if isinstance(cached, dict) and cached.get("github_token"):
             expires_at = _parse_expires_at(cached.get("expires_at"))
             return GitHubInstallationToken(
                 token=str(cached["github_token"]),
                 expires_at=expires_at,
                 installation_id=normalized_installation_id,
                 repository=normalized_repository,
+                permissions=permissions,
             )
 
     _owner, repo_name = normalized_repository.split("/", 1)
@@ -133,9 +156,15 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
+        permission_hint = (
+            " Ensure the MLAI Tools GitHub App is installed on this repository with "
+            "Contents: Read/Write and Pull requests: Read/Write."
+            if mode == "write"
+            else ""
+        )
         raise GitHubAppTokenError(
             f"Could not mint GitHub App installation token for {normalized_repository}: "
-            f"GitHub returned {response.status_code}."
+            f"GitHub returned {response.status_code}.{permission_hint}"
         )
     payload = response.json()
     token = str(payload.get("token") or "").strip()
@@ -147,6 +176,7 @@ def create_installation_access_token(
         expires_at=expires_at,
         installation_id=normalized_installation_id,
         repository=normalized_repository,
+        permissions=_normalize_permissions(payload.get("permissions")),
     )
     if use_cache:
         cache.set(key, result.as_content_factory_payload(), timeout=_token_ttl_seconds(expires_at))
