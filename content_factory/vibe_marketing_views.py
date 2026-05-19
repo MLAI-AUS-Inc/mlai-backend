@@ -43,6 +43,7 @@ from content_factory.models import (
     OrganizationContentConfig,
     PAQuestion,
     ResearchedKeyword,
+    SemanticCluster,
     TopicFeedback,
     VibeMarketingComponentComment,
     VibeMarketingComponentCommentStatus,
@@ -873,6 +874,7 @@ def _topic_candidate_from_keyword(keyword):
     monthly_searches = _json_list(getattr(keyword, "monthly_searches", None)) or (velocity or {}).get("dailyVolumes") or []
     trend_status = (velocity or {}).get("trendStatus")
     trend_percent = _trend_percent_from_velocity(velocity)
+    pillar_metadata = _keyword_pillar_metadata(keyword)
     return {
         "id": f"keyword:{keyword.id}",
         "keyword": keyword.keyword,
@@ -896,7 +898,278 @@ def _topic_candidate_from_keyword(keyword):
         "aiSaturation": _latest_keyword_saturation(keyword),
         "relatedKeywords": _keyword_related_keywords(keyword),
         "paaQuestions": _keyword_paa_questions(keyword),
+        **pillar_metadata,
     }
+
+
+PILLAR_VISUALS = (
+    {"iconKey": "brain", "colorKey": "green"},
+    {"iconKey": "community", "colorKey": "purple"},
+    {"iconKey": "rocket", "colorKey": "blue"},
+    {"iconKey": "tools", "colorKey": "orange"},
+)
+
+
+def _pillar_visual(index):
+    return PILLAR_VISUALS[index % len(PILLAR_VISUALS)]
+
+
+def _pillar_slug(value, *, fallback="pillar"):
+    slug = slugify(str(value or "").strip())
+    return slug or fallback
+
+
+def _pillar_title(value):
+    value = str(value or "").strip()
+    return value or "Content pillar"
+
+
+def _keyword_pillar_metadata(keyword):
+    try:
+        memberships = list(keyword.cluster_memberships.all())
+    except Exception:
+        memberships = []
+    membership = memberships[0] if memberships else None
+    cluster = getattr(membership, "cluster", None)
+    if not cluster:
+        return {}
+    pillar_keyword = _pillar_title(getattr(cluster, "pillar_keyword", ""))
+    return {
+        "pillarSlug": _pillar_slug(pillar_keyword, fallback=f"cluster-{getattr(cluster, 'cluster_id', 'pillar')}"),
+        "pillarName": pillar_keyword,
+        "pillarKeyword": pillar_keyword,
+    }
+
+
+def _pillar_strategy_entries(config):
+    strategy = getattr(config, "pillar_strategy", None) or {}
+    if not isinstance(strategy, dict):
+        return []
+    pillars = strategy.get("pillars")
+    if not isinstance(pillars, list):
+        return []
+    return [pillar for pillar in pillars if isinstance(pillar, dict)]
+
+
+def _pillar_strategy_lookup(config):
+    lookup = {}
+    for pillar in _pillar_strategy_entries(config):
+        name = str(pillar.get("name") or pillar.get("title") or pillar.get("pillar") or "").strip()
+        keyword = str(pillar.get("keyword") or pillar.get("pillar_keyword") or pillar.get("pillarKeyword") or name).strip()
+        slug = _pillar_slug(pillar.get("slug") or keyword or name)
+        metadata = {
+            "name": name or keyword,
+            "slug": slug,
+            "description": str(pillar.get("description") or pillar.get("summary") or "").strip(),
+            "raw": pillar,
+        }
+        for value in (slug, name, keyword):
+            key = normalize_topic_feedback_keyword(value)
+            if key:
+                lookup[key] = metadata
+    return lookup
+
+
+def _pillar_strategy_topics(raw_pillar):
+    for key in (
+        "topicCandidates",
+        "topic_candidates",
+        "articleIdeas",
+        "article_ideas",
+        "topics",
+        "keywords",
+        "seedKeywords",
+        "seed_keywords",
+    ):
+        value = raw_pillar.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _derive_pillar_description(name, candidates):
+    related = [
+        str(candidate.get("keyword") or candidate.get("title") or "").strip()
+        for candidate in candidates[:3]
+        if str(candidate.get("keyword") or candidate.get("title") or "").strip()
+    ]
+    if related:
+        if len(related) == 1:
+            return f"Educational content about {related[0]} and related topics."
+        return f"Educational content about {', '.join(related[:-1])}, and {related[-1]}."
+    return f"Article ideas and search demand around {name}."
+
+
+def _topic_candidate_from_strategy_topic(raw_topic, *, pillar_slug, pillar_name, pillar_keyword, index):
+    if isinstance(raw_topic, dict):
+        keyword = str(
+            raw_topic.get("keyword")
+            or raw_topic.get("targetKeyword")
+            or raw_topic.get("target_keyword")
+            or raw_topic.get("title")
+            or raw_topic.get("angle")
+            or ""
+        ).strip()
+        title = str(raw_topic.get("title") or raw_topic.get("angle") or keyword).strip() or keyword
+        reason = str(raw_topic.get("reason") or raw_topic.get("summary") or "Suggested from stored pillar strategy.").strip()
+        candidate = {
+            "id": str(raw_topic.get("id") or f"pillar:{pillar_slug}:{index}"),
+            "keyword": keyword or title,
+            "title": title or keyword,
+            "reason": reason,
+            "source": "pillar_strategy",
+            "status": "pending",
+            "alreadyWritten": False,
+            "volume": raw_topic.get("volume"),
+            "difficulty": raw_topic.get("difficulty"),
+            "opportunityScore": raw_topic.get("opportunityScore") or raw_topic.get("opportunity_score"),
+        }
+    else:
+        keyword = str(raw_topic or "").strip()
+        candidate = {
+            "id": f"pillar:{pillar_slug}:{index}",
+            "keyword": keyword,
+            "title": keyword,
+            "reason": "Suggested from stored pillar strategy.",
+            "source": "pillar_strategy",
+            "status": "pending",
+            "alreadyWritten": False,
+        }
+    if not candidate["keyword"] and not candidate["title"]:
+        return None
+    return {
+        **candidate,
+        "pillarSlug": pillar_slug,
+        "pillarName": pillar_name,
+        "pillarKeyword": pillar_keyword,
+    }
+
+
+def _topic_pillars_from_strategy(config, *, compact=False):
+    pillars = []
+    candidate_limit = 8 if compact else 30
+    for index, raw_pillar in enumerate(_pillar_strategy_entries(config)):
+        name = _pillar_title(raw_pillar.get("name") or raw_pillar.get("title") or raw_pillar.get("pillar"))
+        pillar_keyword = _pillar_title(raw_pillar.get("keyword") or raw_pillar.get("pillar_keyword") or raw_pillar.get("pillarKeyword") or name)
+        slug = _pillar_slug(raw_pillar.get("slug") or pillar_keyword or name, fallback=f"pillar-{index + 1}")
+        candidates = [
+            candidate
+            for candidate in (
+                _topic_candidate_from_strategy_topic(
+                    topic,
+                    pillar_slug=slug,
+                    pillar_name=name,
+                    pillar_keyword=pillar_keyword,
+                    index=topic_index,
+                )
+                for topic_index, topic in enumerate(_pillar_strategy_topics(raw_pillar), start=1)
+            )
+            if candidate
+        ]
+        visual = _pillar_visual(index)
+        description = str(raw_pillar.get("description") or raw_pillar.get("summary") or "").strip()
+        pillars.append(
+            {
+                "id": str(raw_pillar.get("id") or f"pillar-strategy:{slug}"),
+                "slug": slug,
+                "name": name,
+                "description": description or _derive_pillar_description(name, candidates),
+                "ideaCount": len(candidates),
+                "iconKey": visual["iconKey"],
+                "colorKey": visual["colorKey"],
+                "source": "pillar_strategy",
+                "topicCandidates": candidates[:candidate_limit],
+            }
+        )
+    return pillars
+
+
+def _topic_pillars_from_clusters(organization, config, *, declined_keyword_keys=None, coverage_memory=None, compact=False):
+    declined_keyword_keys = declined_keyword_keys or set()
+    if coverage_memory is None:
+        coverage_memory = build_topic_coverage_memory(organization)
+    strategy_lookup = _pillar_strategy_lookup(config)
+    candidate_limit = 8 if compact else 30
+    memberships_queryset = (
+        ClusterMembership.objects.select_related("keyword")
+        .prefetch_related(
+            Prefetch("keyword__velocity_snapshots", queryset=KeywordVelocity.objects.order_by("-captured_at")),
+            Prefetch("keyword__ai_saturation_snapshots", queryset=AISaturation.objects.order_by("-captured_at")),
+            Prefetch("keyword__paa_questions", queryset=PAQuestion.objects.order_by("depth", "order")),
+            Prefetch(
+                "keyword__cluster_memberships",
+                queryset=ClusterMembership.objects.select_related("cluster"),
+            ),
+        )
+        .order_by("-is_pillar", "-keyword__opportunity_index", "-keyword__volume", "keyword__keyword")
+    )
+    clusters = (
+        SemanticCluster.objects.filter(organization=organization)
+        .prefetch_related(Prefetch("member_keywords", queryset=memberships_queryset))
+        .order_by("-total_volume", "pillar_keyword")
+    )
+    pillars = []
+    for cluster in clusters:
+        pillar_keyword = _pillar_title(cluster.pillar_keyword)
+        cluster_slug = _pillar_slug(pillar_keyword, fallback=f"cluster-{cluster.cluster_id}")
+        strategy_metadata = (
+            strategy_lookup.get(normalize_topic_feedback_keyword(cluster_slug))
+            or strategy_lookup.get(normalize_topic_feedback_keyword(pillar_keyword))
+            or {}
+        )
+        slug = strategy_metadata.get("slug") or cluster_slug
+        name = strategy_metadata.get("name") or pillar_keyword
+        description = strategy_metadata.get("description") or ""
+        seen_keywords = set()
+        candidates = []
+        for membership in cluster.member_keywords.all():
+            keyword = membership.keyword
+            keyword_key = normalize_topic_feedback_keyword(keyword.keyword)
+            if not keyword_key or keyword_key in seen_keywords or keyword_key in declined_keyword_keys:
+                continue
+            seen_keywords.add(keyword_key)
+            coverage_match = match_covered_topic(keyword=keyword.keyword, memory=coverage_memory)
+            if not _keyword_is_available_for_topic_picker(keyword, coverage_memory=coverage_memory):
+                continue
+            candidate = _apply_topic_coverage_to_candidate(_topic_candidate_from_keyword(keyword), coverage_match)
+            candidates.append(
+                {
+                    **candidate,
+                    "pillarSlug": slug,
+                    "pillarName": name,
+                    "pillarKeyword": pillar_keyword,
+                }
+            )
+        if not candidates:
+            continue
+        visual = _pillar_visual(len(pillars))
+        pillars.append(
+            {
+                "id": f"semantic-cluster:{cluster.id}",
+                "slug": slug,
+                "name": name,
+                "description": description or _derive_pillar_description(name, candidates),
+                "ideaCount": len(candidates),
+                "iconKey": visual["iconKey"],
+                "colorKey": visual["colorKey"],
+                "source": "semantic_cluster",
+                "topicCandidates": candidates[:candidate_limit],
+            }
+        )
+    return pillars
+
+
+def _topic_pillars_for_bootstrap(organization, config, *, declined_keyword_keys=None, coverage_memory=None, compact=False):
+    cluster_pillars = _topic_pillars_from_clusters(
+        organization,
+        config,
+        declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
+        compact=compact,
+    )
+    if cluster_pillars:
+        return cluster_pillars
+    return _topic_pillars_from_strategy(config, compact=compact)
 
 
 def _serialize_topic_coverage_match(match):
@@ -4960,6 +5233,13 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         coverage_memory=coverage_memory,
         written_memory=written_memory,
     )
+    topic_pillars = _topic_pillars_for_bootstrap(
+        context.organization,
+        config,
+        declined_keyword_keys=declined_keyword_keys,
+        coverage_memory=coverage_memory,
+        compact=compact,
+    )
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     guided_steps, current_guided_step = _guided_steps(checks)
@@ -5012,6 +5292,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
+        "topicPillars": topic_pillars,
         "hiddenTopicCandidates": hidden_topic_candidates,
         "declinedTopicFeedback": [serialize_topic_feedback(item) for item in declined_topic_feedback],
         "draftArticles": _recent_article_drafts(context.organization, scan_limit=20 if compact else 50),
@@ -5101,6 +5382,7 @@ def _serialize_bootstrap_without_domain(company):
         "latestRuns": [],
         "latestRunsByWorkflow": {},
         "topicCandidates": [],
+        "topicPillars": [],
         "hiddenTopicCandidates": [],
         "declinedTopicFeedback": [],
         "draftArticles": [],
