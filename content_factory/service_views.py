@@ -4650,7 +4650,18 @@ class ContentFactoryCallbackView(APIView):
                     f"*Review the PR:* {pr_url}{preview_line}"
                 )
                 text_body += "\n\nApprove and merge this setup PR. Topic research will unlock after the merged directory is verified on the default branch."
-                _send(text_body)
+                _send(
+                    text_body,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": text_body,
+                            },
+                        }
+                    ],
+                )
             else:
                 _send(
                     f"📁 Articles directory scaffolded for *{domain}*, but "
