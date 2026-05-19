@@ -688,6 +688,33 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         settings.ROO_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
 
+    @patch("integrations.services.github.refresh_github_token", side_effect=Exception("no stored token"))
+    @patch("content_factory.service_views.ContentFactoryCallbackView._send_auth_required_notification")
+    def test_auth_required_callback_updates_job_without_import_error(self, mock_notify, mock_refresh):
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "auth_required",
+                "job_id": "setup-run-auth-required",
+                "domain": "studynash.co",
+                "slack_user_id": "U123",
+                "github_repo": "drsamdonegan/studynash",
+                "workflow": "article_system_setup",
+                "message": "Access denied to repository drsamdonegan/studynash",
+                "reason_code": "missing_or_expired_credentials",
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        job = ContentFactoryJob.objects.get(job_id="setup-run-auth-required")
+        self.assertEqual(job.status, "auth_required")
+        self.assertEqual(job.domain, "studynash.co")
+        self.assertEqual(job.slack_user_id, "U123")
+        self.assertEqual(job.error_message, "Access denied to repository drsamdonegan/studynash")
+        mock_refresh.assert_called_once_with("U123")
+        mock_notify.assert_called_once()
+
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.get_channel_id_by_name')
     @patch('integrations.services.slack.SlackService.send_dm')
