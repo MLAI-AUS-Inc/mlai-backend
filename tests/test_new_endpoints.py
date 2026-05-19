@@ -1131,6 +1131,53 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(run.result["article_system_readiness"]["missing_support_files"], ["app/articles/resources.ts"])
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scan_complete_callback_persists_route_metadata_to_run(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-route-metadata",
+            workflow="repo_scan",
+            domain="studynash.co",
+            github_repo="drsamdonegan/studynash",
+            status=ContentFactoryRunStatus.RUNNING,
+            step_order=["load_repo_context", "scan_structure"],
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scan_complete",
+                "job_id": "scan-run-route-metadata",
+                "run_id": "scan-run-route-metadata",
+                "workflow": "repo_scan",
+                "domain": "studynash.co",
+                "github_repo": "drsamdonegan/studynash",
+                "slack_user_id": "U123",
+                "requested_action": "article_system_setup",
+                "scaffold_required": True,
+                "scaffold_status": "approval_required",
+                "tech_stack": {"framework": "nextjs", "language": "typescript"},
+                "repo_profile": {
+                    "runtime_family": "node",
+                    "framework": "nextjs",
+                    "metadata": {"route_roots": ["pages"]},
+                },
+                "repository_classification": {"route_roots": ["pages"]},
+                "scaffold_plan": {
+                    "framework": "nextjs",
+                    "next_route_kind": "pages",
+                    "next_route_root": "pages",
+                    "route_shell_path": "pages/articles.tsx",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="scan-run-route-metadata")
+        self.assertEqual(run.result["tech_stack"]["framework"], "nextjs")
+        self.assertEqual(run.result["repo_profile"]["metadata"]["route_roots"], ["pages"])
+        self.assertEqual(run.result["repository_classification"]["route_roots"], ["pages"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_scan_complete_callback_persists_auto_setup_preview_queue(self, mock_send_dm):
         Organization.objects.create(name="MLAI", domain="mlai.au")
         ContentFactoryRun.objects.create(

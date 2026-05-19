@@ -1716,6 +1716,13 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "article_system": data.get("article_system") if isinstance(data.get("article_system"), dict) else {},
             "article_system_readiness": readiness,
             "article_system_setup": data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {},
+            "tech_stack": data.get("tech_stack") if isinstance(data.get("tech_stack"), dict) else {},
+            "repo_profile": data.get("repo_profile") if isinstance(data.get("repo_profile"), dict) else {},
+            "repository_classification": (
+                data.get("repository_classification")
+                if isinstance(data.get("repository_classification"), dict)
+                else {}
+            ),
             "article_surface_hint": data.get("article_surface_hint") if isinstance(data.get("article_surface_hint"), dict) else {},
             "article_surface_hint_status": str(data.get("article_surface_hint_status") or "ignored").strip(),
             "article_surface_mode": str(data.get("article_surface_mode") or "").strip(),
@@ -3880,6 +3887,13 @@ class ContentFactoryCallbackView(APIView):
                     'approve_url': approve_url,
                     'deny_url': deny_url,
                     'scaffold_plan': data.get('scaffold_plan') or request_meta.get('scaffold_plan'),
+                    'tech_stack': data.get('tech_stack') or request_meta.get('tech_stack') or {},
+                    'repo_profile': data.get('repo_profile') or request_meta.get('repo_profile') or {},
+                    'repository_classification': (
+                        data.get('repository_classification')
+                        or request_meta.get('repository_classification')
+                        or {}
+                    ),
                 }
             )
             job.status = 'awaiting_confirmation' if approval_required else 'completed'
