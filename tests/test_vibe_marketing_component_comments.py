@@ -293,14 +293,29 @@ class VibeMarketingComponentCommentTests(TestCase):
             github_repo="MLAI-AUS-Inc/mlai-au",
             status=ContentFactoryRunStatus.RUNNING,
             current_step="scan_structure",
-            result={"status": "processing"},
+            run_request={"scan_purpose": "inventory", "article_surface_mode": "not_sure"},
+            result={"status": "processing", "scan_purpose": "inventory", "article_surface_mode": "not_sure"},
         )
+        detected_candidates = [
+            {
+                "route": "/articles",
+                "path": "app/routes/articles.tsx",
+                "confidence": 0.72,
+            }
+        ]
         remote_payload = {
             "run_id": scan_run.run_id,
             "workflow": "repo_scan",
             "status": "completed",
             "current_step": "finalize",
-            "result": {"status": "completed", "scaffold_status": "not_needed"},
+            "result": {
+                "status": "completed",
+                "article_surface_hint": {},
+                "detected_candidates": detected_candidates,
+                "article_system_readiness": {"ready": False, "detected_candidates": detected_candidates},
+                "matched_article_surface": detected_candidates[0],
+                "scaffold_status": "not_needed",
+            },
         }
 
         with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value=remote_payload):
@@ -311,7 +326,16 @@ class VibeMarketingComponentCommentTests(TestCase):
         scan_run.refresh_from_db()
         self.assertEqual(scan_run.status, ContentFactoryRunStatus.COMPLETED)
         self.assertEqual(scan_run.current_step, "finalize")
+        self.assertEqual(scan_run.result["scan_purpose"], "inventory")
+        self.assertEqual(scan_run.result["article_surface_mode"], "not_sure")
         self.assertEqual(scan_run.result["scaffold_status"], "not_needed")
+        self.assertEqual(response.data["result"]["scan_purpose"], "inventory")
+        self.assertEqual(response.data["result"]["article_surface_mode"], "not_sure")
+        self.assertEqual(response.data["result"]["detected_candidates"], detected_candidates)
+        self.assertEqual(response.data["result"]["article_system_readiness"]["detected_candidates"], detected_candidates)
+        self.assertEqual(response.data["result"]["matched_article_surface"], detected_candidates[0])
+        self.assertEqual(response.data["result"]["scaffold_status"], "not_needed")
+        self.assertNotIn("article_surface_hint", response.data["result"])
 
     def test_bootstrap_blocks_mlai_article_system_when_featured_catalog_missing(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
