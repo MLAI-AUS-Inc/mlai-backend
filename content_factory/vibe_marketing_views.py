@@ -4538,6 +4538,8 @@ COMPACT_RUN_RESULT_KEYS = {
     "article_surface_hint",
     "articleSurfaceHint",
     "article_surface_hint_status",
+    "article_surface_mode",
+    "articleSurfaceMode",
     "article_system_readiness",
     "article_system_setup",
     "detected_candidates",
@@ -4545,6 +4547,8 @@ COMPACT_RUN_RESULT_KEYS = {
     "deliveryMode",
     "draft_pr_url",
     "path",
+    "matched_article_surface",
+    "pending_article_system_setup",
     "preview_url",
     "previewUrl",
     "pr_url",
@@ -4565,6 +4569,7 @@ COMPACT_RUN_RESULT_KEYS = {
     "scaffold_job_id",
     "scaffoldJobId",
     "scaffold_plan",
+    "scaffold_status",
     "setup_requested_action",
     "setup_run_id",
     "setupRunId",
@@ -4631,6 +4636,51 @@ def _compact_result_for_run(run):
     if request_compact:
         compact["run_request"] = request_compact
     return compact
+
+
+def _has_concrete_article_surface_hint(value):
+    if isinstance(value, str):
+        return bool(value.strip())
+    if not isinstance(value, dict):
+        return False
+    for key in (
+        "route",
+        "route_path",
+        "routePath",
+        "path",
+        "public_url",
+        "publicUrl",
+        "listing_url",
+        "listingUrl",
+        "article_surface_url",
+        "articleSurfaceUrl",
+        "url",
+    ):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return True
+    return False
+
+
+def _log_terminal_repo_scan_status(run, payload):
+    if run.workflow not in SCAN_WORKFLOWS or run.status not in SCAN_LOCAL_AUTHORITATIVE_STATUSES:
+        return
+    result = _run_mapping(payload.get("result"))
+    readiness = _run_mapping(result.get("article_system_readiness"))
+    candidates = result.get("detected_candidates")
+    if not isinstance(candidates, list):
+        candidates = readiness.get("detected_candidates")
+    candidate_count = len(candidates) if isinstance(candidates, list) else 0
+    request_payload = _run_mapping(result.get("run_request") or result.get("request"))
+    logger.info(
+        "vibe_marketing_repo_scan_status_terminal run_id=%s status=%s scan_purpose=%s setup_hint_present=%s candidate_count=%s",
+        run.run_id,
+        run.status,
+        result.get("scan_purpose") or result.get("scanPurpose") or request_payload.get("scan_purpose") or request_payload.get("scanPurpose") or "",
+        _has_concrete_article_surface_hint(result.get("article_surface_hint"))
+        or _has_concrete_article_surface_hint(result.get("articleSurfaceHint")),
+        candidate_count,
+    )
 
 
 def _serialize_run_steps(run, *, compact=False):
@@ -5763,6 +5813,45 @@ def _sync_local_run_from_remote(run, remote_data):
         run.error = ""
     if result:
         result = _merge_preserved_live_preview(run.result or {}, result)
+        if run.workflow in SCAN_WORKFLOWS:
+            local_result = run.result if isinstance(run.result, dict) else {}
+            run_request = run.run_request if isinstance(run.run_request, dict) else {}
+
+            def preserve_from_local_or_request(result_key, *request_keys):
+                if result.get(result_key) not in (None, "", {}, []):
+                    return
+                local_value = local_result.get(result_key)
+                if local_value not in (None, "", {}, []):
+                    result[result_key] = local_value
+                    return
+                for request_key in request_keys or (result_key,):
+                    request_value = run_request.get(request_key)
+                    if request_value not in (None, "", {}, []):
+                        result[result_key] = request_value
+                        return
+
+            preserve_from_local_or_request("scan_purpose", "scan_purpose", "scanPurpose")
+            preserve_from_local_or_request("scanPurpose", "scanPurpose", "scan_purpose")
+            preserve_from_local_or_request("article_surface_mode", "article_surface_mode", "articleSurfaceMode")
+            preserve_from_local_or_request("articleSurfaceMode", "articleSurfaceMode", "article_surface_mode")
+            for key in (
+                "article_surface_hint",
+                "articleSurfaceHint",
+                "article_surface_hint_status",
+                "article_system_readiness",
+                "matched_article_surface",
+                "detected_candidates",
+                "scaffold_status",
+            ):
+                preserve_from_local_or_request(key)
+
+            request_compact = {
+                key: run_request.get(key)
+                for key in ("scan_purpose", "scanPurpose", "article_surface_mode", "articleSurfaceMode")
+                if run_request.get(key) not in (None, "", [], {})
+            }
+            if request_compact and result.get("run_request") in (None, "", {}, []):
+                result["run_request"] = request_compact
         if run.workflow == "article_system_setup" and isinstance(run.result, dict):
             for key in (
                 "scan_purpose",
@@ -7255,6 +7344,8 @@ class VibeMarketingRunView(APIView):
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
         payload = _serialize_run(run, context=context, mode=view)
+        if view == "status":
+            _log_terminal_repo_scan_status(run, payload)
         return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_run", view=view)
 
 
