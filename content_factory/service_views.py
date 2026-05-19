@@ -3530,6 +3530,7 @@ class ContentFactoryCallbackView(APIView):
         Handle 'auth_required' event: notify user to re-authenticate.
         Attempts automatic token refresh first.
         """
+        from content_factory.models import ContentFactoryJob
         from integrations.services.github import refresh_github_token
         from integrations.services.article_generation import trigger_article_generation, confirm_topic
 
