@@ -3,6 +3,7 @@ from django.urls import path
 from .vibe_marketing_views import (
     VibeMarketingAutofillView,
     VibeMarketingArticleView,
+    VibeMarketingArticleSystemSetupView,
     VibeMarketingArticleSystemRevisionsView,
     VibeMarketingAbnLookupView,
     VibeMarketingBaselineGoogleRefreshView,
@@ -49,6 +50,8 @@ urlpatterns = [
     path("github/repos/", VibeMarketingGitHubReposView.as_view(), name="vibe-marketing-github-repos"),
     path("scan", VibeMarketingScanView.as_view(), name="vibe-marketing-scan-no-slash"),
     path("scan/", VibeMarketingScanView.as_view(), name="vibe-marketing-scan"),
+    path("article-system-setup", VibeMarketingArticleSystemSetupView.as_view(), name="vibe-marketing-article-system-setup-no-slash"),
+    path("article-system-setup/", VibeMarketingArticleSystemSetupView.as_view(), name="vibe-marketing-article-system-setup"),
     path("discovery", VibeMarketingDiscoveryView.as_view(), name="vibe-marketing-discovery-no-slash"),
     path("discovery/", VibeMarketingDiscoveryView.as_view(), name="vibe-marketing-discovery"),
     path("article", VibeMarketingArticleView.as_view(), name="vibe-marketing-article-no-slash"),
