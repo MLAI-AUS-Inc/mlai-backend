@@ -614,13 +614,58 @@ def _append_candidate_source(target, value):
         target.append(value)
 
 
+def _content_island_metadata_from_mapping(mapping):
+    if not isinstance(mapping, dict):
+        return {}
+    nested = mapping.get("content_island") or mapping.get("contentIsland") or {}
+    nested = nested if isinstance(nested, dict) else {}
+    return {
+        "pillarSlug": mapping.get("pillarSlug")
+        or mapping.get("pillar_slug")
+        or mapping.get("contentIslandSlug")
+        or mapping.get("content_island_slug")
+        or nested.get("slug"),
+        "pillarName": mapping.get("pillarName")
+        or mapping.get("pillar_name")
+        or mapping.get("contentIslandName")
+        or mapping.get("content_island_name")
+        or nested.get("name"),
+        "pillarKeyword": mapping.get("pillarKeyword")
+        or mapping.get("pillar_keyword")
+        or mapping.get("contentIslandKeyword")
+        or mapping.get("content_island_keyword")
+        or nested.get("keyword"),
+        "pillarIconKey": mapping.get("pillarIconKey")
+        or mapping.get("pillar_icon_key")
+        or mapping.get("contentIslandIconKey")
+        or mapping.get("content_island_icon_key")
+        or nested.get("iconKey")
+        or nested.get("icon_key"),
+        "pillarColorKey": mapping.get("pillarColorKey")
+        or mapping.get("pillar_color_key")
+        or mapping.get("contentIslandColorKey")
+        or mapping.get("content_island_color_key")
+        or nested.get("colorKey")
+        or nested.get("color_key"),
+    }
+
+
 def _extract_topic_candidates_from_result(result):
     if not isinstance(result, dict):
         return []
     raw_candidates = []
+    inherited_island_metadata = _content_island_metadata_from_mapping(result)
     for mapping in (result, result.get("selection_data"), result.get("selection")):
         if not isinstance(mapping, dict):
             continue
+        inherited_island_metadata = {
+            **inherited_island_metadata,
+            **{
+                key: value
+                for key, value in _content_island_metadata_from_mapping(mapping).items()
+                if value
+            },
+        }
         _append_candidate_source(
             raw_candidates,
             _first_non_empty_mapping_value(
@@ -664,6 +709,8 @@ def _extract_topic_candidates_from_result(result):
         ).strip()
         title = str(
             raw.get("title")
+            or raw.get("display_title")
+            or raw.get("displayTitle")
             or raw.get("suggested_title")
             or raw.get("suggestedTitle")
             or raw.get("custom_title")
@@ -682,6 +729,11 @@ def _extract_topic_candidates_from_result(result):
             if raw.get("opportunityScore") is not None
             else raw.get("opportunityIndex")
         )
+        raw_island_metadata = _content_island_metadata_from_mapping(raw)
+        island_metadata = {
+            key: raw_island_metadata.get(key) or inherited_island_metadata.get(key)
+            for key in inherited_island_metadata.keys() | raw_island_metadata.keys()
+        }
         candidates.append(
             {
                 "id": str(raw.get("id") or raw.get("keyword_id") or index),
@@ -709,6 +761,7 @@ def _extract_topic_candidates_from_result(result):
                 "relatedKeywords": raw.get("related_keywords") or raw.get("relatedKeywords") or [],
                 "paaQuestions": raw.get("paa_questions") or raw.get("paaQuestions") or [],
                 "sourceRunId": raw.get("source_run_id") or raw.get("sourceRunId"),
+                **{key: value for key, value in island_metadata.items() if value},
             }
         )
     return candidates
@@ -5765,6 +5818,18 @@ def _run_result_from_remote(remote_data):
         "pending_article_system_setup",
         "requested_action",
         "setup_requested_action",
+        "content_island",
+        "contentIsland",
+        "content_island_slug",
+        "contentIslandSlug",
+        "content_island_name",
+        "contentIslandName",
+        "content_island_keyword",
+        "contentIslandKeyword",
+        "content_island_icon_key",
+        "contentIslandIconKey",
+        "content_island_color_key",
+        "contentIslandColorKey",
         "article_surface_mode",
         "article_surface_hint",
         "article_surface_hint_status",
@@ -7430,6 +7495,38 @@ class VibeMarketingDiscoveryView(APIView):
             "slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        content_island_slug = str(
+            _request_value(request.data, "contentIslandSlug", "content_island_slug", default="") or ""
+        ).strip()
+        if content_island_slug:
+            content_island_name = str(
+                _request_value(request.data, "contentIslandName", "content_island_name", default="") or ""
+            ).strip()
+            content_island_keyword = str(
+                _request_value(request.data, "contentIslandKeyword", "content_island_keyword", default="") or ""
+            ).strip()
+            content_island_icon_key = str(
+                _request_value(request.data, "contentIslandIconKey", "content_island_icon_key", default="") or ""
+            ).strip()
+            content_island_color_key = str(
+                _request_value(request.data, "contentIslandColorKey", "content_island_color_key", default="") or ""
+            ).strip()
+            try:
+                requested_topic_count = int(
+                    _request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
+                )
+            except (TypeError, ValueError):
+                requested_topic_count = 4
+            payload.update(
+                {
+                    "content_island_slug": content_island_slug,
+                    "content_island_name": content_island_name,
+                    "content_island_keyword": content_island_keyword or content_island_name,
+                    "content_island_icon_key": content_island_icon_key,
+                    "content_island_color_key": content_island_color_key,
+                    "requested_topic_count": max(1, min(requested_topic_count, 8)),
+                }
+            )
         run = _queue_content_factory_run(
             endpoint="discovery",
             workflow="auto_discovery",
