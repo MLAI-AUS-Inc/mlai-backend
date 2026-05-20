@@ -1418,6 +1418,23 @@ def _prefer_topic_difficulty(existing, candidate):
     )
 
 
+def _topic_candidate_passes_dashboard_quality(candidate):
+    difficulty = _safe_number(candidate.get("difficulty"), default=0)
+    volume = _safe_number(candidate.get("volume"), default=0)
+    opportunity_score = _safe_number(candidate.get("opportunityScore") or candidate.get("opportunity_score"), default=0)
+    return difficulty <= 50 and (volume >= 50 or opportunity_score >= 500)
+
+
+def _apply_content_island_metadata(candidate, metadata):
+    if not metadata:
+        return candidate
+    enriched = dict(candidate)
+    for key, value in metadata.items():
+        if value and not enriched.get(key):
+            enriched[key] = value
+    return enriched
+
+
 def _topic_candidates_from_runs(
     runs,
     *,
@@ -1434,8 +1451,16 @@ def _topic_candidates_from_runs(
             continue
         candidates = _extract_topic_candidates_from_result(run.result or {})
         if candidates:
+            run_island_metadata = _content_island_metadata_from_mapping(run.run_request or {})
             for candidate in candidates:
                 candidate["sourceRunId"] = candidate.get("sourceRunId") or run.run_id
+                candidate.update(_apply_content_island_metadata(candidate, run_island_metadata))
+            candidates = [
+                candidate
+                for candidate in candidates
+                if _topic_candidate_passes_dashboard_quality(candidate)
+            ]
+        if candidates:
             run_candidates = candidates
             break
     if organization is None:
@@ -1458,23 +1483,37 @@ def _topic_candidates_from_runs(
         written_memory=written_memory,
     )
     merged = {}
-    for candidate in [*stored_candidates, *enriched_run_candidates]:
+    for candidate in [*enriched_run_candidates, *stored_candidates]:
         key = _normalize_keyword_memory(candidate.get("keyword"))
         if not key:
             continue
         existing = merged.get(key)
         if existing:
             difficulty, difficulty_source = _prefer_topic_difficulty(existing, candidate)
-            merged[key] = {
-                **existing,
-                **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
-                "volume": existing.get("volume") or candidate.get("volume"),
-                "difficulty": difficulty,
-                "difficultySource": difficulty_source,
-                "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
-                "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
-                "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
-            }
+            existing_is_run_candidate = bool(existing.get("sourceRunId"))
+            candidate_is_run_candidate = bool(candidate.get("sourceRunId"))
+            if existing_is_run_candidate and not candidate_is_run_candidate:
+                merged[key] = {
+                    **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
+                    **existing,
+                    "volume": existing.get("volume") or candidate.get("volume"),
+                    "difficulty": difficulty,
+                    "difficultySource": difficulty_source,
+                    "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
+                    "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
+                    "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
+                }
+            else:
+                merged[key] = {
+                    **existing,
+                    **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
+                    "volume": existing.get("volume") or candidate.get("volume"),
+                    "difficulty": difficulty,
+                    "difficultySource": difficulty_source,
+                    "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
+                    "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
+                    "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
+                }
         else:
             merged[key] = candidate
 

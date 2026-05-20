@@ -984,6 +984,82 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(candidate["pillarIconKey"], "rocket")
         self.assertEqual(candidate["pillarColorKey"], "blue")
 
+    def test_bootstrap_exposes_all_strong_latest_discovery_options_with_island_visuals(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="discovery-island-selection-2",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            run_request={
+                "content_island": {
+                    "slug": "ai-growth",
+                    "name": "AI Growth",
+                    "keyword": "ai growth strategy",
+                    "icon_key": "rocket",
+                    "color_key": "blue",
+                }
+            },
+            result={
+                "selection": {
+                    "options": [
+                        {
+                            "id": "ai-detectors",
+                            "keyword": "how do ai detectors work",
+                            "title": "How AI Detectors Work",
+                            "volume": 720,
+                            "difficulty": 18,
+                            "opportunityScore": 4516,
+                        },
+                        {
+                            "id": "startup-company",
+                            "keyword": "what is startup company",
+                            "title": "What Is a Startup Company?",
+                            "volume": 320,
+                            "difficulty": 25,
+                            "opportunityScore": 768,
+                        },
+                        {
+                            "id": "hard-topic",
+                            "keyword": "competitive ai startup marketing",
+                            "title": "Competitive AI Startup Marketing",
+                            "volume": 900,
+                            "difficulty": 72,
+                            "opportunityScore": 1200,
+                        },
+                        {
+                            "id": "weak-topic",
+                            "keyword": "tiny ai startup idea",
+                            "title": "Tiny AI Startup Idea",
+                            "volume": 20,
+                            "difficulty": 20,
+                            "opportunityScore": 100,
+                        },
+                    ]
+                },
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        candidates = {
+            candidate["keyword"]: candidate
+            for candidate in response.data["topicCandidates"]
+        }
+        self.assertIn("how do ai detectors work", candidates)
+        self.assertIn("what is startup company", candidates)
+        self.assertNotIn("competitive ai startup marketing", candidates)
+        self.assertNotIn("tiny ai startup idea", candidates)
+        for candidate in candidates.values():
+            self.assertEqual(candidate["sourceRunId"], "discovery-island-selection-2")
+            self.assertEqual(candidate["pillarSlug"], "ai-growth")
+            self.assertEqual(candidate["pillarIconKey"], "rocket")
+            self.assertEqual(candidate["pillarColorKey"], "blue")
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_scoped_discovery_forwards_content_island_metadata(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
