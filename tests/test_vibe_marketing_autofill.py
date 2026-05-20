@@ -941,6 +941,85 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(candidates[0]["opportunityScore"], 82)
         self.assertEqual(candidates[0]["sourceRunId"], "discovery-selection-1")
 
+    def test_bootstrap_preserves_content_island_metadata_from_selection_options(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="discovery-island-selection-1",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            result={
+                "content_island": {
+                    "slug": "ai-growth",
+                    "name": "AI Growth",
+                    "keyword": "ai growth strategy",
+                    "icon_key": "rocket",
+                    "color_key": "blue",
+                },
+                "selection": {
+                    "options": [
+                        {
+                            "id": "ai-growth-for-startups",
+                            "keyword": "ai growth for startups",
+                            "title": "AI Growth for Startups",
+                            "volume": 120,
+                            "difficulty": 24,
+                            "opportunityScore": 91,
+                        }
+                    ]
+                },
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        candidate = response.data["topicCandidates"][0]
+        self.assertEqual(candidate["pillarSlug"], "ai-growth")
+        self.assertEqual(candidate["pillarName"], "AI Growth")
+        self.assertEqual(candidate["pillarKeyword"], "ai growth strategy")
+        self.assertEqual(candidate["pillarIconKey"], "rocket")
+        self.assertEqual(candidate["pillarColorKey"], "blue")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_scoped_discovery_forwards_content_island_metadata(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _Response(status_code=202, payload={"run_id": "discovery-island-run-1", "status": "queued"})
+
+        with patch.object(http_client, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/discovery/",
+                {
+                    "contentIslandSlug": "ai-growth",
+                    "contentIslandName": "AI Growth",
+                    "contentIslandKeyword": "ai growth strategy",
+                    "contentIslandIconKey": "rocket",
+                    "contentIslandColorKey": "blue",
+                    "requestedTopicCount": 4,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/discovery")
+        self.assertEqual(captured["json"]["content_island_slug"], "ai-growth")
+        self.assertEqual(captured["json"]["content_island_name"], "AI Growth")
+        self.assertEqual(captured["json"]["content_island_keyword"], "ai growth strategy")
+        self.assertEqual(captured["json"]["content_island_icon_key"], "rocket")
+        self.assertEqual(captured["json"]["content_island_color_key"], "blue")
+        self.assertEqual(captured["json"]["requested_topic_count"], 4)
+
     def test_bootstrap_returns_first_article_mode_without_domain(self):
         self.company.domain = ""
         self.company.organization = None
