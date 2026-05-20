@@ -1836,7 +1836,12 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         config = org.content_config
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
-        pending.update({key: value for key, value in updates.items() if value not in (None, "")})
+        clearable_empty_keys = {"previewUrl", "preview_url"}
+        for key, value in updates.items():
+            if value not in (None, ""):
+                pending[key] = value
+            elif key in clearable_empty_keys:
+                pending[key] = ""
         if not pending:
             return
         pending["updatedAt"] = timezone.now().isoformat()
@@ -1857,6 +1862,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     setup_payload = data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
     live_preview = data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
     result = dict((existing_run.result if existing_run else None) or {})
+    preview_url_value = str(data.get("preview_url") or setup_payload.get("preview_url") or "").strip()
+    live_preview_url_value = str(data.get("live_preview_url") or setup_payload.get("live_preview_url") or "").strip()
     result.update(
         {
             "status": str(data.get("status") or setup_payload.get("status") or event_type).strip(),
@@ -1874,8 +1881,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "merge_status": data.get("merge_status") or setup_payload.get("merge_status"),
             "article_system_setup": setup_payload,
             "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
-            "preview_url": data.get("preview_url") or setup_payload.get("preview_url"),
-            "live_preview_url": data.get("live_preview_url") or setup_payload.get("live_preview_url"),
+            "preview_url": preview_url_value,
+            "live_preview_url": live_preview_url_value,
             "approve_url": data.get("approve_url") or setup_payload.get("approve_url"),
             "deny_url": data.get("deny_url") or setup_payload.get("deny_url"),
             "feedback_batch_id": data.get("feedback_batch_id") or result.get("feedback_batch_id"),
@@ -1883,6 +1890,10 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "livePreview": live_preview,
             "live_preview": live_preview,
             "error_code": data.get("error_code") or setup_payload.get("error_code") or result.get("error_code"),
+            "builder_run_url": data.get("builder_run_url") or live_preview.get("builderRunUrl") or live_preview.get("builder_run_url") or result.get("builder_run_url"),
+            "failed_phase": data.get("failed_phase") or live_preview.get("failedPhase") or live_preview.get("failed_phase") or result.get("failed_phase"),
+            "failed_command": data.get("failed_command") or live_preview.get("failedCommand") or live_preview.get("failed_command") or result.get("failed_command"),
+            "log_excerpt": data.get("log_excerpt") or live_preview.get("logExcerpt") or live_preview.get("log_excerpt") or result.get("log_excerpt"),
             "retryable": (
                 data.get("retryable")
                 if data.get("retryable") is not None
@@ -1959,6 +1970,22 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "preview_failed"
         error = preview_error
+    elif event_type == "article_system_setup_preview_ready" and not preview_url_value:
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "preview_building"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["live_preview_url"] = live_preview_url_value
+        setup_payload.pop("preview_url", None)
+        result["status"] = "preview_building"
+        result["preview_url"] = ""
+        result["article_system_setup"] = setup_payload
+        result["livePreview"] = live_preview
+        result["live_preview"] = live_preview
+        run_status = ContentFactoryRunStatus.RUNNING
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "start_hosted_preview"
+        error = ""
     elif event_type == "article_system_setup_manual_merge_required":
         setup_payload = dict(setup_payload)
         setup_payload["status"] = "manual_merge_required"
@@ -2051,8 +2078,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         rescan_run_id=result.get("rescan_run_id"),
         prUrl=result.get("pr_url"),
         pr_url=result.get("pr_url"),
-        previewUrl=result.get("preview_url") or result.get("live_preview_url"),
-        preview_url=result.get("preview_url") or result.get("live_preview_url"),
+        previewUrl=result.get("preview_url"),
+        preview_url=result.get("preview_url"),
         livePreviewUrl=result.get("live_preview_url"),
         live_preview_url=result.get("live_preview_url"),
         mergeStatus=result.get("merge_status"),
@@ -4519,7 +4546,14 @@ class ContentFactoryCallbackView(APIView):
         files_created = data.get('files_created', 0)
         already_exists = data.get('already_exists', False)
         error = data.get('error')
-        preview_url = data.get('preview_url')
+        setup_payload = data.get('article_system_setup') if isinstance(data.get('article_system_setup'), dict) else {}
+        preview_url = str(data.get('preview_url') or setup_payload.get('preview_url') or '').strip()
+        live_preview_url = str(data.get('live_preview_url') or setup_payload.get('live_preview_url') or '').strip()
+        setup_status = str(
+            data.get('setup_status')
+            or setup_payload.get('status')
+            or ('preview_ready' if preview_url else 'preview_building' if data.get('preview_dispatched') else 'preview_unavailable')
+        ).strip() or 'preview_unavailable'
         build_verified = data.get('build_verified', False)
 
         # Update job record
@@ -4597,9 +4631,9 @@ class ContentFactoryCallbackView(APIView):
                 pending = dict(article_system_payload.get('pending_article_system_setup') or {})
                 pending.update(
                     {
-                        'status': 'preview_ready',
-                        'setupStatus': 'preview_ready',
-                        'setup_status': 'preview_ready',
+                        'status': setup_status,
+                        'setupStatus': setup_status,
+                        'setup_status': setup_status,
                         'setupRunId': job_id,
                         'setup_run_id': job_id,
                         'sourceScanRunId': parent_run_id or pending.get('sourceScanRunId') or pending.get('source_scan_run_id') or '',
@@ -4608,6 +4642,8 @@ class ContentFactoryCallbackView(APIView):
                         'pr_url': pr_url,
                         'previewUrl': preview_url,
                         'preview_url': preview_url,
+                        'livePreviewUrl': live_preview_url,
+                        'live_preview_url': live_preview_url,
                         'buildVerified': bool(build_verified),
                         'build_verified': bool(build_verified),
                         'updatedAt': timezone.now().isoformat(),

@@ -1262,6 +1262,62 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_ready_without_url_stays_building(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "pending_generation",
+                    "setup_run_id": "setup-run-building",
+                    "previewUrl": "https://stale.example/articles",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_ready",
+                "job_id": "setup-run-building",
+                "run_id": "setup-run-building",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
+                "preview_url": "",
+                "live_preview": {
+                    "available": False,
+                    "status": "building",
+                    "platformStatus": "queued",
+                    "previewUrl": "",
+                },
+                "live_preview_url": "/api/runs/setup-run-building/live-preview",
+                "article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-building",
+                    "live_preview_url": "/api/runs/setup-run-building/live-preview",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-building")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(setup_run.current_step, "start_hosted_preview")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["status"], "preview_building")
+        self.assertEqual(setup_run.result["preview_url"], "")
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "preview_building")
+        self.assertEqual(pending.get("previewUrl"), "")
+        self.assertEqual(pending["livePreviewUrl"], "/api/runs/setup-run-building/live-preview")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_completed_waits_for_verification_scan(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(
@@ -1360,6 +1416,55 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10")
         self.assertFalse(config.articles_scaffolded)
         self.assertNotEqual(config.article_system.get("state"), "roo_scaffolded")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_scaffold_complete_with_queued_preview_does_not_mark_preview_ready(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "pending_generation",
+                    "setup_run_id": "setup-run-scaffold-building",
+                    "setupRunId": "setup-run-scaffold-building",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "scaffold_complete",
+                "job_id": "setup-run-scaffold-building",
+                "parent_run_id": "scan-run-scaffold-building",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10",
+                "preview_url": "",
+                "live_preview_url": "/api/runs/setup-run-scaffold-building/live-preview",
+                "preview_dispatched": True,
+                "setup_status": "preview_building",
+                "article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-scaffold-building",
+                    "live_preview_url": "/api/runs/setup-run-scaffold-building/live-preview",
+                },
+                "already_exists": False,
+                "build_verified": False,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "preview_building")
+        self.assertEqual(pending["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/10")
+        self.assertEqual(pending["preview_url"], "")
+        self.assertEqual(pending["live_preview_url"], "/api/runs/setup-run-scaffold-building/live-preview")
+        self.assertFalse(config.articles_scaffolded)
+        self.assertFalse(config.articles_scaffold_preview_url)
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_preview_failed_callback_blocks_run(self, mock_send_dm):

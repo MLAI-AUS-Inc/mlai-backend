@@ -260,6 +260,7 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "queued",
     "running",
     "processing",
+    "preview_building",
     "preview_ready",
     "revision_ready",
     "awaiting_approval",
@@ -4430,8 +4431,13 @@ def _setup_metadata_from_run(run) -> dict:
         "rescanRunId": rescan_run_id,
         "prUrl": str(_setup_value(result, "pr_url", "prUrl") or _setup_value(setup, "pr_url", "prUrl") or "").strip(),
         "previewUrl": str(
-            _setup_value(result, "preview_url", "previewUrl", "live_preview_url", "livePreviewUrl")
-            or _setup_value(setup, "preview_url", "previewUrl", "live_preview_url", "livePreviewUrl")
+            _setup_value(result, "preview_url", "previewUrl")
+            or _setup_value(setup, "preview_url", "previewUrl")
+            or ""
+        ).strip(),
+        "livePreviewUrl": str(
+            _setup_value(result, "live_preview_url", "livePreviewUrl")
+            or _setup_value(setup, "live_preview_url", "livePreviewUrl")
             or ""
         ).strip(),
     }
@@ -4479,6 +4485,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         "rescanRunId": None,
         "prUrl": None,
         "previewUrl": None,
+        "livePreviewUrl": None,
     }
     if not config:
         return meta
@@ -4495,8 +4502,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         ("pr_url", "prUrl"),
         ("previewUrl", "previewUrl"),
         ("preview_url", "previewUrl"),
-        ("livePreviewUrl", "previewUrl"),
-        ("live_preview_url", "previewUrl"),
+        ("livePreviewUrl", "livePreviewUrl"),
+        ("live_preview_url", "livePreviewUrl"),
     ):
         if pending.get(source_key):
             meta[target_key] = pending.get(source_key)
@@ -4554,7 +4561,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
 
     meta["published"] = bool(published)
     meta["setupBlocked"] = bool(setup_blocked)
-    for key in ("setupRunId", "setupStatus", "rescanRunId", "prUrl", "previewUrl"):
+    for key in ("setupRunId", "setupStatus", "rescanRunId", "prUrl", "previewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
 
