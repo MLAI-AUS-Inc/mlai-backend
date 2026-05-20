@@ -6345,6 +6345,29 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
     )
 
 
+def _run_start_payload(run):
+    result = run.result if isinstance(run.result, dict) else {}
+    error = str(run.error or result.get("error") or result.get("message") or "").strip()
+    raw_errors = result.get("errors")
+    errors = [str(item) for item in raw_errors if item] if isinstance(raw_errors, list) else []
+    if error and error not in errors:
+        errors.insert(0, error)
+    payload = {
+        "run_id": run.run_id,
+        "runId": run.run_id,
+        "status": run.status,
+    }
+    if error:
+        payload["error"] = error
+    if errors:
+        payload["errors"] = errors
+    if result.get("retryable") is not None:
+        payload["retryable"] = bool(result.get("retryable"))
+    if isinstance(result.get("diagnostics"), dict):
+        payload["diagnostics"] = result["diagnostics"]
+    return payload
+
+
 def _call_content_factory_run_action(
     *,
     run_id,
@@ -7534,7 +7557,9 @@ class VibeMarketingDiscoveryView(APIView):
             config=config,
             payload=payload,
         )
-        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+        response_payload = _run_start_payload(run)
+        response_status = status.HTTP_503_SERVICE_UNAVAILABLE if run.status == ContentFactoryRunStatus.BLOCKED else status.HTTP_202_ACCEPTED
+        return Response(response_payload, status=response_status)
 
 
 class VibeMarketingArticleView(APIView):
