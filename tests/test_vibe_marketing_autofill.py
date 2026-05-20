@@ -1020,6 +1020,38 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["json"]["content_island_color_key"], "blue")
         self.assertEqual(captured["json"]["requested_topic_count"], 4)
 
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_scoped_discovery_returns_service_unavailable_when_dispatch_fails(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+
+        with patch.object(http_client, "post", side_effect=http_client.RequestException("connection refused")):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/discovery/",
+                {
+                    "contentIslandSlug": "ai-growth",
+                    "contentIslandName": "AI Growth",
+                    "contentIslandKeyword": "ai growth strategy",
+                    "contentIslandIconKey": "rocket",
+                    "contentIslandColorKey": "blue",
+                    "requestedTopicCount": 4,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertIn("Content Factory worker is unavailable", response.data["errors"][0])
+        self.assertTrue(response.data["retryable"])
+        self.assertIn("connection refused", response.data["diagnostics"]["technical_error"])
+
+        run = ContentFactoryRun.objects.get(run_id=response.data["run_id"])
+        self.assertEqual(run.workflow, "auto_discovery")
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
+
     def test_bootstrap_returns_first_article_mode_without_domain(self):
         self.company.domain = ""
         self.company.organization = None
