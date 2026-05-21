@@ -1318,6 +1318,68 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["livePreviewUrl"], "/api/runs/setup-run-building/live-preview")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_fallback_preview_callback_blocks_approval(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-fallback",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_fallback_ready",
+                "job_id": "setup-run-fallback",
+                "run_id": "setup-run-fallback",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
+                "preview_url": "",
+                "fallback_preview_url": "https://fallback.example/articles",
+                "live_preview": {
+                    "available": True,
+                    "status": "running",
+                    "platformStatus": "ready",
+                    "previewUrl": "https://fallback.example/articles",
+                    "exactRender": False,
+                    "renderConfidence": "fallback",
+                    "previewBuildMode": "route_scoped_next_preview",
+                    "fullSiteBuildSkipped": True,
+                },
+                "live_preview_url": "/api/runs/setup-run-fallback/live-preview",
+                "article_system_setup": {
+                    "status": "fallback_ready",
+                    "setup_run_id": "setup-run-fallback",
+                    "preview_url": "",
+                    "fallback_preview_url": "https://fallback.example/articles",
+                    "live_preview_url": "/api/runs/setup-run-fallback/live-preview",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-fallback")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "fallback_ready")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["preview_url"], "")
+        self.assertEqual(setup_run.result["fallback_preview_url"], "https://fallback.example/articles")
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "fallback_ready")
+        self.assertEqual(pending.get("previewUrl"), "")
+        self.assertEqual(pending["fallbackPreviewUrl"], "https://fallback.example/articles")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_completed_waits_for_verification_scan(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(
@@ -1575,6 +1637,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "platformStatus": "ready",
                 "previewMode": "platform_deployment",
                 "previewUrl": "https://preview.example/articles",
+                "exactRender": True,
             },
         )
 
@@ -1586,6 +1649,54 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(setup_run.result["status"], "preview_ready")
         self.assertEqual(setup_run.result["preview_url"], "https://preview.example/articles")
         self.assertEqual(setup_run.result["article_system_setup"]["status"], "preview_ready")
+
+    def test_article_system_live_preview_fallback_does_not_enable_approval(self):
+        from content_factory.vibe_marketing_views import _persist_live_preview_payload
+
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-run-preview-fallback",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="start_hosted_preview",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            result={
+                "status": "preview_building",
+                "article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-preview-fallback",
+                },
+            },
+        )
+
+        _persist_live_preview_payload(
+            setup_run,
+            {
+                "available": True,
+                "status": "running",
+                "platformStatus": "ready",
+                "previewMode": "platform_deployment",
+                "previewUrl": "https://fallback.example/articles",
+                "exactRender": False,
+                "renderConfidence": "fallback",
+                "previewBuildMode": "route_scoped_next_preview",
+                "fullSiteBuildSkipped": True,
+            },
+        )
+
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "fallback_ready")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["status"], "fallback_ready")
+        self.assertEqual(setup_run.result["preview_url"], "")
+        self.assertEqual(setup_run.result["fallback_preview_url"], "https://fallback.example/articles")
+        self.assertEqual(setup_run.result["article_system_setup"]["preview_url"], "")
+        self.assertEqual(
+            setup_run.result["article_system_setup"]["fallback_preview_url"],
+            "https://fallback.example/articles",
+        )
 
         _persist_live_preview_payload(
             setup_run,
