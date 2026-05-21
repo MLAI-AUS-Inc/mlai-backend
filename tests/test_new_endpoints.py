@@ -1244,6 +1244,8 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "live_preview": {
                     "available": True,
                     "previewUrl": "https://preview.example/articles",
+                    "exactRender": True,
+                    "renderConfidence": "exact",
                     "inspectorProtocolVersion": 2,
                     "inspectorMode": "comment",
                 },
@@ -1316,6 +1318,64 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["status"], "preview_building")
         self.assertEqual(pending.get("previewUrl"), "")
         self.assertEqual(pending["livePreviewUrl"], "/api/runs/setup-run-building/live-preview")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_preview_ready_without_exact_render_blocks_approval(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-non-exact",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_ready",
+                "job_id": "setup-run-non-exact",
+                "run_id": "setup-run-non-exact",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/1",
+                "preview_url": "https://fallback.example/articles",
+                "live_preview": {
+                    "available": True,
+                    "status": "running",
+                    "platformStatus": "ready",
+                    "previewUrl": "https://fallback.example/articles",
+                    "exactRender": False,
+                    "renderConfidence": "fallback",
+                },
+                "live_preview_url": "/api/runs/setup-run-non-exact/live-preview",
+                "article_system_setup": {
+                    "status": "preview_ready",
+                    "setup_run_id": "setup-run-non-exact",
+                    "preview_url": "https://fallback.example/articles",
+                    "live_preview_url": "/api/runs/setup-run-non-exact/live-preview",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-non-exact")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "fallback_ready")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.result["preview_url"], "")
+        self.assertEqual(setup_run.result["fallback_preview_url"], "https://fallback.example/articles")
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "fallback_ready")
+        self.assertEqual(pending.get("previewUrl"), "")
+        self.assertEqual(pending["fallbackPreviewUrl"], "https://fallback.example/articles")
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_fallback_preview_callback_blocks_approval(self, mock_send_dm):
