@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import OperationalError, connection
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -29,6 +31,7 @@ from content_factory.models import (
     WrittenArticle,
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+from founder_tools.serializers import FounderCompanySerializer
 from integrations import http_client
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
@@ -37,6 +40,14 @@ from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, Conte
 
 
 User = get_user_model()
+
+
+def _uploaded_png(name="avatar.png", size=(32, 32)):
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", size, color=(128, 64, 255)).save(output, format="PNG")
+    return SimpleUploadedFile(name, output.getvalue(), content_type="image/png")
 
 
 class _Response(SimpleNamespace):
@@ -125,6 +136,65 @@ class VibeMarketingAutofillTests(TestCase):
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
         self.client.force_authenticate(user=self.user)
+
+    def test_bootstrap_exposes_company_avatar_url(self):
+        self.company.avatar_url = "https://cdn.example.com/company-avatar.jpg"
+        self.company.save(update_fields=["avatar_url", "updated_at"])
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["company"]["avatarUrl"], "https://cdn.example.com/company-avatar.jpg")
+        self.assertEqual(response.data["company"]["avatar_url"], "https://cdn.example.com/company-avatar.jpg")
+
+    def test_founder_company_serializer_exposes_avatar_url(self):
+        self.company.avatar_url = "https://cdn.example.com/company-avatar.jpg"
+        self.company.save(update_fields=["avatar_url", "updated_at"])
+
+        data = FounderCompanySerializer(self.company).data
+
+        self.assertEqual(data["avatarUrl"], "https://cdn.example.com/company-avatar.jpg")
+        self.assertEqual(data["avatar_url"], "https://cdn.example.com/company-avatar.jpg")
+
+    def test_company_avatar_upload_requires_authenticated_user(self):
+        client = APIClient()
+
+        response = client.post("/api/v1/vibe-marketing/company/avatar/", {"avatar": _uploaded_png()}, format="multipart")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_company_avatar_upload_requires_file(self):
+        response = self.client.post("/api/v1/vibe-marketing/company/avatar/", {}, format="multipart")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_company_avatar_upload_rejects_non_image(self):
+        upload = SimpleUploadedFile("avatar.txt", b"not an image", content_type="text/plain")
+
+        response = self.client.post("/api/v1/vibe-marketing/company/avatar/", {"avatar": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_company_avatar_upload_rejects_oversized_file(self):
+        upload = SimpleUploadedFile("avatar.png", b"x" * (10 * 1024 * 1024 + 1), content_type="image/png")
+
+        response = self.client.post("/api/v1/vibe-marketing/company/avatar/", {"avatar": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_company_avatar_upload_saves_avatar_and_returns_bootstrap(self):
+        with patch("core.firebase_utils.upload_file_to_storage") as upload_file_to_storage:
+            upload_file_to_storage.return_value = "https://cdn.example.com/company-avatar.jpg"
+            response = self.client.post(
+                "/api/v1/vibe-marketing/company/avatar/",
+                {"avatar": _uploaded_png()},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.avatar_url, "https://cdn.example.com/company-avatar.jpg")
+        self.assertEqual(response.data["company"]["avatarUrl"], "https://cdn.example.com/company-avatar.jpg")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_starts_durable_run_without_persisting_generated_fields(self):

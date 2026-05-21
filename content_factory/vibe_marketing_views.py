@@ -9,6 +9,7 @@ import re
 import socket
 import uuid
 import time
+from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
 from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
@@ -25,6 +26,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_exempt
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -5522,6 +5524,8 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
             "domain": context.company.domain,
             "location": context.company.location,
             "abn": context.company.abn,
+            "avatarUrl": context.company.avatar_url,
+            "avatar_url": context.company.avatar_url,
             "organizationId": context.organization.id,
             "companyLinkedInUrl": context.organization.company_linkedin_url,
         },
@@ -5607,6 +5611,8 @@ def _serialize_bootstrap_without_domain(company):
             "domain": company.domain,
             "location": company.location,
             "abn": company.abn,
+            "avatarUrl": company.avatar_url,
+            "avatar_url": company.avatar_url,
             "organizationId": None,
             "companyLinkedInUrl": "",
         },
@@ -7071,6 +7077,90 @@ class VibeMarketingBootstrapView(APIView):
             return error_response
         payload = _serialize_bootstrap(context, request=request, view=view)
         return _timed_vibe_response(payload, started_at=started_at, metric_name="vibe_bootstrap", view=view)
+
+
+class VibeMarketingCompanyAvatarView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    max_avatar_size_bytes = 10 * 1024 * 1024
+
+    def post(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        profile = get_or_create_founder_profile(request.user)
+        company = resolve_active_company(profile)
+        if company is None:
+            return Response(
+                {"detail": "Create or select a founder company first.", "redirect": "/founder-tools/company-setup"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        avatar_file = request.FILES.get("avatar")
+        if not avatar_file:
+            return Response({"detail": "Upload an avatar image."}, status=status.HTTP_400_BAD_REQUEST)
+        if getattr(avatar_file, "size", 0) > self.max_avatar_size_bytes:
+            return Response({"detail": "Avatar image must be 10MB or smaller."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from PIL import Image, ImageOps, UnidentifiedImageError
+        except ImportError:
+            logger.exception("Pillow is unavailable for company avatar upload")
+            return Response({"detail": "Avatar upload is temporarily unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        try:
+            image = Image.open(avatar_file)
+            image = ImageOps.exif_transpose(image)
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+            image.thumbnail((512, 512), resampling)
+            if image.mode in {"RGBA", "LA", "P"}:
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                if image.mode == "P":
+                    image = image.convert("RGBA")
+                alpha = image.getchannel("A") if "A" in image.getbands() else None
+                background.paste(image.convert("RGB"), mask=alpha)
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+
+            output_buffer = BytesIO()
+            image.save(output_buffer, format="JPEG", quality=90, optimize=True)
+            output_buffer.seek(0)
+        except (UnidentifiedImageError, OSError, ValueError):
+            return Response({"detail": "Upload a valid image file."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from core.firebase_utils import upload_file_to_storage
+
+            destination_path = f"company-avatars/{company.id}_{int(timezone.now().timestamp())}.jpg"
+            avatar_url = upload_file_to_storage(output_buffer, destination_path, content_type="image/jpeg")
+        except Exception:
+            logger.exception("company_avatar_upload_failed company_id=%s user_id=%s", company.id, request.user.id)
+            return Response({"detail": "Avatar upload failed. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
+
+        company.avatar_url = avatar_url
+        company.save(update_fields=["avatar_url", "updated_at"])
+
+        try:
+            if not normalize_company_domain(company.domain):
+                return Response(_serialize_bootstrap_without_domain(company), status=status.HTTP_200_OK)
+            context, error_response = _resolve_context_or_response(request, require_domain=True)
+            if error_response:
+                return error_response
+            return Response(_serialize_bootstrap(context, request=request, view="summary"), status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("company_avatar_bootstrap_refresh_failed company_id=%s user_id=%s", company.id, request.user.id)
+            return Response(
+                {
+                    "company": {
+                        "id": str(company.id),
+                        "name": company.name,
+                        "domain": company.domain,
+                        "avatarUrl": company.avatar_url,
+                        "avatar_url": company.avatar_url,
+                    }
+                },
+                status=status.HTTP_200_OK,
+            )
 
 
 class VibeMarketingTopicFeedbackView(APIView):

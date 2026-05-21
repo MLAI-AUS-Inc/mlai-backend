@@ -10,6 +10,7 @@ from .vibe_marketing_views import (
     VibeMarketingBaselineSkipView,
     VibeMarketingBaselineView,
     VibeMarketingBootstrapView,
+    VibeMarketingCompanyAvatarView,
     VibeMarketingDailyReplayView,
     VibeMarketingDiscoveryView,
     VibeMarketingGitHubConnectView,
@@ -34,6 +35,8 @@ from .vibe_marketing_views import (
 
 urlpatterns = [
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
+    path("company/avatar", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar-no-slash"),
+    path("company/avatar/", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar"),
     path("settings", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings-no-slash"),
     path("settings/", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings"),
     path("autofill", VibeMarketingAutofillView.as_view(), name="vibe-marketing-autofill-no-slash"),
