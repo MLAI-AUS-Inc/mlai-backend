@@ -32,6 +32,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     organizationId = serializers.SerializerMethodField()
     organizationDomain = serializers.SerializerMethodField()
     companyLinkedInUrl = serializers.SerializerMethodField()
+    avatarUrl = serializers.SerializerMethodField()
 
     class Meta:
         model = VibeRaisingCompany
@@ -41,6 +42,8 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "domain",
             "abn",
             "location",
+            "avatar_url",
+            "avatarUrl",
             "registered",
             "organizationId",
             "organizationDomain",
@@ -55,6 +58,9 @@ class FounderCompanySerializer(serializers.ModelSerializer):
 
     def get_companyLinkedInUrl(self, obj):
         return obj.organization.company_linkedin_url if obj.organization_id else ""
+
+    def get_avatarUrl(self, obj):
+        return obj.avatar_url or ""
 
 
 class FounderProfileSerializer(serializers.ModelSerializer):
