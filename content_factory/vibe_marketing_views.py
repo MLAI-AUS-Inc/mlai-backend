@@ -2076,6 +2076,9 @@ def _live_preview_from_run(run):
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
         "fallbackReason": payload.get("fallbackReason") or payload.get("fallback_reason") or "",
+        "fallbackPreviewUrl": payload.get("fallbackPreviewUrl") or payload.get("fallback_preview_url") or "",
+        "previewBuildMode": payload.get("previewBuildMode") or payload.get("preview_build_mode") or "",
+        "fullSiteBuildSkipped": bool(payload.get("fullSiteBuildSkipped") or payload.get("full_site_build_skipped")),
         "nativePreviewFailure": payload.get("nativePreviewFailure") or payload.get("native_preview_failure") or {},
         "visualFallback": payload.get("visualFallback") or payload.get("visual_fallback") or {},
         "platformProvider": payload.get("platformProvider") or payload.get("platform_provider") or "",
@@ -2510,6 +2513,33 @@ def _live_preview_statuses(payload):
     } - {""}
 
 
+def _live_preview_exact_ready(payload):
+    preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+    return bool(preview_url and (payload.get("exactRender") is True or payload.get("exact_render") is True))
+
+
+def _live_preview_fallback_ready(payload):
+    preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+    if not preview_url or _live_preview_exact_ready(payload):
+        return False
+    proof = payload.get("proof") if isinstance(payload.get("proof"), dict) else {}
+    preview_build_mode = str(
+        payload.get("previewBuildMode")
+        or payload.get("preview_build_mode")
+        or proof.get("previewBuildMode")
+        or proof.get("preview_build_mode")
+        or ""
+    ).strip()
+    full_site_build_skipped = bool(
+        payload.get("fullSiteBuildSkipped")
+        or payload.get("full_site_build_skipped")
+        or proof.get("fullSiteBuildSkipped")
+        or proof.get("full_site_build_skipped")
+    )
+    render_confidence = str(payload.get("renderConfidence") or payload.get("render_confidence") or "").strip().lower()
+    return preview_build_mode == "route_scoped_next_preview" or full_site_build_skipped or render_confidence == "fallback"
+
+
 def _persist_live_preview_payload(run, payload):
     if isinstance(payload, dict) and payload:
         payload = _normalize_live_preview_payload(payload)
@@ -2522,7 +2552,8 @@ def _persist_live_preview_payload(run, payload):
             preview_statuses = _live_preview_statuses(payload)
             preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
             failed = bool(preview_statuses.intersection(LIVE_PREVIEW_FAILURE_STATUSES) or payload.get("error"))
-            ready = bool(preview_url)
+            ready = _live_preview_exact_ready(payload)
+            fallback_ready = _live_preview_fallback_ready(payload)
             active = bool(preview_statuses.intersection(LIVE_PREVIEW_ACTIVE_STATUSES))
             setup_payload = dict(result.get("article_system_setup") or {})
 
@@ -2545,9 +2576,11 @@ def _persist_live_preview_payload(run, payload):
             elif ready:
                 result["status"] = "preview_ready"
                 result["preview_url"] = preview_url
+                result.pop("fallback_preview_url", None)
                 result.pop("error", None)
                 setup_payload["status"] = "preview_ready"
                 setup_payload["preview_url"] = preview_url
+                setup_payload.pop("fallback_preview_url", None)
                 setup_payload.pop("error", None)
                 result["article_system_setup"] = setup_payload
                 run.status = ContentFactoryRunStatus.AWAITING_APPROVAL
@@ -2555,11 +2588,33 @@ def _persist_live_preview_payload(run, payload):
                 run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
                 run.error = ""
                 update_fields.extend(["status", "current_step", "approval_state", "error"])
+            elif fallback_ready:
+                warning = "Exact articles setup preview is unavailable; the hosted URL is a route-scoped fallback and cannot be approved."
+                result["status"] = "fallback_ready"
+                result["preview_url"] = ""
+                result["fallback_preview_url"] = preview_url
+                result["error"] = warning
+                result["error_code"] = "article_system_setup_preview_not_exact"
+                setup_payload["status"] = "fallback_ready"
+                setup_payload["preview_url"] = ""
+                setup_payload["fallback_preview_url"] = preview_url
+                setup_payload["error"] = warning
+                setup_payload["error_code"] = "article_system_setup_preview_not_exact"
+                setup_payload["retryable"] = payload.get("retryable", True)
+                result["article_system_setup"] = setup_payload
+                run.status = ContentFactoryRunStatus.BLOCKED
+                run.current_step = "fallback_ready"
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.error = warning
+                update_fields.extend(["status", "current_step", "approval_state", "error"])
             elif active:
                 result["status"] = "preview_building"
                 result["preview_url"] = ""
+                result.pop("fallback_preview_url", None)
                 result.pop("error", None)
                 setup_payload["status"] = "preview_building"
+                setup_payload["preview_url"] = ""
+                setup_payload.pop("fallback_preview_url", None)
                 setup_payload.pop("error", None)
                 result["article_system_setup"] = setup_payload
                 run.status = ContentFactoryRunStatus.RUNNING
@@ -4435,6 +4490,11 @@ def _setup_metadata_from_run(run) -> dict:
             or _setup_value(setup, "preview_url", "previewUrl")
             or ""
         ).strip(),
+        "fallbackPreviewUrl": str(
+            _setup_value(result, "fallback_preview_url", "fallbackPreviewUrl")
+            or _setup_value(setup, "fallback_preview_url", "fallbackPreviewUrl")
+            or ""
+        ).strip(),
         "livePreviewUrl": str(
             _setup_value(result, "live_preview_url", "livePreviewUrl")
             or _setup_value(setup, "live_preview_url", "livePreviewUrl")
@@ -4486,6 +4546,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         "prUrl": None,
         "previewUrl": None,
         "livePreviewUrl": None,
+        "fallbackPreviewUrl": None,
     }
     if not config:
         return meta
@@ -4502,6 +4563,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         ("pr_url", "prUrl"),
         ("previewUrl", "previewUrl"),
         ("preview_url", "previewUrl"),
+        ("fallbackPreviewUrl", "fallbackPreviewUrl"),
+        ("fallback_preview_url", "fallbackPreviewUrl"),
         ("livePreviewUrl", "livePreviewUrl"),
         ("live_preview_url", "livePreviewUrl"),
     ):
@@ -4561,7 +4624,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
 
     meta["published"] = bool(published)
     meta["setupBlocked"] = bool(setup_blocked)
-    for key in ("setupRunId", "setupStatus", "rescanRunId", "prUrl", "previewUrl", "livePreviewUrl"):
+    for key in ("setupRunId", "setupStatus", "rescanRunId", "prUrl", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
 
@@ -4866,6 +4929,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["publish"] = "locked"
             summary_by_id["review"] = "Review the hosted setup preview and approve the setup PR when ready."
             action_by_id["review"] = _workflow_step_action("Review articles setup preview", href=setup_run_url)
+        elif setup_status == "fallback_ready":
+            status_by_id["generate"] = "blocked"
+            status_by_id["review"] = "needs_action"
+            status_by_id["publish"] = "locked"
+            summary_by_id["review"] = "Only a fallback setup preview is available; exact preview must be fixed before approval."
+            action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         else:
             status_by_id["generate"] = "running"
             status_by_id["review"] = "locked"

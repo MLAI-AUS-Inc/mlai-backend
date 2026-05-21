@@ -1836,7 +1836,7 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         config = org.content_config
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
-        clearable_empty_keys = {"previewUrl", "preview_url"}
+        clearable_empty_keys = {"previewUrl", "preview_url", "fallbackPreviewUrl", "fallback_preview_url"}
         for key, value in updates.items():
             if value not in (None, ""):
                 pending[key] = value
@@ -1863,7 +1863,23 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     live_preview = data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
     result = dict((existing_run.result if existing_run else None) or {})
     preview_url_value = str(data.get("preview_url") or setup_payload.get("preview_url") or "").strip()
+    fallback_preview_url_value = str(
+        data.get("fallback_preview_url")
+        or setup_payload.get("fallback_preview_url")
+        or live_preview.get("fallbackPreviewUrl")
+        or live_preview.get("fallback_preview_url")
+        or ""
+    ).strip()
     live_preview_url_value = str(data.get("live_preview_url") or setup_payload.get("live_preview_url") or "").strip()
+    live_preview_exact = bool(live_preview.get("exactRender") or live_preview.get("exact_render"))
+    if not live_preview_exact and not fallback_preview_url_value:
+        candidate_preview = str(live_preview.get("previewUrl") or live_preview.get("preview_url") or "").strip()
+        if candidate_preview and (
+            live_preview.get("fullSiteBuildSkipped")
+            or live_preview.get("full_site_build_skipped")
+            or str(live_preview.get("renderConfidence") or live_preview.get("render_confidence") or "").strip().lower() == "fallback"
+        ):
+            fallback_preview_url_value = candidate_preview
     result.update(
         {
             "status": str(data.get("status") or setup_payload.get("status") or event_type).strip(),
@@ -1882,6 +1898,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "article_system_setup": setup_payload,
             "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
             "preview_url": preview_url_value,
+            "fallback_preview_url": fallback_preview_url_value,
             "live_preview_url": live_preview_url_value,
             "approve_url": data.get("approve_url") or setup_payload.get("approve_url"),
             "deny_url": data.get("deny_url") or setup_payload.get("deny_url"),
@@ -1986,6 +2003,39 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "start_hosted_preview"
         error = ""
+    elif event_type == "article_system_setup_preview_fallback_ready" or (
+        event_type == "article_system_setup_preview_ready" and preview_url_value and not live_preview_exact
+    ):
+        fallback_preview_url_value = fallback_preview_url_value or preview_url_value
+        setup_payload = dict(setup_payload)
+        setup_payload["status"] = "fallback_ready"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["preview_url"] = ""
+        setup_payload["fallback_preview_url"] = fallback_preview_url_value
+        setup_payload["live_preview_url"] = live_preview_url_value
+        warning = str(
+            data.get("error")
+            or setup_payload.get("error")
+            or "Exact articles setup preview is unavailable; the hosted URL is a route-scoped fallback and cannot be approved."
+        ).strip()
+        setup_payload["error"] = warning
+        setup_payload["error_code"] = data.get("error_code") or setup_payload.get("error_code") or "article_system_setup_preview_not_exact"
+        setup_payload["retryable"] = data.get("retryable") if data.get("retryable") is not None else setup_payload.get("retryable", True)
+        result["status"] = "fallback_ready"
+        result["preview_url"] = ""
+        result["fallback_preview_url"] = fallback_preview_url_value
+        result["article_system_setup"] = setup_payload
+        result["livePreview"] = live_preview
+        result["live_preview"] = live_preview
+        result["error"] = warning
+        result["error_code"] = setup_payload["error_code"]
+        result["retryable"] = bool(setup_payload.get("retryable", True))
+        result["retry_available"] = bool(setup_payload.get("retryable", True))
+        run_status = ContentFactoryRunStatus.BLOCKED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "fallback_ready"
+        error = warning
     elif event_type == "article_system_setup_manual_merge_required":
         setup_payload = dict(setup_payload)
         setup_payload["status"] = "manual_merge_required"
@@ -2053,6 +2103,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     "merge_status": result.get("merge_status"),
                     "article_system_setup": parent_setup,
                     "preview_url": result.get("preview_url"),
+                    "fallback_preview_url": result.get("fallback_preview_url"),
                     "pr_url": result.get("pr_url"),
                     "live_preview_url": result.get("live_preview_url"),
                 }
@@ -2063,6 +2114,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                 parent.current_step = (
                     "article_system_setup_preview_failed"
                     if event_type == "article_system_setup_preview_failed"
+                    else "article_system_setup_preview_fallback_ready"
+                    if event_type == "article_system_setup_preview_fallback_ready"
                     else "article_system_setup_preview"
                 )
             parent.save(update_fields=["status", "result", "current_step", "updated_at"])
@@ -2080,6 +2133,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         pr_url=result.get("pr_url"),
         previewUrl=result.get("preview_url"),
         preview_url=result.get("preview_url"),
+        fallbackPreviewUrl=result.get("fallback_preview_url"),
+        fallback_preview_url=result.get("fallback_preview_url"),
         livePreviewUrl=result.get("live_preview_url"),
         live_preview_url=result.get("live_preview_url"),
         mergeStatus=result.get("merge_status"),
@@ -2162,6 +2217,7 @@ class ContentFactoryCallbackView(APIView):
                 return self._handle_scan_complete(data)
             elif event_type in {
                 'article_system_setup_preview_ready',
+                'article_system_setup_preview_fallback_ready',
                 'article_system_setup_revision_ready',
                 'article_system_setup_preview_failed',
                 'article_system_setup_completed',
