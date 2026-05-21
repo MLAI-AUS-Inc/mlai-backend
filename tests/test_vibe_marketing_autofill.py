@@ -1060,6 +1060,175 @@ class VibeMarketingAutofillTests(TestCase):
             self.assertEqual(candidate["pillarIconKey"], "rocket")
             self.assertEqual(candidate["pillarColorKey"], "blue")
 
+    def test_bootstrap_accumulates_topic_candidates_across_content_islands(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        older_run = ContentFactoryRun.objects.create(
+            run_id="discovery-green-island",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            run_request={
+                "content_island": {
+                    "slug": "learning-ai",
+                    "name": "Learning AI",
+                    "keyword": "learning ai",
+                    "icon_key": "brain",
+                    "color_key": "green",
+                }
+            },
+            result={
+                "selection": {
+                    "options": [
+                        {"id": "green-1", "keyword": "ai learning path", "title": "AI Learning Path", "volume": 600, "difficulty": 12, "opportunityScore": 9200},
+                        {"id": "green-2", "keyword": "machine learning beginner", "title": "Machine Learning Beginner", "volume": 420, "difficulty": 20, "opportunityScore": 7100},
+                        {"id": "green-3", "keyword": "ai workshops australia", "title": "AI Workshops Australia", "volume": 250, "difficulty": 18, "opportunityScore": 5600},
+                    ]
+                },
+            },
+        )
+        newer_run = ContentFactoryRun.objects.create(
+            run_id="discovery-orange-island",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            run_request={
+                "content_island": {
+                    "slug": "startup-fundraising",
+                    "name": "Startup Fundraising",
+                    "keyword": "startup fundraising",
+                    "icon_key": "tools",
+                    "color_key": "orange",
+                }
+            },
+            result={
+                "selection": {
+                    "options": [
+                        {"id": "orange-1", "keyword": "tech central", "title": "Tech Central", "volume": 1000, "difficulty": 3, "opportunityScore": 10000},
+                        {"id": "orange-2", "keyword": "startup pitch updates", "title": "Startup Pitch Updates", "volume": 520, "difficulty": 14, "opportunityScore": 7800},
+                        {"id": "orange-3", "keyword": "investor update template", "title": "Investor Update Template", "volume": 300, "difficulty": 16, "opportunityScore": 6100},
+                    ]
+                },
+            },
+        )
+        ContentFactoryRun.objects.filter(run_id=older_run.run_id).update(updated_at=timezone.now() - timedelta(minutes=10))
+        ContentFactoryRun.objects.filter(run_id=newer_run.run_id).update(updated_at=timezone.now())
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        candidates = response.data["topicCandidates"]
+        colors = [candidate["pillarColorKey"] for candidate in candidates if candidate.get("pillarColorKey")]
+        self.assertIn("green", colors)
+        self.assertIn("orange", colors)
+        self.assertEqual(colors[:4], ["orange", "green", "orange", "green"])
+        self.assertEqual({candidate["sourceRunId"] for candidate in candidates if candidate.get("pillarColorKey")}, {
+            "discovery-green-island",
+            "discovery-orange-island",
+        })
+
+    def test_bootstrap_uses_dedicated_recent_discovery_runs_for_topic_candidates(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        discovery_run = ContentFactoryRun.objects.create(
+            run_id="discovery-outside-latest-runs",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            result={
+                "selection": {
+                    "options": [
+                        {
+                            "id": "older-discovery-topic",
+                            "keyword": "older discovery topic",
+                            "title": "Older Discovery Topic",
+                            "volume": 500,
+                            "difficulty": 18,
+                            "opportunityScore": 8400,
+                        }
+                    ]
+                }
+            },
+        )
+        ContentFactoryRun.objects.filter(run_id=discovery_run.run_id).update(updated_at=timezone.now() - timedelta(hours=1))
+        for index in range(7):
+            run = ContentFactoryRun.objects.create(
+                run_id=f"newer-article-run-{index}",
+                workflow="article_generation",
+                domain="acme.com",
+                status=ContentFactoryRunStatus.COMPLETED,
+                current_step="finalize",
+                result={"title": f"Article {index}"},
+            )
+            ContentFactoryRun.objects.filter(run_id=run.run_id).update(updated_at=timezone.now() + timedelta(minutes=index))
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        keywords = [candidate["keyword"] for candidate in response.data["topicCandidates"]]
+        self.assertIn("older discovery topic", keywords)
+
+    def test_duplicate_keyword_merge_preserves_island_metadata_and_fills_stored_metrics(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="discovery-green-duplicate",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            run_request={
+                "content_island": {
+                    "slug": "learning-ai",
+                    "name": "Learning AI",
+                    "keyword": "learning ai",
+                    "icon_key": "brain",
+                    "color_key": "green",
+                }
+            },
+            result={
+                "selection": {
+                    "options": [
+                        {
+                            "id": "shared-topic",
+                            "keyword": "shared ai startup topic",
+                            "title": "Shared AI Startup Topic",
+                            "volume": 120,
+                            "difficulty": 30,
+                        }
+                    ]
+                }
+            },
+        )
+        ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="shared ai startup topic",
+            volume=880,
+            difficulty=12,
+            difficulty_source="dataforseo_labs",
+            opportunity_index=9900,
+            status=KeywordStatus.PENDING,
+        )
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        candidate = next(candidate for candidate in response.data["topicCandidates"] if candidate["keyword"] == "shared ai startup topic")
+        self.assertEqual(candidate["sourceRunId"], "discovery-green-duplicate")
+        self.assertEqual(candidate["pillarSlug"], "learning-ai")
+        self.assertEqual(candidate["pillarIconKey"], "brain")
+        self.assertEqual(candidate["pillarColorKey"], "green")
+        self.assertEqual(candidate["volume"], 880)
+        self.assertEqual(candidate["difficulty"], 12)
+        self.assertEqual(candidate["difficultySource"], "dataforseo_labs")
+        self.assertEqual(candidate["opportunityScore"], 9900)
+
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_scoped_discovery_forwards_content_island_metadata(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

@@ -121,6 +121,18 @@ DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_dis
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
+DISCOVERY_TOPIC_CANDIDATE_STATUSES = {
+    ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+    ContentFactoryRunStatus.COMPLETED,
+}
+RECENT_DISCOVERY_TOPIC_RUN_LIMIT = 12
+CONTENT_ISLAND_METADATA_KEYS = (
+    "pillarSlug",
+    "pillarName",
+    "pillarKeyword",
+    "pillarIconKey",
+    "pillarColorKey",
+)
 MLAI_AU_FEATURED_REQUIRED_COMPONENTS = {
     "ArticleDisclaimer",
     "ArticleHeroHeader",
@@ -594,6 +606,16 @@ def _latest_runs_for_org(organization, limit=6):
     )
 
 
+def _recent_discovery_topic_runs_for_org(organization, limit=RECENT_DISCOVERY_TOPIC_RUN_LIMIT):
+    return list(
+        ContentFactoryRun.objects.filter(
+            domain=organization.domain,
+            workflow__in=DISCOVERY_WORKFLOWS,
+            status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
+        ).order_by("-updated_at")[:limit]
+    )
+
+
 def _latest_run_matching(runs, workflows):
     return next((run for run in runs if run.workflow in workflows), None)
 
@@ -694,6 +716,7 @@ def _extract_topic_candidates_from_result(result):
                     "title": raw,
                     "reason": "",
                     "source": "discovery",
+                    **{key: value for key, value in inherited_island_metadata.items() if value},
                 }
             )
             continue
@@ -1436,6 +1459,100 @@ def _apply_content_island_metadata(candidate, metadata):
     return enriched
 
 
+def _candidate_has_content_island_metadata(candidate):
+    return any(candidate.get(key) for key in CONTENT_ISLAND_METADATA_KEYS)
+
+
+def _candidate_non_empty_items(candidate):
+    return {
+        item_key: item_value
+        for item_key, item_value in candidate.items()
+        if item_value not in (None, "", [])
+    }
+
+
+def _prefer_numeric_metric(existing, candidate, key):
+    existing_value = existing.get(key)
+    candidate_value = candidate.get(key)
+    if existing_value in (None, ""):
+        return candidate_value
+    if candidate_value in (None, ""):
+        return existing_value
+    return existing_value if _safe_number(existing_value) >= _safe_number(candidate_value) else candidate_value
+
+
+def _merge_topic_candidate(existing, candidate):
+    difficulty, difficulty_source = _prefer_topic_difficulty(existing, candidate)
+    existing_has_island = _candidate_has_content_island_metadata(existing)
+    candidate_has_island = _candidate_has_content_island_metadata(candidate)
+    existing_is_run_candidate = bool(existing.get("sourceRunId"))
+    candidate_is_run_candidate = bool(candidate.get("sourceRunId"))
+    candidate_values = _candidate_non_empty_items(candidate)
+
+    if existing_has_island and not candidate_has_island:
+        merged = {**candidate_values, **existing}
+    elif existing_has_island and candidate_has_island:
+        merged = {**candidate_values, **existing}
+    elif candidate_has_island and not existing_has_island:
+        merged = {**existing, **candidate_values}
+    elif existing_is_run_candidate and not candidate_is_run_candidate:
+        merged = {**candidate_values, **existing}
+    else:
+        merged = {**existing, **candidate_values}
+
+    merged.update(
+        {
+            "volume": _prefer_numeric_metric(existing, candidate, "volume"),
+            "difficulty": difficulty,
+            "difficultySource": difficulty_source,
+            "opportunityScore": _prefer_numeric_metric(existing, candidate, "opportunityScore"),
+            "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
+            "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
+        }
+    )
+    return merged
+
+
+def _topic_candidate_sort_key(candidate):
+    return (
+        -_safe_number(candidate.get("opportunityScore")),
+        -_safe_number(candidate.get("volume")),
+        _safe_number(candidate.get("difficulty"), default=100),
+        str(candidate.get("keyword") or ""),
+    )
+
+
+def _topic_candidate_island_key(candidate):
+    return str(candidate.get("pillarSlug") or "").strip()
+
+
+def _balanced_topic_candidate_order(candidates, island_order):
+    candidates = list(candidates)
+    if not island_order:
+        return sorted(candidates, key=_topic_candidate_sort_key)
+
+    island_groups = {}
+    fallback_candidates = []
+    for candidate in candidates:
+        island_key = _topic_candidate_island_key(candidate)
+        if island_key and island_key in island_order:
+            island_groups.setdefault(island_key, []).append(candidate)
+        else:
+            fallback_candidates.append(candidate)
+
+    for island_key in island_groups:
+        island_groups[island_key] = sorted(island_groups[island_key], key=_topic_candidate_sort_key)
+
+    ordered_island_keys = sorted(island_groups, key=lambda key: (island_order.get(key, 9999), key))
+    balanced = []
+    while any(island_groups[key] for key in ordered_island_keys):
+        for island_key in ordered_island_keys:
+            if island_groups[island_key]:
+                balanced.append(island_groups[island_key].pop(0))
+
+    return balanced + sorted(fallback_candidates, key=_topic_candidate_sort_key)
+
+
 def _topic_candidates_from_runs(
     runs,
     *,
@@ -1447,8 +1564,11 @@ def _topic_candidates_from_runs(
     written_memory=None,
 ):
     run_candidates = []
+    island_order = {}
     for run in runs:
         if run.workflow not in DISCOVERY_WORKFLOWS:
+            continue
+        if run.status not in DISCOVERY_TOPIC_CANDIDATE_STATUSES:
             continue
         candidates = _extract_topic_candidates_from_result(run.result or {})
         if candidates:
@@ -1462,10 +1582,14 @@ def _topic_candidates_from_runs(
                 if _topic_candidate_passes_dashboard_quality(candidate)
             ]
         if candidates:
-            run_candidates = candidates
-            break
+            for candidate in candidates:
+                island_key = _topic_candidate_island_key(candidate)
+                if island_key and island_key not in island_order:
+                    island_order[island_key] = len(island_order)
+            run_candidates.extend(candidates)
     if organization is None:
-        return run_candidates
+        ordered_run_candidates = _balanced_topic_candidate_order(run_candidates, island_order)
+        return ordered_run_candidates[:limit] if limit else ordered_run_candidates
 
     declined_keyword_keys = declined_keyword_keys or set()
     stored_candidates = _stored_keyword_topic_candidates(
@@ -1490,43 +1614,11 @@ def _topic_candidates_from_runs(
             continue
         existing = merged.get(key)
         if existing:
-            difficulty, difficulty_source = _prefer_topic_difficulty(existing, candidate)
-            existing_is_run_candidate = bool(existing.get("sourceRunId"))
-            candidate_is_run_candidate = bool(candidate.get("sourceRunId"))
-            if existing_is_run_candidate and not candidate_is_run_candidate:
-                merged[key] = {
-                    **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
-                    **existing,
-                    "volume": existing.get("volume") or candidate.get("volume"),
-                    "difficulty": difficulty,
-                    "difficultySource": difficulty_source,
-                    "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
-                    "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
-                    "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
-                }
-            else:
-                merged[key] = {
-                    **existing,
-                    **{item_key: item_value for item_key, item_value in candidate.items() if item_value not in (None, "", [])},
-                    "volume": existing.get("volume") or candidate.get("volume"),
-                    "difficulty": difficulty,
-                    "difficultySource": difficulty_source,
-                    "opportunityScore": existing.get("opportunityScore") or candidate.get("opportunityScore"),
-                    "alreadyWritten": bool(existing.get("alreadyWritten") or candidate.get("alreadyWritten")),
-                    "writtenArticle": existing.get("writtenArticle") or candidate.get("writtenArticle"),
-                }
+            merged[key] = _merge_topic_candidate(existing, candidate)
         else:
             merged[key] = candidate
 
-    sorted_candidates = sorted(
-        merged.values(),
-        key=lambda candidate: (
-            -_safe_number(candidate.get("opportunityScore")),
-            -_safe_number(candidate.get("volume")),
-            _safe_number(candidate.get("difficulty"), default=100),
-            str(candidate.get("keyword") or ""),
-        ),
-    )
+    sorted_candidates = _balanced_topic_candidate_order(merged.values(), island_order)
     return sorted_candidates[:limit] if limit else sorted_candidates
 
 
@@ -5374,6 +5466,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     compact = view == "summary"
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
+    discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
     declined_topic_feedback = declined_topic_feedback_all[:8] if compact else declined_topic_feedback_all
@@ -5385,7 +5478,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     coverage_memory = build_topic_coverage_memory(context.organization, article_limit=100 if compact else None)
     written_memory = _written_topic_memory(context.organization, keyword_limit=500 if compact else None)
     topic_candidates = _topic_candidates_from_runs(
-        latest_runs,
+        discovery_topic_runs,
         organization=context.organization,
         limit=topic_limit,
         declined_keyword_keys=declined_keyword_keys,
@@ -5393,7 +5486,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         written_memory=written_memory,
     )
     hidden_topic_candidates = _topic_candidates_from_runs(
-        latest_runs,
+        discovery_topic_runs,
         organization=context.organization,
         include_written=True,
         limit=topic_limit,
