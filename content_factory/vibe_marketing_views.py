@@ -255,6 +255,7 @@ WORKFLOW_STEP_DEFS = [
 WORKFLOW_STEP_IDS = [step["id"] for step in WORKFLOW_STEP_DEFS]
 RUNNING_RUN_STATUSES = {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}
 FAILED_RUN_STATUSES = {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}
+STARTUP_AUTOFILL_ACTIVE_REUSE_WINDOW = timedelta(minutes=30)
 SCAN_LOCAL_AUTHORITATIVE_STATUSES = FAILED_RUN_STATUSES | {
     ContentFactoryRunStatus.COMPLETED,
     ContentFactoryRunStatus.AWAITING_CONFIRMATION,
@@ -615,6 +616,20 @@ def _recent_discovery_topic_runs_for_org(organization, limit=RECENT_DISCOVERY_TO
             workflow__in=DISCOVERY_WORKFLOWS,
             status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
         ).order_by("-updated_at")[:limit]
+    )
+
+
+def _active_startup_autofill_run_for_domain(domain):
+    cutoff = timezone.now() - STARTUP_AUTOFILL_ACTIVE_REUSE_WINDOW
+    return (
+        ContentFactoryRun.objects.filter(
+            domain=domain,
+            workflow="startup_autofill",
+            status__in=RUNNING_RUN_STATUSES,
+            updated_at__gte=cutoff,
+        )
+        .order_by("-updated_at")
+        .first()
     )
 
 
@@ -4083,6 +4098,9 @@ def _serialize_startup_profile(organization):
         profile = organization.startup_profile
     except Exception:
         return {
+            "shortDescription": "",
+            "problemSolved": "",
+            "targetAudience": "",
             "founderNames": [],
             "stage": "",
             "organizationKind": "",
@@ -4091,6 +4109,9 @@ def _serialize_startup_profile(organization):
             "domainAliases": [],
         }
     return {
+        "shortDescription": profile.short_description,
+        "problemSolved": profile.problem_solved,
+        "targetAudience": profile.target_audience,
         "founderNames": list(profile.founder_names or []),
         "stage": profile.stage,
         "organizationKind": getattr(profile, "organization_kind", ""),
@@ -4099,6 +4120,43 @@ def _serialize_startup_profile(organization):
         "domainAliases": list(profile.domain_aliases or []),
         "competitorDomains": list(profile.competitor_domains or []),
         "positiveKeywords": list(profile.positive_keywords or []),
+    }
+
+
+def _autofill_startup_profile_payload(organization):
+    try:
+        profile = organization.startup_profile
+    except Exception:
+        return {
+            "short_description": "",
+            "problem_solved": "",
+            "target_audience": "",
+            "founder_names": [],
+            "stage": "",
+            "organization_kind": "",
+            "notes": "",
+        }
+    return {
+        "short_description": profile.short_description,
+        "problem_solved": profile.problem_solved,
+        "target_audience": profile.target_audience,
+        "founder_names": list(profile.founder_names or []),
+        "stage": profile.stage,
+        "organization_kind": getattr(profile, "organization_kind", ""),
+        "notes": profile.notes,
+    }
+
+
+def _autofill_profile_fields_payload(startup_profile):
+    return {
+        "shortDescription": str(startup_profile.get("short_description") or ""),
+        "problemSolved": str(startup_profile.get("problem_solved") or ""),
+        "targetAudience": str(startup_profile.get("target_audience") or ""),
+        "location": "",
+        "founderNames": list(startup_profile.get("founder_names") or []),
+        "stage": str(startup_profile.get("stage") or ""),
+        "organizationKind": str(startup_profile.get("organization_kind") or ""),
+        "abn": "",
     }
 
 
@@ -5971,6 +6029,30 @@ def _heal_stale_status_poll_timeout(run):
     return run
 
 
+def _block_startup_autofill_on_status_poll_unavailable(run, remote_data):
+    if not run or run.workflow != "startup_autofill":
+        return run
+    payload = _blocked_worker_payload(
+        workflow=run.workflow,
+        technical_error=str((remote_data or {}).get("error") or ""),
+        diagnostics=(remote_data or {}).get("diagnostics") if isinstance(remote_data, dict) else None,
+    )
+    result = dict(run.result or {})
+    result.update(
+        {
+            "error": payload["error"],
+            "errors": payload["errors"],
+            "diagnostics": payload["diagnostics"],
+            "retryable": payload["retryable"],
+        }
+    )
+    run.status = ContentFactoryRunStatus.BLOCKED
+    run.error = payload["error"]
+    run.result = result
+    run.save(update_fields=["status", "error", "result", "updated_at"])
+    return run
+
+
 def _parse_remote_datetime(value):
     if not value:
         return None
@@ -6580,6 +6662,36 @@ def _run_start_payload(run):
     if isinstance(result.get("diagnostics"), dict):
         payload["diagnostics"] = result["diagnostics"]
     return payload
+
+
+def _autofill_start_payload(run):
+    result = run.result if isinstance(run.result, dict) else {}
+    error = str(run.error or result.get("error") or result.get("message") or "").strip()
+    raw_errors = result.get("errors")
+    errors = [str(item) for item in raw_errors if item] if isinstance(raw_errors, list) else []
+    if error and error not in errors:
+        errors.insert(0, error)
+    return {
+        "run_id": run.run_id,
+        "runId": run.run_id,
+        "status": run.status,
+        "error": error,
+        "errors": errors,
+    }
+
+
+def _autofill_start_response(run, *, reused_active_run=False):
+    payload = _autofill_start_payload(run)
+    logger.info(
+        "vibe_marketing_autofill_start_response run_id=%s domain=%s workflow=%s status=%s reused_active_run=%s has_error=%s",
+        run.run_id,
+        run.domain,
+        run.workflow,
+        run.status,
+        bool(reused_active_run),
+        bool(payload["error"] or payload["errors"]),
+    )
+    return Response(payload, status=status.HTTP_202_ACCEPTED)
 
 
 def _call_content_factory_run_action(
@@ -7319,7 +7431,6 @@ class VibeMarketingSettingsView(APIView):
 
 
 class VibeMarketingAutofillView(APIView):
-    @transaction.atomic
     def post(self, request):
         profile = get_or_create_founder_profile(request.user)
         if profile.role != profile.ROLE_FOUNDER:
@@ -7332,63 +7443,76 @@ class VibeMarketingAutofillView(APIView):
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
 
-        company_id = _company_id_from_request(request)
-        if company_id:
+        with transaction.atomic():
+            company_id = _company_id_from_request(request)
+            if company_id:
+                try:
+                    company = profile.companies.get(pk=company_id)
+                except VibeRaisingCompany.DoesNotExist:
+                    return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+            else:
+                company = resolve_active_company(profile)
+
+            if company is None:
+                company = VibeRaisingCompany.objects.create(
+                    profile=profile,
+                    name=company_name,
+                    domain=domain,
+                    location=str(request.data.get("location") or "").strip(),
+                    abn=str(request.data.get("abn") or "").strip() or None,
+                )
+                profile.active_company = company
+                profile.save(update_fields=["active_company", "updated_at"])
+            else:
+                company.name = company_name
+                company.domain = domain
+                if "location" in request.data:
+                    company.location = str(request.data.get("location") or "").strip()
+                if "abn" in request.data:
+                    company.abn = str(request.data.get("abn") or "").strip() or None
+                company.save(update_fields=["name", "domain", "location", "abn", "updated_at"])
+
+            organization = ensure_company_organization(company)
+            if organization is None:
+                return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+
             try:
-                company = profile.companies.get(pk=company_id)
-            except VibeRaisingCompany.DoesNotExist:
-                return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            company = resolve_active_company(profile)
-
-        if company is None:
-            company = VibeRaisingCompany.objects.create(
-                profile=profile,
-                name=company_name,
-                domain=domain,
-                location=str(request.data.get("location") or "").strip(),
-                abn=str(request.data.get("abn") or "").strip() or None,
-            )
-            profile.active_company = company
-            profile.save(update_fields=["active_company", "updated_at"])
-        else:
-            company.name = company_name
-            company.domain = domain
-            if "location" in request.data:
-                company.location = str(request.data.get("location") or "").strip()
-            if "abn" in request.data:
-                company.abn = str(request.data.get("abn") or "").strip() or None
-            company.save(update_fields=["name", "domain", "location", "abn", "updated_at"])
-
-        organization = ensure_company_organization(company)
-        if organization is None:
-            return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            apply_shared_startup_details(user=request.user, company=company, data=request.data)
-        except ValueError as exc:
-            return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
+                apply_shared_startup_details(user=request.user, company=company, data=request.data)
+            except ValueError as exc:
+                return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
         context = get_founder_company_context(request.user, company_id=company.id)
         company = context.company
         organization = context.organization
         config = _get_config(organization)
         actor_id = founder_actor_id_for_user(request.user)
+        active_run = _active_startup_autofill_run_for_domain(organization.domain)
+        if active_run is not None:
+            return _autofill_start_response(active_run, reused_active_run=True)
+
+        startup_profile = _autofill_startup_profile_payload(organization)
+        profile_fields = _autofill_profile_fields_payload(startup_profile)
+        profile_fields["location"] = company.location
+        profile_fields["abn"] = company.abn or ""
         existing_fields = {
             "brandName": config.brand_name or organization.name,
             "companyContext": config.company_context or "",
             "competitors": _camel_list(organization.competitors),
             "seedKeywords": _camel_list(organization.seed_keywords),
             "companyLinkedInUrl": organization.company_linkedin_url,
+            "profileFields": profile_fields,
         }
         payload = {
             "domain": organization.domain,
+            "company_id": str(company.id),
+            "organization_id": str(organization.id),
             "company_name": company.name,
             "brand_name": config.brand_name or organization.name,
             "company_linkedin_url": organization.company_linkedin_url,
             "location": company.location,
             "abn": company.abn,
             "existing_fields": existing_fields,
+            "startup_profile": startup_profile,
             "research_depth": "deep",
             "strict_deep_research": True,
             "min_direct_competitors": 3,
@@ -7407,18 +7531,7 @@ class VibeMarketingAutofillView(APIView):
             config=config,
             payload=payload,
         )
-        result = run.result or {}
-        errors = result.get("errors") if isinstance(result.get("errors"), list) else ([run.error] if run.error else [])
-        return Response(
-            {
-                "run_id": run.run_id,
-                "runId": run.run_id,
-                "status": run.status,
-                "error": run.error or result.get("error") or "",
-                "errors": errors,
-            },
-            status=status.HTTP_202_ACCEPTED,
-        )
+        return _autofill_start_response(run, reused_active_run=False)
 
 
 class VibeMarketingBaselineView(APIView):
@@ -7714,11 +7827,14 @@ class VibeMarketingScanView(APIView):
             run.save(update_fields=["result", "updated_at"])
         if scan_purpose == "setup" and article_surface_hint:
             route_path = str(article_surface_hint.get("route_path") or article_surface_url or "").strip()
+            source_scan_run_id = str(
+                _request_value(request.data, "sourceScanRunId", "source_scan_run_id", default="") or ""
+            ).strip() or run.run_id
             pending = _store_pending_article_system_setup(
                 config,
                 mode=article_surface_mode,
                 route_path=route_path,
-                source_scan_run_id=str(_request_value(request.data, "sourceScanRunId", "source_scan_run_id", default="") or ""),
+                source_scan_run_id=source_scan_run_id,
                 article_surface_hint=article_surface_hint,
             )
             result = run.result or {}
@@ -8014,7 +8130,10 @@ class VibeMarketingRunView(APIView):
                 "missing_publish_child_recoverable" if skipped_missing_publish_child else "terminal_article",
             )
         if _is_status_poll_unavailable_payload(remote_data):
-            run = _heal_stale_status_poll_timeout(run)
+            if run.workflow == "startup_autofill":
+                run = _block_startup_autofill_on_status_poll_unavailable(run, remote_data)
+            else:
+                run = _heal_stale_status_poll_timeout(run)
             logger.warning(
                 "content_factory_status_poll_preserved_local_state run_id=%s workflow=%s status=%s error=%s",
                 run.run_id,

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import OperationalError, connection
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -114,6 +114,55 @@ class _SearchConsoleService:
 
     def searchanalytics(self):
         return self.analytics
+
+
+class VibeMarketingAutofillTransactionTests(TransactionTestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="founder-transaction@example.com",
+            password="password",
+            first_name="Founder",
+            last_name="Transaction",
+            role="participant",
+        )
+        self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.company = VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            name="Acme",
+            domain="acme.com",
+            registered=True,
+        )
+        self.profile.active_company = self.company
+        self.profile.save(update_fields=["active_company", "updated_at"])
+        self.client.force_authenticate(user=self.user)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_dispatch_happens_after_local_transaction_commits(self):
+        observed = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            observed["in_atomic_block"] = connection.in_atomic_block
+            return _Response(status_code=202, payload={"run_id": "autofill-run-not-atomic", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/autofill/",
+                {
+                    "companyName": "Acme",
+                    "domain": "https://www.acme.com",
+                    "companyLinkedInUrl": "https://linkedin.com/company/acme/",
+                    "brandName": "Acme",
+                    "companyContext": "",
+                    "competitors": "",
+                    "seedKeywords": "",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["run_id"], "autofill-run-not-atomic")
+        self.assertEqual(observed, {"in_atomic_block": False})
 
 
 class VibeMarketingAutofillTests(TestCase):
@@ -241,10 +290,50 @@ class VibeMarketingAutofillTests(TestCase):
 
         run = ContentFactoryRun.objects.get(run_id="autofill-run-1")
         self.assertEqual(run.workflow, "startup_autofill")
+        self.assertEqual(run.run_request["company_id"], str(self.company.id))
+        self.assertEqual(run.run_request["organization_id"], str(organization.id))
         self.assertEqual(run.run_request["persist"], False)
         self.assertEqual(run.run_request["company_linkedin_url"], "https://www.linkedin.com/company/acme")
         self.assertEqual(run.run_request["existing_fields"]["companyContext"], "")
         self.assertEqual(run.run_request["existing_fields"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_reuses_recent_active_run_for_same_domain(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        active_run = ContentFactoryRun.objects.create(
+            run_id="autofill-active-studynash",
+            workflow="startup_autofill",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="research_public_web",
+            run_request={"domain": "acme.com", "company_id": str(self.company.id), "organization_id": str(organization.id)},
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post_mock:
+            response = self.client.post(
+                "/api/v1/vibe-marketing/autofill/",
+                {
+                    "companyName": "Acme",
+                    "domain": "https://www.acme.com",
+                    "companyLinkedInUrl": "https://linkedin.com/company/acme/",
+                    "brandName": "Acme",
+                    "companyContext": "",
+                    "competitors": "",
+                    "seedKeywords": "",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["run_id"], active_run.run_id)
+        self.assertEqual(response.data["runId"], active_run.run_id)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(response.data["error"], "")
+        self.assertEqual(response.data["errors"], [])
+        post_mock.assert_not_called()
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_autofill", domain="acme.com").count(), 1)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_autofill_persists_submitted_startup_details_before_queueing(self):
