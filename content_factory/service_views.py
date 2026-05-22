@@ -1962,6 +1962,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         ).strip()
         setup_payload["error"] = preview_error
         setup_payload["error_code"] = error_code
+        setup_payload.pop("approve_url", None)
+        setup_payload.pop("deny_url", None)
         if live_preview:
             live_preview = dict(live_preview)
             live_preview.setdefault("error", preview_error)
@@ -1977,6 +1979,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         result["status"] = "preview_failed"
         result["article_system_setup"] = setup_payload
         result["preview_url"] = ""
+        result.pop("approve_url", None)
+        result.pop("deny_url", None)
         result["error"] = preview_error
         result["error_code"] = setup_payload.get("error_code")
         result["livePreview"] = live_preview
@@ -1994,8 +1998,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
         setup_payload["live_preview_url"] = live_preview_url_value
         setup_payload.pop("preview_url", None)
+        setup_payload.pop("approve_url", None)
+        setup_payload.pop("deny_url", None)
         result["status"] = "preview_building"
         result["preview_url"] = ""
+        result.pop("approve_url", None)
+        result.pop("deny_url", None)
         result["article_system_setup"] = setup_payload
         result["livePreview"] = live_preview
         result["live_preview"] = live_preview
@@ -2014,6 +2022,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload["preview_url"] = ""
         setup_payload["fallback_preview_url"] = fallback_preview_url_value
         setup_payload["live_preview_url"] = live_preview_url_value
+        setup_payload.pop("approve_url", None)
+        setup_payload.pop("deny_url", None)
         warning = str(
             data.get("error")
             or setup_payload.get("error")
@@ -2024,6 +2034,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload["retryable"] = data.get("retryable") if data.get("retryable") is not None else setup_payload.get("retryable", True)
         result["status"] = "fallback_ready"
         result["preview_url"] = ""
+        result.pop("approve_url", None)
+        result.pop("deny_url", None)
         result["fallback_preview_url"] = fallback_preview_url_value
         result["article_system_setup"] = setup_payload
         result["livePreview"] = live_preview
@@ -4786,7 +4798,7 @@ class ContentFactoryCallbackView(APIView):
                     f"  • {build_status}\n\n"
                     f"*Review the PR:* {pr_url}{preview_line}"
                 )
-                text_body += "\n\nApprove and merge this setup PR. Topic research will unlock after the merged directory is verified on the default branch."
+                text_body += "\n\nReview this setup PR in GitHub. Topic research will unlock after it is merged and verified on the default branch."
                 _send(
                     text_body,
                     blocks=[
