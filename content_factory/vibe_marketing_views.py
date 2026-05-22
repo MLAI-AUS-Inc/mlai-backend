@@ -2646,7 +2646,13 @@ def _live_preview_fallback_ready(payload):
         or proof.get("full_site_build_skipped")
     )
     render_confidence = str(payload.get("renderConfidence") or payload.get("render_confidence") or "").strip().lower()
-    return preview_build_mode == "route_scoped_next_preview" or full_site_build_skipped or render_confidence == "fallback"
+    explicit_non_exact = payload.get("exactRender") is False or payload.get("exact_render") is False
+    return (
+        preview_build_mode == "route_scoped_next_preview"
+        or full_site_build_skipped
+        or render_confidence == "fallback"
+        or explicit_non_exact
+    )
 
 
 def _persist_live_preview_payload(run, payload):
@@ -2670,11 +2676,15 @@ def _persist_live_preview_payload(run, payload):
                 error_code = payload.get("errorCode") or payload.get("error_code") or ""
                 result["status"] = "preview_failed"
                 result["preview_url"] = ""
+                result.pop("approve_url", None)
+                result.pop("deny_url", None)
                 result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
                 result["error_code"] = error_code
                 setup_payload["status"] = "preview_failed"
                 setup_payload["error"] = result["error"]
                 setup_payload["error_code"] = error_code
+                setup_payload.pop("approve_url", None)
+                setup_payload.pop("deny_url", None)
                 setup_payload["retryable"] = payload.get("retryable", True)
                 result["article_system_setup"] = setup_payload
                 run.status = ContentFactoryRunStatus.BLOCKED
@@ -2701,11 +2711,15 @@ def _persist_live_preview_payload(run, payload):
                 warning = "Exact articles setup preview is unavailable; the hosted URL is a route-scoped fallback and cannot be approved."
                 result["status"] = "fallback_ready"
                 result["preview_url"] = ""
+                result.pop("approve_url", None)
+                result.pop("deny_url", None)
                 result["fallback_preview_url"] = preview_url
                 result["error"] = warning
                 result["error_code"] = "article_system_setup_preview_not_exact"
                 setup_payload["status"] = "fallback_ready"
                 setup_payload["preview_url"] = ""
+                setup_payload.pop("approve_url", None)
+                setup_payload.pop("deny_url", None)
                 setup_payload["fallback_preview_url"] = preview_url
                 setup_payload["error"] = warning
                 setup_payload["error_code"] = "article_system_setup_preview_not_exact"
@@ -2720,10 +2734,14 @@ def _persist_live_preview_payload(run, payload):
                 result["status"] = "preview_building"
                 result["preview_url"] = ""
                 result.pop("fallback_preview_url", None)
+                result.pop("approve_url", None)
+                result.pop("deny_url", None)
                 result.pop("error", None)
                 setup_payload["status"] = "preview_building"
                 setup_payload["preview_url"] = ""
                 setup_payload.pop("fallback_preview_url", None)
+                setup_payload.pop("approve_url", None)
+                setup_payload.pop("deny_url", None)
                 setup_payload.pop("error", None)
                 result["article_system_setup"] = setup_payload
                 run.status = ContentFactoryRunStatus.RUNNING
