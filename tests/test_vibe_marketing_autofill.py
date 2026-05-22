@@ -649,6 +649,14 @@ class VibeMarketingAutofillTests(TestCase):
                     "brandName": "Acme",
                     "companyLinkedInUrl": "https://www.linkedin.com/company/acme",
                     "companyContext": "## Positioning\nAcme builds workflow automation for founders.\n\n## Audience\nStartup founders and operators.\n\n## Product\nWorkflow automation for startup operations.",
+                    "profileFields": {
+                        "shortDescription": "Acme helps founders automate startup workflows.",
+                        "problemSolved": "Startup teams lose time coordinating repeatable operating workflows manually.",
+                        "targetAudience": "Startup founders and operators.",
+                        "companyContext": "## Positioning\nAcme builds workflow automation for founders.",
+                        "fieldConfidence": {"shortDescription": "high", "targetAudience": "high"},
+                        "reviewNotes": [],
+                    },
                     "offeringProfile": {
                         "coreOffering": "Workflow automation for founders.",
                         "targetUsers": "Startup founders and operators.",
@@ -794,16 +802,29 @@ class VibeMarketingAutofillTests(TestCase):
             return_value=_Response(status_code=200, payload=remote_payload),
         ):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+            status_response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/?view=status")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "completed")
         self.assertIn("## Positioning", response.data["result"]["autofill"]["companyContext"])
+        self.assertEqual(
+            response.data["result"]["autofill"]["profileFields"]["shortDescription"],
+            "Acme helps founders automate startup workflows.",
+        )
         self.assertEqual(response.data["result"]["autofill"]["seedKeywordCount"], 20)
         self.assertEqual(response.data["result"]["autofill"]["offeringProfile"]["excludedMeanings"], ["home equity"])
         self.assertEqual(response.data["result"]["autofill"]["keywordCandidates"][0]["keyword"], "workflow automation for founders")
         self.assertEqual(response.data["result"]["autofill"]["directCompetitors"][0]["domain"], "buildclub.ai")
         self.assertEqual(response.data["result"]["autofill"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
         self.assertEqual(response.data["result"]["autofill"]["researchDepth"]["linkedinSimilarSignals"], 1)
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(
+            status_response.data["result"]["autofill"]["profileFields"]["shortDescription"],
+            "Acme helps founders automate startup workflows.",
+        )
+        self.assertEqual(status_response.data["result"]["autofill"]["companyLinkedInUrl"], "https://www.linkedin.com/company/acme")
+        self.assertEqual(status_response.data["result"]["autofill"]["seedKeywordCount"], 20)
+        self.assertEqual(status_response.data["result"]["autofill"]["seedKeywords"][0], "workflow automation 1")
 
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.COMPLETED)
@@ -875,6 +896,7 @@ class VibeMarketingAutofillTests(TestCase):
             return_value=_Response(status_code=200, payload=remote_payload),
         ):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+            status_response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/?view=status")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
@@ -889,6 +911,13 @@ class VibeMarketingAutofillTests(TestCase):
             "Acme helps founders automate startup workflows.",
         )
         self.assertEqual(response.data["result"]["autofill"]["profileFields"]["reviewNotes"][0], "Review problem wording before saving.")
+        self.assertEqual(status_response.status_code, 200)
+        self.assertTrue(status_response.data["result"]["autofill"]["partial"])
+        self.assertEqual(
+            status_response.data["result"]["autofill"]["profileFields"]["targetAudience"],
+            "Startup founders and operators.",
+        )
+        self.assertEqual(status_response.data["result"]["autofill"]["researchQuality"]["status"], "partial")
 
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)

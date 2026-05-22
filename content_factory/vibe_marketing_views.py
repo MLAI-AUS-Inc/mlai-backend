@@ -5190,18 +5190,76 @@ COMPACT_AUTOFILL_RESULT_KEYS = {
     "companyContext",
     "companyLinkedInUrl",
     "competitorGroups",
+    "competitorCount",
     "competitorSuggestions",
     "competitors",
     "directCompetitors",
+    "keywordCandidateCount",
     "linkedinProfile",
     "partial",
     "profileFields",
+    "researchDepth",
+    "researchQuality",
     "researchSummary",
     "seedKeywords",
+    "seedKeywordCount",
     "seoCompetitors",
+    "sourceCount",
     "sources",
     "warnings",
 }
+
+COMPACT_AUTOFILL_LIST_LIMITS = {
+    "adjacentOrganizations": 12,
+    "competitorSuggestions": 12,
+    "competitors": 12,
+    "directCompetitors": 12,
+    "seedKeywords": 24,
+    "seoCompetitors": 12,
+    "sources": 12,
+    "warnings": 12,
+}
+
+
+def _compact_result_value(key, value):
+    if isinstance(value, list):
+        return value[: COMPACT_AUTOFILL_LIST_LIMITS.get(key, 12)]
+    return value
+
+
+def _source_looks_like_autofill_payload(source):
+    if not isinstance(source, dict):
+        return False
+    return any(
+        source.get(key) not in (None, "", [], {})
+        for key in (
+            "profileFields",
+            "companyContext",
+            "companyLinkedInUrl",
+            "directCompetitors",
+            "competitors",
+            "seedKeywords",
+            "researchQuality",
+        )
+    )
+
+
+def _compact_autofill_payload_from_sources(sources):
+    compact = {}
+    autofill_sources = []
+    for source in sources:
+        nested = _run_mapping(source.get("autofill"))
+        if nested:
+            autofill_sources.append(nested)
+        if _source_looks_like_autofill_payload(source):
+            autofill_sources.append(source)
+
+    for source in autofill_sources:
+        for key in COMPACT_AUTOFILL_RESULT_KEYS:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                compact.setdefault(key, _compact_result_value(key, value))
+    return compact
 
 
 def _compact_result_for_run(run):
@@ -5217,9 +5275,13 @@ def _compact_result_for_run(run):
         for key in keys:
             value = source.get(key)
             if value not in (None, "", [], {}):
-                if isinstance(value, list):
-                    value = value[:12]
-                compact.setdefault(key, value)
+                compact.setdefault(key, _compact_result_value(key, value))
+    if run.workflow == "startup_autofill":
+        autofill = _compact_autofill_payload_from_sources(sources)
+        if autofill:
+            compact["autofill"] = autofill
+            if autofill.get("warnings") and not compact.get("warnings"):
+                compact["warnings"] = autofill["warnings"]
     run_request = _run_mapping(result.get("run_request") or result.get("request"))
     request_compact = {
         key: run_request.get(key)
