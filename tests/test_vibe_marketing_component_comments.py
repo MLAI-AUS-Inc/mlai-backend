@@ -1808,6 +1808,44 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(article_response.status_code, 409)
         self.assertEqual(article_response.data["code"], "article_system_setup_blocked")
 
+    def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
+        self._prepare_articles_setup_gate(status="preview_failed")
+        ContentFactoryRun.objects.create(
+            run_id="setup-gate-run",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            error="Hosted preview build failed. Inspect the build logs for details.",
+            result={
+                "status": "preview_failed",
+                "setup_run_id": "setup-gate-run",
+                "error": "Hosted preview build failed. Inspect the build logs for details.",
+                "error_code": "platform_preview_failed",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-gate-run",
+                    "error": "Hosted preview build failed. Inspect the build logs for details.",
+                    "error_code": "platform_preview_failed",
+                },
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(progress["currentStepId"], "review")
+        self.assertEqual(steps["generate"]["status"], "complete")
+        self.assertEqual(steps["review"]["status"], "blocked")
+        self.assertEqual(steps["review"]["primaryAction"]["label"], "Open setup diagnostics")
+        self.assertIn("build logs", steps["review"]["summary"])
+        self.assertEqual(steps["publish"]["status"], "locked")
+
     def test_first_time_articles_setup_verification_rescan_unlocks_research(self):
         config = self._prepare_articles_setup_gate(status="merged_verifying", rescan_run_id="verify-setup-run")
         article_system = dict(config.article_system)

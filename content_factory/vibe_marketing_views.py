@@ -282,6 +282,9 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "awaiting_confirmation",
     "approval_required",
     "await_review",
+    "preview_failed",
+    "failed",
+    "blocked",
     "manual_merge_required",
     "manual_blocked",
     "completed",
@@ -5104,6 +5107,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["review"] = "needs_action"
             status_by_id["publish"] = "locked"
             summary_by_id["review"] = "Only a fallback setup preview is available; exact preview must be fixed before approval."
+            action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
+        elif setup_status in {"preview_failed", "failed", "blocked"}:
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "blocked"
+            status_by_id["publish"] = "locked"
+            summary_by_id["review"] = "Hosted setup preview failed. Open diagnostics, inspect the build logs, then retry."
             action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
         else:
             status_by_id["generate"] = "running"
