@@ -5966,6 +5966,8 @@ def _normalize_remote_run_status(value):
         "in_progress": ContentFactoryRunStatus.RUNNING,
         "blocked_verification": ContentFactoryRunStatus.BLOCKED,
         "precondition_failed": ContentFactoryRunStatus.BLOCKED,
+        "preview_failed": ContentFactoryRunStatus.BLOCKED,
+        "fallback_ready": ContentFactoryRunStatus.BLOCKED,
         "error": ContentFactoryRunStatus.FAILED,
     }
     normalized = mapping.get(normalized, normalized)
@@ -6276,9 +6278,11 @@ def _result_has_current_failure(result):
 def _terminal_article_system_setup_has_local_failure(run) -> bool:
     if not run or run.workflow not in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
         return False
-    if run.status not in FAILED_RUN_STATUSES:
-        return False
-    return bool(run.error or _result_has_current_failure(run.result if isinstance(run.result, dict) else {}))
+    result = run.result if isinstance(run.result, dict) else {}
+    result_failure = _result_has_current_failure(result)
+    current_step = str(run.current_step or "").strip().lower()
+    terminal_status = run.status in FAILED_RUN_STATUSES or current_step in {"preview_failed", "fallback_ready"}
+    return bool((terminal_status or result_failure) and (run.error or result_failure))
 
 
 def _merge_preserved_live_preview(local_result, remote_result):

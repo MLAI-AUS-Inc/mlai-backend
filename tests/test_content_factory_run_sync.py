@@ -97,6 +97,56 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(ContentFactoryRun.objects.filter(run_id="run-sync-lock-1").exists())
 
+    def test_run_sync_identical_payload_does_not_bump_updated_at(self):
+        payload = {
+            "run_id": "run-sync-unchanged-1",
+            "workflow": "article_system_setup",
+            "status": "blocked",
+            "current_step": "verify_directory_browser",
+            "artifact_root": "/tmp/content-factory-runs/run-sync-unchanged-1",
+            "step_order": ["verify_directory_browser"],
+            "acceptance_summary": {},
+            "verification_summary": {},
+            "approval_state": "not_required",
+            "resume_available": True,
+            "error": "Directory browser verification failed before setup approval.",
+            "result": {
+                "status": "preview_failed",
+                "error": "Directory browser verification failed before setup approval.",
+                "article_system_setup": {"status": "preview_failed"},
+            },
+            "run_request": {"domain": "mlai.au", "github_repo": "MLAI-AUS-Inc/mlai-au"},
+            "step_states": {
+                "verify_directory_browser": {
+                    "name": "verify_directory_browser",
+                    "required": True,
+                    "status": "blocked",
+                    "attempts": 1,
+                    "message": "Directory browser verification failed.",
+                    "attempt_history": [],
+                }
+            },
+        }
+
+        first = self.client.put(
+            "/api/content-factory/runs/run-sync-unchanged-1/",
+            payload,
+            format="json",
+        )
+        run = ContentFactoryRun.objects.get(run_id="run-sync-unchanged-1")
+        updated_at = run.updated_at
+        second = self.client.put(
+            "/api/content-factory/runs/run-sync-unchanged-1/",
+            payload,
+            format="json",
+        )
+        run.refresh_from_db()
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["sync_status"], "unchanged")
+        self.assertEqual(run.updated_at, updated_at)
+
     def test_callback_job_sync_retries_transient_sqlite_lock(self):
         original_update_or_create = ContentFactoryJob.objects.update_or_create
         attempts = {"count": 0}

@@ -2524,6 +2524,60 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["status"], ContentFactoryRunStatus.FAILED)
         status_mock.assert_not_called()
 
+    def test_preview_failed_article_system_setup_status_skips_remote_poll_even_if_local_status_is_running(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-preview-failed",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_browser",
+            result={
+                "status": "preview_failed",
+                "error": "Directory browser verification failed before setup approval.",
+                "error_code": "DIRECTORY_BROWSER_VERIFICATION_FAILED",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "error": "Directory browser verification failed before setup approval.",
+                    "error_code": "DIRECTORY_BROWSER_VERIFICATION_FAILED",
+                },
+            },
+            error="",
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status") as status_mock:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        status_mock.assert_not_called()
+
+    def test_sync_local_run_from_remote_maps_preview_failed_to_blocked(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-preview-failed-remote",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="start_hosted_preview",
+            result={"status": "preview_building"},
+        )
+        remote_data = {
+            "status": "preview_failed",
+            "current_step": "verify_directory_browser",
+            "result": {
+                "status": "preview_failed",
+                "error": "Directory browser verification failed before setup approval.",
+                "article_system_setup": {"status": "preview_failed"},
+            },
+            "error": "Directory browser verification failed before setup approval.",
+        }
+
+        _sync_local_run_from_remote(setup_run, remote_data)
+
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.current_step, "verify_directory_browser")
+        self.assertEqual(setup_run.result["status"], "preview_failed")
+
     def test_sync_local_run_from_remote_does_not_save_identical_terminal_payload(self):
         setup_run = ContentFactoryRun.objects.create(
             run_id="article-system-setup-same-failure",
