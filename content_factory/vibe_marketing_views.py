@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import ipaddress
 import json
@@ -121,6 +122,7 @@ VIBE_MARKETING_WORKFLOWS = {
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
 ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
+ARTICLE_SYSTEM_SETUP_WORKFLOWS = {"article_system_setup"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
 DISCOVERY_TOPIC_CANDIDATE_STATUSES = {
@@ -6271,6 +6273,14 @@ def _result_has_current_failure(result):
     )
 
 
+def _terminal_article_system_setup_has_local_failure(run) -> bool:
+    if not run or run.workflow not in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
+        return False
+    if run.status not in FAILED_RUN_STATUSES:
+        return False
+    return bool(run.error or _result_has_current_failure(run.result if isinstance(run.result, dict) else {}))
+
+
 def _merge_preserved_live_preview(local_result, remote_result):
     if not isinstance(remote_result, dict):
         return remote_result
@@ -6504,6 +6514,19 @@ def _sync_local_run_from_remote(run, remote_data):
     if not isinstance(remote_data, dict) or not remote_data:
         return run
 
+    original_snapshot = {
+        "workflow": run.workflow,
+        "status": run.status,
+        "current_step": run.current_step,
+        "artifact_root": run.artifact_root,
+        "step_order": list(run.step_order or []),
+        "acceptance_summary": copy.deepcopy(run.acceptance_summary),
+        "verification_summary": copy.deepcopy(run.verification_summary),
+        "approval_state": run.approval_state,
+        "resume_available": run.resume_available,
+        "result": copy.deepcopy(run.result),
+        "error": run.error,
+    }
     result = _run_result_from_remote(remote_data)
     remote_status = _normalize_remote_run_status(remote_data.get("status") or result.get("status") or run.status)
     if (
@@ -6606,6 +6629,21 @@ def _sync_local_run_from_remote(run, remote_data):
                     result[key] = run.result[key]
         run.result = result
     _sync_steps_from_remote(run, remote_data)
+    next_snapshot = {
+        "workflow": run.workflow,
+        "status": run.status,
+        "current_step": run.current_step,
+        "artifact_root": run.artifact_root,
+        "step_order": list(run.step_order or []),
+        "acceptance_summary": run.acceptance_summary,
+        "verification_summary": run.verification_summary,
+        "approval_state": run.approval_state,
+        "resume_available": run.resume_available,
+        "result": run.result,
+        "error": run.error,
+    }
+    if next_snapshot == original_snapshot:
+        return run
     run.save(
         update_fields=[
             "workflow",
@@ -8206,6 +8244,8 @@ class VibeMarketingRunView(APIView):
             and not _local_publish_child_for_run(run, context=context)
             and not _publish_handoff_pending_for_run(run)
         )
+        if _terminal_article_system_setup_has_local_failure(run):
+            skip_remote_status = True
         skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
         if skipped_missing_publish_child:
             skip_remote_status = True
@@ -8216,7 +8256,11 @@ class VibeMarketingRunView(APIView):
                 run.run_id,
                 run.workflow,
                 run.status,
-                "missing_publish_child_recoverable" if skipped_missing_publish_child else "terminal_article",
+                "terminal_article_system_setup_failure"
+                if _terminal_article_system_setup_has_local_failure(run)
+                else "missing_publish_child_recoverable"
+                if skipped_missing_publish_child
+                else "terminal_article",
             )
         if _is_status_poll_unavailable_payload(remote_data):
             if run.workflow == "startup_autofill":
