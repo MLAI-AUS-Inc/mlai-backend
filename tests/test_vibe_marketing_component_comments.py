@@ -13,7 +13,7 @@ from content_factory.models import GeneratedComponent, KeywordStatus, Organizati
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
-from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run
+from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run, _sync_local_run_from_remote
 
 
 User = get_user_model()
@@ -2495,6 +2495,65 @@ class VibeMarketingComponentCommentTests(TestCase):
         status_mock.assert_not_called()
         self.assertTrue(response.data["publishChildRecoverable"])
         self.assertIn("queued but did not start", response.data["publishChildWaitReason"])
+
+    def test_failed_article_system_setup_status_skips_remote_poll(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-failed",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="validate_directory_dependencies",
+            result={
+                "status": "failed",
+                "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+                "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+                "article_system_setup": {
+                    "status": "failed",
+                    "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+                    "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+                },
+            },
+            error="Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status") as status_mock:
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.FAILED)
+        status_mock.assert_not_called()
+
+    def test_sync_local_run_from_remote_does_not_save_identical_terminal_payload(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-same-failure",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="validate_directory_dependencies",
+            result={
+                "status": "failed",
+                "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+                "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+            },
+            error="Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+        )
+        remote_data = {
+            "status": ContentFactoryRunStatus.FAILED,
+            "current_step": "validate_directory_dependencies",
+            "result": {
+                "status": "failed",
+                "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+                "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+            },
+            "error": "Directory scaffold dependency validation failed: Missing required directory component slots: article_list",
+        }
+
+        with patch.object(setup_run, "save", wraps=setup_run.save) as save_mock:
+            _sync_local_run_from_remote(setup_run, remote_data)
+
+        save_mock.assert_not_called()
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_retries_local_child_missing_remotely(self):
