@@ -1632,6 +1632,10 @@ ARTICLE_SYSTEM_SETUP_FAILURE_METADATA_KEYS = (
     "directoryQualityGates",
     "directory_browser_repair",
     "directoryBrowserRepair",
+    "directory_visual_style_report",
+    "directoryVisualStyleReport",
+    "directory_visual_repair",
+    "directoryVisualRepair",
 )
 
 
@@ -1964,6 +1968,10 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
             "directory_quality_gates",
             "directoryBrowserRepair",
             "directory_browser_repair",
+            "directoryVisualStyleReport",
+            "directory_visual_style_report",
+            "directoryVisualRepair",
+            "directory_visual_repair",
         }
         explicit_empty_value_keys = {
             "previewUrl",
@@ -2019,6 +2027,10 @@ def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: d
         "directoryQualityGates",
         "directory_browser_repair",
         "directoryBrowserRepair",
+        "directory_visual_style_report",
+        "directoryVisualStyleReport",
+        "directory_visual_repair",
+        "directoryVisualRepair",
         "output_excerpt",
     ):
         value = data.get(key)
@@ -2121,6 +2133,22 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         or result.get("directory_browser_repair")
         or result.get("directoryBrowserRepair")
     )
+    directory_visual_style_report = (
+        data.get("directory_visual_style_report")
+        or data.get("directoryVisualStyleReport")
+        or setup_payload.get("directory_visual_style_report")
+        or setup_payload.get("directoryVisualStyleReport")
+        or result.get("directory_visual_style_report")
+        or result.get("directoryVisualStyleReport")
+    )
+    directory_visual_repair = (
+        data.get("directory_visual_repair")
+        or data.get("directoryVisualRepair")
+        or setup_payload.get("directory_visual_repair")
+        or setup_payload.get("directoryVisualRepair")
+        or result.get("directory_visual_repair")
+        or result.get("directoryVisualRepair")
+    )
     current_step_value = str(
         data.get("current_step")
         or data.get("step")
@@ -2164,6 +2192,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "preview_failure_details": preview_failure_details,
             "directory_quality_gates": directory_quality_gates,
             "directory_browser_repair": directory_browser_repair,
+            "directory_visual_style_report": directory_visual_style_report,
+            "directory_visual_repair": directory_visual_repair,
             "live_preview_url": live_preview_url_value,
             "approve_url": data.get("approve_url") or setup_payload.get("approve_url"),
             "deny_url": data.get("deny_url") or setup_payload.get("deny_url"),
@@ -2296,6 +2326,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         if isinstance(directory_browser_repair, dict):
             setup_payload["directory_browser_repair"] = directory_browser_repair
             setup_payload["directoryBrowserRepair"] = directory_browser_repair
+        if isinstance(directory_visual_style_report, dict):
+            setup_payload["directory_visual_style_report"] = directory_visual_style_report
+            setup_payload["directoryVisualStyleReport"] = directory_visual_style_report
+        if isinstance(directory_visual_repair, dict):
+            setup_payload["directory_visual_repair"] = directory_visual_repair
+            setup_payload["directoryVisualRepair"] = directory_visual_repair
         setup_payload.pop("approve_url", None)
         setup_payload.pop("deny_url", None)
         if live_preview:
@@ -2344,6 +2380,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         if isinstance(directory_browser_repair, dict):
             result["directory_browser_repair"] = directory_browser_repair
             result["directoryBrowserRepair"] = directory_browser_repair
+        if isinstance(directory_visual_style_report, dict):
+            result["directory_visual_style_report"] = directory_visual_style_report
+            result["directoryVisualStyleReport"] = directory_visual_style_report
+        if isinstance(directory_visual_repair, dict):
+            result["directory_visual_repair"] = directory_visual_repair
+            result["directoryVisualRepair"] = directory_visual_repair
         result["livePreview"] = live_preview
         result["live_preview"] = live_preview
         result["retryable"] = bool(setup_payload.get("retryable", True))
@@ -2496,6 +2538,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     "preview_failure_details": result.get("preview_failure_details"),
                     "directory_quality_gates": result.get("directory_quality_gates"),
                     "directory_browser_repair": result.get("directory_browser_repair"),
+                    "directory_visual_style_report": result.get("directory_visual_style_report"),
+                    "directory_visual_repair": result.get("directory_visual_repair"),
                     "pr_url": result.get("pr_url"),
                     "live_preview_url": result.get("live_preview_url"),
                 }
@@ -2554,6 +2598,10 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         directory_quality_gates=result.get("directory_quality_gates"),
         directoryBrowserRepair=result.get("directory_browser_repair"),
         directory_browser_repair=result.get("directory_browser_repair"),
+        directoryVisualStyleReport=result.get("directory_visual_style_report"),
+        directory_visual_style_report=result.get("directory_visual_style_report"),
+        directoryVisualRepair=result.get("directory_visual_repair"),
+        directory_visual_repair=result.get("directory_visual_repair"),
         livePreviewUrl=result.get("live_preview_url"),
         live_preview_url=result.get("live_preview_url"),
         mergeStatus=result.get("merge_status"),

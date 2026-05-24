@@ -1787,6 +1787,92 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["failedStep"], "verify_directory_browser")
         self.assertEqual(pending["previewFailureDetails"]["missing_slots"], ["empty-state"])
 
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_visual_failure_preserves_style_diagnostics(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            article_system={"pending_article_system_setup": {"status": "preview_building"}},
+        )
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-style-preview",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            result={
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "failureKind": "failed_requests",
+                    "previewFailureDetails": {"failed_request_paths": ["/articles/old"]},
+                }
+            },
+        )
+
+        preview_details = {
+            "failed_step": "review_directory_visual_style",
+            "failure_kind": "visual_style",
+            "score": 0.74,
+            "summary": "Preview needs style fixes before approval.",
+            "mismatch_summaries": ["renderer_profile / text_color: Text color does not match."],
+            "repair_instructions": ["Use target text and surface tokens."],
+        }
+        visual_report = {
+            "success": False,
+            "score": 0.74,
+            "summary": "Preview needs style fixes before approval.",
+            "mismatches": [{"field": "text_color", "summary": "Text color does not match."}],
+        }
+        visual_repair = {"status": "skipped", "reason": "no_effective_repair", "repair_attempts": 1}
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-run-style-preview",
+                "run_id": "setup-run-style-preview",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-style-preview",
+                "failed_preview_url": "https://preview.example/articles/",
+                "failure_kind": "visual_style",
+                "failed_step": "review_directory_visual_style",
+                "preview_failure_details": preview_details,
+                "directory_visual_style_report": visual_report,
+                "directory_visual_repair": visual_repair,
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-run-style-preview",
+                    "error": "Directory visual style review failed before setup approval.",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-style-preview")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(setup_run.result["failure_kind"], "visual_style")
+        self.assertEqual(setup_run.result["preview_failure_details"]["score"], 0.74)
+        self.assertEqual(setup_run.result["directory_visual_style_report"]["score"], 0.74)
+        self.assertEqual(setup_run.result["directory_visual_repair"]["reason"], "no_effective_repair")
+        setup_payload = setup_run.result["article_system_setup"]
+        self.assertEqual(setup_payload["failureKind"], "visual_style")
+        self.assertEqual(setup_payload["previewFailureDetails"]["mismatch_summaries"], preview_details["mismatch_summaries"])
+        self.assertEqual(setup_payload["directoryVisualStyleReport"]["mismatches"][0]["field"], "text_color")
+        self.assertNotIn("/articles/old", str(setup_run.result))
+
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-style-preview")
+        self.assertEqual(parent.result["article_system_setup"]["failureKind"], "visual_style")
+        self.assertEqual(parent.result["article_system_setup"]["previewFailureDetails"]["score"], 0.74)
+
+        organization.content_config.refresh_from_db()
+        pending = organization.content_config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["failureKind"], "visual_style")
+        self.assertEqual(pending["previewFailureDetails"]["repair_instructions"], ["Use target text and surface tokens."])
+        self.assertEqual(pending["directoryVisualRepair"]["repair_attempts"], 1)
+
     def test_article_system_live_preview_retry_progress_clears_stale_failure_state(self):
         from content_factory.vibe_marketing_views import _persist_live_preview_payload
 
