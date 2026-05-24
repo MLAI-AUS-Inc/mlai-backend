@@ -1884,6 +1884,53 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
 
 
+def _article_system_setup_resume_generation(*payloads) -> int:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
+            value = payload.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: dict, result: dict) -> dict:
+    resume_generation = _article_system_setup_resume_generation(data, setup_payload, result)
+    fields = {
+        "setup_run_id": str(data.get("setup_run_id") or data.get("run_id") or data.get("job_id") or "").strip(),
+        "workflow": str(data.get("workflow") or "article_system_setup"),
+        "current_step": data.get("current_step") or setup_payload.get("current_step") or result.get("current_step"),
+        "failure_step": data.get("failure_step") or setup_payload.get("failure_step") or result.get("failure_step"),
+        "resume_generation": resume_generation,
+        "is_current_attempt": data.get("is_current_attempt") if data.get("is_current_attempt") is not None else True,
+        "updated_at": data.get("updated_at") or setup_payload.get("updated_at") or timezone.now().isoformat(),
+    }
+    for key in (
+        "diagnostics",
+        "step_states",
+        "directory_dependency_report",
+        "directory_static_report",
+        "directory_build_report",
+        "repair_status",
+        "worker_queue",
+        "failure_kind",
+        "output_excerpt",
+    ):
+        value = data.get(key)
+        if value is None and isinstance(setup_payload, dict):
+            value = setup_payload.get(key)
+        if value is None and isinstance(result, dict):
+            value = result.get(key)
+        if value not in (None, "", {}, []):
+            fields[key] = value
+    return fields
+
+
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -1893,6 +1940,21 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     setup_payload = data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
     live_preview = data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
     result = dict((existing_run.result if existing_run else None) or {})
+    incoming_generation = _article_system_setup_resume_generation(data, setup_payload)
+    existing_generation = _article_system_setup_resume_generation(
+        result,
+        result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {},
+    )
+    if existing_generation and incoming_generation < existing_generation:
+        logger.info(
+            "article_system_setup_callback_ignored_stale_attempt run_id=%s event=%s incoming_generation=%s current_generation=%s",
+            run_id,
+            event_type,
+            incoming_generation,
+            existing_generation,
+        )
+        return existing_run
+    common_fields = _article_system_setup_common_callback_fields(data=data, setup_payload=setup_payload, result=result)
     preview_url_value = str(data.get("preview_url") or setup_payload.get("preview_url") or "").strip()
     fallback_preview_url_value = str(
         data.get("fallback_preview_url")
@@ -1957,11 +2019,40 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "queue_name": data.get("queue_name") or setup_payload.get("queue_name") or result.get("queue_name"),
             "queued_at": data.get("queued_at") or setup_payload.get("queued_at") or result.get("queued_at"),
             "setup_queue": data.get("setup_queue") or result.get("setup_queue"),
+            **common_fields,
         }
     )
 
-    if event_type == "article_system_setup_completed":
+    if event_type == "article_system_setup_progress":
         setup_payload = dict(setup_payload)
+        setup_status = str(data.get("status") or setup_payload.get("status") or "running").strip() or "running"
+        if setup_status in {"processing", "in_progress"}:
+            setup_status = "running"
+        setup_payload.update(common_fields)
+        setup_payload["status"] = setup_status
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload.pop("error", None)
+        setup_payload.pop("error_code", None)
+        setup_payload["retry_available"] = False
+        setup_payload["retryable"] = False
+        result.update(common_fields)
+        result["status"] = setup_status
+        result["article_system_setup"] = setup_payload
+        result.pop("error", None)
+        result.pop("error_code", None)
+        result.pop("errors", None)
+        result.pop("livePreview", None)
+        result.pop("live_preview", None)
+        result["retry_available"] = False
+        result["retryable"] = False
+        run_status = ContentFactoryRunStatus.QUEUED if setup_status == "queued" else ContentFactoryRunStatus.RUNNING
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = str(common_fields.get("current_step") or data.get("current_step") or "running")
+        error = ""
+    elif event_type == "article_system_setup_completed":
+        setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = "merged_verifying"
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
@@ -1977,6 +2068,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         error = ""
     elif event_type == "article_system_setup_preview_failed":
         setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = "preview_failed"
         setup_payload["setup_run_id"] = run_id
         error_code = (
@@ -2024,6 +2116,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         error = preview_error
     elif event_type == "article_system_setup_preview_ready" and not preview_url_value:
         setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = "preview_building"
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
@@ -2047,6 +2140,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     ):
         fallback_preview_url_value = fallback_preview_url_value or preview_url_value
         setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = "fallback_ready"
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
@@ -2081,6 +2175,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         error = warning
     elif event_type == "article_system_setup_manual_merge_required":
         setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = "manual_merge_required"
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
@@ -2094,6 +2189,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         error = str(data.get("message") or "Manual merge is required for this article system setup.")
     else:
         setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
         setup_payload["status"] = setup_payload.get("status") or "preview_ready"
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
@@ -2188,18 +2284,30 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
 
 def _clear_article_system_setup_retry_state(result):
     cleaned = dict(result or {})
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    resume_generation = _article_system_setup_resume_generation(cleaned, setup_payload) + 1
+    current_step = str(cleaned.get("current_step") or setup_payload.get("current_step") or "fetch_org_config").strip() or "fetch_org_config"
+    updated_at = timezone.now().isoformat()
     for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
         cleaned.pop(key, None)
-    if str(cleaned.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
-        cleaned["status"] = "queued"
-    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    cleaned["status"] = "queued"
+    cleaned["current_step"] = current_step
+    cleaned["resume_generation"] = resume_generation
+    cleaned["is_current_attempt"] = True
+    cleaned["retry_available"] = False
+    cleaned["retryable"] = False
+    cleaned["updated_at"] = updated_at
     if setup_payload:
         setup_payload = dict(setup_payload)
-        for key in ("error", "error_code", "livePreview", "live_preview"):
+        for key in ("error", "error_code", "livePreview", "live_preview", "stale", "stale_reason"):
             setup_payload.pop(key, None)
-        if str(setup_payload.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
-            setup_payload["status"] = "queued"
+        setup_payload["status"] = "queued"
+        setup_payload["current_step"] = current_step
+        setup_payload["resume_generation"] = resume_generation
+        setup_payload["is_current_attempt"] = True
         setup_payload["retry_available"] = False
+        setup_payload["retryable"] = False
+        setup_payload["updated_at"] = updated_at
         cleaned["article_system_setup"] = setup_payload
     return cleaned
 
@@ -2262,6 +2370,7 @@ class ContentFactoryCallbackView(APIView):
                 'article_system_setup_preview_ready',
                 'article_system_setup_preview_fallback_ready',
                 'article_system_setup_revision_ready',
+                'article_system_setup_progress',
                 'article_system_setup_preview_failed',
                 'article_system_setup_completed',
                 'article_system_setup_manual_merge_required',

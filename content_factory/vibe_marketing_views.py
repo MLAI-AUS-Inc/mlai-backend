@@ -6575,6 +6575,26 @@ def _run_result_from_remote(remote_data):
         "scan_purpose",
         "setup_run_id",
         "setupRunId",
+        "source_scan_run_id",
+        "resume_generation",
+        "resumeGeneration",
+        "attempt_number",
+        "attemptNumber",
+        "is_current_attempt",
+        "isCurrentAttempt",
+        "current_step",
+        "currentStep",
+        "failure_step",
+        "failureStep",
+        "step_states",
+        "stepStates",
+        "directory_dependency_report",
+        "directory_static_report",
+        "directory_build_report",
+        "repair_status",
+        "worker_queue",
+        "failure_kind",
+        "output_excerpt",
         "scaffold_job_id",
         "scaffold_status",
         "article_system_setup",
@@ -6659,6 +6679,51 @@ def _terminal_article_system_setup_has_local_failure(run) -> bool:
     return bool((terminal_status or result_failure) and (run.error or result_failure))
 
 
+def _article_system_setup_resume_generation(*payloads) -> int:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
+            value = payload.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+ARTICLE_SYSTEM_SETUP_ACTIVE_PAYLOAD_STATUSES = {
+    "queued",
+    "pending",
+    "processing",
+    "running",
+    "in_progress",
+    "preview_building",
+}
+
+
+def _article_system_setup_payload_active(result) -> bool:
+    if not isinstance(result, dict):
+        return False
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    status_value = str(result.get("status") or setup.get("status") or "").strip().lower()
+    return status_value in ARTICLE_SYSTEM_SETUP_ACTIVE_PAYLOAD_STATUSES
+
+
+def _article_system_setup_remote_can_replace_local(run, result, remote_status) -> bool:
+    if not run or run.workflow not in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
+        return False
+    local_result = run.result if isinstance(run.result, dict) else {}
+    local_setup = local_result.get("article_system_setup") if isinstance(local_result.get("article_system_setup"), dict) else {}
+    local_generation = _article_system_setup_resume_generation(local_result, local_setup)
+    remote_setup = result.get("article_system_setup") if isinstance(result, dict) and isinstance(result.get("article_system_setup"), dict) else {}
+    remote_generation = _article_system_setup_resume_generation(result if isinstance(result, dict) else {}, remote_setup)
+    remote_payload_active = _article_system_setup_payload_active(result)
+    return bool(remote_payload_active or remote_status in RUNNING_RUN_STATUSES or remote_generation > local_generation)
+
+
 def _merge_preserved_live_preview(local_result, remote_result):
     if not isinstance(remote_result, dict):
         return remote_result
@@ -6680,18 +6745,30 @@ def _merge_preserved_live_preview(local_result, remote_result):
 
 def _clear_article_system_setup_retry_state(result):
     cleaned = dict(result or {})
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    resume_generation = _article_system_setup_resume_generation(cleaned, setup_payload) + 1
+    current_step = str(cleaned.get("current_step") or setup_payload.get("current_step") or "fetch_org_config").strip() or "fetch_org_config"
+    updated_at = timezone.now().isoformat()
     for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
         cleaned.pop(key, None)
-    if str(cleaned.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
-        cleaned["status"] = "queued"
-    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
+    cleaned["status"] = "queued"
+    cleaned["current_step"] = current_step
+    cleaned["resume_generation"] = resume_generation
+    cleaned["is_current_attempt"] = True
+    cleaned["retry_available"] = False
+    cleaned["retryable"] = False
+    cleaned["updated_at"] = updated_at
     if setup_payload:
         setup_payload = dict(setup_payload)
-        for key in ("error", "error_code", "livePreview", "live_preview"):
+        for key in ("error", "error_code", "livePreview", "live_preview", "stale", "stale_reason"):
             setup_payload.pop(key, None)
-        if str(setup_payload.get("status") or "").strip().lower() in {"failed", "blocked", "preview_failed"}:
-            setup_payload["status"] = "queued"
+        setup_payload["status"] = "queued"
+        setup_payload["current_step"] = current_step
+        setup_payload["resume_generation"] = resume_generation
+        setup_payload["is_current_attempt"] = True
         setup_payload["retry_available"] = False
+        setup_payload["retryable"] = False
+        setup_payload["updated_at"] = updated_at
         cleaned["article_system_setup"] = setup_payload
     return cleaned
 
@@ -6925,7 +7002,8 @@ def _sync_local_run_from_remote(run, remote_data):
     if run.status == ContentFactoryRunStatus.CANCELLED and remote_status != ContentFactoryRunStatus.CANCELLED:
         return run
     if run.status in FAILED_RUN_STATUSES and remote_status in RUNNING_RUN_STATUSES:
-        return run
+        if not _article_system_setup_remote_can_replace_local(run, result, remote_status):
+            return run
 
     run.status = remote_status
     run.current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "")
@@ -6986,25 +7064,24 @@ def _sync_local_run_from_remote(run, remote_data):
             if request_compact and result.get("run_request") in (None, "", {}, []):
                 result["run_request"] = request_compact
         if run.workflow == "article_system_setup" and isinstance(run.result, dict):
+            remote_replaces_local_setup = _article_system_setup_remote_can_replace_local(run, result, remote_status)
             for key in (
                 "scan_purpose",
                 "setup_run_id",
                 "setupRunId",
-                "error_code",
-                "stale",
-                "stale_reason",
-                "retry_available",
-                "retryable",
                 "queue_name",
                 "queued_at",
                 "setup_queue",
                 "article_surface_mode",
                 "article_surface_hint",
-                "article_system_setup",
                 "pending_article_system_setup",
             ):
                 if result.get(key) in (None, "", {}, []) and run.result.get(key) not in (None, "", {}, []):
                     result[key] = run.result[key]
+            if not remote_replaces_local_setup:
+                for key in ("error_code", "stale", "stale_reason", "retry_available", "retryable", "article_system_setup"):
+                    if result.get(key) in (None, "", {}, []) and run.result.get(key) not in (None, "", {}, []):
+                        result[key] = run.result[key]
         run.result = result
     _sync_steps_from_remote(run, remote_data)
     next_snapshot = {
@@ -8622,7 +8699,8 @@ class VibeMarketingRunView(APIView):
             and not _local_publish_child_for_run(run, context=context)
             and not _publish_handoff_pending_for_run(run)
         )
-        if _terminal_article_system_setup_has_local_failure(run):
+        terminal_setup_failure = _terminal_article_system_setup_has_local_failure(run)
+        if terminal_setup_failure and not _article_system_setup_payload_active(run.result if isinstance(run.result, dict) else {}):
             skip_remote_status = True
         skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
         if skipped_missing_publish_child:
@@ -8635,7 +8713,7 @@ class VibeMarketingRunView(APIView):
                 run.workflow,
                 run.status,
                 "terminal_article_system_setup_failure"
-                if _terminal_article_system_setup_has_local_failure(run)
+                if terminal_setup_failure
                 else "missing_publish_child_recoverable"
                 if skipped_missing_publish_child
                 else "terminal_article",
@@ -9585,6 +9663,10 @@ class VibeMarketingRunControlView(APIView):
                 run.status = ContentFactoryRunStatus.QUEUED
             if run.workflow == "article_system_setup":
                 run.result = _clear_article_system_setup_retry_state(run.result or {})
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = str(run.result.get("current_step") or run.current_step or "fetch_org_config")
+                run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                run.resume_available = False
                 run.error = ""
         elif action == "delivery-mode":
             result = run.result or {}
@@ -9653,6 +9735,15 @@ class VibeMarketingRunControlView(APIView):
                 run.status = remote_data["status"]
             if remote_data.get("current_step"):
                 run.current_step = remote_data["current_step"]
+            if action == "resume" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                if remote_result:
+                    result.update(remote_result)
+                    setup_payload = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+                    remote_setup_payload = remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {}
+                    setup_payload = {**setup_payload, **remote_setup_payload}
+                    if setup_payload:
+                        result["article_system_setup"] = setup_payload
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
