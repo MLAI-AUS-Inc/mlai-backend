@@ -492,6 +492,12 @@ class ContentFactoryOrgConfigView(APIView):
             if field in data:
                 defaults[field] = data[field]
 
+        scan_head_sha = str(data.get('repo_head_sha') or data.get('commit_sha') or '').strip()
+        scan_timestamp = timezone.now()
+        if scan_head_sha:
+            defaults['last_scanned_sha'] = scan_head_sha
+            defaults['last_scanned_at'] = scan_timestamp
+
         if 'connected_slack_user_id' in defaults:
             defaults['connected_slack_user_id'] = resulting_owner or None
         if resulting_enabled and inferred_owner:
@@ -502,6 +508,27 @@ class ContentFactoryOrgConfigView(APIView):
         if 'article_system' in data:
             current_article_system = resolve_article_system(getattr(org, 'content_config', None))
             defaults['article_system'] = merge_article_system(current_article_system, data.get('article_system'))
+            if scan_head_sha:
+                scan_default_branch = str(data.get('default_branch') or data.get('defaultBranch') or '').strip()
+                scan_state = {
+                    'githubRepo': str(data.get('github_repo') or resulting_github_repo or '').strip(),
+                    'github_repo': str(data.get('github_repo') or resulting_github_repo or '').strip(),
+                    'defaultBranch': scan_default_branch,
+                    'default_branch': scan_default_branch,
+                    'defaultBranchSha': scan_head_sha,
+                    'default_branch_sha': scan_head_sha,
+                    'repoHeadSha': scan_head_sha,
+                    'repo_head_sha': scan_head_sha,
+                    'status': 'completed',
+                    'completedAt': scan_timestamp.isoformat(),
+                    'completed_at': scan_timestamp.isoformat(),
+                    'updatedAt': scan_timestamp.isoformat(),
+                    'updated_at': scan_timestamp.isoformat(),
+                }
+                defaults['article_system']['scan'] = {
+                    **dict(current_article_system.get('scan') or {}),
+                    **{key: value for key, value in scan_state.items() if value not in (None, '')},
+                }
 
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
@@ -1709,6 +1736,10 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "workflow": str(data.get("workflow") or "repo_scan"),
             "domain": str(data.get("domain") or (existing_run.domain if existing_run else "") or ""),
             "github_repo": str(data.get("github_repo") or (existing_run.github_repo if existing_run else "") or ""),
+            "default_branch": str(data.get("default_branch") or data.get("defaultBranch") or "").strip(),
+            "repo_head_sha": str(data.get("repo_head_sha") or data.get("commit_sha") or "").strip(),
+            "commit_sha": str(data.get("commit_sha") or data.get("repo_head_sha") or "").strip(),
+            "scan_completed_at": str(data.get("scan_completed_at") or "").strip(),
             "requested_action": data.get("requested_action"),
             "scaffold_required": bool(data.get("scaffold_required")),
             "scaffold_status": scaffold_status,
@@ -4023,6 +4054,27 @@ class ContentFactoryCallbackView(APIView):
             has_pillars = bool((config.pillar_strategy or {}).get('pillars'))
             raw_article_system = dict(config.article_system or {})
             pending_setup = dict(raw_article_system.get('pending_article_system_setup') or {})
+            scan_head_sha = str(data.get('repo_head_sha') or data.get('commit_sha') or '').strip()
+            scan_default_branch = str(data.get('default_branch') or data.get('defaultBranch') or '').strip()
+            scan_completed_at = _parse_optional_datetime(data.get('scan_completed_at')) or timezone.now()
+            scan_state = {
+                'githubRepo': str(data.get('github_repo') or config.github_repo or '').strip(),
+                'github_repo': str(data.get('github_repo') or config.github_repo or '').strip(),
+                'defaultBranch': scan_default_branch,
+                'default_branch': scan_default_branch,
+                'defaultBranchSha': scan_head_sha,
+                'default_branch_sha': scan_head_sha,
+                'repoHeadSha': scan_head_sha,
+                'repo_head_sha': scan_head_sha,
+                'scanRunId': str(run_id or '').strip(),
+                'scan_run_id': str(run_id or '').strip(),
+                'status': 'completed',
+                'completedAt': scan_completed_at.isoformat(),
+                'completed_at': scan_completed_at.isoformat(),
+                'updatedAt': timezone.now().isoformat(),
+                'updated_at': timezone.now().isoformat(),
+            }
+            scan_state = {key: value for key, value in scan_state.items() if value not in (None, '')}
             pending_rescan_run_id = str(
                 pending_setup.get('rescanRunId') or pending_setup.get('rescan_run_id') or ''
             ).strip()
@@ -4067,6 +4119,11 @@ class ContentFactoryCallbackView(APIView):
                             update_fields.append('articles_scaffold_preview_url')
                     else:
                         merged_article_system['pending_article_system_setup'] = pending_setup
+                if scan_state:
+                    merged_article_system['scan'] = {
+                        **dict(raw_article_system.get('scan') or {}),
+                        **scan_state,
+                    }
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
@@ -4077,20 +4134,32 @@ class ContentFactoryCallbackView(APIView):
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')
+                if scan_head_sha and scan_head_sha != str(config.last_scanned_sha or '').strip():
+                    config.last_scanned_sha = scan_head_sha
+                    update_fields.append('last_scanned_sha')
+                if scan_completed_at and config.last_scanned_at != scan_completed_at:
+                    config.last_scanned_at = scan_completed_at
+                    update_fields.append('last_scanned_at')
                 if update_fields:
                     update_fields.append('updated_at')
                     config.save(update_fields=update_fields)
                 article_system = merged_article_system
             else:
                 update_fields = []
+                next_article_system = dict(config.article_system or {})
                 if pending_setup and is_setup_verification_scan and publish_targets:
-                    next_article_system = dict(config.article_system or {})
                     next_article_system.pop('pending_article_system_setup', None)
-                    config.article_system = next_article_system
-                    update_fields.append('article_system')
                     if not config.articles_scaffolded:
                         config.articles_scaffolded = True
                         update_fields.append('articles_scaffolded')
+                if scan_state:
+                    next_article_system['scan'] = {
+                        **dict(next_article_system.get('scan') or {}),
+                        **scan_state,
+                    }
+                if next_article_system != (config.article_system or {}):
+                    config.article_system = next_article_system
+                    update_fields.append('article_system')
                 if publish_targets != (config.publish_targets or []):
                     config.publish_targets = publish_targets
                     update_fields.append('publish_targets')
@@ -4098,6 +4167,12 @@ class ContentFactoryCallbackView(APIView):
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')
+                if scan_head_sha and scan_head_sha != str(config.last_scanned_sha or '').strip():
+                    config.last_scanned_sha = scan_head_sha
+                    update_fields.append('last_scanned_sha')
+                if scan_completed_at and config.last_scanned_at != scan_completed_at:
+                    config.last_scanned_at = scan_completed_at
+                    update_fields.append('last_scanned_at')
                 if update_fields:
                     update_fields.append('updated_at')
                     config.save(update_fields=update_fields)

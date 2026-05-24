@@ -4572,6 +4572,340 @@ def _run_can_promote_package(run, config=None):
     return False
 
 
+def _iso_or_none(value):
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    text = str(value or "").strip()
+    return text or None
+
+
+def _article_setup_state_value(*mappings, keys) -> str:
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        for key in keys:
+            value = mapping.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+    return ""
+
+
+def _scan_identity_from_run(run) -> dict:
+    if not run:
+        return {}
+    result = _run_mapping(run.result)
+    nested = _run_mapping(result.get("result"))
+    run_request = _run_mapping(run.run_request)
+    scan = _run_mapping(result.get("scan") or nested.get("scan"))
+    repo = str(
+        result.get("github_repo")
+        or result.get("githubRepo")
+        or nested.get("github_repo")
+        or nested.get("githubRepo")
+        or run_request.get("github_repo")
+        or run_request.get("githubRepo")
+        or getattr(run, "github_repo", "")
+        or ""
+    ).strip()
+    default_branch = _article_setup_state_value(
+        result,
+        nested,
+        scan,
+        run_request,
+        keys=("defaultBranch", "default_branch", "branch", "branchName", "branch_name"),
+    )
+    head_sha = _article_setup_state_value(
+        result,
+        nested,
+        scan,
+        run_request,
+        keys=("defaultBranchSha", "default_branch_sha", "repoHeadSha", "repo_head_sha", "commitSha", "commit_sha"),
+    )
+    completed_at = (
+        _article_setup_state_value(result, nested, scan, keys=("scan_completed_at", "scanCompletedAt", "completedAt", "completed_at"))
+        or _iso_or_none(getattr(run, "updated_at", None))
+    )
+    return {
+        "repo": repo,
+        "defaultBranch": default_branch,
+        "defaultBranchSha": head_sha,
+        "scanRunId": getattr(run, "run_id", "") or "",
+        "completedAt": completed_at,
+    }
+
+
+def _scan_identity_from_config(config, article_system: dict) -> dict:
+    scan_state = article_system.get("scan") if isinstance(article_system.get("scan"), dict) else {}
+    scan_summary = getattr(config, "scan_summary", None)
+    if isinstance(scan_summary, str) and scan_summary.strip():
+        try:
+            scan_summary = json.loads(scan_summary)
+        except json.JSONDecodeError:
+            try:
+                scan_summary = ast.literal_eval(scan_summary)
+            except (SyntaxError, ValueError):
+                scan_summary = {}
+    scan_summary = scan_summary if isinstance(scan_summary, dict) else {}
+    repo = str(
+        scan_state.get("githubRepo")
+        or scan_state.get("github_repo")
+        or scan_summary.get("github_repo")
+        or scan_summary.get("githubRepo")
+        or getattr(config, "github_repo", "")
+        or ""
+    ).strip()
+    default_branch = _article_setup_state_value(
+        scan_state,
+        scan_summary,
+        keys=("defaultBranch", "default_branch", "branch", "branchName", "branch_name"),
+    )
+    head_sha = _article_setup_state_value(
+        scan_state,
+        scan_summary,
+        keys=("defaultBranchSha", "default_branch_sha", "repoHeadSha", "repo_head_sha", "commitSha", "commit_sha"),
+    ) or str(getattr(config, "last_scanned_sha", "") or "").strip()
+    completed_at = (
+        _article_setup_state_value(scan_state, scan_summary, keys=("completedAt", "completed_at", "scanCompletedAt", "scan_completed_at"))
+        or _iso_or_none(getattr(config, "last_scanned_at", None))
+    )
+    return {
+        "repo": repo,
+        "defaultBranch": default_branch,
+        "defaultBranchSha": head_sha,
+        "scanRunId": _article_setup_state_value(scan_state, scan_summary, keys=("scanRunId", "scan_run_id", "runId", "run_id")),
+        "completedAt": completed_at,
+    }
+
+
+def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_id: str = ""):
+    if not config or not getattr(config, "organization_id", None):
+        return None
+    domain = getattr(config.organization, "domain", "")
+    run_id = str(run_id or "").strip()
+    if run_id:
+        run = ContentFactoryRun.objects.filter(run_id=run_id).prefetch_related("steps").first()
+        if run is not None:
+            return run
+    queryset = (
+        ContentFactoryRun.objects.filter(domain=domain, workflow__in=workflows)
+        .exclude(status=ContentFactoryRunStatus.CANCELLED)
+        .prefetch_related("steps")
+        .order_by("-updated_at")
+    )
+    repo = str(getattr(config, "github_repo", "") or "").strip()
+    if repo:
+        repo_run = queryset.filter(github_repo__iexact=repo).first()
+        if repo_run is not None:
+            return repo_run
+    return queryset.first()
+
+
+def _dedupe_runs(*groups):
+    seen = set()
+    runs = []
+    for group in groups:
+        for run in group or []:
+            if not run or run.run_id in seen:
+                continue
+            seen.add(run.run_id)
+            runs.append(run)
+    return runs
+
+
+def _article_setup_state_run_from_latest(latest_runs, run_id: str):
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return None
+    return next((run for run in latest_runs or [] if run.run_id == run_id), None)
+
+
+def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> dict:
+    latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
+    raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
+    article_system = resolve_article_system(config) if config else {}
+    pending = _pending_article_system_setup_from_config(config) if config else {}
+    pending_setup_run_id = str(
+        pending.get("setupRunId") or pending.get("setup_run_id") or ""
+    ).strip()
+    pending_source_scan_run_id = str(
+        pending.get("sourceScanRunId") or pending.get("source_scan_run_id") or ""
+    ).strip()
+    pending_rescan_run_id = str(
+        pending.get("rescanRunId") or pending.get("rescan_run_id") or ""
+    ).strip()
+
+    explicit_runs = []
+    for run_id in (pending_setup_run_id, pending_source_scan_run_id, pending_rescan_run_id):
+        explicit_run = _article_setup_state_run_from_latest(latest_runs, run_id) or _latest_persisted_run_for_article_setup(
+            config,
+            VIBE_MARKETING_WORKFLOWS,
+            run_id=run_id,
+        )
+        if explicit_run:
+            explicit_runs.append(explicit_run)
+    latest_scan = (
+        (run if run and run.workflow in SCAN_WORKFLOWS else None)
+        or _article_setup_state_run_from_latest(explicit_runs, pending_source_scan_run_id)
+        or _latest_run_matching(latest_runs, SCAN_WORKFLOWS)
+        or _latest_persisted_run_for_article_setup(config, SCAN_WORKFLOWS)
+    )
+    setup_run = (
+        (run if run and run.workflow == "article_system_setup" else None)
+        or _article_setup_state_run_from_latest(explicit_runs, pending_setup_run_id)
+        or _latest_article_system_setup_run(latest_runs, setup_run_id=pending_setup_run_id)
+        or _latest_persisted_run_for_article_setup(config, {"article_system_setup"}, run_id=pending_setup_run_id)
+    )
+    related_runs = _dedupe_runs(latest_runs, explicit_runs, [latest_scan, setup_run])
+    setup_gate = _article_system_setup_gate(config, related_runs, article_system)
+    if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
+        setup_run = (
+            _article_setup_state_run_from_latest(related_runs, setup_gate.get("setupRunId"))
+            or _latest_persisted_run_for_article_setup(config, {"article_system_setup"}, run_id=setup_gate.get("setupRunId"))
+        )
+        related_runs = _dedupe_runs(related_runs, [setup_run])
+
+    scan_config_identity = _scan_identity_from_config(config, raw_article_system) if config else {}
+    scan_run_identity = _scan_identity_from_run(latest_scan)
+    scan_repo = scan_run_identity.get("repo") or scan_config_identity.get("repo") or str(getattr(config, "github_repo", "") or "").strip()
+    scan_default_branch = scan_run_identity.get("defaultBranch") or scan_config_identity.get("defaultBranch")
+    scan_head_sha = scan_run_identity.get("defaultBranchSha") or scan_config_identity.get("defaultBranchSha")
+    last_scanned_sha = str(getattr(config, "last_scanned_sha", "") or "").strip()
+    scan_completed_at = (
+        scan_run_identity.get("completedAt")
+        or scan_config_identity.get("completedAt")
+        or _iso_or_none(getattr(config, "last_scanned_at", None))
+    )
+    has_persisted_scan = bool(
+        scan_completed_at
+        or last_scanned_sha
+        or getattr(config, "scan_summary", None)
+        or article_system
+        or getattr(config, "publish_targets", None)
+        or pending_source_scan_run_id
+    )
+    scan_status = ""
+    if latest_scan:
+        scan_status = latest_scan.status
+    elif has_persisted_scan:
+        scan_status = "completed"
+    scan_stale = bool(last_scanned_sha and scan_head_sha and last_scanned_sha != scan_head_sha)
+
+    setup_meta = _setup_metadata_from_run(setup_run) if setup_run else {}
+    setup_status = (
+        setup_meta.get("setupStatus")
+        or setup_gate.get("setupStatus")
+        or pending.get("setupStatus")
+        or pending.get("setup_status")
+        or pending.get("status")
+        or (setup_run.status if setup_run else "")
+        or ""
+    )
+    setup_run_id = (
+        setup_meta.get("setupRunId")
+        or setup_gate.get("setupRunId")
+        or pending_setup_run_id
+        or (setup_run.run_id if setup_run else "")
+        or ""
+    )
+    route_path = _article_setup_state_value(
+        pending,
+        article_system,
+        keys=("routePath", "route_path", "path", "publicPath", "public_path", "listingPath", "listing_path"),
+    )
+    preview_url = setup_meta.get("previewUrl") or setup_gate.get("previewUrl") or ""
+    fallback_preview_url = setup_meta.get("fallbackPreviewUrl") or setup_gate.get("fallbackPreviewUrl") or ""
+    live_preview_url = setup_meta.get("livePreviewUrl") or setup_gate.get("livePreviewUrl") or ""
+    pr_url = setup_meta.get("prUrl") or setup_gate.get("prUrl") or ""
+    live_preview = _live_preview_from_run(setup_run) if setup_run else None
+    setup_result = _run_mapping(setup_run.result) if setup_run else {}
+    setup_payload = _article_system_setup_payload_from_run(setup_run) if setup_run else {}
+    error = str(
+        (setup_run.error if setup_run else "")
+        or setup_result.get("error")
+        or setup_result.get("error_message")
+        or setup_payload.get("error")
+        or setup_payload.get("error_message")
+        or ""
+    ).strip()
+    updated_values = [
+        getattr(latest_scan, "updated_at", None),
+        getattr(setup_run, "updated_at", None),
+        getattr(config, "updated_at", None),
+    ]
+    updated_values = [value for value in updated_values if value]
+    updated_at = max(updated_values).isoformat() if updated_values else None
+    return {
+        "repo": scan_repo,
+        "githubRepo": scan_repo,
+        "defaultBranch": scan_default_branch or None,
+        "defaultBranchSha": scan_head_sha or last_scanned_sha or None,
+        "lastScannedSha": last_scanned_sha or None,
+        "scanRunId": (latest_scan.run_id if latest_scan else pending_source_scan_run_id or scan_config_identity.get("scanRunId")) or None,
+        "scanStatus": scan_status or None,
+        "scanCompletedAt": scan_completed_at or None,
+        "scanUpdatedAt": _iso_or_none(getattr(latest_scan, "updated_at", None)),
+        "scanStale": scan_stale,
+        "scanNeedsRescan": scan_stale,
+        "staleReason": "default_branch_changed" if scan_stale else None,
+        "setupRunId": setup_run_id or None,
+        "setupStatus": str(setup_status or "").strip() or None,
+        "setupRunStatus": setup_run.status if setup_run else None,
+        "setupCurrentStep": (setup_payload.get("currentStep") or setup_payload.get("current_step") or getattr(setup_run, "current_step", "") or None) if setup_run else None,
+        "setupBlocked": bool(setup_gate.get("setupBlocked")),
+        "published": bool(setup_gate.get("published")),
+        "routePath": route_path or None,
+        "previewUrl": preview_url or None,
+        "fallbackPreviewUrl": fallback_preview_url or None,
+        "livePreviewUrl": live_preview_url or None,
+        "prUrl": pr_url or None,
+        "livePreview": live_preview,
+        "retryAvailable": bool((setup_run and (setup_run.resume_available or setup_result.get("retry_available"))) or (latest_scan and latest_scan.resume_available)),
+        "error": error or None,
+        "source": "setup_run" if setup_run else "scan_run" if latest_scan else "config" if has_persisted_scan or pending else "none",
+        "updatedAt": updated_at,
+        "articleSurfaceMode": pending.get("mode") or pending.get("articleSurfaceMode") or pending.get("article_surface_mode") or None,
+        "articleSurfaceHint": pending.get("articleSurfaceHint") or pending.get("article_surface_hint") or None,
+    }
+
+
+def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
+    organization = context.organization if context is not None else None
+    if organization is None and run is not None and run.domain:
+        organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
+    if organization is None:
+        return {
+            "repo": "",
+            "githubRepo": "",
+            "scanStatus": None,
+            "scanRunId": None,
+            "scanStale": False,
+            "scanNeedsRescan": False,
+            "setupRunId": None,
+            "setupStatus": None,
+            "setupBlocked": False,
+            "published": False,
+            "source": "none",
+        }
+    config = _get_config(organization) if context is not None else OrganizationContentConfig.objects.filter(organization=organization).first()
+    if config is None:
+        return {
+            "repo": "",
+            "githubRepo": "",
+            "scanStatus": None,
+            "scanRunId": None,
+            "scanStale": False,
+            "scanNeedsRescan": False,
+            "setupRunId": None,
+            "setupStatus": None,
+            "setupBlocked": False,
+            "published": False,
+            "source": "none",
+        }
+    return _article_setup_state_for_config(config, latest_runs=latest_runs, run=run)
+
+
 def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None):
     organization = context.organization if context is not None else None
     if organization is None and run is not None and run.domain:
@@ -5394,6 +5728,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
+    article_setup_state = _article_setup_state(context=context, run=run, latest_runs=latest_runs)
     if compact:
         return {
             "runId": run.run_id,
@@ -5423,10 +5758,15 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "stale": bool(result.get("stale")),
             "staleReason": result.get("stale_reason"),
             "retryAvailable": bool(result.get("retry_available") or run.resume_available),
+            "resumeGeneration": result.get("resume_generation"),
+            "isCurrentAttempt": result.get("is_current_attempt"),
+            "failureStep": result.get("failure_step"),
             "queueName": result.get("queue_name"),
             "queuedAt": result.get("queued_at"),
             "setupQueue": result.get("setup_queue"),
             "livePreview": live_preview,
+            "articleSetupState": article_setup_state,
+            "article_setup_state": article_setup_state,
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
             "result": _compact_result_for_run(run),
         }
@@ -5458,14 +5798,19 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "publishChildRecoverable": result.get("publish_child_recoverable"),
         "publishChildWaitReason": result.get("publish_child_wait_reason"),
         "stale": bool(result.get("stale")),
-        "staleReason": result.get("stale_reason"),
-        "retryAvailable": bool(result.get("retry_available") or run.resume_available),
-        "queueName": result.get("queue_name"),
+            "staleReason": result.get("stale_reason"),
+            "retryAvailable": bool(result.get("retry_available") or run.resume_available),
+            "resumeGeneration": result.get("resume_generation"),
+            "isCurrentAttempt": result.get("is_current_attempt"),
+            "failureStep": result.get("failure_step"),
+            "queueName": result.get("queue_name"),
         "queuedAt": result.get("queued_at"),
         "setupQueue": result.get("setup_queue"),
         "contentPackage": content_package,
         "componentManifest": component_manifest,
         "livePreview": live_preview,
+        "articleSetupState": article_setup_state,
+        "article_setup_state": article_setup_state,
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": result,
@@ -5654,6 +5999,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     )
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
+    article_setup_state = _article_setup_state_for_config(config, latest_runs=latest_runs)
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
     run_mode = "summary" if compact else "full"
@@ -5703,6 +6049,8 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
+        "articleSetupState": article_setup_state,
+        "article_setup_state": article_setup_state,
         "latestRuns": [_serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode) for run in latest_runs],
         "latestRunsByWorkflow": latest_runs_by_workflow,
         "topicCandidates": topic_candidates,
@@ -5795,6 +6143,32 @@ def _serialize_bootstrap_without_domain(company):
         },
         "websiteBaseline": {"status": "missing", "passed": False, "skipped": False},
         "googleBaselineConnection": {"connected": False, "hasBaselineScopes": False, "status": "needs_connection", "connectUrl": ""},
+        "articleSetupState": {
+            "repo": "",
+            "githubRepo": "",
+            "scanStatus": None,
+            "scanRunId": None,
+            "scanStale": False,
+            "scanNeedsRescan": False,
+            "setupRunId": None,
+            "setupStatus": None,
+            "setupBlocked": False,
+            "published": False,
+            "source": "none",
+        },
+        "article_setup_state": {
+            "repo": "",
+            "githubRepo": "",
+            "scanStatus": None,
+            "scanRunId": None,
+            "scanStale": False,
+            "scanNeedsRescan": False,
+            "setupRunId": None,
+            "setupStatus": None,
+            "setupBlocked": False,
+            "published": False,
+            "source": "none",
+        },
         "latestRuns": [],
         "latestRunsByWorkflow": {},
         "topicCandidates": [],

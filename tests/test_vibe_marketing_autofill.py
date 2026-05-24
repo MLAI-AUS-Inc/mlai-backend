@@ -2182,6 +2182,103 @@ class VibeMarketingAutofillTests(TestCase):
         ]
         self.assertEqual(write_queries, [])
 
+    def test_bootstrap_article_setup_state_uses_pending_setup_outside_latest_runs(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config.github_repo = "Acme/site"
+        config.article_system = {
+            "state": "missing",
+            "pending_article_system_setup": {
+                "setupRunId": "setup-run-canonical",
+                "setup_run_id": "setup-run-canonical",
+                "sourceScanRunId": "scan-run-canonical",
+                "source_scan_run_id": "scan-run-canonical",
+                "status": "preview_failed",
+                "routePath": "/articles",
+                "route_path": "/articles",
+            },
+        }
+        config.save(update_fields=["github_repo", "article_system", "updated_at"])
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-run-canonical",
+            workflow="article_system_setup",
+            domain="acme.com",
+            github_repo="Acme/site",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            result={
+                "article_system_setup": {
+                    "setup_run_id": "setup-run-canonical",
+                    "status": "preview_failed",
+                    "preview_url": "https://preview.example/articles",
+                }
+            },
+        )
+        ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
+        for index in range(8):
+            run = ContentFactoryRun.objects.create(
+                run_id=f"newer-article-run-{index}",
+                workflow="article_generation",
+                domain="acme.com",
+                github_repo="Acme/site",
+                status=ContentFactoryRunStatus.COMPLETED,
+            )
+            ContentFactoryRun.objects.filter(run_id=run.run_id).update(updated_at=timezone.now() + timedelta(minutes=index))
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(any(run["runId"] == "setup-run-canonical" for run in response.data["latestRuns"]))
+        state = response.data["articleSetupState"]
+        self.assertEqual(state["setupRunId"], "setup-run-canonical")
+        self.assertEqual(state["setupStatus"], "preview_failed")
+        self.assertEqual(state["scanRunId"], "scan-run-canonical")
+        self.assertEqual(state["routePath"], "/articles")
+
+    def test_bootstrap_article_setup_state_keeps_completed_scan_without_scan_run(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        scanned_at = timezone.now() - timedelta(hours=2)
+        config.github_repo = "Acme/site"
+        config.last_scanned_sha = "abc123"
+        config.last_scanned_at = scanned_at
+        config.article_system = {
+            "state": "missing",
+            "scan": {
+                "githubRepo": "Acme/site",
+                "defaultBranch": "main",
+                "defaultBranchSha": "abc123",
+                "scanRunId": "scan-run-old",
+                "status": "completed",
+                "completedAt": scanned_at.isoformat(),
+            },
+        }
+        config.save(update_fields=["github_repo", "last_scanned_sha", "last_scanned_at", "article_system", "updated_at"])
+        for index in range(8):
+            run = ContentFactoryRun.objects.create(
+                run_id=f"recent-discovery-run-{index}",
+                workflow="content_factory_discovery",
+                domain="acme.com",
+                github_repo="Acme/site",
+                status=ContentFactoryRunStatus.COMPLETED,
+            )
+            ContentFactoryRun.objects.filter(run_id=run.run_id).update(updated_at=timezone.now() + timedelta(minutes=index))
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(any(run["workflow"] in {"repo_scan", "content_factory_scan"} for run in response.data["latestRuns"]))
+        state = response.data["articleSetupState"]
+        self.assertEqual(state["scanStatus"], "completed")
+        self.assertEqual(state["scanRunId"], "scan-run-old")
+        self.assertEqual(state["defaultBranch"], "main")
+        self.assertEqual(state["defaultBranchSha"], "abc123")
+        self.assertFalse(state["scanNeedsRescan"])
+
     def test_bootstrap_includes_resumable_article_drafts(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         OrganizationContentConfig.objects.get_or_create(organization=organization)
