@@ -1332,10 +1332,17 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "status": "preview_failed",
                 "error": "Directory scaffold failed local build verification.",
                 "error_code": "DIRECTORY_BUILD_CODE_FAILED",
+                "failed_preview_url": "https://old-preview.example/articles",
+                "failure_kind": "old_failure",
+                "failed_step": "verify_directory_browser",
+                "preview_failure_details": {"old": True},
                 "resume_generation": 1,
                 "article_system_setup": {
                     "status": "preview_failed",
                     "error_code": "DIRECTORY_BUILD_CODE_FAILED",
+                    "failed_preview_url": "https://old-preview.example/articles",
+                    "failure_kind": "old_failure",
+                    "failed_step": "verify_directory_browser",
                     "resume_generation": 1,
                 },
                 "livePreview": {"status": "failed", "error": "old failure"},
@@ -1373,6 +1380,10 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(run.result["resume_generation"], 2)
         self.assertNotIn("livePreview", run.result)
         self.assertNotIn("error_code", run.result)
+        self.assertNotIn("failed_preview_url", run.result)
+        self.assertNotIn("failure_kind", run.result)
+        self.assertNotIn("failed_step", run.result)
+        self.assertNotIn("preview_failure_details", run.result)
         self.assertFalse(run.result["retry_available"])
         self.assertEqual(run.error, "")
 
@@ -1699,7 +1710,11 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
 
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_preview_failed_callback_blocks_run(self, mock_send_dm):
-        Organization.objects.create(name="MLAI", domain="mlai.au")
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            article_system={"pending_article_system_setup": {"status": "preview_building"}},
+        )
         ContentFactoryRun.objects.create(
             run_id="scan-run-parent-failed-preview",
             workflow="repo_scan",
@@ -1719,12 +1734,21 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
                 "github_repo": "MLAI-AUS-Inc/mlai-au",
                 "parent_run_id": "scan-run-parent-failed-preview",
                 "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/2",
+                "failed_preview_url": "https://preview.example/articles/",
+                "failure_kind": "directory_slot_missing",
+                "failed_step": "verify_directory_browser",
+                "preview_failure_details": {"missing_slots": ["empty-state"]},
+                "directory_quality_gates": {"status": "failed", "failed_gate": "browser"},
+                "directory_browser_repair": {"attempts": 2, "exhausted": True},
                 "live_preview": {
                     "available": False,
                     "status": "failed",
                     "platformStatus": "failed",
                     "error": "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.",
                     "errorCode": "platform_preview_failed",
+                    "failedPreviewUrl": "https://preview.example/articles/",
+                    "failureKind": "directory_slot_missing",
+                    "failedPhase": "verify_directory_browser",
                     "builderRunUrl": "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21",
                     "retryable": True,
                 },
@@ -1745,9 +1769,23 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(setup_run.error, "MLAI GitHub App cannot access MLAI-AUS-Inc/mlai-au.")
         self.assertEqual(setup_run.result["livePreview"]["status"], "failed")
         self.assertEqual(setup_run.result["livePreview"]["builderRunUrl"], "https://github.com/MLAI-AUS-Inc/content-factory/actions/runs/21")
+        self.assertEqual(setup_run.result["failed_preview_url"], "https://preview.example/articles/")
+        self.assertEqual(setup_run.result["failure_kind"], "directory_slot_missing")
+        self.assertEqual(setup_run.result["failed_step"], "verify_directory_browser")
+        self.assertEqual(setup_run.result["preview_failure_details"]["missing_slots"], ["empty-state"])
+        self.assertEqual(setup_run.result["directory_quality_gates"]["failed_gate"], "browser")
+        self.assertEqual(setup_run.result["directory_browser_repair"]["attempts"], 2)
         parent = ContentFactoryRun.objects.get(run_id="scan-run-parent-failed-preview")
         self.assertEqual(parent.current_step, "article_system_setup_preview_failed")
         self.assertEqual(parent.result["article_system_setup"]["status"], "preview_failed")
+        self.assertEqual(parent.result["failed_preview_url"], "https://preview.example/articles/")
+        self.assertEqual(parent.result["failure_kind"], "directory_slot_missing")
+        config = Organization.objects.get(domain="mlai.au").content_config
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["failedPreviewUrl"], "https://preview.example/articles/")
+        self.assertEqual(pending["failureKind"], "directory_slot_missing")
+        self.assertEqual(pending["failedStep"], "verify_directory_browser")
+        self.assertEqual(pending["previewFailureDetails"]["missing_slots"], ["empty-state"])
 
     def test_article_system_live_preview_retry_progress_clears_stale_failure_state(self):
         from content_factory.vibe_marketing_views import _persist_live_preview_payload
