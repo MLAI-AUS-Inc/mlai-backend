@@ -494,6 +494,70 @@ def _store_pending_article_system_setup(config, *, mode: str, route_path: str, s
     return pending
 
 
+def _mark_pending_article_system_setup_retry(config, *, run=None, result=None):
+    if not config:
+        return
+    result = _run_mapping(result if result is not None else getattr(run, "result", {}))
+    setup = _run_mapping(result.get("article_system_setup"))
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    setup_run_id = str(
+        setup.get("setup_run_id")
+        or setup.get("setupRunId")
+        or result.get("setup_run_id")
+        or result.get("setupRunId")
+        or getattr(run, "run_id", "")
+        or ""
+    ).strip()
+    current_step = str(
+        setup.get("current_step")
+        or setup.get("currentStep")
+        or result.get("current_step")
+        or result.get("currentStep")
+        or getattr(run, "current_step", "")
+        or "queued"
+    ).strip()
+    if setup_run_id:
+        pending["setupRunId"] = setup_run_id
+        pending["setup_run_id"] = setup_run_id
+    pending["status"] = "queued"
+    pending["setupStatus"] = "queued"
+    pending["setup_status"] = "queued"
+    pending["currentStep"] = current_step
+    pending["current_step"] = current_step
+    pending["setupCurrentStep"] = current_step
+    pending["setup_current_step"] = current_step
+    pending["retryAvailable"] = False
+    pending["retry_available"] = False
+    pending["retryable"] = False
+    pending["isCurrentAttempt"] = True
+    pending["is_current_attempt"] = True
+    resume_generation = result.get("resume_generation") or setup.get("resume_generation")
+    if resume_generation not in (None, ""):
+        pending["resumeGeneration"] = resume_generation
+        pending["resume_generation"] = resume_generation
+    for key in (
+        "error",
+        "errorCode",
+        "error_code",
+        "livePreview",
+        "live_preview",
+        "stale",
+        "staleReason",
+        "stale_reason",
+        "failureStep",
+        "failure_step",
+        "failedStep",
+        "failed_step",
+    ):
+        pending.pop(key, None)
+    pending["updatedAt"] = timezone.now().isoformat()
+    pending["updated_at"] = pending["updatedAt"]
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = article_system
+    config.save(update_fields=["article_system", "updated_at"])
+
+
 def _serialize_github_repo_payload(repo: dict, *, installation_id: str = "") -> dict:
     owner = repo.get("owner") if isinstance(repo.get("owner"), dict) else {}
     full_name = str(repo.get("full_name") or "").strip()
@@ -4821,7 +4885,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     live_preview = _live_preview_from_run(setup_run) if setup_run else None
     setup_result = _run_mapping(setup_run.result) if setup_run else {}
     setup_payload = _article_system_setup_payload_from_run(setup_run) if setup_run else {}
-    error = str(
+    active_setup_run = bool(setup_run and setup_run.status in RUNNING_RUN_STATUSES)
+    error = "" if active_setup_run else str(
         (setup_run.error if setup_run else "")
         or setup_result.get("error")
         or setup_result.get("error_message")
@@ -4972,13 +5037,17 @@ def _setup_metadata_from_run(run) -> dict:
         return {}
     result = _run_mapping(run.result)
     setup = _article_system_setup_payload_from_run(run)
-    status_value = str(
-        _setup_value(result, "status")
-        or _setup_value(setup, "status")
-        or getattr(run, "current_step", "")
-        or getattr(run, "status", "")
-        or ""
-    ).strip()
+    run_status_value = str(getattr(run, "status", "") or "").strip()
+    if run.workflow == "article_system_setup" and run_status_value in RUNNING_RUN_STATUSES:
+        status_value = run_status_value
+    else:
+        status_value = str(
+            _setup_value(result, "status")
+            or _setup_value(setup, "status")
+            or getattr(run, "current_step", "")
+            or run_status_value
+            or ""
+        ).strip()
     setup_run_id = str(
         _setup_value(result, "setup_run_id", "setupRunId")
         or _setup_value(setup, "setup_run_id", "setupRunId")
@@ -6673,25 +6742,12 @@ def _terminal_article_system_setup_has_local_failure(run) -> bool:
     if not run or run.workflow not in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
         return False
     result = run.result if isinstance(run.result, dict) else {}
+    if _article_system_setup_current_retry_attempt(result):
+        return False
     result_failure = _result_has_current_failure(result)
     current_step = str(run.current_step or "").strip().lower()
     terminal_status = run.status in FAILED_RUN_STATUSES or current_step in {"preview_failed", "fallback_ready"}
     return bool((terminal_status or result_failure) and (run.error or result_failure))
-
-
-def _article_system_setup_resume_generation(*payloads) -> int:
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            continue
-        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
-            value = payload.get(key)
-            if value in (None, ""):
-                continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                continue
-    return 0
 
 
 ARTICLE_SYSTEM_SETUP_ACTIVE_PAYLOAD_STATUSES = {
@@ -6743,34 +6799,115 @@ def _merge_preserved_live_preview(local_result, remote_result):
     return merged
 
 
-def _clear_article_system_setup_retry_state(result):
+ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES = {"failed", "blocked", "preview_failed", "fallback_ready"}
+
+
+def _clear_article_system_setup_retry_state(result, *, current_step="", resume_generation=None):
     cleaned = dict(result or {})
-    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
-    resume_generation = _article_system_setup_resume_generation(cleaned, setup_payload) + 1
-    current_step = str(cleaned.get("current_step") or setup_payload.get("current_step") or "fetch_org_config").strip() or "fetch_org_config"
     updated_at = timezone.now().isoformat()
-    for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
+    failure_keys = (
+        "livePreview",
+        "live_preview",
+        "error",
+        "error_code",
+        "errorCode",
+        "errors",
+        "stale",
+        "stale_reason",
+        "staleReason",
+        "failure_step",
+        "failureStep",
+        "failed_step",
+        "failedStep",
+        "failed_phase",
+        "failedPhase",
+        "failed_command",
+        "failedCommand",
+        "log_excerpt",
+        "logExcerpt",
+        "builder_run_url",
+        "builderRunUrl",
+    )
+    for key in failure_keys:
         cleaned.pop(key, None)
-    cleaned["status"] = "queued"
-    cleaned["current_step"] = current_step
-    cleaned["resume_generation"] = resume_generation
-    cleaned["is_current_attempt"] = True
+    if str(cleaned.get("status") or "").strip().lower() in ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES:
+        cleaned["status"] = "queued"
+    if current_step:
+        cleaned["current_step"] = current_step
+        cleaned["currentStep"] = current_step
+    if resume_generation not in (None, ""):
+        cleaned["resume_generation"] = resume_generation
+        cleaned["resumeGeneration"] = resume_generation
     cleaned["retry_available"] = False
+    cleaned["retryAvailable"] = False
     cleaned["retryable"] = False
+    cleaned["is_current_attempt"] = True
+    cleaned["isCurrentAttempt"] = True
     cleaned["updated_at"] = updated_at
+    cleaned["updatedAt"] = updated_at
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
     if setup_payload:
         setup_payload = dict(setup_payload)
-        for key in ("error", "error_code", "livePreview", "live_preview", "stale", "stale_reason"):
+        for key in failure_keys:
             setup_payload.pop(key, None)
-        setup_payload["status"] = "queued"
-        setup_payload["current_step"] = current_step
-        setup_payload["resume_generation"] = resume_generation
-        setup_payload["is_current_attempt"] = True
+        if str(setup_payload.get("status") or "").strip().lower() in ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES:
+            setup_payload["status"] = "queued"
+        if current_step:
+            setup_payload["current_step"] = current_step
+            setup_payload["currentStep"] = current_step
+        if resume_generation not in (None, ""):
+            setup_payload["resume_generation"] = resume_generation
+            setup_payload["resumeGeneration"] = resume_generation
         setup_payload["retry_available"] = False
+        setup_payload["retryAvailable"] = False
         setup_payload["retryable"] = False
+        setup_payload["is_current_attempt"] = True
+        setup_payload["isCurrentAttempt"] = True
         setup_payload["updated_at"] = updated_at
+        setup_payload["updatedAt"] = updated_at
         cleaned["article_system_setup"] = setup_payload
+    nested_result = cleaned.get("result") if isinstance(cleaned.get("result"), dict) else {}
+    if nested_result:
+        cleaned["result"] = _clear_article_system_setup_retry_state(
+            nested_result,
+            current_step=current_step,
+            resume_generation=resume_generation,
+        )
     return cleaned
+
+
+def _article_system_setup_resume_generation(*payloads):
+    for payload in payloads:
+        mapping = _run_mapping(payload)
+        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
+            value = mapping.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _article_system_setup_current_retry_attempt(*payloads) -> bool:
+    for payload in payloads:
+        mapping = _run_mapping(payload)
+        if not mapping:
+            continue
+        setup = _run_mapping(mapping.get("article_system_setup"))
+        queue = _run_mapping(mapping.get("setup_queue")) or _run_mapping(setup.get("setup_queue"))
+        if mapping.get("is_current_attempt") is True or setup.get("is_current_attempt") is True:
+            return True
+        if mapping.get("isCurrentAttempt") is True or setup.get("isCurrentAttempt") is True:
+            return True
+        if queue.get("resumed") is True:
+            return True
+        if _article_system_setup_resume_generation(mapping, setup) > 0 and str(
+            mapping.get("status") or setup.get("status") or ""
+        ).strip().lower() in {"queued", "running", "processing", "pending", "starting", "in_progress", "preview_building"}:
+            return True
+    return False
 
 
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
@@ -6984,6 +7121,11 @@ def _sync_local_run_from_remote(run, remote_data):
     }
     result = _run_result_from_remote(remote_data)
     remote_status = _normalize_remote_run_status(remote_data.get("status") or result.get("status") or run.status)
+    remote_current_retry_attempt = bool(
+        run.workflow == "article_system_setup"
+        and remote_status in RUNNING_RUN_STATUSES
+        and _article_system_setup_current_retry_attempt(remote_data, result)
+    )
     if (
         run.workflow in SCAN_WORKFLOWS
         and run.status in SCAN_LOCAL_AUTHORITATIVE_STATUSES
@@ -7002,7 +7144,7 @@ def _sync_local_run_from_remote(run, remote_data):
     if run.status == ContentFactoryRunStatus.CANCELLED and remote_status != ContentFactoryRunStatus.CANCELLED:
         return run
     if run.status in FAILED_RUN_STATUSES and remote_status in RUNNING_RUN_STATUSES:
-        if not _article_system_setup_remote_can_replace_local(run, result, remote_status):
+        if not remote_current_retry_attempt and not _article_system_setup_remote_can_replace_local(run, result, remote_status):
             return run
 
     run.status = remote_status
@@ -7064,8 +7206,12 @@ def _sync_local_run_from_remote(run, remote_data):
             if request_compact and result.get("run_request") in (None, "", {}, []):
                 result["run_request"] = request_compact
         if run.workflow == "article_system_setup" and isinstance(run.result, dict):
-            remote_replaces_local_setup = _article_system_setup_remote_can_replace_local(run, result, remote_status)
-            for key in (
+            remote_replaces_local_setup = remote_current_retry_attempt or _article_system_setup_remote_can_replace_local(
+                run,
+                result,
+                remote_status,
+            )
+            preserved_keys = (
                 "scan_purpose",
                 "setup_run_id",
                 "setupRunId",
@@ -7075,7 +7221,19 @@ def _sync_local_run_from_remote(run, remote_data):
                 "article_surface_mode",
                 "article_surface_hint",
                 "pending_article_system_setup",
-            ):
+            )
+            if remote_replaces_local_setup:
+                stale_retry_keys = {
+                    "error_code",
+                    "stale",
+                    "stale_reason",
+                    "retry_available",
+                    "retryable",
+                    "article_system_setup",
+                    "pending_article_system_setup",
+                }
+                preserved_keys = tuple(key for key in preserved_keys if key not in stale_retry_keys)
+            for key in preserved_keys:
                 if result.get(key) in (None, "", {}, []) and run.result.get(key) not in (None, "", {}, []):
                     result[key] = run.result[key]
             if not remote_replaces_local_setup:
@@ -9662,9 +9820,22 @@ class VibeMarketingRunControlView(APIView):
             if run.status in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
                 run.status = ContentFactoryRunStatus.QUEUED
             if run.workflow == "article_system_setup":
-                run.result = _clear_article_system_setup_retry_state(run.result or {})
+                resume_current_step = str(remote_data.get("current_step") or remote_data.get("step") or run.current_step or "queued").strip()
+                resume_generation = _article_system_setup_resume_generation(
+                    remote_data,
+                    remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {},
+                )
+                if not resume_generation:
+                    local_result = run.result if isinstance(run.result, dict) else {}
+                    local_setup = local_result.get("article_system_setup") if isinstance(local_result.get("article_system_setup"), dict) else {}
+                    resume_generation = _article_system_setup_resume_generation(local_result, local_setup) + 1
+                run.result = _clear_article_system_setup_retry_state(
+                    run.result or {},
+                    current_step=resume_current_step,
+                    resume_generation=resume_generation or None,
+                )
                 run.status = ContentFactoryRunStatus.QUEUED
-                run.current_step = str(run.result.get("current_step") or run.current_step or "fetch_org_config")
+                run.current_step = resume_current_step
                 run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
                 run.resume_available = False
                 run.error = ""
@@ -9682,6 +9853,51 @@ class VibeMarketingRunControlView(APIView):
         if remote_data:
             result = run.result or {}
             result["latest_control_response"] = remote_data
+            if action == "resume" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                resume_current_step = str(
+                    remote_data.get("current_step")
+                    or remote_data.get("step")
+                    or remote_result.get("current_step")
+                    or remote_result.get("currentStep")
+                    or run.current_step
+                    or "queued"
+                ).strip()
+                resume_generation = _article_system_setup_resume_generation(
+                    remote_data,
+                    remote_result,
+                    remote_result.get("article_system_setup") if isinstance(remote_result.get("article_system_setup"), dict) else {},
+                )
+                result = _clear_article_system_setup_retry_state(
+                    result,
+                    current_step=resume_current_step,
+                    resume_generation=resume_generation or None,
+                )
+                result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
+                setup_payload = dict(result.get("article_system_setup") or {})
+                setup_payload["status"] = "queued"
+                setup_payload.setdefault("setup_run_id", run.run_id)
+                setup_payload["current_step"] = resume_current_step
+                setup_payload["currentStep"] = resume_current_step
+                setup_payload["retry_available"] = False
+                setup_payload["retryAvailable"] = False
+                setup_payload["retryable"] = False
+                setup_payload["is_current_attempt"] = True
+                setup_payload["isCurrentAttempt"] = True
+                if resume_generation:
+                    setup_payload["resume_generation"] = resume_generation
+                    setup_payload["resumeGeneration"] = resume_generation
+                    result["resume_generation"] = resume_generation
+                    result["resumeGeneration"] = resume_generation
+                result["article_system_setup"] = setup_payload
+                result["status"] = "queued"
+                result["current_step"] = resume_current_step
+                result["currentStep"] = resume_current_step
+                run.status = ContentFactoryRunStatus.QUEUED
+                run.current_step = resume_current_step
+                run.resume_available = False
+                run.error = ""
+                _mark_pending_article_system_setup_retry(_get_config(context.organization), run=run, result=result)
             if action == "approve" and run.workflow in SCAN_WORKFLOWS:
                 setup_run_id = str(remote_data.get("setup_run_id") or "").strip()
                 if setup_run_id:
@@ -9731,8 +9947,8 @@ class VibeMarketingRunControlView(APIView):
                             result=setup_payload,
                             error="",
                         )
-            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data):
-                run.status = remote_data["status"]
+            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data) and action != "resume":
+                run.status = _normalize_remote_run_status(remote_data["status"])
             if remote_data.get("current_step"):
                 run.current_step = remote_data["current_step"]
             if action == "resume" and run.workflow == "article_system_setup":

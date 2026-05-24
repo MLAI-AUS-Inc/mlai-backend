@@ -7,10 +7,10 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from content_factory.models import ContentFactoryJob
+from content_factory.models import ContentFactoryJob, OrganizationContentConfig
 from organizations.models import Organization
 from startup_updates.models import UserStartupBinding
-from workflow_runs.models import ContentFactoryRun
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 User = get_user_model()
 
@@ -68,6 +68,222 @@ class ContentFactoryRunSyncTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id="run-sync-1")
         self.assertEqual(run.workflow, "repo_scan")
         self.assertEqual(run.run_request.get("domain"), "mlai.au")
+
+    def test_run_sync_accepts_running_article_setup_retry_over_terminal_local_state(self):
+        ContentFactoryRun.objects.create(
+            run_id="setup-retry-sync-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            error="Hosted preview failed.",
+            result={
+                "status": "preview_failed",
+                "error": "Hosted preview failed.",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-retry-sync-1",
+                    "error": "Hosted preview failed.",
+                },
+            },
+        )
+
+        response = self.client.put(
+            "/api/content-factory/runs/setup-retry-sync-1/",
+            {
+                "run_id": "setup-retry-sync-1",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": "running",
+                "current_step": "verify_directory_build",
+                "result": {
+                    "status": "running",
+                    "current_step": "verify_directory_build",
+                    "resume_generation": 2,
+                    "is_current_attempt": True,
+                    "article_system_setup": {
+                        "status": "running",
+                        "setup_run_id": "setup-retry-sync-1",
+                        "current_step": "verify_directory_build",
+                        "resume_generation": 2,
+                        "is_current_attempt": True,
+                    },
+                },
+                "step_states": {
+                    "verify_directory_build": {
+                        "name": "verify_directory_build",
+                        "required": True,
+                        "status": "running",
+                        "attempts": 2,
+                    }
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sync_status"], "updated")
+        run = ContentFactoryRun.objects.get(run_id="setup-retry-sync-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "verify_directory_build")
+        self.assertEqual(run.error, "")
+        self.assertEqual(run.result["article_system_setup"]["status"], "running")
+        self.assertNotIn("error", run.result["article_system_setup"])
+
+    def test_status_poll_sync_accepts_running_article_setup_retry(self):
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+
+        run = ContentFactoryRun.objects.create(
+            run_id="setup-poll-sync-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            error="Hosted preview failed.",
+            result={
+                "status": "preview_failed",
+                "error": "Hosted preview failed.",
+                "retry_available": True,
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-poll-sync-1",
+                    "error": "Hosted preview failed.",
+                },
+            },
+        )
+
+        synced = _sync_local_run_from_remote(
+            run,
+            {
+                "run_id": "setup-poll-sync-1",
+                "workflow": "article_system_setup",
+                "status": "processing",
+                "current_step": "verify_directory_build",
+                "result": {
+                    "status": "running",
+                    "current_step": "verify_directory_build",
+                    "resume_generation": 4,
+                    "is_current_attempt": True,
+                    "article_system_setup": {
+                        "status": "running",
+                        "setup_run_id": "setup-poll-sync-1",
+                        "current_step": "verify_directory_build",
+                        "resume_generation": 4,
+                        "is_current_attempt": True,
+                    },
+                },
+            },
+        )
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(synced.current_step, "verify_directory_build")
+        self.assertEqual(synced.error, "")
+        self.assertEqual(synced.result["article_system_setup"]["status"], "running")
+        self.assertNotIn("error", synced.result)
+
+    def test_article_setup_progress_callback_updates_pending_setup_state(self):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            article_system={
+                "pending_article_system_setup": {
+                    "setupRunId": "setup-progress-1",
+                    "setupStatus": "preview_failed",
+                    "status": "preview_failed",
+                    "error": "Old preview failure.",
+                }
+            },
+        )
+        ContentFactoryRun.objects.create(
+            run_id="setup-progress-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="preview_failed",
+            error="Old preview failure.",
+            result={"status": "preview_failed", "error": "Old preview failure."},
+        )
+
+        response = self.client.post(
+            "/api/content-factory/callback/",
+            {
+                "event_type": "article_system_setup_progress",
+                "job_id": "setup-progress-1",
+                "run_id": "setup-progress-1",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": "running",
+                "current_step": "verify_directory_build",
+                "resume_generation": 3,
+                "is_current_attempt": True,
+                "article_system_setup": {
+                    "status": "running",
+                    "setup_run_id": "setup-progress-1",
+                    "current_step": "verify_directory_build",
+                    "resume_generation": 3,
+                    "is_current_attempt": True,
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="setup-progress-1")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "verify_directory_build")
+        self.assertEqual(run.error, "")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["setupStatus"], "running")
+        self.assertEqual(pending["setupCurrentStep"], "verify_directory_build")
+        self.assertEqual(pending["resumeGeneration"], 3)
+        self.assertNotIn("error", pending)
+
+    def test_article_setup_state_prefers_active_setup_run_over_stale_pending_config(self):
+        from content_factory.vibe_marketing_views import _article_setup_state_for_config
+
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "setupRunId": "setup-state-1",
+                    "setupStatus": "preview_failed",
+                    "status": "preview_failed",
+                    "error": "Old preview failure.",
+                }
+            },
+        )
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-state-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            result={
+                "status": "preview_failed",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "setup_run_id": "setup-state-1",
+                    "current_step": "verify_directory_build",
+                },
+            },
+        )
+
+        state = _article_setup_state_for_config(config, latest_runs=[], run=setup_run)
+
+        self.assertEqual(state["setupStatus"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(state["setupRunStatus"], ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(state["setupCurrentStep"], "verify_directory_build")
+        self.assertIsNone(state["error"])
 
     def test_run_sync_retries_transient_sqlite_lock(self):
         payload = {
