@@ -1320,6 +1320,115 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["livePreviewUrl"], "/api/runs/setup-run-building/live-preview")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_progress_callback_replaces_stale_failure(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="setup-run-retry-progress",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="verify_directory_build",
+            result={
+                "status": "preview_failed",
+                "error": "Directory scaffold failed local build verification.",
+                "error_code": "DIRECTORY_BUILD_CODE_FAILED",
+                "resume_generation": 1,
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "error_code": "DIRECTORY_BUILD_CODE_FAILED",
+                    "resume_generation": 1,
+                },
+                "livePreview": {"status": "failed", "error": "old failure"},
+                "retry_available": True,
+            },
+            error="Directory scaffold failed local build verification.",
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_progress",
+                "job_id": "setup-run-retry-progress",
+                "run_id": "setup-run-retry-progress",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": "running",
+                "current_step": "validate_directory_dependencies",
+                "resume_generation": 2,
+                "article_system_setup": {
+                    "status": "running",
+                    "setup_run_id": "setup-run-retry-progress",
+                    "current_step": "validate_directory_dependencies",
+                    "resume_generation": 2,
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="setup-run-retry-progress")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "validate_directory_dependencies")
+        self.assertEqual(run.result["resume_generation"], 2)
+        self.assertNotIn("livePreview", run.result)
+        self.assertNotIn("error_code", run.result)
+        self.assertFalse(run.result["retry_available"])
+        self.assertEqual(run.error, "")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_ignores_stale_older_failure_callback(self, mock_send_dm):
+        ContentFactoryRun.objects.create(
+            run_id="setup-run-stale-callback",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            result={
+                "status": "running",
+                "current_step": "verify_directory_build",
+                "resume_generation": 3,
+                "article_system_setup": {
+                    "status": "running",
+                    "current_step": "verify_directory_build",
+                    "resume_generation": 3,
+                },
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-run-stale-callback",
+                "run_id": "setup-run-stale-callback",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": "failed",
+                "current_step": "verify_directory_build",
+                "resume_generation": 2,
+                "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+                "error": "old failed callback",
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "current_step": "verify_directory_build",
+                    "resume_generation": 2,
+                    "error_code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="setup-run-stale-callback")
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "verify_directory_build")
+        self.assertEqual(run.result["resume_generation"], 3)
+        self.assertNotIn("error_code", run.result)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_preview_ready_without_exact_render_blocks_approval(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(
