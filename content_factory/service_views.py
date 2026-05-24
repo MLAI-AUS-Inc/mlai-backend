@@ -1918,10 +1918,6 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
         clearable_empty_keys = {
-            "previewUrl",
-            "preview_url",
-            "fallbackPreviewUrl",
-            "fallback_preview_url",
             "error",
             "errorCode",
             "error_code",
@@ -1935,10 +1931,18 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
             "failedStep",
             "failed_step",
         }
+        explicit_empty_value_keys = {
+            "previewUrl",
+            "preview_url",
+            "fallbackPreviewUrl",
+            "fallback_preview_url",
+        }
         for key, value in updates.items():
-            if value not in (None, ""):
+            if value not in (None, "") or (value == "" and key in explicit_empty_value_keys):
                 pending[key] = value
             elif key in clearable_empty_keys:
+                pending.pop(key, None)
+            elif value is None and key in explicit_empty_value_keys:
                 pending.pop(key, None)
         if not pending:
             return
