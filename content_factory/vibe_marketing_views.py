@@ -2680,7 +2680,7 @@ def _rewrite_live_preview_proxy_body(run_id, body, content_type):
     return rewritten.encode("utf-8")
 
 
-LIVE_PREVIEW_ACTIVE_STATUSES = {"queued", "pending", "preparing", "starting", "building", "running"}
+LIVE_PREVIEW_ACTIVE_STATUSES = {"queued", "pending", "preparing", "starting", "building", "running", "preview_verifying", "repair_preview_building"}
 LIVE_PREVIEW_FAILURE_STATUSES = {"failed", "blocked", "expired", "cancelled", "canceled", "timeout", "timed_out"}
 
 
@@ -2735,6 +2735,12 @@ def _persist_live_preview_payload(run, payload):
         if run.workflow == "article_system_setup":
             preview_statuses = _live_preview_statuses(payload)
             preview_url = str(payload.get("previewUrl") or payload.get("preview_url") or "").strip()
+            failed_preview_url = str(payload.get("failedPreviewUrl") or payload.get("failed_preview_url") or "").strip()
+            failure_kind = str(payload.get("failureKind") or payload.get("failure_kind") or "").strip()
+            failed_step = str(payload.get("failedPhase") or payload.get("failed_phase") or payload.get("failedStep") or payload.get("failed_step") or "").strip()
+            preview_failure_details = payload.get("previewFailureDetails") or payload.get("preview_failure_details")
+            directory_quality_gates = payload.get("directoryQualityGates") or payload.get("directory_quality_gates")
+            directory_browser_repair = payload.get("directoryBrowserRepair") or payload.get("directory_browser_repair")
             failed = bool(preview_statuses.intersection(LIVE_PREVIEW_FAILURE_STATUSES) or payload.get("error"))
             ready = _live_preview_exact_ready(payload)
             fallback_ready = _live_preview_fallback_ready(payload)
@@ -2749,9 +2755,45 @@ def _persist_live_preview_payload(run, payload):
                 result.pop("deny_url", None)
                 result["error"] = payload.get("error") or "Articles setup preview could not be prepared."
                 result["error_code"] = error_code
+                if failed_preview_url:
+                    result["failed_preview_url"] = failed_preview_url
+                    result["failedPreviewUrl"] = failed_preview_url
+                if failure_kind:
+                    result["failure_kind"] = failure_kind
+                    result["failureKind"] = failure_kind
+                if failed_step:
+                    result["failed_step"] = failed_step
+                    result["failedStep"] = failed_step
+                if isinstance(preview_failure_details, dict):
+                    result["preview_failure_details"] = preview_failure_details
+                    result["previewFailureDetails"] = preview_failure_details
+                if isinstance(directory_quality_gates, dict):
+                    result["directory_quality_gates"] = directory_quality_gates
+                    result["directoryQualityGates"] = directory_quality_gates
+                if isinstance(directory_browser_repair, dict):
+                    result["directory_browser_repair"] = directory_browser_repair
+                    result["directoryBrowserRepair"] = directory_browser_repair
                 setup_payload["status"] = "preview_failed"
                 setup_payload["error"] = result["error"]
                 setup_payload["error_code"] = error_code
+                if failed_preview_url:
+                    setup_payload["failed_preview_url"] = failed_preview_url
+                    setup_payload["failedPreviewUrl"] = failed_preview_url
+                if failure_kind:
+                    setup_payload["failure_kind"] = failure_kind
+                    setup_payload["failureKind"] = failure_kind
+                if failed_step:
+                    setup_payload["failed_step"] = failed_step
+                    setup_payload["failedStep"] = failed_step
+                if isinstance(preview_failure_details, dict):
+                    setup_payload["preview_failure_details"] = preview_failure_details
+                    setup_payload["previewFailureDetails"] = preview_failure_details
+                if isinstance(directory_quality_gates, dict):
+                    setup_payload["directory_quality_gates"] = directory_quality_gates
+                    setup_payload["directoryQualityGates"] = directory_quality_gates
+                if isinstance(directory_browser_repair, dict):
+                    setup_payload["directory_browser_repair"] = directory_browser_repair
+                    setup_payload["directoryBrowserRepair"] = directory_browser_repair
                 setup_payload.pop("approve_url", None)
                 setup_payload.pop("deny_url", None)
                 setup_payload["retryable"] = payload.get("retryable", True)
@@ -2766,6 +2808,22 @@ def _persist_live_preview_payload(run, payload):
                 result["preview_url"] = preview_url
                 result.pop("fallback_preview_url", None)
                 result.pop("error", None)
+                for key in (
+                    "failed_preview_url",
+                    "failedPreviewUrl",
+                    "failure_kind",
+                    "failureKind",
+                    "failed_step",
+                    "failedStep",
+                    "preview_failure_details",
+                    "previewFailureDetails",
+                    "directory_quality_gates",
+                    "directoryQualityGates",
+                    "directory_browser_repair",
+                    "directoryBrowserRepair",
+                ):
+                    result.pop(key, None)
+                    setup_payload.pop(key, None)
                 setup_payload["status"] = "preview_ready"
                 setup_payload["preview_url"] = preview_url
                 setup_payload.pop("fallback_preview_url", None)
@@ -2785,6 +2843,22 @@ def _persist_live_preview_payload(run, payload):
                 result["fallback_preview_url"] = preview_url
                 result["error"] = warning
                 result["error_code"] = "article_system_setup_preview_not_exact"
+                for key in (
+                    "failed_preview_url",
+                    "failedPreviewUrl",
+                    "failure_kind",
+                    "failureKind",
+                    "failed_step",
+                    "failedStep",
+                    "preview_failure_details",
+                    "previewFailureDetails",
+                    "directory_quality_gates",
+                    "directoryQualityGates",
+                    "directory_browser_repair",
+                    "directoryBrowserRepair",
+                ):
+                    result.pop(key, None)
+                    setup_payload.pop(key, None)
                 setup_payload["status"] = "fallback_ready"
                 setup_payload["preview_url"] = ""
                 setup_payload.pop("approve_url", None)
@@ -2800,13 +2874,35 @@ def _persist_live_preview_payload(run, payload):
                 run.error = warning
                 update_fields.extend(["status", "current_step", "approval_state", "error"])
             elif active:
-                result["status"] = "preview_building"
+                if "preview_verifying" in preview_statuses:
+                    active_status = "preview_verifying"
+                elif "repair_preview_building" in preview_statuses:
+                    active_status = "repair_preview_building"
+                else:
+                    active_status = "preview_building"
+                result["status"] = active_status
                 result["preview_url"] = ""
                 result.pop("fallback_preview_url", None)
                 result.pop("approve_url", None)
                 result.pop("deny_url", None)
                 result.pop("error", None)
-                setup_payload["status"] = "preview_building"
+                for key in (
+                    "failed_preview_url",
+                    "failedPreviewUrl",
+                    "failure_kind",
+                    "failureKind",
+                    "failed_step",
+                    "failedStep",
+                    "preview_failure_details",
+                    "previewFailureDetails",
+                    "directory_quality_gates",
+                    "directoryQualityGates",
+                    "directory_browser_repair",
+                    "directoryBrowserRepair",
+                ):
+                    result.pop(key, None)
+                    setup_payload.pop(key, None)
+                setup_payload["status"] = active_status
                 setup_payload["preview_url"] = ""
                 setup_payload.pop("fallback_preview_url", None)
                 setup_payload.pop("approve_url", None)
@@ -4880,6 +4976,12 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     )
     preview_url = setup_meta.get("previewUrl") or setup_gate.get("previewUrl") or ""
     fallback_preview_url = setup_meta.get("fallbackPreviewUrl") or setup_gate.get("fallbackPreviewUrl") or ""
+    failed_preview_url = setup_meta.get("failedPreviewUrl") or setup_gate.get("failedPreviewUrl") or ""
+    failure_kind = setup_meta.get("failureKind") or setup_gate.get("failureKind") or ""
+    failed_step = setup_meta.get("failedStep") or setup_gate.get("failedStep") or ""
+    preview_failure_details = setup_meta.get("previewFailureDetails") or setup_gate.get("previewFailureDetails")
+    directory_quality_gates = setup_meta.get("directoryQualityGates") or setup_gate.get("directoryQualityGates")
+    directory_browser_repair = setup_meta.get("directoryBrowserRepair") or setup_gate.get("directoryBrowserRepair")
     live_preview_url = setup_meta.get("livePreviewUrl") or setup_gate.get("livePreviewUrl") or ""
     pr_url = setup_meta.get("prUrl") or setup_gate.get("prUrl") or ""
     live_preview = _live_preview_from_run(setup_run) if setup_run else None
@@ -4923,6 +5025,12 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         "routePath": route_path or None,
         "previewUrl": preview_url or None,
         "fallbackPreviewUrl": fallback_preview_url or None,
+        "failedPreviewUrl": failed_preview_url or None,
+        "failureKind": failure_kind or None,
+        "failedStep": failed_step or None,
+        "previewFailureDetails": preview_failure_details or None,
+        "directoryQualityGates": directory_quality_gates or None,
+        "directoryBrowserRepair": directory_browser_repair or None,
         "livePreviewUrl": live_preview_url or None,
         "prUrl": pr_url or None,
         "livePreview": live_preview,
@@ -5073,6 +5181,36 @@ def _setup_metadata_from_run(run) -> dict:
             or _setup_value(setup, "fallback_preview_url", "fallbackPreviewUrl")
             or ""
         ).strip(),
+        "failedPreviewUrl": str(
+            _setup_value(result, "failed_preview_url", "failedPreviewUrl")
+            or _setup_value(setup, "failed_preview_url", "failedPreviewUrl")
+            or ""
+        ).strip(),
+        "failureKind": str(
+            _setup_value(result, "failure_kind", "failureKind")
+            or _setup_value(setup, "failure_kind", "failureKind")
+            or ""
+        ).strip(),
+        "failedStep": str(
+            _setup_value(result, "failed_step", "failedStep", "failed_phase", "failedPhase")
+            or _setup_value(setup, "failed_step", "failedStep", "failed_phase", "failedPhase")
+            or ""
+        ).strip(),
+        "previewFailureDetails": (
+            _setup_value(result, "preview_failure_details", "previewFailureDetails")
+            or _setup_value(setup, "preview_failure_details", "previewFailureDetails")
+            or None
+        ),
+        "directoryQualityGates": (
+            _setup_value(result, "directory_quality_gates", "directoryQualityGates")
+            or _setup_value(setup, "directory_quality_gates", "directoryQualityGates")
+            or None
+        ),
+        "directoryBrowserRepair": (
+            _setup_value(result, "directory_browser_repair", "directoryBrowserRepair")
+            or _setup_value(setup, "directory_browser_repair", "directoryBrowserRepair")
+            or None
+        ),
         "livePreviewUrl": str(
             _setup_value(result, "live_preview_url", "livePreviewUrl")
             or _setup_value(setup, "live_preview_url", "livePreviewUrl")
@@ -5125,6 +5263,12 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         "previewUrl": None,
         "livePreviewUrl": None,
         "fallbackPreviewUrl": None,
+        "failedPreviewUrl": None,
+        "failureKind": None,
+        "failedStep": None,
+        "previewFailureDetails": None,
+        "directoryQualityGates": None,
+        "directoryBrowserRepair": None,
     }
     if not config:
         return meta
@@ -5143,6 +5287,18 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         ("preview_url", "previewUrl"),
         ("fallbackPreviewUrl", "fallbackPreviewUrl"),
         ("fallback_preview_url", "fallbackPreviewUrl"),
+        ("failedPreviewUrl", "failedPreviewUrl"),
+        ("failed_preview_url", "failedPreviewUrl"),
+        ("failureKind", "failureKind"),
+        ("failure_kind", "failureKind"),
+        ("failedStep", "failedStep"),
+        ("failed_step", "failedStep"),
+        ("previewFailureDetails", "previewFailureDetails"),
+        ("preview_failure_details", "previewFailureDetails"),
+        ("directoryQualityGates", "directoryQualityGates"),
+        ("directory_quality_gates", "directoryQualityGates"),
+        ("directoryBrowserRepair", "directoryBrowserRepair"),
+        ("directory_browser_repair", "directoryBrowserRepair"),
         ("livePreviewUrl", "livePreviewUrl"),
         ("live_preview_url", "livePreviewUrl"),
     ):
@@ -6827,6 +6983,16 @@ def _clear_article_system_setup_retry_state(result, *, current_step="", resume_g
         "logExcerpt",
         "builder_run_url",
         "builderRunUrl",
+        "failed_preview_url",
+        "failedPreviewUrl",
+        "failure_kind",
+        "failureKind",
+        "preview_failure_details",
+        "previewFailureDetails",
+        "directory_quality_gates",
+        "directoryQualityGates",
+        "directory_browser_repair",
+        "directoryBrowserRepair",
     )
     for key in failure_keys:
         cleaned.pop(key, None)
