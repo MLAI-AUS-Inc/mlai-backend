@@ -1607,10 +1607,60 @@ TERMINAL_RUN_STATUSES = {
     ContentFactoryRunStatus.DENIED,
     ContentFactoryRunStatus.CANCELLED,
 }
+ARTICLE_SYSTEM_SETUP_ACTIVE_STATUSES = {"queued", "running", "processing", "pending", "starting", "in_progress", "preview_building"}
+ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES = {"failed", "blocked", "preview_failed", "fallback_ready"}
 
 
 def _is_terminal_run_status(value: str) -> bool:
     return str(value or "").strip() in TERMINAL_RUN_STATUSES
+
+
+def _mapping(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _article_system_setup_resume_generation(*payloads) -> int:
+    for payload in payloads:
+        mapping = _mapping(payload)
+        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
+            value = mapping.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _article_system_setup_current_retry_attempt(*payloads) -> bool:
+    for payload in payloads:
+        mapping = _mapping(payload)
+        if not mapping:
+            continue
+        setup = _mapping(mapping.get("article_system_setup"))
+        queue = _mapping(mapping.get("setup_queue")) or _mapping(setup.get("setup_queue"))
+        status_value = str(mapping.get("status") or setup.get("status") or "").strip().lower()
+        if mapping.get("is_current_attempt") is True or mapping.get("isCurrentAttempt") is True:
+            return True
+        if setup.get("is_current_attempt") is True or setup.get("isCurrentAttempt") is True:
+            return True
+        if queue.get("resumed") is True:
+            return True
+        if _article_system_setup_resume_generation(mapping, setup) > 0 and status_value in ARTICLE_SYSTEM_SETUP_ACTIVE_STATUSES:
+            return True
+    return False
+
+
+def _article_system_setup_snapshot_is_current_retry(*, existing_run, data: dict, raw_payload: dict) -> bool:
+    if not existing_run or existing_run.workflow != "article_system_setup":
+        return False
+    if str(data.get("workflow") or raw_payload.get("workflow") or "").strip() != "article_system_setup":
+        return False
+    incoming_status = str(data.get("status") or raw_payload.get("status") or "").strip().lower()
+    if incoming_status not in ARTICLE_SYSTEM_SETUP_ACTIVE_STATUSES:
+        return False
+    return _article_system_setup_current_retry_attempt(data, raw_payload, data.get("result"), raw_payload.get("result"))
 
 
 def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status: str) -> Optional[ContentFactoryRun]:
@@ -1867,12 +1917,29 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         config = org.content_config
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
-        clearable_empty_keys = {"previewUrl", "preview_url", "fallbackPreviewUrl", "fallback_preview_url"}
+        clearable_empty_keys = {
+            "previewUrl",
+            "preview_url",
+            "fallbackPreviewUrl",
+            "fallback_preview_url",
+            "error",
+            "errorCode",
+            "error_code",
+            "livePreview",
+            "live_preview",
+            "stale",
+            "staleReason",
+            "stale_reason",
+            "failureStep",
+            "failure_step",
+            "failedStep",
+            "failed_step",
+        }
         for key, value in updates.items():
             if value not in (None, ""):
                 pending[key] = value
             elif key in clearable_empty_keys:
-                pending[key] = ""
+                pending.pop(key, None)
         if not pending:
             return
         pending["updatedAt"] = timezone.now().isoformat()
@@ -1882,21 +1949,6 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         config.save(update_fields=["article_system", "updated_at"])
     except Exception as exc:
         logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
-
-
-def _article_system_setup_resume_generation(*payloads) -> int:
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            continue
-        for key in ("resume_generation", "resumeGeneration", "attempt_number", "attemptNumber"):
-            value = payload.get(key)
-            if value in (None, ""):
-                continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                continue
-    return 0
 
 
 def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: dict, result: dict) -> dict:
@@ -1964,6 +2016,15 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         or ""
     ).strip()
     live_preview_url_value = str(data.get("live_preview_url") or setup_payload.get("live_preview_url") or "").strip()
+    current_step_value = str(
+        data.get("current_step")
+        or data.get("step")
+        or setup_payload.get("current_step")
+        or setup_payload.get("currentStep")
+        or (existing_run.current_step if existing_run else "")
+        or "queued"
+    ).strip()
+    resume_generation = _article_system_setup_resume_generation(data, setup_payload, result)
     live_preview_exact = bool(live_preview.get("exactRender") or live_preview.get("exact_render"))
     if not live_preview_exact and not fallback_preview_url_value:
         candidate_preview = str(live_preview.get("previewUrl") or live_preview.get("preview_url") or "").strip()
@@ -2020,6 +2081,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "queued_at": data.get("queued_at") or setup_payload.get("queued_at") or result.get("queued_at"),
             "setup_queue": data.get("setup_queue") or result.get("setup_queue"),
             **common_fields,
+            "current_step": current_step_value,
+            "currentStep": current_step_value,
+            "resume_generation": data.get("resume_generation") or setup_payload.get("resume_generation") or result.get("resume_generation"),
+            "resumeGeneration": data.get("resumeGeneration") or setup_payload.get("resumeGeneration") or result.get("resumeGeneration"),
+            "is_current_attempt": data.get("is_current_attempt") if data.get("is_current_attempt") is not None else setup_payload.get("is_current_attempt", result.get("is_current_attempt")),
+            "isCurrentAttempt": data.get("isCurrentAttempt") if data.get("isCurrentAttempt") is not None else setup_payload.get("isCurrentAttempt", result.get("isCurrentAttempt")),
         }
     )
 
@@ -2028,16 +2095,27 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_status = str(data.get("status") or setup_payload.get("status") or "running").strip() or "running"
         if setup_status in {"processing", "in_progress"}:
             setup_status = "running"
+        result = _clear_article_system_setup_retry_state(
+            result,
+            current_step=current_step_value,
+            resume_generation=resume_generation or None,
+        )
         setup_payload.update(common_fields)
         setup_payload["status"] = setup_status
         setup_payload["setup_run_id"] = run_id
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["current_step"] = current_step_value
+        setup_payload["currentStep"] = current_step_value
+        setup_payload["retry_available"] = False
+        setup_payload["retryAvailable"] = False
+        setup_payload["retryable"] = False
+        setup_payload["is_current_attempt"] = True
+        setup_payload["isCurrentAttempt"] = True
         setup_payload.pop("error", None)
         setup_payload.pop("error_code", None)
-        setup_payload["retry_available"] = False
-        setup_payload["retryable"] = False
         result.update(common_fields)
         result["status"] = setup_status
+        result["message"] = data.get("message") or result.get("message")
         result["article_system_setup"] = setup_payload
         result.pop("error", None)
         result.pop("error_code", None)
@@ -2048,7 +2126,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         result["retryable"] = False
         run_status = ContentFactoryRunStatus.QUEUED if setup_status == "queued" else ContentFactoryRunStatus.RUNNING
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
-        current_step = str(common_fields.get("current_step") or data.get("current_step") or "running")
+        current_step = current_step_value
         error = ""
     elif event_type == "article_system_setup_completed":
         setup_payload = dict(setup_payload)
@@ -2266,6 +2344,21 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         status=setup_payload.get("status") or result.get("status"),
         setupStatus=setup_payload.get("status") or result.get("status"),
         setup_status=setup_payload.get("status") or result.get("status"),
+        currentStep=current_step,
+        current_step=current_step,
+        setupCurrentStep=current_step,
+        setup_current_step=current_step,
+        resumeGeneration=result.get("resume_generation"),
+        resume_generation=result.get("resume_generation"),
+        isCurrentAttempt=result.get("is_current_attempt"),
+        is_current_attempt=result.get("is_current_attempt"),
+        retryAvailable=result.get("retry_available"),
+        retry_available=result.get("retry_available"),
+        error=error,
+        errorCode=result.get("error_code") if event_type != "article_system_setup_progress" else "",
+        error_code=result.get("error_code") if event_type != "article_system_setup_progress" else "",
+        livePreview=result.get("livePreview") if event_type != "article_system_setup_progress" else "",
+        live_preview=result.get("live_preview") if event_type != "article_system_setup_progress" else "",
         rescanRunId=result.get("rescan_run_id"),
         rescan_run_id=result.get("rescan_run_id"),
         prUrl=result.get("pr_url"),
@@ -2282,33 +2375,77 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     return run
 
 
-def _clear_article_system_setup_retry_state(result):
+def _clear_article_system_setup_retry_state(result, *, current_step="", resume_generation=None):
     cleaned = dict(result or {})
-    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
-    resume_generation = _article_system_setup_resume_generation(cleaned, setup_payload) + 1
-    current_step = str(cleaned.get("current_step") or setup_payload.get("current_step") or "fetch_org_config").strip() or "fetch_org_config"
     updated_at = timezone.now().isoformat()
-    for key in ("livePreview", "live_preview", "error", "error_code", "errors", "stale", "stale_reason"):
+    failure_keys = (
+        "livePreview",
+        "live_preview",
+        "error",
+        "error_code",
+        "errorCode",
+        "errors",
+        "stale",
+        "stale_reason",
+        "staleReason",
+        "failure_step",
+        "failureStep",
+        "failed_step",
+        "failedStep",
+        "failed_phase",
+        "failedPhase",
+        "failed_command",
+        "failedCommand",
+        "log_excerpt",
+        "logExcerpt",
+        "builder_run_url",
+        "builderRunUrl",
+    )
+    for key in failure_keys:
         cleaned.pop(key, None)
-    cleaned["status"] = "queued"
-    cleaned["current_step"] = current_step
-    cleaned["resume_generation"] = resume_generation
-    cleaned["is_current_attempt"] = True
+    if str(cleaned.get("status") or "").strip().lower() in ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES:
+        cleaned["status"] = "queued"
+    if current_step:
+        cleaned["current_step"] = current_step
+        cleaned["currentStep"] = current_step
+    if resume_generation not in (None, ""):
+        cleaned["resume_generation"] = resume_generation
+        cleaned["resumeGeneration"] = resume_generation
     cleaned["retry_available"] = False
+    cleaned["retryAvailable"] = False
     cleaned["retryable"] = False
+    cleaned["is_current_attempt"] = True
+    cleaned["isCurrentAttempt"] = True
     cleaned["updated_at"] = updated_at
+    cleaned["updatedAt"] = updated_at
+    setup_payload = cleaned.get("article_system_setup") if isinstance(cleaned.get("article_system_setup"), dict) else {}
     if setup_payload:
         setup_payload = dict(setup_payload)
-        for key in ("error", "error_code", "livePreview", "live_preview", "stale", "stale_reason"):
+        for key in failure_keys:
             setup_payload.pop(key, None)
-        setup_payload["status"] = "queued"
-        setup_payload["current_step"] = current_step
-        setup_payload["resume_generation"] = resume_generation
-        setup_payload["is_current_attempt"] = True
+        if str(setup_payload.get("status") or "").strip().lower() in ARTICLE_SYSTEM_SETUP_RETRY_TERMINAL_STATUSES:
+            setup_payload["status"] = "queued"
+        if current_step:
+            setup_payload["current_step"] = current_step
+            setup_payload["currentStep"] = current_step
+        if resume_generation not in (None, ""):
+            setup_payload["resume_generation"] = resume_generation
+            setup_payload["resumeGeneration"] = resume_generation
         setup_payload["retry_available"] = False
+        setup_payload["retryAvailable"] = False
         setup_payload["retryable"] = False
+        setup_payload["is_current_attempt"] = True
+        setup_payload["isCurrentAttempt"] = True
         setup_payload["updated_at"] = updated_at
+        setup_payload["updatedAt"] = updated_at
         cleaned["article_system_setup"] = setup_payload
+    nested_result = cleaned.get("result") if isinstance(cleaned.get("result"), dict) else {}
+    if nested_result:
+        cleaned["result"] = _clear_article_system_setup_retry_state(
+            nested_result,
+            current_step=current_step,
+            resume_generation=resume_generation,
+        )
     return cleaned
 
 
@@ -2367,6 +2504,7 @@ class ContentFactoryCallbackView(APIView):
             elif event_type == 'scan_complete':
                 return self._handle_scan_complete(data)
             elif event_type in {
+                'article_system_setup_progress',
                 'article_system_setup_preview_ready',
                 'article_system_setup_preview_fallback_ready',
                 'article_system_setup_revision_ready',
@@ -6620,6 +6758,11 @@ class ContentFactoryRunView(APIView):
                 ContentFactoryRunStatus.DENIED,
                 ContentFactoryRunStatus.CANCELLED,
             }
+            and not _article_system_setup_snapshot_is_current_retry(
+                existing_run=existing_run,
+                data=data,
+                raw_payload=request.data if isinstance(request.data, dict) else {},
+            )
         ):
             response_payload = _serialize_content_factory_run(existing_run)
             response_payload["sync_status"] = "ignored_terminal_state"
@@ -6883,12 +7026,20 @@ class ContentFactoryRunControlView(APIView):
             }:
                 run.status = ContentFactoryRunStatus.QUEUED
             if run.workflow == "article_system_setup":
-                run.result = _clear_article_system_setup_retry_state(run.result or {})
+                current_step = str(request.data.get("current_step") or request.data.get("step") or run.current_step or "queued").strip()
+                resume_generation = _article_system_setup_resume_generation(run.result or {}) + 1
+                run.result = _clear_article_system_setup_retry_state(
+                    run.result or {},
+                    current_step=current_step,
+                    resume_generation=resume_generation,
+                )
+                run.current_step = current_step
+                run.resume_available = False
                 run.error = ""
         else:
             return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
 
-        run.save(update_fields=["approval_state", "status", "resume_available", "result", "error", "updated_at"])
+        run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
         return Response(
             {
                 "run_id": run_id,
