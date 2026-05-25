@@ -1264,6 +1264,74 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(parent.result["setup_run_id"], "setup-run-2")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_pr_created_callback_moves_to_publish_step(self, mock_send_dm):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_ready",
+                    "setup_run_id": "setup-run-pr",
+                    "setupRunId": "setup-run-pr",
+                }
+            },
+        )
+        ContentFactoryRun.objects.create(
+            run_id="scan-run-pr-parent",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_pr_created",
+                "job_id": "setup-run-pr",
+                "run_id": "setup-run-pr",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "parent_run_id": "scan-run-pr-parent",
+                "status": "setup_pr_created",
+                "setup_status": "pr_created",
+                "current_step": "create_pull_request",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/19",
+                "pr_number": 19,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-run-pr",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/19",
+                    "pr_number": 19,
+                    "merge_status": "not_merged",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-pr")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(setup_run.current_step, "create_pull_request")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.APPROVED)
+        self.assertEqual(setup_run.result["status"], "setup_pr_created")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "pr_created")
+        self.assertEqual(setup_run.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/19")
+
+        parent = ContentFactoryRun.objects.get(run_id="scan-run-pr-parent")
+        self.assertEqual(parent.result["article_system_setup"]["status"], "pr_created")
+        self.assertEqual(parent.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/19")
+
+        organization.content_config.refresh_from_db()
+        pending = organization.content_config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "pr_created")
+        self.assertEqual(pending["merge_status"], "not_merged")
+        self.assertEqual(pending["pr_number"], 19)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_preview_ready_without_url_stays_building(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(

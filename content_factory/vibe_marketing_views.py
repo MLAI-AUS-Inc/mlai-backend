@@ -287,6 +287,8 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "preview_failed",
     "failed",
     "blocked",
+    "pr_created",
+    "setup_pr_created",
     "manual_merge_required",
     "manual_blocked",
     "completed",
@@ -3706,17 +3708,21 @@ def _annotate_publish_child_state(run, *, context=None):
 
 def _pull_request_number_from_run(run):
     result = _run_mapping(run.result)
-    for key in ("pr_number", "pull_request_number", "draft_pr_number"):
-        value = result.get(key)
-        if value:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                pass
+    setup = _article_system_setup_payload_from_run(run)
+    for mapping in (result, setup):
+        for key in ("pr_number", "pull_request_number", "draft_pr_number"):
+            value = mapping.get(key)
+            if value:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
     pr_url = str(
         result.get("pr_url")
         or result.get("pull_request_url")
         or result.get("draft_pr_url")
+        or setup.get("pr_url")
+        or setup.get("prUrl")
         or _publish_evidence_from_run(run).get("prUrl")
         or ""
     ).strip()
@@ -3725,6 +3731,214 @@ def _pull_request_number_from_run(run):
         return int(match.group(1))
     return None
 
+
+def _pull_request_url_from_run(run) -> str:
+    result = _run_mapping(run.result)
+    setup = _article_system_setup_payload_from_run(run)
+    return str(
+        result.get("pr_url")
+        or result.get("prUrl")
+        or result.get("pull_request_url")
+        or result.get("pullRequestUrl")
+        or result.get("draft_pr_url")
+        or result.get("draftPrUrl")
+        or setup.get("pr_url")
+        or setup.get("prUrl")
+        or ""
+    ).strip()
+
+
+def _mark_pending_article_system_setup_merged(config, *, run, result):
+    if not config:
+        return
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    setup = _run_mapping(result.get("article_system_setup"))
+    setup_run_id = str(
+        setup.get("setup_run_id")
+        or setup.get("setupRunId")
+        or result.get("setup_run_id")
+        or result.get("setupRunId")
+        or getattr(run, "run_id", "")
+        or ""
+    ).strip()
+    pr_url = str(result.get("pr_url") or result.get("prUrl") or setup.get("pr_url") or setup.get("prUrl") or "").strip()
+    pr_number = result.get("pr_number") or result.get("prNumber") or setup.get("pr_number") or setup.get("prNumber")
+    if setup_run_id:
+        pending["setupRunId"] = setup_run_id
+        pending["setup_run_id"] = setup_run_id
+    if pr_url:
+        pending["prUrl"] = pr_url
+        pending["pr_url"] = pr_url
+    if pr_number not in (None, ""):
+        pending["prNumber"] = pr_number
+        pending["pr_number"] = pr_number
+    pending["status"] = "merged"
+    pending["setupStatus"] = "merged"
+    pending["setup_status"] = "merged"
+    pending["mergeStatus"] = "merged"
+    pending["merge_status"] = "merged"
+    pending["currentStep"] = "merged"
+    pending["current_step"] = "merged"
+    pending["setupCurrentStep"] = "merged"
+    pending["setup_current_step"] = "merged"
+    pending["updatedAt"] = timezone.now().isoformat()
+    pending["updated_at"] = pending["updatedAt"]
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = article_system
+    config.save(update_fields=["article_system", "updated_at"])
+
+
+def _mark_pending_article_system_setup_pr_created(config, *, run, result):
+    if not config:
+        return
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    setup = _run_mapping(result.get("article_system_setup"))
+    setup_run_id = str(
+        setup.get("setup_run_id")
+        or setup.get("setupRunId")
+        or result.get("setup_run_id")
+        or result.get("setupRunId")
+        or getattr(run, "run_id", "")
+        or ""
+    ).strip()
+    pr_url = str(result.get("pr_url") or result.get("prUrl") or setup.get("pr_url") or setup.get("prUrl") or "").strip()
+    pr_number = result.get("pr_number") or result.get("prNumber") or setup.get("pr_number") or setup.get("prNumber")
+    if setup_run_id:
+        pending["setupRunId"] = setup_run_id
+        pending["setup_run_id"] = setup_run_id
+    if pr_url:
+        pending["prUrl"] = pr_url
+        pending["pr_url"] = pr_url
+    if pr_number not in (None, ""):
+        pending["prNumber"] = pr_number
+        pending["pr_number"] = pr_number
+    pending["status"] = "pr_created"
+    pending["setupStatus"] = "pr_created"
+    pending["setup_status"] = "pr_created"
+    pending["mergeStatus"] = "not_merged"
+    pending["merge_status"] = "not_merged"
+    pending["currentStep"] = "create_pull_request"
+    pending["current_step"] = "create_pull_request"
+    pending["setupCurrentStep"] = "create_pull_request"
+    pending["setup_current_step"] = "create_pull_request"
+    pending["updatedAt"] = timezone.now().isoformat()
+    pending["updated_at"] = pending["updatedAt"]
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = article_system
+    config.save(update_fields=["article_system", "updated_at"])
+
+
+def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
+    config = _get_config(context.organization)
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    pr_url = _pull_request_url_from_run(run)
+    pr_number = _pull_request_number_from_run(run)
+    if pr_url:
+        result["pr_url"] = pr_url
+        setup["pr_url"] = pr_url
+        setup["prUrl"] = pr_url
+    if pr_number:
+        result["pr_number"] = pr_number
+        setup["pr_number"] = pr_number
+        setup["prNumber"] = pr_number
+    merged_at = timezone.now().isoformat()
+    result["status"] = "merged"
+    result["setup_status"] = "merged"
+    result["setupStatus"] = "merged"
+    result["merge_status"] = "merged"
+    result["mergeStatus"] = "merged"
+    result["checks_status"] = checks_status
+    result["checksStatus"] = checks_status
+    result["merged_at"] = merged_at
+    result["current_step"] = "merged"
+    result["currentStep"] = "merged"
+    if merge_response is not None:
+        result["merge_response"] = merge_response
+    setup["status"] = "merged"
+    setup["setup_status"] = "merged"
+    setup["setupStatus"] = "merged"
+    setup["merge_status"] = "merged"
+    setup["mergeStatus"] = "merged"
+    setup["checks_status"] = checks_status
+    setup["checksStatus"] = checks_status
+    setup["merged_at"] = merged_at
+    setup["current_step"] = "merged"
+    setup["currentStep"] = "merged"
+    setup.setdefault("setup_run_id", run.run_id)
+    setup.setdefault("setupRunId", run.run_id)
+    result["article_system_setup"] = setup
+    run.result = result
+    run.status = ContentFactoryRunStatus.COMPLETED
+    run.current_step = "merged"
+    run.approval_state = ContentFactoryApprovalState.APPROVED
+    run.save(update_fields=["status", "current_step", "approval_state", "result", "updated_at"])
+    _mark_pending_article_system_setup_merged(config, run=run, result=result)
+    return run
+
+
+def _merge_setup_pr_for_run(*, run, context):
+    if run.workflow != "article_system_setup":
+        return None, Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
+    repo = run.github_repo or _get_config(context.organization).github_repo
+    if not repo:
+        return None, Response({"detail": "No GitHub repository is configured for this setup run."}, status=status.HTTP_400_BAD_REQUEST)
+    pr_number = _pull_request_number_from_run(run)
+    if not pr_number:
+        return None, Response({"detail": "No setup pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
+    try:
+        token, token_source = _github_token_for_repo_operation(
+            domain=context.organization.domain,
+            github_repo=repo,
+            permission_mode="write",
+        )
+        logger.info(
+            "vibe_marketing_setup_merge_token_source run_id=%s repo=%s token_source=%s",
+            run.run_id,
+            repo,
+            token_source,
+        )
+        pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
+        if pull.get("merged"):
+            return _apply_setup_merge_result(run=run, context=context, checks_status="merged"), None
+        if not checks.get("ready"):
+            result = dict(run.result or {})
+            setup = dict(result.get("article_system_setup") or {})
+            checks_state = str(checks.get("state") or "blocked")
+            result["merge_status"] = checks_state
+            result["mergeStatus"] = checks_state
+            result["checks_status"] = checks_state
+            result["checksStatus"] = checks_state
+            result["merge_blocked_reason"] = checks.get("message")
+            setup["merge_status"] = checks_state
+            setup["mergeStatus"] = checks_state
+            setup["checks_status"] = checks_state
+            setup["checksStatus"] = checks_state
+            setup["merge_blocked_reason"] = checks.get("message")
+            result["article_system_setup"] = setup
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return None, Response(
+                {"detail": checks.get("message") or "Setup PR checks are not ready.", "checks": checks},
+                status=status.HTTP_409_CONFLICT,
+            )
+        merge_payload = {
+            "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
+            "merge_method": "squash",
+        }
+        merged = _github_api_request(
+            "PUT",
+            f"/repos/{repo}/pulls/{pr_number}/merge",
+            token=token,
+            body=merge_payload,
+            expected=(200, 201),
+        )
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+    return _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged), None
 
 def _github_api_request(method, path, *, token, body=None, expected=(200,)):
     url = f"https://api.github.com{path}"
@@ -5012,6 +5226,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     directory_visual_repair = setup_meta.get("directoryVisualRepair") or setup_gate.get("directoryVisualRepair")
     live_preview_url = setup_meta.get("livePreviewUrl") or setup_gate.get("livePreviewUrl") or ""
     pr_url = setup_meta.get("prUrl") or setup_gate.get("prUrl") or ""
+    pr_number = setup_meta.get("prNumber") or setup_gate.get("prNumber") or ""
+    merge_status = setup_meta.get("mergeStatus") or setup_gate.get("mergeStatus") or ""
     live_preview = _live_preview_from_run(setup_run) if setup_run else None
     setup_result = _run_mapping(setup_run.result) if setup_run else {}
     setup_payload = _article_system_setup_payload_from_run(setup_run) if setup_run else {}
@@ -5049,6 +5265,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         "setupRunStatus": setup_run.status if setup_run else None,
         "setupCurrentStep": (setup_payload.get("currentStep") or setup_payload.get("current_step") or getattr(setup_run, "current_step", "") or None) if setup_run else None,
         "setupBlocked": bool(setup_gate.get("setupBlocked")),
+        "setupMerged": bool(setup_gate.get("setupMerged")),
         "published": bool(setup_gate.get("published")),
         "routePath": route_path or None,
         "previewUrl": preview_url or None,
@@ -5063,6 +5280,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         "directoryVisualRepair": directory_visual_repair or None,
         "livePreviewUrl": live_preview_url or None,
         "prUrl": pr_url or None,
+        "prNumber": pr_number or None,
+        "mergeStatus": merge_status or None,
         "livePreview": live_preview,
         "retryAvailable": bool((setup_run and (setup_run.resume_available or setup_result.get("retry_available"))) or (latest_scan and latest_scan.resume_available)),
         "error": error or None,
@@ -5200,7 +5419,13 @@ def _setup_metadata_from_run(run) -> dict:
         "setupRunId": setup_run_id,
         "setupStatus": status_value,
         "rescanRunId": rescan_run_id,
+        "mergeStatus": str(
+            _setup_value(result, "merge_status", "mergeStatus")
+            or _setup_value(setup, "merge_status", "mergeStatus")
+            or ""
+        ).strip(),
         "prUrl": str(_setup_value(result, "pr_url", "prUrl") or _setup_value(setup, "pr_url", "prUrl") or "").strip(),
+        "prNumber": _setup_value(result, "pr_number", "prNumber") or _setup_value(setup, "pr_number", "prNumber"),
         "previewUrl": str(
             _setup_value(result, "preview_url", "previewUrl")
             or _setup_value(setup, "preview_url", "previewUrl")
@@ -5323,8 +5548,12 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         ("setup_status", "setupStatus"),
         ("rescanRunId", "rescanRunId"),
         ("rescan_run_id", "rescanRunId"),
+        ("mergeStatus", "mergeStatus"),
+        ("merge_status", "mergeStatus"),
         ("prUrl", "prUrl"),
         ("pr_url", "prUrl"),
+        ("prNumber", "prNumber"),
+        ("pr_number", "prNumber"),
         ("previewUrl", "previewUrl"),
         ("preview_url", "previewUrl"),
         ("fallbackPreviewUrl", "fallbackPreviewUrl"),
@@ -5377,6 +5606,11 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     )
     published = bool(_article_system_is_published(config, article_system) and (not pending or verification_published))
     setup_status = str(meta.get("setupStatus") or "").strip().lower()
+    merge_status = str(meta.get("mergeStatus") or "").strip().lower()
+    setup_merged = bool(
+        merge_status == "merged"
+        or setup_status in {"merged", "merged_verifying", "verifying", "published", "verified"}
+    )
     setup_has_active_signal = bool(pending or setup_run or (latest_scan and _scan_run_is_pending_article_system_generation(latest_scan)))
     completed_with_pending_verification = bool(
         meta.get("rescanRunId") and not verification_published
@@ -5404,7 +5638,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
 
     meta["published"] = bool(published)
     meta["setupBlocked"] = bool(setup_blocked)
-    for key in ("setupRunId", "setupStatus", "rescanRunId", "prUrl", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
+    meta["setupMerged"] = bool(setup_merged)
+    for key in ("setupRunId", "setupStatus", "rescanRunId", "mergeStatus", "prUrl", "prNumber", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
 
@@ -6125,6 +6360,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
     article_system_ready = bool(setup_gate.get("published") and not setup_gate.get("setupBlocked"))
+    setup_pr_merged = bool(setup_gate.get("setupMerged"))
     missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
     component_catalog_ready = not missing_featured_components
     article_ready = article_system_ready and component_catalog_ready
@@ -6175,7 +6411,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         and keywords_ok
         and baseline_ready
         and scan_ready
-        and article_ready
+        and (article_ready or setup_pr_merged)
         and bool(config.connected_slack_user_id)
         and (delivery_mode != "publish_code" or github_ready)
     )
@@ -6208,10 +6444,13 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "passed": article_ready,
             "published": bool(setup_gate.get("published")),
             "setupBlocked": bool(setup_gate.get("setupBlocked")),
+            "setupMerged": bool(setup_gate.get("setupMerged")),
             "setupRunId": setup_gate.get("setupRunId"),
             "setupStatus": setup_gate.get("setupStatus"),
             "rescanRunId": setup_gate.get("rescanRunId"),
+            "mergeStatus": setup_gate.get("mergeStatus"),
             "prUrl": setup_gate.get("prUrl"),
+            "prNumber": setup_gate.get("prNumber"),
             "previewUrl": setup_gate.get("previewUrl"),
             "articleSystem": article_system,
             "componentCatalogReady": component_catalog_ready,
@@ -6613,6 +6852,10 @@ def _normalize_remote_run_status(value):
         "precondition_failed": ContentFactoryRunStatus.BLOCKED,
         "preview_failed": ContentFactoryRunStatus.BLOCKED,
         "fallback_ready": ContentFactoryRunStatus.BLOCKED,
+        "setup_pr_created": ContentFactoryRunStatus.COMPLETED,
+        "pr_created": ContentFactoryRunStatus.COMPLETED,
+        "merged": ContentFactoryRunStatus.COMPLETED,
+        "merged_verifying": ContentFactoryRunStatus.COMPLETED,
         "error": ContentFactoryRunStatus.FAILED,
     }
     normalized = mapping.get(normalized, normalized)
@@ -9910,6 +10153,12 @@ class VibeMarketingRunControlView(APIView):
                 return merge_error
             return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
 
+        if action == "merge-setup-pr":
+            merged_run, merge_error = _merge_setup_pr_for_run(run=run, context=context)
+            if merge_error:
+                return merge_error
+            return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
+
         remote_run = run
         if action in {"promote-bundle", "publish-pr"}:
             publish_child_source = _publish_source_run_for_child(run, context)
@@ -10090,9 +10339,78 @@ class VibeMarketingRunControlView(APIView):
         else:
             return Response({"detail": "Unsupported run action."}, status=status.HTTP_400_BAD_REQUEST)
 
+        handled_setup_pr_created = False
         if remote_data:
             result = run.result or {}
             result["latest_control_response"] = remote_data
+            if action == "approve" and run.workflow == "article_system_setup":
+                remote_result = _run_result_from_remote(remote_data)
+                if remote_result:
+                    result.update({key: value for key, value in remote_result.items() if value not in (None, "", {}, [])})
+                remote_setup_payload = remote_data.get("article_system_setup") if isinstance(remote_data.get("article_system_setup"), dict) else {}
+                setup_payload = dict(result.get("article_system_setup") or {})
+                setup_payload.update(remote_setup_payload)
+                remote_status = str(remote_data.get("status") or result.get("status") or "").strip().lower()
+                setup_status = str(
+                    remote_data.get("setup_status")
+                    or remote_data.get("setupStatus")
+                    or setup_payload.get("status")
+                    or result.get("setup_status")
+                    or result.get("setupStatus")
+                    or ""
+                ).strip().lower()
+                if remote_status == "setup_pr_created" or setup_status in {"pr_created", "setup_pr_created"}:
+                    pr_url = str(
+                        remote_data.get("pr_url")
+                        or remote_data.get("prUrl")
+                        or result.get("pr_url")
+                        or setup_payload.get("pr_url")
+                        or setup_payload.get("prUrl")
+                        or ""
+                    ).strip()
+                    pr_number = (
+                        remote_data.get("pr_number")
+                        or remote_data.get("prNumber")
+                        or result.get("pr_number")
+                        or setup_payload.get("pr_number")
+                        or setup_payload.get("prNumber")
+                    )
+                    if pr_url:
+                        result["pr_url"] = pr_url
+                        result["prUrl"] = pr_url
+                        setup_payload["pr_url"] = pr_url
+                        setup_payload["prUrl"] = pr_url
+                    if pr_number not in (None, ""):
+                        result["pr_number"] = pr_number
+                        result["prNumber"] = pr_number
+                        setup_payload["pr_number"] = pr_number
+                        setup_payload["prNumber"] = pr_number
+                    setup_payload["status"] = "pr_created"
+                    setup_payload["setup_status"] = "pr_created"
+                    setup_payload["setupStatus"] = "pr_created"
+                    setup_payload["merge_status"] = "not_merged"
+                    setup_payload["mergeStatus"] = "not_merged"
+                    setup_payload["current_step"] = "create_pull_request"
+                    setup_payload["currentStep"] = "create_pull_request"
+                    setup_payload.setdefault("setup_run_id", run.run_id)
+                    setup_payload.setdefault("setupRunId", run.run_id)
+                    result["article_system_setup"] = setup_payload
+                    result["status"] = "setup_pr_created"
+                    result["setup_status"] = "pr_created"
+                    result["setupStatus"] = "pr_created"
+                    result["merge_status"] = "not_merged"
+                    result["mergeStatus"] = "not_merged"
+                    result["current_step"] = "create_pull_request"
+                    result["currentStep"] = "create_pull_request"
+                    result["setup_run_id"] = result.get("setup_run_id") or run.run_id
+                    result["source_setup_run_id"] = result.get("source_setup_run_id") or run.run_id
+                    run.status = ContentFactoryRunStatus.COMPLETED
+                    run.current_step = "create_pull_request"
+                    run.approval_state = ContentFactoryApprovalState.APPROVED
+                    run.resume_available = False
+                    run.error = ""
+                    _mark_pending_article_system_setup_pr_created(_get_config(context.organization), run=run, result=result)
+                    handled_setup_pr_created = True
             if action == "resume" and run.workflow == "article_system_setup":
                 remote_result = _run_result_from_remote(remote_data)
                 resume_current_step = str(
@@ -10187,9 +10505,9 @@ class VibeMarketingRunControlView(APIView):
                             result=setup_payload,
                             error="",
                         )
-            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data) and action != "resume":
+            if remote_data.get("status") and not _content_factory_action_transport_pending(remote_data) and action != "resume" and not handled_setup_pr_created:
                 run.status = _normalize_remote_run_status(remote_data["status"])
-            if remote_data.get("current_step"):
+            if remote_data.get("current_step") and not handled_setup_pr_created:
                 run.current_step = remote_data["current_step"]
             if action == "resume" and run.workflow == "article_system_setup":
                 remote_result = _run_result_from_remote(remote_data)
