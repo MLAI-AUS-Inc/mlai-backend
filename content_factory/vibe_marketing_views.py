@@ -5632,6 +5632,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     if setup_status in {"published", "verified"}:
         setup_blocked = False
         published = _article_system_is_published(config, article_system)
+    if setup_merged:
+        setup_blocked = False
     if verification_published:
         setup_blocked = False
         published = True
@@ -5736,6 +5738,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
     scaffold_check = checks.get("scaffold", {})
     setup_blocked = bool(scaffold_check.get("setupBlocked"))
+    setup_merged = bool(scaffold_check.get("setupMerged"))
 
     if not checks.get("websiteProfile", {}).get("passed"):
         status_by_id["profile"] = "needs_action"
@@ -5789,7 +5792,10 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         elif discovery_run.status in FAILED_RUN_STATUSES:
             status_by_id["research"] = "blocked"
             action_by_id["research"] = _workflow_step_action("Open research run", href=_run_url(discovery_run))
-    if checks.get("scaffold", {}).get("passed") and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
+    if setup_merged and not setup_blocked:
+        status_by_id["article_system"] = "complete"
+        action_by_id.pop("article_system", None)
+    if (checks.get("scaffold", {}).get("passed") or setup_merged) and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
@@ -5905,7 +5911,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         setup_status = str(scaffold_check.get("setupStatus") or "").strip().lower()
         rescan_run_id = str(scaffold_check.get("rescanRunId") or "").strip()
         setup_run_url = f"/founder-tools/marketing/runs/{setup_run_id}" if setup_run_id else href_by_id["article_system"]
-        rescan_run = _verification_scan_for_setup(latest_runs, rescan_run_id=rescan_run_id)
+        setup_generate_url = f"{setup_run_url}?setupStep=generate" if setup_run_id else setup_run_url
+        setup_review_url = f"{setup_run_url}?setupStep=review" if setup_run_id else setup_run_url
+        setup_publish_url = f"{setup_run_url}?setupStep=publish" if setup_run_id else setup_run_url
         for blocked_step_id in ("research", "choose_topic", "revise", "package", "automation"):
             action_by_id.pop(blocked_step_id, None)
             run_by_id.pop(blocked_step_id, None)
@@ -5913,9 +5921,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         for setup_step_id in ("generate", "review", "publish"):
             action_by_id.pop(setup_step_id, None)
         status_by_id["article_system"] = "complete"
-        href_by_id["generate"] = setup_run_url
-        href_by_id["review"] = setup_run_url
-        href_by_id["publish"] = setup_run_url
+        href_by_id["generate"] = setup_generate_url
+        href_by_id["review"] = setup_review_url
+        href_by_id["publish"] = setup_publish_url
         if setup_run_id:
             run_by_id["generate"] = setup_run_id
             run_by_id["review"] = setup_run_id
@@ -5934,10 +5942,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "complete"
             status_by_id["publish"] = "running"
-            summary_by_id["publish"] = "The merged articles directory is being verified before topic research unlocks."
-            if rescan_run:
-                href_by_id["publish"] = _run_url(rescan_run)
-                run_by_id["publish"] = rescan_run.run_id
+            summary_by_id["publish"] = "The merged articles directory is being verified in the background."
         elif setup_status in {"preview_ready", "revision_ready", "awaiting_approval", "approval_required", "await_review"}:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "needs_action"
@@ -6468,6 +6473,22 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     }
 
 
+def _bootstrap_topic_picker_ready(*, checks, article_setup_state=None, has_completed_article_flow=False):
+    scaffold = checks.get("scaffold", {}) if isinstance(checks, dict) else {}
+    article_setup_state = article_setup_state if isinstance(article_setup_state, dict) else {}
+    setup_blocked = bool(scaffold.get("setupBlocked") or article_setup_state.get("setupBlocked"))
+    if setup_blocked:
+        return False
+    return bool(
+        has_completed_article_flow
+        or scaffold.get("passed")
+        or scaffold.get("published")
+        or scaffold.get("setupMerged")
+        or article_setup_state.get("published")
+        or article_setup_state.get("setupMerged")
+    )
+
+
 def _serialize_bootstrap(context, request=None, *, view="full"):
     compact = view == "summary"
     config = _get_config(context.organization)
@@ -6522,6 +6543,11 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
     has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs)
+    topic_picker_ready = _bootstrap_topic_picker_ready(
+        checks=checks,
+        article_setup_state=article_setup_state,
+        has_completed_article_flow=has_completed_article_flow,
+    )
     return {
         "company": {
             "id": str(context.company.id),
@@ -6580,7 +6606,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
             topic_candidates=topic_candidates,
         ),
         "hasCompletedArticleFlow": has_completed_article_flow,
-        "startPageMode": "topic_picker" if has_completed_article_flow else "first_article_setup",
+        "startPageMode": "topic_picker" if topic_picker_ready else "first_article_setup",
     }
 
 
