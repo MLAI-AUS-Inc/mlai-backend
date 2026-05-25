@@ -147,6 +147,7 @@ MLAI_AU_FEATURED_REQUIRED_COMPONENTS = {
     "MLAITemplateResourceCTA",
 }
 REMOTE_REQUIRED_WORKFLOWS = {
+    "article_system_setup",
     "article_generation",
     "content_factory_article",
     "direct_generate",
@@ -5121,6 +5122,25 @@ def _article_setup_state_run_from_latest(latest_runs, run_id: str):
     return next((run for run in latest_runs or [] if run.run_id == run_id), None)
 
 
+def _article_system_setup_run_is_dispatch_blocked(run) -> bool:
+    if not run or run.workflow != "article_system_setup":
+        return False
+    result = _run_mapping(run.result)
+    if result.get("content_factory_dispatch_blocked"):
+        return True
+    diagnostics = _run_mapping(result.get("diagnostics"))
+    if run.status != ContentFactoryRunStatus.BLOCKED or not diagnostics:
+        return False
+    if diagnostics.get("content_factory_remote_enabled") is False:
+        return True
+    if diagnostics.get("content_factory_status_code") and not (
+        result.get("setup_run_id") or result.get("setupRunId") or result.get("scaffold_job_id")
+    ):
+        return True
+    technical_error = str(diagnostics.get("technical_error") or "").strip().lower()
+    return "content factory did not return a run id" in technical_error
+
+
 def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> dict:
     latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
@@ -5145,6 +5165,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         )
         if explicit_run:
             explicit_runs.append(explicit_run)
+    explicit_runs = [candidate for candidate in explicit_runs if not _article_system_setup_run_is_dispatch_blocked(candidate)]
     latest_scan = (
         (run if run and run.workflow in SCAN_WORKFLOWS else None)
         or _article_setup_state_run_from_latest(explicit_runs, pending_source_scan_run_id)
@@ -5157,6 +5178,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         or _latest_article_system_setup_run(latest_runs, setup_run_id=pending_setup_run_id)
         or _latest_persisted_run_for_article_setup(config, {"article_system_setup"}, run_id=pending_setup_run_id)
     )
+    if _article_system_setup_run_is_dispatch_blocked(setup_run):
+        setup_run = None
     related_runs = _dedupe_runs(latest_runs, explicit_runs, [latest_scan, setup_run])
     setup_gate = _article_system_setup_gate(config, related_runs, article_system)
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
@@ -5193,22 +5216,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     scan_stale = bool(last_scanned_sha and scan_head_sha and last_scanned_sha != scan_head_sha)
 
     setup_meta = _setup_metadata_from_run(setup_run) if setup_run else {}
-    setup_status = (
-        setup_meta.get("setupStatus")
-        or setup_gate.get("setupStatus")
-        or pending.get("setupStatus")
-        or pending.get("setup_status")
-        or pending.get("status")
-        or (setup_run.status if setup_run else "")
-        or ""
-    )
-    setup_run_id = (
-        setup_meta.get("setupRunId")
-        or setup_gate.get("setupRunId")
-        or pending_setup_run_id
-        or (setup_run.run_id if setup_run else "")
-        or ""
-    )
+    setup_status = setup_meta.get("setupStatus") or setup_gate.get("setupStatus") or (setup_run.status if setup_run else "") or ""
+    setup_run_id = setup_meta.get("setupRunId") or setup_gate.get("setupRunId") or (setup_run.run_id if setup_run else "") or ""
     route_path = _article_setup_state_value(
         pending,
         article_system,
@@ -5488,9 +5497,16 @@ def _latest_article_system_setup_run(latest_runs, *, setup_run_id: str = ""):
     setup_run_id = str(setup_run_id or "").strip()
     if setup_run_id:
         matched = next((run for run in latest_runs or [] if run.run_id == setup_run_id), None)
-        if matched:
+        if matched and not _article_system_setup_run_is_dispatch_blocked(matched):
             return matched
-    return _latest_run_matching(latest_runs or [], {"article_system_setup"})
+    return next(
+        (
+            run
+            for run in latest_runs or []
+            if run.workflow == "article_system_setup" and not _article_system_setup_run_is_dispatch_blocked(run)
+        ),
+        None,
+    )
 
 
 def _verification_scan_for_setup(latest_runs, *, rescan_run_id: str = ""):
@@ -5518,6 +5534,31 @@ def _article_system_is_published(config, article_system: dict) -> bool:
 
 def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dict:
     pending = _pending_article_system_setup_from_config(config)
+    pending_setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
+    pending_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip().lower()
+    pending_merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip().lower()
+    pending_has_external_evidence = bool(
+        pending.get("prUrl")
+        or pending.get("pr_url")
+        or pending.get("prNumber")
+        or pending.get("pr_number")
+        or pending.get("rescanRunId")
+        or pending.get("rescan_run_id")
+        or pending_merge_status
+        or pending_status
+        in {
+            "pr_created",
+            "setup_pr_created",
+            "manual_merge_required",
+            "manual_blocked",
+            "merged",
+            "merged_verifying",
+            "verifying",
+            "published",
+            "verified",
+        }
+    )
+    pending_can_seed_setup_meta = bool(pending_has_external_evidence)
     meta = {
         "published": False,
         "setupBlocked": False,
@@ -5540,45 +5581,46 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     if not config:
         return meta
 
-    for source_key, target_key in (
-        ("setupRunId", "setupRunId"),
-        ("setup_run_id", "setupRunId"),
-        ("status", "setupStatus"),
-        ("setupStatus", "setupStatus"),
-        ("setup_status", "setupStatus"),
-        ("rescanRunId", "rescanRunId"),
-        ("rescan_run_id", "rescanRunId"),
-        ("mergeStatus", "mergeStatus"),
-        ("merge_status", "mergeStatus"),
-        ("prUrl", "prUrl"),
-        ("pr_url", "prUrl"),
-        ("prNumber", "prNumber"),
-        ("pr_number", "prNumber"),
-        ("previewUrl", "previewUrl"),
-        ("preview_url", "previewUrl"),
-        ("fallbackPreviewUrl", "fallbackPreviewUrl"),
-        ("fallback_preview_url", "fallbackPreviewUrl"),
-        ("failedPreviewUrl", "failedPreviewUrl"),
-        ("failed_preview_url", "failedPreviewUrl"),
-        ("failureKind", "failureKind"),
-        ("failure_kind", "failureKind"),
-        ("failedStep", "failedStep"),
-        ("failed_step", "failedStep"),
-        ("previewFailureDetails", "previewFailureDetails"),
-        ("preview_failure_details", "previewFailureDetails"),
-        ("directoryQualityGates", "directoryQualityGates"),
-        ("directory_quality_gates", "directoryQualityGates"),
-        ("directoryBrowserRepair", "directoryBrowserRepair"),
-        ("directory_browser_repair", "directoryBrowserRepair"),
-        ("directoryVisualStyleReport", "directoryVisualStyleReport"),
-        ("directory_visual_style_report", "directoryVisualStyleReport"),
-        ("directoryVisualRepair", "directoryVisualRepair"),
-        ("directory_visual_repair", "directoryVisualRepair"),
-        ("livePreviewUrl", "livePreviewUrl"),
-        ("live_preview_url", "livePreviewUrl"),
-    ):
-        if pending.get(source_key):
-            meta[target_key] = pending.get(source_key)
+    if pending_can_seed_setup_meta:
+        for source_key, target_key in (
+            ("setupRunId", "setupRunId"),
+            ("setup_run_id", "setupRunId"),
+            ("status", "setupStatus"),
+            ("setupStatus", "setupStatus"),
+            ("setup_status", "setupStatus"),
+            ("rescanRunId", "rescanRunId"),
+            ("rescan_run_id", "rescanRunId"),
+            ("mergeStatus", "mergeStatus"),
+            ("merge_status", "mergeStatus"),
+            ("prUrl", "prUrl"),
+            ("pr_url", "prUrl"),
+            ("prNumber", "prNumber"),
+            ("pr_number", "prNumber"),
+            ("previewUrl", "previewUrl"),
+            ("preview_url", "previewUrl"),
+            ("fallbackPreviewUrl", "fallbackPreviewUrl"),
+            ("fallback_preview_url", "fallbackPreviewUrl"),
+            ("failedPreviewUrl", "failedPreviewUrl"),
+            ("failed_preview_url", "failedPreviewUrl"),
+            ("failureKind", "failureKind"),
+            ("failure_kind", "failureKind"),
+            ("failedStep", "failedStep"),
+            ("failed_step", "failedStep"),
+            ("previewFailureDetails", "previewFailureDetails"),
+            ("preview_failure_details", "previewFailureDetails"),
+            ("directoryQualityGates", "directoryQualityGates"),
+            ("directory_quality_gates", "directoryQualityGates"),
+            ("directoryBrowserRepair", "directoryBrowserRepair"),
+            ("directory_browser_repair", "directoryBrowserRepair"),
+            ("directoryVisualStyleReport", "directoryVisualStyleReport"),
+            ("directory_visual_style_report", "directoryVisualStyleReport"),
+            ("directoryVisualRepair", "directoryVisualRepair"),
+            ("directory_visual_repair", "directoryVisualRepair"),
+            ("livePreviewUrl", "livePreviewUrl"),
+            ("live_preview_url", "livePreviewUrl"),
+        ):
+            if pending.get(source_key):
+                meta[target_key] = pending.get(source_key)
 
     latest_scan = _latest_run_matching(latest_runs or [], SCAN_WORKFLOWS)
     if latest_scan and _scan_run_is_pending_article_system_generation(latest_scan):
@@ -5589,7 +5631,10 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         if not meta.get("setupStatus"):
             meta["setupStatus"] = latest_scan.status
 
-    setup_run = _latest_article_system_setup_run(latest_runs or [], setup_run_id=str(meta.get("setupRunId") or ""))
+    setup_run = _latest_article_system_setup_run(
+        latest_runs or [],
+        setup_run_id=str(meta.get("setupRunId") or pending_setup_run_id or ""),
+    )
     if setup_run:
         run_meta = _setup_metadata_from_run(setup_run)
         for key, value in run_meta.items():
@@ -5604,14 +5649,18 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         and rescan_run.status == ContentFactoryRunStatus.COMPLETED
         and _article_system_is_published(config, article_system)
     )
-    published = bool(_article_system_is_published(config, article_system) and (not pending or verification_published))
+    setup_has_active_signal = bool(
+        pending_has_external_evidence
+        or setup_run
+        or (latest_scan and _scan_run_is_pending_article_system_generation(latest_scan))
+    )
+    published = bool(_article_system_is_published(config, article_system) and (not setup_has_active_signal or verification_published))
     setup_status = str(meta.get("setupStatus") or "").strip().lower()
     merge_status = str(meta.get("mergeStatus") or "").strip().lower()
     setup_merged = bool(
         merge_status == "merged"
         or setup_status in {"merged", "merged_verifying", "verifying", "published", "verified"}
     )
-    setup_has_active_signal = bool(pending or setup_run or (latest_scan and _scan_run_is_pending_article_system_generation(latest_scan)))
     completed_with_pending_verification = bool(
         meta.get("rescanRunId") and not verification_published
     )
@@ -5619,8 +5668,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         setup_has_active_signal
         and not published
         and (
-            bool(pending)
-            or completed_with_pending_verification
+            completed_with_pending_verification
             or setup_status in ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES
             or (setup_run and setup_run.status in RUNNING_RUN_STATUSES | FAILED_RUN_STATUSES | {
                 ContentFactoryRunStatus.AWAITING_CONFIRMATION,
@@ -6933,6 +6981,7 @@ def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_c
         "message": friendly,
         "diagnostics": payload_diagnostics,
         "retryable": retryable,
+        "content_factory_dispatch_blocked": True,
     }
 
 
@@ -7108,6 +7157,7 @@ def _run_result_from_remote(remote_data):
         "stale",
         "stale_reason",
         "retry_available",
+        "content_factory_dispatch_blocked",
         "queue_name",
         "queued_at",
         "scan_queue",
@@ -9142,10 +9192,31 @@ class VibeMarketingArticleSystemSetupView(APIView):
             config=config,
             payload=payload,
         )
+        if _article_system_setup_run_is_dispatch_blocked(run):
+            result = run.result or {}
+            result["scan_purpose"] = "setup"
+            result["article_surface_mode"] = article_surface_mode
+            result["article_surface_hint"] = article_surface_hint
+            result["pending_article_system_setup"] = pending
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(_run_start_payload(run), status=status.HTTP_503_SERVICE_UNAVAILABLE)
         result = run.result or {}
         result["scan_purpose"] = "setup"
         result["article_surface_mode"] = article_surface_mode
         result["article_surface_hint"] = article_surface_hint
+        pending = dict(pending)
+        pending["setupRunId"] = run.run_id
+        pending["setup_run_id"] = run.run_id
+        pending["setupStatus"] = run.status
+        pending["setup_status"] = run.status
+        pending["status"] = run.status
+        pending["updatedAt"] = timezone.now().isoformat()
+        pending["updated_at"] = pending["updatedAt"]
+        article_system = dict(config.article_system or {})
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
         result["pending_article_system_setup"] = pending
         result.setdefault("setup_run_id", run.run_id)
         setup_payload = dict(result.get("article_system_setup") or {})
