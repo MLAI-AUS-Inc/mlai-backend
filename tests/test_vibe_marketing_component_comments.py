@@ -381,6 +381,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertTrue(scaffold["passed"])
         self.assertTrue(scaffold["componentCatalogReady"])
         self.assertEqual(scaffold["missingComponents"], [])
+        self.assertFalse(response.data["hasCompletedArticleFlow"])
+        self.assertEqual(response.data["startPageMode"], "topic_picker")
 
     def test_starting_new_scan_supersedes_stale_scan_run(self):
         stale_run = ContentFactoryRun.objects.create(
@@ -2966,8 +2968,33 @@ class VibeMarketingComponentCommentTests(TestCase):
             bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
 
         self.assertEqual(bootstrap_response.status_code, 200)
+        scaffold = bootstrap_response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["passed"])
+        self.assertFalse(scaffold["setupBlocked"])
+        self.assertTrue(scaffold["setupMerged"])
+        self.assertFalse(bootstrap_response.data["hasCompletedArticleFlow"])
+        self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
         self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
-        self.assertFalse(bootstrap_response.data["checks"]["scaffold"]["passed"])
+        workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
+        self.assertEqual(workflow_steps["research"]["status"], "ready")
+
+        queued_article = ContentFactoryRun.objects.create(
+            run_id="article-after-setup-merge",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.QUEUED,
+            result={},
+        )
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_article):
+            article_response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {"topic": "AI adoption", "targetKeyword": "ai adoption"},
+                format="json",
+            )
+
+        self.assertEqual(article_response.status_code, 202)
+        self.assertEqual(article_response.data["runId"], "article-after-setup-merge")
 
         enable_response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",
