@@ -2237,6 +2237,34 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(state["scanRunId"], "scan-run-canonical")
         self.assertEqual(state["routePath"], "/articles")
 
+    def test_bootstrap_article_setup_state_keeps_saved_route_without_fake_setup_run(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config.github_repo = "Acme/site"
+        config.article_system = {
+            "state": "missing",
+            "pending_article_system_setup": {
+                "status": "pending_generation",
+                "routePath": "/articles",
+                "route_path": "/articles",
+                "mode": "existing",
+            },
+        }
+        config.save(update_fields=["github_repo", "article_system", "updated_at"])
+
+        response = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+
+        self.assertEqual(response.status_code, 200)
+        state = response.data["articleSetupState"]
+        self.assertEqual(state["routePath"], "/articles")
+        self.assertIsNone(state["setupRunId"])
+        self.assertIsNone(state["setupStatus"])
+        self.assertIsNone(state["setupRunStatus"])
+        self.assertFalse(state["setupBlocked"])
+        self.assertFalse(response.data["checks"]["scaffold"]["setupBlocked"])
+
     def test_bootstrap_article_setup_state_keeps_completed_scan_without_scan_run(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
@@ -3135,6 +3163,85 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.result["scan_purpose"], "inventory")
         config = OrganizationContentConfig.objects.get(organization=organization)
         self.assertNotIn("pending_article_system_setup", config.article_system or {})
+
+    @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
+    def test_article_system_setup_requires_content_factory_remote(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={"github_repo": "acme/site"},
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/article-system-setup/",
+            {
+                "githubRepo": "acme/site",
+                "articleSurfaceMode": "existing",
+                "articleSurfaceUrl": "https://www.acme.com/articles",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.BLOCKED)
+        self.assertNotIn("setupRunId", response.data)
+        run = ContentFactoryRun.objects.get(workflow="article_system_setup", domain="acme.com")
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertTrue(run.result["content_factory_dispatch_blocked"])
+        self.assertNotIn("setup_run_id", run.result)
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["routePath"], "/articles")
+        self.assertNotIn("setupRunId", pending)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_setup_records_confirmed_content_factory_run(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={"github_repo": "acme/site"},
+        )
+
+        class FakeResponse:
+            status_code = 202
+            content = b"{}"
+
+            def json(self):
+                return {"run_id": "setup-confirmed-1", "status": "queued", "workflow": "article_system_setup"}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertEqual(url, "https://content-factory.test/api/runs/article-system-setup")
+            self.assertEqual(json["github_repo"], "acme/site")
+            self.assertEqual(json["scan_purpose"], "setup")
+            self.assertEqual(json["article_surface_hint"]["route_path"], "/articles")
+            return FakeResponse()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article-system-setup/",
+                {
+                    "githubRepo": "acme/site",
+                    "articleSurfaceMode": "existing",
+                    "articleSurfaceUrl": "https://www.acme.com/articles",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["setupRunId"], "setup-confirmed-1")
+        run = ContentFactoryRun.objects.get(run_id="setup-confirmed-1")
+        self.assertEqual(run.workflow, "article_system_setup")
+        self.assertEqual(run.status, ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(run.result["setup_run_id"], "setup-confirmed-1")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["routePath"], "/articles")
+        self.assertEqual(pending["setupRunId"], "setup-confirmed-1")
+        self.assertEqual(pending["setupStatus"], ContentFactoryRunStatus.QUEUED)
 
     def test_scan_rejects_mismatched_article_surface_domain(self):
         response = self.client.post(
