@@ -2184,6 +2184,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "merge_status": data.get("merge_status") or setup_payload.get("merge_status"),
             "article_system_setup": setup_payload,
             "pr_url": data.get("pr_url") or setup_payload.get("pr_url"),
+            "pr_number": data.get("pr_number") or data.get("prNumber") or setup_payload.get("pr_number") or setup_payload.get("prNumber"),
             "preview_url": preview_url_value,
             "fallback_preview_url": fallback_preview_url_value,
             "failed_preview_url": failed_preview_url_value,
@@ -2288,6 +2289,36 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         run_status = ContentFactoryRunStatus.COMPLETED
         approval_state = ContentFactoryApprovalState.APPROVED
         current_step = "completed"
+        error = ""
+    elif event_type == "article_system_setup_pr_created":
+        setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
+        setup_payload["status"] = "pr_created"
+        setup_payload["setup_status"] = "pr_created"
+        setup_payload["setupStatus"] = "pr_created"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["merge_status"] = result.get("merge_status") or "not_merged"
+        setup_payload["mergeStatus"] = setup_payload["merge_status"]
+        setup_payload["current_step"] = "create_pull_request"
+        setup_payload["currentStep"] = "create_pull_request"
+        if result.get("pr_url"):
+            setup_payload["pr_url"] = result.get("pr_url")
+            setup_payload["prUrl"] = result.get("pr_url")
+        if result.get("pr_number") not in (None, ""):
+            setup_payload["pr_number"] = result.get("pr_number")
+            setup_payload["prNumber"] = result.get("pr_number")
+        result["status"] = "setup_pr_created"
+        result["setup_status"] = "pr_created"
+        result["setupStatus"] = "pr_created"
+        result["merge_status"] = setup_payload["merge_status"]
+        result["mergeStatus"] = setup_payload["mergeStatus"]
+        result["current_step"] = "create_pull_request"
+        result["currentStep"] = "create_pull_request"
+        result["article_system_setup"] = setup_payload
+        run_status = ContentFactoryRunStatus.COMPLETED
+        approval_state = ContentFactoryApprovalState.APPROVED
+        current_step = "create_pull_request"
         error = ""
     elif event_type == "article_system_setup_preview_failed":
         setup_payload = dict(setup_payload)
@@ -2541,6 +2572,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     "directory_visual_style_report": result.get("directory_visual_style_report"),
                     "directory_visual_repair": result.get("directory_visual_repair"),
                     "pr_url": result.get("pr_url"),
+                    "pr_number": result.get("pr_number"),
                     "live_preview_url": result.get("live_preview_url"),
                 }
             )
@@ -2552,6 +2584,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     if event_type == "article_system_setup_preview_failed"
                     else "article_system_setup_preview_fallback_ready"
                     if event_type == "article_system_setup_preview_fallback_ready"
+                    else "article_system_setup_pr_created"
+                    if event_type == "article_system_setup_pr_created"
                     else "article_system_setup_preview"
                 )
             parent.save(update_fields=["status", "result", "current_step", "updated_at"])
@@ -2582,6 +2616,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         rescan_run_id=result.get("rescan_run_id"),
         prUrl=result.get("pr_url"),
         pr_url=result.get("pr_url"),
+        prNumber=result.get("pr_number"),
+        pr_number=result.get("pr_number"),
         previewUrl=result.get("preview_url"),
         preview_url=result.get("preview_url"),
         fallbackPreviewUrl=result.get("fallback_preview_url"),
@@ -2747,6 +2783,7 @@ class ContentFactoryCallbackView(APIView):
                 'article_system_setup_progress',
                 'article_system_setup_preview_failed',
                 'article_system_setup_completed',
+                'article_system_setup_pr_created',
                 'article_system_setup_manual_merge_required',
             }:
                 _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)

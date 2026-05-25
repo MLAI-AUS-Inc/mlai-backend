@@ -2815,3 +2815,167 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.refresh_from_db()
         self.assertEqual(self.run.result["merge_status"], "pending")
         self.assertEqual(self.run.result["checks_status"], "pending")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_direct_article_system_setup_approve_persists_pr_created_state(self):
+        config = self._prepare_articles_setup_gate(status="preview_ready")
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-direct-approve",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "status": "preview_ready",
+                "setup_status": "preview_ready",
+                "preview_url": "https://preview.example/articles",
+                "article_system_setup": {"status": "preview_ready", "setup_run_id": "setup-direct-approve"},
+            },
+        )
+        remote_payload = {
+            "run_id": "setup-direct-approve",
+            "workflow": "article_system_setup",
+            "status": "setup_pr_created",
+            "setup_status": "pr_created",
+            "current_step": "create_pull_request",
+            "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/44",
+            "pr_number": 44,
+            "merge_status": "not_merged",
+            "article_system_setup": {
+                "status": "pr_created",
+                "setup_run_id": "setup-direct-approve",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/44",
+                "pr_number": 44,
+                "merge_status": "not_merged",
+            },
+        }
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value=remote_payload):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/approve", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(response.data["currentStep"], "create_pull_request")
+        self.assertEqual(response.data["approvalState"], ContentFactoryApprovalState.APPROVED)
+        self.assertEqual(response.data["result"]["status"], "setup_pr_created")
+        self.assertEqual(response.data["result"]["article_system_setup"]["status"], "pr_created")
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(setup_run.current_step, "create_pull_request")
+        self.assertEqual(setup_run.result["pr_number"], 44)
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "pr_created")
+        self.assertEqual(pending["pr_number"], 44)
+
+    def test_merge_setup_pr_refuses_pending_checks(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-merge-pending",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/45",
+                "pr_number": 45,
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-merge-pending",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/45",
+                    "pr_number": 45,
+                },
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
+                ),
+            ),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("GitHub Actions checks are still running", response.data["detail"])
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.result["merge_status"], "pending")
+        self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "pending")
+
+    def test_merge_setup_pr_marks_setup_merged_and_daily_ready(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        config.connected_slack_user_id = "U123"
+        config.save(update_fields=["connected_slack_user_id", "updated_at"])
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-merge-success",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "setup_status": "pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46",
+                "pr_number": 46,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-merge-success",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46",
+                    "pr_number": 46,
+                    "merge_status": "not_merged",
+                },
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": True, "state": "success", "message": "Checks are passing."},
+                ),
+            ),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"merged": True, "sha": "abc123"}),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(setup_run.current_step, "merged")
+        self.assertEqual(setup_run.result["merge_status"], "merged")
+        self.assertEqual(setup_run.result["article_system_setup"]["status"], "merged")
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "merged")
+        self.assertEqual(pending["merge_status"], "merged")
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(bootstrap_response.status_code, 200)
+        self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
+        self.assertFalse(bootstrap_response.data["checks"]["scaffold"]["passed"])
+
+        enable_response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",
+            {"defaultTimezone": "Australia/Melbourne"},
+            format="json",
+        )
+
+        self.assertEqual(enable_response.status_code, 200)
+        config.refresh_from_db()
+        self.assertTrue(config.daily_discovery_enabled)
+        self.assertEqual(config.default_timezone, "Australia/Melbourne")
