@@ -61,6 +61,11 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Project Markdown docs and notes
+/*.md
+/docs/*.md
+/docs/**/*.md
+
 # Flask stuff:
 instance/
 .webassets-cache
