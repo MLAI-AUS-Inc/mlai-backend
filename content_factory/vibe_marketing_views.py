@@ -87,6 +87,7 @@ from workflow_runs.models import (
     ContentFactoryRunStatus,
     ContentFactoryStepStatus,
 )
+from workflow_runs.sanitization import sanitize_json_for_postgres
 
 
 logger = logging.getLogger(__name__)
@@ -7470,7 +7471,8 @@ def _article_system_setup_current_retry_attempt(*payloads) -> bool:
 
 
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
-    remote_data = remote_data or {}
+    remote_data = sanitize_json_for_postgres(remote_data or {})
+    payload = sanitize_json_for_postgres(payload or {})
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
     if not run_id:
         run_id = f"vibe-marketing-{workflow}-{uuid.uuid4().hex[:12]}"
@@ -7549,7 +7551,7 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         )
 
     if response.status_code == 200:
-        return response.json() if response.content else {}
+        return sanitize_json_for_postgres(response.json() if response.content else {})
     if response.status_code == 404:
         if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
             detail = f"Content Factory run {run_id} was not found."
@@ -7572,7 +7574,8 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         response_payload = response.json()
     except Exception:
         response_payload = {}
-    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    response_payload = sanitize_json_for_postgres(response_payload)
+    detail = sanitize_json_for_postgres(response_payload.get("detail") or response_payload.get("error") or response.text)
     if response.status_code >= 500:
         logger.warning(
             "content_factory_status_poll_unavailable run_id=%s workflow=%s status_code=%s",
@@ -7613,6 +7616,7 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
 
 
 def _sync_steps_from_remote(run, remote_data):
+    remote_data = sanitize_json_for_postgres(remote_data if isinstance(remote_data, dict) else {})
     raw_steps = remote_data.get("steps") or remote_data.get("step_states")
     if not raw_steps:
         return
@@ -7664,6 +7668,7 @@ def _sync_steps_from_remote(run, remote_data):
 def _sync_local_run_from_remote(run, remote_data):
     if not isinstance(remote_data, dict) or not remote_data:
         return run
+    remote_data = sanitize_json_for_postgres(remote_data)
 
     original_snapshot = {
         "workflow": run.workflow,
