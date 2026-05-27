@@ -88,6 +88,19 @@ from workflow_runs.models import (
     ContentFactoryStepStatus,
 )
 from workflow_runs.sanitization import sanitize_json_for_postgres
+from content_factory.billing import (
+    CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+    build_roo_points_authorization_payload,
+    build_roo_points_payload,
+    get_content_factory_ai_agent_required_points,
+    get_content_factory_article_cost_points,
+    is_free_content_factory_domain,
+)
+from integrations.services.article_generation import (
+    InsufficientRooPointsError,
+    charge_content_factory_request_for_user,
+    refund_content_factory_request_for_user,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -390,6 +403,118 @@ def _resolve_context_or_response(request, *, require_domain=True):
 def _get_config(organization):
     config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
     return config
+
+
+def _roo_points_balance_for_user(user) -> int:
+    from roo.services import PointsService
+
+    balance_data = PointsService.get_balance(user)
+    try:
+        return int(balance_data.get("balance") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _roo_points_response(*, domain: str, action: str, current_balance: int, cost_points: int = 0) -> Response:
+    return Response(
+        build_roo_points_payload(
+            domain=domain,
+            action=action,
+            current_balance=current_balance,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            cost_points=cost_points,
+        ),
+        status=status.HTTP_402_PAYMENT_REQUIRED,
+    )
+
+
+def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
+    required_points = get_content_factory_ai_agent_required_points(domain)
+    if required_points <= 0:
+        return None, None
+    current_balance = _roo_points_balance_for_user(user)
+    if current_balance < required_points:
+        return _roo_points_response(
+            domain=domain,
+            action=action,
+            current_balance=current_balance,
+            cost_points=0,
+        ), current_balance
+    return None, current_balance
+
+
+def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action=action,
+            cost_points=0,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            current_balance=current_balance,
+            billing_status="free" if is_free_content_factory_domain(domain) else "gated",
+        )
+    )
+
+
+def _charge_roo_points_for_article(request, *, context, payload: dict):
+    domain = context.organization.domain
+    client_request_id = str(
+        payload.get("client_request_id")
+        or _request_value(request.data, "client_request_id", "clientRequestId", default="")
+        or f"vibe-article:{context.organization.id}:{uuid.uuid4().hex}"
+    ).strip()
+    payload["client_request_id"] = client_request_id
+    actor_id = founder_actor_id_for_user(request.user)
+    article_request = {
+        **payload,
+        "user_email": getattr(request.user, "email", ""),
+        "user_first_name": getattr(request.user, "first_name", ""),
+        "user_last_name": getattr(request.user, "last_name", ""),
+        "user_avatar_url": getattr(request.user, "avatar_url", ""),
+    }
+    try:
+        charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+            user=request.user,
+            actor_id=actor_id,
+            article_request=article_request,
+            resolved_domain=domain,
+        )
+    except InsufficientRooPointsError as exc:
+        return None, None, None, Response(
+            getattr(exc, "payload", None) or build_roo_points_payload(
+                domain=domain,
+                action="article_generation",
+                current_balance=_roo_points_balance_for_user(request.user),
+                required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+                cost_points=get_content_factory_article_cost_points(domain),
+            ),
+            status=status.HTTP_402_PAYMENT_REQUIRED,
+        )
+
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action="article_generation",
+            cost_points=charge_amount,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            current_balance=_roo_points_balance_for_user(request.user),
+            billing_status="charged" if charge_amount > 0 else "free",
+            ledger_id=getattr(charge_ledger, "id", None),
+        )
+    )
+    return charged_user, charge_ledger, article_request, None
+
+
+def _refund_roo_points_for_article_start(*, charged_user, actor_id: str, article_request: dict, domain: str, reason: str):
+    if not charged_user or not article_request:
+        return None
+    return refund_content_factory_request_for_user(
+        user=charged_user,
+        actor_id=actor_id,
+        article_request=article_request,
+        resolved_domain=domain,
+        reason=reason,
+    )
 
 
 def _assign_config_actor(config, user) -> list[str]:
@@ -4358,12 +4483,55 @@ def _restart_article_run(*, run, context):
             status=status.HTTP_409_CONFLICT,
         )
 
+    client_request_id = str(payload.get("client_request_id") or f"vibe-article-restart:{run.run_id}:{uuid.uuid4().hex}").strip()
+    payload["client_request_id"] = client_request_id
+    article_request = {
+        **payload,
+        "user_email": getattr(context.profile.user, "email", ""),
+        "user_first_name": getattr(context.profile.user, "first_name", ""),
+        "user_last_name": getattr(context.profile.user, "last_name", ""),
+        "user_avatar_url": getattr(context.profile.user, "avatar_url", ""),
+    }
+    try:
+        charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+            user=context.profile.user,
+            actor_id=actor_id,
+            article_request=article_request,
+            resolved_domain=context.organization.domain,
+        )
+    except InsufficientRooPointsError as exc:
+        return None, Response(
+            getattr(exc, "payload", None) or build_roo_points_payload(
+                domain=context.organization.domain,
+                action="article_generation",
+                current_balance=_roo_points_balance_for_user(context.profile.user),
+                required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+                cost_points=get_content_factory_article_cost_points(context.organization.domain),
+            ),
+            status=status.HTTP_402_PAYMENT_REQUIRED,
+        )
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=context.organization.domain,
+            action="article_generation",
+            cost_points=charge_amount,
+            required_points=get_content_factory_ai_agent_required_points(context.organization.domain),
+            current_balance=_roo_points_balance_for_user(context.profile.user),
+            billing_status="charged" if charge_amount > 0 else "free",
+            ledger_id=getattr(charge_ledger, "id", None),
+        )
+    )
     restarted_run = _queue_content_factory_run(
         endpoint="article",
         workflow="article_generation",
         context=context,
         config=config,
         payload=payload,
+        billing_refund_context={
+            "charged_user": charged_user,
+            "article_request": article_request,
+            "reason": "Vibe Marketing article restart queue did not start.",
+        },
     )
     result = run.result or {}
     result["restart_child_run_id"] = restarted_run.run_id
@@ -7841,10 +8009,11 @@ def _sync_local_run_from_remote(run, remote_data):
     return run
 
 
-def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
+def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
     actor_id = founder_actor_id_for_user(context.profile.user)
     remote_config = _content_factory_remote_config()
     remote_data = {}
+    remote_run_id = ""
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
     if requires_remote and not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -7877,6 +8046,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
             if response.status_code in (200, 202):
                 remote_data = response.json() if response.content else {}
                 run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
+                remote_run_id = run_id
                 logger.info(
                     "content_factory_dispatch_result workflow=%s endpoint=%s status_code=%s run_id=%s",
                     workflow,
@@ -7934,6 +8104,15 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
                 diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
                 retryable=True,
             )
+
+    if billing_refund_context and not remote_run_id:
+        _refund_roo_points_for_article_start(
+            charged_user=billing_refund_context.get("charged_user"),
+            actor_id=actor_id,
+            article_request=billing_refund_context.get("article_request") or {},
+            domain=context.organization.domain,
+            reason=billing_refund_context.get("reason") or "Content Factory article queue did not start.",
+        )
 
     return _create_local_run(
         workflow=workflow,
@@ -8746,6 +8925,13 @@ class VibeMarketingAutofillView(APIView):
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=domain,
+            action="startup_autofill",
+        )
+        if gate_response is not None:
+            return gate_response
 
         with transaction.atomic():
             company_id = _company_id_from_request(request)
@@ -8828,6 +9014,12 @@ class VibeMarketingAutofillView(APIView):
             "requested_by_slack_user_id": actor_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=organization.domain,
+            action="startup_autofill",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="autofill",
             workflow="startup_autofill",
@@ -8844,6 +9036,13 @@ class VibeMarketingBaselineView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="website_baseline",
+        )
+        if gate_response is not None:
+            return gate_response
         config.baseline_skipped_at = None
         config.baseline_skip_reason = ""
         config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
@@ -8857,6 +9056,12 @@ class VibeMarketingBaselineView(APIView):
             "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="website_baseline",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="baseline",
             workflow="website_baseline",
@@ -9063,6 +9268,13 @@ class VibeMarketingScanView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="repo_scan",
+        )
+        if gate_response is not None:
+            return gate_response
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
@@ -9105,6 +9317,12 @@ class VibeMarketingScanView(APIView):
             "article_surface_mode": article_surface_mode,
             "scan_purpose": scan_purpose,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="repo_scan",
+            current_balance=gate_balance,
+        )
         if article_surface_url:
             payload["article_surface_url"] = article_surface_url
         if article_surface_hint:
@@ -9154,6 +9372,13 @@ class VibeMarketingArticleSystemSetupView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="article_system_setup",
+        )
+        if gate_response is not None:
+            return gate_response
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
@@ -9190,6 +9415,12 @@ class VibeMarketingArticleSystemSetupView(APIView):
             "article_surface_mode": article_surface_mode,
             "article_surface_hint": article_surface_hint,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="article_system_setup",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="article-system-setup",
             workflow="article_system_setup",
@@ -9252,11 +9483,24 @@ class VibeMarketingDiscoveryView(APIView):
         blocked_response = _setup_blocked_response_for_generation(context, config)
         if blocked_response:
             return blocked_response
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="topic_discovery",
+        )
+        if gate_response is not None:
+            return gate_response
         payload = {
             "domain": context.organization.domain,
             "slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="topic_discovery",
+            current_balance=gate_balance,
+        )
         content_island_slug = str(
             _request_value(request.data, "contentIslandSlug", "content_island_slug", default="") or ""
         ).strip()
@@ -9408,12 +9652,24 @@ class VibeMarketingArticleView(APIView):
             "custom_title": selected_title or custom_title or None,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
+            request,
+            context=context,
+            payload=payload,
+        )
+        if billing_error is not None:
+            return billing_error
         run = _queue_content_factory_run(
             endpoint="article",
             workflow="article_generation",
             context=context,
             config=config,
             payload=payload,
+            billing_refund_context={
+                "charged_user": charged_user,
+                "article_request": article_request,
+                "reason": "Vibe Marketing article queue did not start.",
+            },
         )
         if run.status not in FAILED_RUN_STATUSES:
             _mark_keyword_in_progress(context.organization, payload["target_keyword"])
@@ -9536,6 +9792,13 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             .order_by("created_at", "id")
         )
         draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="article_system_revision",
+        )
+        if gate_response is not None:
+            return gate_response
         retry_existing_batch = False
         submitted_local_comments = []
         if draft_comments:
@@ -9598,6 +9861,12 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             "request_source": "founder_tools_article_system_feedback",
             "comments": remote_comments,
         }
+        _mark_roo_points_gate_authorized(
+            remote_payload,
+            domain=context.organization.domain,
+            action="article_system_revision",
+            current_balance=gate_balance,
+        )
         remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
         if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
             result = dict(run.result or {})
@@ -9799,6 +10068,13 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     .order_by("created_at", "id")
                 )
                 draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="article_revision",
+        )
+        if gate_response is not None:
+            return gate_response
         retry_existing_batch = False
         if draft_comments:
             batch_id = str(uuid.uuid4())
@@ -9843,6 +10119,12 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             "comments": [_remote_comment_payload(comment) for comment in draft_comments],
             "request_source": "founder_tools_component_feedback",
         }
+        _mark_roo_points_gate_authorized(
+            remote_payload,
+            domain=context.organization.domain,
+            action="article_revision",
+            current_balance=gate_balance,
+        )
         remote_data = _call_content_factory_component_revision(run_id=source_run.run_id, payload=remote_payload)
         new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
         if remote_data.get("error") and not new_run_id:
@@ -10296,6 +10578,20 @@ class VibeMarketingRunControlView(APIView):
                     _annotate_publish_handoff_staleness(candidate)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
             _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action)
+        if action == "revise":
+            gate_response, gate_balance = _require_roo_points_for_ai_agent(
+                request.user,
+                domain=context.organization.domain,
+                action="article_revision",
+            )
+            if gate_response is not None:
+                return gate_response
+            _mark_roo_points_gate_authorized(
+                payload,
+                domain=context.organization.domain,
+                action="article_revision",
+                current_balance=gate_balance,
+            )
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
             action=action,
