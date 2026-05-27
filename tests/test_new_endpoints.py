@@ -2416,7 +2416,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             status="generating",
             client_request_id="publish-target-request-1",
             billing_source_job_id="publish-target-run-1",
-            billing_amount=4,
+            billing_amount=6,
             billing_status="charged",
             request_meta={
                 "domain": "woofya.com.au",
@@ -2447,7 +2447,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("refunded automatically", message)
 
         user.points_account.refresh_from_db()
-        self.assertEqual(user.points_account.balance, 18)
+        self.assertEqual(user.points_account.balance, 20)
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
 
@@ -2511,7 +2511,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_user_id="U123",
             status="generating",
             billing_status="charged",
-            billing_amount=4,
+            billing_amount=6,
             request_meta={"domain": "mlai.au"},
         )
 

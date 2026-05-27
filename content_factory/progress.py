@@ -6,9 +6,13 @@ from typing import Optional
 from django.utils import timezone
 
 from integrations.services.slack import SlackService
+from content_factory.billing import (
+    CONTENT_FACTORY_ARTICLE_COST_POINTS,
+    FREE_CONTENT_FACTORY_DOMAINS,
+    get_content_factory_article_cost_points,
+    normalize_content_factory_domain,
+)
 
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 4
-FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 QUIET_RUN_THRESHOLD = timedelta(minutes=10)
 SCHEDULED_DAILY_TRIGGER_SOURCE = "scheduled_daily"
 
@@ -27,41 +31,16 @@ MILESTONE_SUMMARIES = {
 }
 
 
-def normalize_content_factory_domain(domain: str | None) -> str:
-    if not domain:
-        return ""
-
-    normalized = domain.strip().lower()
-    if normalized.startswith("https://"):
-        normalized = normalized[8:]
-    elif normalized.startswith("http://"):
-        normalized = normalized[7:]
-
-    if normalized.startswith("www."):
-        normalized = normalized[4:]
-
-    if "/" in normalized:
-        normalized = normalized.split("/", 1)[0]
-
-    return normalized
-
-
-def get_content_factory_article_cost_points(domain: str | None) -> int:
-    normalized_domain = normalize_content_factory_domain(domain)
-    if normalized_domain in FREE_CONTENT_FACTORY_DOMAINS:
-        return 0
-    return CONTENT_FACTORY_ARTICLE_COST_POINTS
-
-
 def build_content_factory_live_cost_text(job_or_domain) -> str:
     if hasattr(job_or_domain, "domain"):
         job = job_or_domain
         domain = getattr(job, "domain", None)
         request_meta = getattr(job, "request_meta", {}) or {}
-        if (
-            str(getattr(job, "billing_status", "") or "").strip() in {"", "deferred"}
-            and str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
-        ):
+        billing_status = str(getattr(job, "billing_status", "") or "").strip()
+        trigger_source = str(request_meta.get("trigger_source") or "").strip()
+        if billing_status == "deferred":
+            return "💳 This research run has not charged Roo points yet. Points will only be deducted if you confirm writing."
+        if billing_status == "" and trigger_source == SCHEDULED_DAILY_TRIGGER_SOURCE:
             return "💳 This scheduled suggestion has not charged Roo points yet. Points will only be deducted if you confirm writing."
     else:
         job = None

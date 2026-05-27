@@ -8,6 +8,16 @@ from content_factory.article_system import (
     resolve_article_system_with_source,
 )
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from content_factory.billing import (
+    CONTENT_FACTORY_ARTICLE_COST_POINTS,
+    CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+    FREE_CONTENT_FACTORY_DOMAINS,
+    build_roo_points_authorization_payload,
+    build_roo_points_payload,
+    get_content_factory_ai_agent_required_points,
+    get_content_factory_article_cost_points,
+    is_free_content_factory_domain,
+)
 from content_factory.progress import upsert_live_progress_card
 from organizations.models import Organization
 from integrations.models import UserIntegration
@@ -28,8 +38,6 @@ FAILURE_RUN_STATUSES = {"failed", "error", "denied"}
 BLOCKED_RUN_STATUSES = {"blocked", "blocked_verification"}
 REVIEWABLE_RUN_STATUSES = {"pr_opened", "needs_review"}
 APPROVAL_PENDING_STATUSES = {"approval_required", "awaiting_approval"}
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 4
-FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 CONTENT_FACTORY_LEDGER_SOURCE = "CONTENT_FACTORY"
 CONTENT_FACTORY_BILLING_STATUS_CHARGED = "charged"
 CONTENT_FACTORY_BILLING_STATUS_REUSED = "reused"
@@ -56,6 +64,18 @@ CONTENT_FACTORY_BACKEND_UNAVAILABLE_ERROR_CODE = "CONTENT_FACTORY_UNAVAILABLE"
 class ArticleGenerationError(Exception):
     """Exception raised when article generation fails."""
     pass
+
+
+class InsufficientRooPointsError(ArticleGenerationError):
+    """Raised when a Content Factory AI action is blocked by Roo point balance."""
+
+    def __init__(self, payload: dict):
+        self.payload = dict(payload or {})
+        super().__init__(
+            self.payload.get("message")
+            or self.payload.get("error")
+            or "Insufficient Roo points."
+        )
 
 
 class GitHubReconnectRequiredError(ArticleGenerationError):
@@ -372,17 +392,6 @@ def _raise_content_factory_precondition(
     )
 
 
-def get_content_factory_article_cost_points(domain: Optional[str]) -> int:
-    normalized_domain = normalize_domain(domain or "")
-    if normalized_domain in FREE_CONTENT_FACTORY_DOMAINS:
-        return 0
-    return CONTENT_FACTORY_ARTICLE_COST_POINTS
-
-
-def is_free_content_factory_domain(domain: Optional[str]) -> bool:
-    return get_content_factory_article_cost_points(domain) == 0
-
-
 def _append_refund_instruction(message: str, domain: Optional[str]) -> str:
     cost_points = get_content_factory_article_cost_points(domain)
     if cost_points == 0:
@@ -532,6 +541,62 @@ def _build_content_factory_charge_description(resolved_domain: str, article_requ
     return f"Content Factory article research for {resolved_domain}"
 
 
+def _content_factory_balance_for_user(user) -> int:
+    from roo.services import PointsService
+
+    balance_data = PointsService.get_balance(user)
+    try:
+        return int(balance_data.get("balance") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _content_factory_authorization_payload(
+    *,
+    resolved_domain: str,
+    action: str,
+    cost_points: int,
+    billing_status: str,
+    ledger=None,
+    current_balance: Optional[int] = None,
+) -> dict:
+    return build_roo_points_authorization_payload(
+        domain=resolved_domain,
+        action=action,
+        cost_points=cost_points,
+        required_points=get_content_factory_ai_agent_required_points(resolved_domain),
+        current_balance=current_balance,
+        billing_status=billing_status,
+        ledger_id=getattr(ledger, "id", None),
+    )
+
+
+def _require_content_factory_ai_agent_points(
+    *,
+    slack_user_id: str,
+    article_request: dict,
+    resolved_domain: str,
+    action: str,
+):
+    required_points = get_content_factory_ai_agent_required_points(resolved_domain)
+    if required_points <= 0:
+        return None, None
+
+    user = _ensure_content_factory_user(slack_user_id, article_request)
+    current_balance = _content_factory_balance_for_user(user)
+    if current_balance < required_points:
+        raise InsufficientRooPointsError(
+            build_roo_points_payload(
+                domain=resolved_domain,
+                action=action,
+                current_balance=current_balance,
+                required_points=required_points,
+                cost_points=0,
+            )
+        )
+    return user, current_balance
+
+
 def _get_existing_billed_source_job(client_request_id: str):
     from content_factory.models import ContentFactoryJob
 
@@ -563,12 +628,17 @@ def _serialize_existing_billed_job(job) -> dict:
     }
 
 
-def _charge_content_factory_request(slack_user_id: str, article_request: dict, resolved_domain: str):
+def _charge_content_factory_user(
+    *,
+    user,
+    created_by_slack_id: str,
+    article_request: dict,
+    resolved_domain: str,
+):
     from content_factory.models import ContentFactoryJob
     from roo.permissions import InsufficientBalanceError
     from roo.services import PointsService
 
-    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     client_request_id = _get_client_request_id(article_request)
     cost_points = get_content_factory_article_cost_points(resolved_domain)
     existing_refunded = (
@@ -584,7 +654,6 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
             "This Content Factory run was already refunded after a failed start. Please start a new article request."
         )
 
-    user = _ensure_content_factory_user(slack_user_id, article_request)
     if cost_points == 0:
         return user, None, 0
 
@@ -594,17 +663,49 @@ def _charge_content_factory_request(slack_user_id: str, article_request: dict, r
             delta=cost_points,
             source=CONTENT_FACTORY_LEDGER_SOURCE,
             description=_build_content_factory_charge_description(resolved_domain, article_request),
-            created_by_slack_id=requested_by_slack_user_id,
+            created_by_slack_id=created_by_slack_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
             reference_id=client_request_id,
         )
     except InsufficientBalanceError:
-        raise ArticleGenerationError(
-            f"Creating an article costs {cost_points} Roo points, and this user does not have enough."
+        raise InsufficientRooPointsError(
+            build_roo_points_payload(
+                domain=resolved_domain,
+                action="article_generation",
+                current_balance=_content_factory_balance_for_user(user),
+                required_points=get_content_factory_ai_agent_required_points(resolved_domain),
+                cost_points=cost_points,
+            )
         )
 
     return user, ledger, cost_points
+
+
+def _charge_content_factory_request(slack_user_id: str, article_request: dict, resolved_domain: str):
+    requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
+    user = _ensure_content_factory_user(slack_user_id, article_request)
+    return _charge_content_factory_user(
+        user=user,
+        created_by_slack_id=requested_by_slack_user_id,
+        article_request=article_request,
+        resolved_domain=resolved_domain,
+    )
+
+
+def charge_content_factory_request_for_user(
+    *,
+    user,
+    actor_id: str,
+    article_request: dict,
+    resolved_domain: str,
+):
+    return _charge_content_factory_user(
+        user=user,
+        created_by_slack_id=actor_id,
+        article_request=article_request,
+        resolved_domain=resolved_domain,
+    )
 
 
 def _refund_content_factory_request(
@@ -640,6 +741,23 @@ def _refund_content_factory_request(
         billing_ledger_id=ledger.id,
     )
     return ledger
+
+
+def refund_content_factory_request_for_user(
+    *,
+    user,
+    actor_id: str,
+    article_request: dict,
+    resolved_domain: str,
+    reason: str,
+):
+    return _refund_content_factory_request(
+        user=user,
+        slack_user_id=actor_id,
+        article_request=article_request,
+        resolved_domain=resolved_domain,
+        reason=reason,
+    )
 
 
 def _get_content_factory_user_for_job(job):
@@ -915,7 +1033,10 @@ def maybe_auto_refund_terminal_failure(job, *, error_code: Optional[str], error_
 def _job_uses_deferred_billing(job) -> bool:
     if not job:
         return False
-    if getattr(job, "billing_status", "") not in {"", CONTENT_FACTORY_BILLING_STATUS_DEFERRED}:
+    billing_status = str(getattr(job, "billing_status", "") or "").strip()
+    if billing_status == CONTENT_FACTORY_BILLING_STATUS_DEFERRED:
+        return True
+    if billing_status:
         return False
     request_meta = getattr(job, "request_meta", {}) or {}
     return _is_scheduled_daily_request(request_meta)
@@ -1672,21 +1793,26 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     if not topic:
         discovery_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/discovery"
         requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
-        scheduled_daily_request = _is_scheduled_daily_request(article_request)
-        charged_user = None
-        charge_ledger = None
+        _gated_user, gated_balance = _require_content_factory_ai_agent_points(
+            slack_user_id=slack_user_id,
+            article_request=article_request,
+            resolved_domain=resolved_domain,
+            action="topic_discovery",
+        )
         charge_amount = 0
-        billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED if scheduled_daily_request else CONTENT_FACTORY_BILLING_STATUS_CHARGED
-        if not scheduled_daily_request:
-            charged_user, charge_ledger, charge_amount = _charge_content_factory_request(
-                slack_user_id,
-                article_request,
-                resolved_domain,
-            )
+        billing_status = CONTENT_FACTORY_BILLING_STATUS_DEFERRED
         payload = {
             "domain": resolved_domain,
             "slack_user_id": slack_user_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+            "client_request_id": client_request_id,
+            **_content_factory_authorization_payload(
+                resolved_domain=resolved_domain,
+                action="topic_discovery",
+                cost_points=0,
+                billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+                current_balance=gated_balance,
+            ),
         }
         if isinstance(article_request.get("notification_context"), dict):
             payload["notification_context"] = article_request["notification_context"]
@@ -1706,28 +1832,12 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
 
             if response.status_code not in [200, 202]:
                 logger.error(f"Content Factory discovery failed: {response.text}")
-                if charged_user is not None:
-                    _refund_content_factory_request(
-                        user=charged_user,
-                        slack_user_id=slack_user_id,
-                        article_request=article_request,
-                        resolved_domain=resolved_domain,
-                        reason=f"discovery queue failed with status {response.status_code}",
-                    )
                 raise ArticleGenerationError(f"Content Factory returned {response.status_code}: {response.text}")
 
             data = response.json()
             job_id = data.get('job_id') or data.get('task_id') or data.get('run_id')
             if not job_id:
                 logger.warning("Content Factory returned discovery success but no job_id")
-                if charged_user is not None:
-                    _refund_content_factory_request(
-                        user=charged_user,
-                        slack_user_id=slack_user_id,
-                        article_request=article_request,
-                        resolved_domain=resolved_domain,
-                        reason="missing job id from discovery queue response",
-                    )
                 raise ArticleGenerationError("Content Factory did not return a run id for the discovery request.")
 
             _store_job_tracking_record(
@@ -1743,7 +1853,6 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 billing_source_job_id=job_id,
                 billing_amount=charge_amount,
                 billing_status=billing_status,
-                billing_ledger_id=charge_ledger.id if charge_ledger else None,
                 progress_message_ts=progress_message_ts,
                 last_progress_milestone_key="queued",
                 last_progress_updated_at=timezone.now(),
@@ -1757,14 +1866,6 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
                 "job_status_url": f"{content_factory_url.rstrip('/')}/api/runs/{job_id}",
             }
         except ContentFactoryBackendUnavailableError:
-            if charged_user is not None:
-                _refund_content_factory_request(
-                    user=charged_user,
-                    slack_user_id=slack_user_id,
-                    article_request=article_request,
-                    resolved_domain=resolved_domain,
-                    reason="Content Factory queue path unavailable during discovery start",
-                )
             raise
         except ArticleGenerationError:
             raise
@@ -1827,6 +1928,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         "slack_user_id": slack_user_id,
         "competitors": competitors,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+        "client_request_id": client_request_id,
     }
     requested_by_slack_user_id = _resolve_requested_by_slack_user_id(slack_user_id, article_request)
     if requested_by_slack_user_id and requested_by_slack_user_id != str(slack_user_id or "").strip():
@@ -1851,6 +1953,16 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         slack_user_id,
         article_request,
         resolved_domain,
+    )
+    payload.update(
+        _content_factory_authorization_payload(
+            resolved_domain=resolved_domain,
+            action="article_generation",
+            cost_points=charge_amount,
+            billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
+            ledger=charge_ledger,
+            current_balance=_content_factory_balance_for_user(charged_user),
+        )
     )
 
     try:
@@ -2497,6 +2609,8 @@ def confirm_topic(
         "custom_title": custom_title,
         "request_source": request_source,
     }
+    if source_job and getattr(source_job, "client_request_id", None):
+        payload["client_request_id"] = source_job.client_request_id
     if isinstance(notification_context, dict) and notification_context:
         payload["notification_context"] = notification_context
     if resolved_requested_by_slack_user_id and resolved_requested_by_slack_user_id != str(slack_user_id or "").strip():
@@ -2512,6 +2626,31 @@ def confirm_topic(
         payload["skip_alternatives"] = skip_alternatives
     if source_run_id:
         payload["source_run_id"] = source_run_id
+    if source_job:
+        try:
+            source_charge_amount = int(getattr(source_job, "billing_amount", 0) or 0)
+        except (TypeError, ValueError):
+            source_charge_amount = 0
+        payload.update(
+            _content_factory_authorization_payload(
+                resolved_domain=normalized_domain,
+                action="article_generation",
+                cost_points=source_charge_amount,
+                billing_status=str(getattr(source_job, "billing_status", "") or "reused"),
+                ledger=getattr(source_job, "billing_ledger", None),
+                current_balance=None,
+            )
+        )
+    elif is_free_content_factory_domain(normalized_domain):
+        payload.update(
+            _content_factory_authorization_payload(
+                resolved_domain=normalized_domain,
+                action="article_generation",
+                cost_points=0,
+                billing_status="free",
+                current_balance=None,
+            )
+        )
 
     # 3. Call Content Factory
     content_factory_url = _get_content_factory_base_url()

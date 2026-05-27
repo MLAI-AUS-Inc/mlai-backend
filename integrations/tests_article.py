@@ -15,6 +15,7 @@ from integrations.services.article_generation import (
     ArticleGenerationError,
     ContentFactoryBackendUnavailableError,
     GitHubReconnectRequiredError,
+    InsufficientRooPointsError,
     _append_refund_instruction,
     check_generation_status,
     confirm_topic,
@@ -146,17 +147,17 @@ class ArticleGenerationServiceTest(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job_delegated_123")
         self.assertEqual(job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
 
-    def test_paid_article_cost_is_four_points(self):
-        self.assertEqual(get_content_factory_article_cost_points("example.com"), 4)
+    def test_paid_article_cost_is_six_points(self):
+        self.assertEqual(get_content_factory_article_cost_points("example.com"), 6)
         self.assertEqual(get_content_factory_article_cost_points("mlai.au"), 0)
 
-    def test_paid_article_refund_instruction_uses_four_points(self):
+    def test_paid_article_refund_instruction_uses_six_points(self):
         message = _append_refund_instruction("The article run failed.", "example.com")
 
-        self.assertIn("4 Roo points", message)
+        self.assertIn("6 Roo points", message)
 
     @patch("integrations.services.article_generation.http_requests.post")
-    def test_trigger_generation_paid_domain_charges_four_points(self, mock_post):
+    def test_trigger_generation_paid_domain_charges_six_points(self, mock_post):
         paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
         OrganizationContentConfig.objects.create(
             organization=paid_org,
@@ -189,10 +190,69 @@ class ArticleGenerationServiceTest(TestCase):
         self.assertEqual(result["job_id"], "job_paid_123")
         job = ContentFactoryJob.objects.get(job_id="job_paid_123")
         self.assertEqual(job.billing_status, "charged")
-        self.assertEqual(job.billing_amount, 4)
-        self.assertEqual(job.billing_ledger.delta, -4)
+        self.assertEqual(job.billing_amount, 6)
+        self.assertEqual(job.billing_ledger.delta, -6)
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 16)
+        self.assertEqual(self.user.points_account.balance, 14)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_discovery_requires_six_points_without_spending(self, mock_post):
+        paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
+        OrganizationContentConfig.objects.create(
+            organization=paid_org,
+            github_repo=self.repo_name,
+            scan_summary="scan complete",
+        )
+        self.user.points_account.balance = 6
+        self.user.points_account.save(update_fields=["balance"])
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {"job_id": "job_discovery_paid_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        article_request = self._article_request(
+            domain="example.com",
+            topic=None,
+            target_keyword="",
+            client_request_id="content-factory-paid-discovery",
+        )
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            result = trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(result["job_id"], "job_discovery_paid_123")
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["roo_points_cost"], 0)
+        self.assertEqual(payload["roo_points_required"], 6)
+        self.assertEqual(payload["roo_points_balance"], 6)
+        job = ContentFactoryJob.objects.get(job_id="job_discovery_paid_123")
+        self.assertEqual(job.billing_status, "deferred")
+        self.assertEqual(job.billing_amount, 0)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 6)
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_discovery_rejects_when_balance_below_six(self, mock_post):
+        paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
+        OrganizationContentConfig.objects.create(organization=paid_org, github_repo=self.repo_name)
+        self.user.points_account.balance = 5
+        self.user.points_account.save(update_fields=["balance"])
+
+        article_request = self._article_request(
+            domain="example.com",
+            topic=None,
+            target_keyword="",
+            client_request_id="content-factory-paid-discovery-insufficient",
+        )
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            with self.assertRaises(InsufficientRooPointsError) as exc:
+                trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual(exc.exception.payload["error_code"], "INSUFFICIENT_ROO_POINTS")
+        self.assertEqual(exc.exception.payload["required_points"], 6)
+        self.assertEqual(exc.exception.payload["current_balance"], 5)
+        mock_post.assert_not_called()
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):

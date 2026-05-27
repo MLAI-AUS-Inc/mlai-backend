@@ -12,6 +12,7 @@ from integrations import http_client
 from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
+from roo.models import PointsAccount
 from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run, _sync_local_run_from_remote
 
@@ -121,6 +122,126 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.status = ContentFactoryRunStatus.CANCELLED
         self.run.save(update_fields=["status", "updated_at"])
         return config
+
+    def _prepare_billable_vibe_context(self, *, balance=6):
+        self.organization.name = "Example"
+        self.organization.domain = "example.com"
+        self.organization.seed_keywords = ["startup automation"]
+        self.organization.competitors = ["competitor.example"]
+        self.organization.save(update_fields=["name", "domain", "seed_keywords", "competitors"])
+        self.company.name = "Example"
+        self.company.domain = "example.com"
+        self.company.save(update_fields=["name", "domain", "updated_at"])
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.brand_name = "Example"
+        config.company_context = "Example helps startups automate marketing operations."
+        config.github_repo = "example/site"
+        config.github_token_encrypted = "encrypted-token"
+        config.baseline_skipped_at = timezone.now()
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.last_scanned_at = timezone.now()
+        config.save(
+            update_fields=[
+                "brand_name",
+                "company_context",
+                "github_repo",
+                "github_token_encrypted",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "last_scanned_at",
+                "updated_at",
+            ]
+        )
+        account, _ = PointsAccount.objects.update_or_create(
+            user=self.user,
+            defaults={"balance": balance, "earned_balance": balance},
+        )
+        return config, account
+
+    def test_vibe_zero_cost_ai_routes_require_six_roo_points_without_spending(self):
+        _config, account = self._prepare_billable_vibe_context(balance=5)
+
+        with patch(
+            "content_factory.vibe_marketing_views._queue_content_factory_run",
+            side_effect=AssertionError("AI route should not queue without enough Roo points"),
+        ):
+            requests = [
+                (
+                    "/api/v1/vibe-marketing/autofill/",
+                    {"companyName": "Example", "domain": "example.com"},
+                ),
+                ("/api/v1/vibe-marketing/baseline/", {}),
+                (
+                    "/api/v1/vibe-marketing/scan/",
+                    {"githubRepo": "example/site", "scanPurpose": "inventory"},
+                ),
+                (
+                    "/api/v1/vibe-marketing/article-system-setup/",
+                    {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
+                ),
+                ("/api/v1/vibe-marketing/discovery/", {}),
+            ]
+            for path, payload in requests:
+                response = self.client.post(path, payload, format="json")
+                self.assertEqual(response.status_code, 402, path)
+                self.assertEqual(response.data["error_code"], "INSUFFICIENT_ROO_POINTS")
+                self.assertEqual(response.data["required_points"], 6)
+                self.assertEqual(response.data["current_balance"], 5)
+                self.assertEqual(response.data["cost_points"], 0)
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 5)
+        self.assertEqual(account.lifetime_spent, 0)
+
+    def test_vibe_zero_cost_ai_routes_authorize_without_spending(self):
+        _config, account = self._prepare_billable_vibe_context(balance=6)
+        queued_payloads = {}
+
+        def fake_queue(endpoint, workflow, context, config, payload, **kwargs):
+            queued_payloads[endpoint] = dict(payload)
+            return ContentFactoryRun.objects.create(
+                run_id=f"{endpoint}-roo-gate-run",
+                workflow=workflow,
+                domain=context.organization.domain,
+                github_repo=config.github_repo,
+                status=ContentFactoryRunStatus.QUEUED,
+                result={},
+            )
+
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", side_effect=fake_queue):
+            requests = [
+                (
+                    "autofill",
+                    "/api/v1/vibe-marketing/autofill/",
+                    {"companyName": "Example", "domain": "example.com"},
+                ),
+                ("baseline", "/api/v1/vibe-marketing/baseline/", {}),
+                (
+                    "scan",
+                    "/api/v1/vibe-marketing/scan/",
+                    {"githubRepo": "example/site", "scanPurpose": "inventory"},
+                ),
+                ("discovery", "/api/v1/vibe-marketing/discovery/", {}),
+                (
+                    "article-system-setup",
+                    "/api/v1/vibe-marketing/article-system-setup/",
+                    {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
+                ),
+            ]
+            for endpoint, path, payload in requests:
+                response = self.client.post(path, payload, format="json")
+                self.assertEqual(response.status_code, 202, path)
+                self.assertIn(endpoint, queued_payloads)
+                self.assertTrue(queued_payloads[endpoint]["roo_points_authorized"])
+                self.assertEqual(queued_payloads[endpoint]["roo_points_cost"], 0)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 6)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_balance"], 6)
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 6)
+        self.assertEqual(account.lifetime_spent, 0)
 
     def test_completed_article_run_auto_prepares_live_preview(self):
         self.run.result = {

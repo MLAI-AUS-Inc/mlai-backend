@@ -19,6 +19,7 @@ from integrations.services.article_generation import (
     ArticleSystemActionRequiredError,
     ContentFactoryBackendUnavailableError,
     GitHubReconnectRequiredError,
+    InsufficientRooPointsError,
     CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
     SCHEDULED_DAILY_TRIGGER_SOURCE,
 )
@@ -78,6 +79,14 @@ def _handle_backend_unavailable_error(exc: ContentFactoryBackendUnavailableError
     payload.setdefault("status", "backend_unavailable")
     payload.setdefault("retryable", True)
     return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+def _handle_insufficient_roo_points_error(exc: InsufficientRooPointsError) -> Response:
+    payload = dict(getattr(exc, "payload", {}) or {})
+    payload.setdefault("error", str(exc))
+    payload.setdefault("detail", payload["error"])
+    payload.setdefault("error_code", "INSUFFICIENT_ROO_POINTS")
+    return Response(payload, status=status.HTTP_402_PAYMENT_REQUIRED)
 
 
 def _resolve_requested_by_slack_user_id(
@@ -545,6 +554,8 @@ class ContentGenerateView(APIView):
         except ArticleSystemActionRequiredError as e:
             logger.warning(f"Article system action required: {e}")
             return _handle_article_system_action_required(e, slack_user_id, article_request)
+        except InsufficientRooPointsError as e:
+            return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             logger.warning(f"Generation error: {e}")
             error_str = str(e)
@@ -872,6 +883,8 @@ class ContentConfirmView(APIView):
                     "requested_by_slack_user_id": requested_by_slack_user_id,
                 },
             )
+        except InsufficientRooPointsError as e:
+            return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
@@ -958,9 +971,10 @@ class ContentJobConfirmView(APIView):
         request_meta = dict(job.request_meta or {})
         if requested_by_slack_user_id:
             request_meta["requested_by_slack_user_id"] = requested_by_slack_user_id
-        uses_deferred_billing = (
-            str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
-            and str(job.billing_status or "").strip() in {"", CONTENT_FACTORY_BILLING_STATUS_DEFERRED}
+        billing_status = str(job.billing_status or "").strip()
+        uses_deferred_billing = billing_status == CONTENT_FACTORY_BILLING_STATUS_DEFERRED or (
+            billing_status == ""
+            and str(request_meta.get("trigger_source") or "").strip() == SCHEDULED_DAILY_TRIGGER_SOURCE
         )
         if job.billing_status not in {"charged", "reused"} and not uses_deferred_billing:
             return Response(
@@ -1118,6 +1132,8 @@ class ContentJobConfirmView(APIView):
                     "requested_by_slack_user_id": requested_by_slack_user_id,
                 },
             )
+        except InsufficientRooPointsError as e:
+            return _handle_insufficient_roo_points_error(e)
         except ArticleGenerationError as e:
             error_str = str(e)
             if error_str.startswith("PREREQUISITE_MISSING:"):
