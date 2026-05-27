@@ -70,6 +70,7 @@ from workflow_runs.serializers import (
     ContentFactoryRunSyncSerializer,
     ContentFactoryRunValleyJobSerializer,
 )
+from workflow_runs.sanitization import sanitize_json_for_postgres
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -6901,6 +6902,8 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
 
 
 def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: dict):
+    data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
+    step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
         existing_run = (
             ContentFactoryRun.objects.select_for_update()
@@ -6998,12 +7001,12 @@ class ContentFactoryRunView(APIView):
 
     def put(self, request, run_id: str):
         existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        payload = dict(request.data)
+        payload = sanitize_json_for_postgres(dict(request.data))
         payload["run_id"] = run_id
         serializer = ContentFactoryRunSyncSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        step_states = request.data.get("step_states", {}) or {}
+        step_states = data.get("step_states", {}) or {}
         incoming_status = str(data.get("status") or "").strip()
 
         if (
@@ -7034,7 +7037,7 @@ class ContentFactoryRunView(APIView):
             and not _article_system_setup_snapshot_is_current_retry(
                 existing_run=existing_run,
                 data=data,
-                raw_payload=request.data if isinstance(request.data, dict) else {},
+                raw_payload=payload if isinstance(payload, dict) else {},
             )
         ):
             response_payload = _serialize_content_factory_run(existing_run)
