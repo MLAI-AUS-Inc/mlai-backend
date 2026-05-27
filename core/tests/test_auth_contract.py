@@ -182,6 +182,23 @@ class AuthContractTests(TestCase):
         mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
         mock_send.assert_called_once()
 
+    @override_settings(WATT_THE_HACK_URL='http://localhost:5173')
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_send_magic_link_uses_watt_the_hack_frontend_origin(self, mock_generate, mock_send):
+        user = User.objects.create_user(email='watt-origin@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {'email': 'watt-origin@example.com', 'app': 'watt-the-hack', 'next': '/watt-the-hack/dashboard'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['magic_link_sent'])
+        mock_generate.assert_called_once_with(user, base_url='http://localhost:5173')
+        mock_send.assert_called_once()
+
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')
     @patch('core.views.send_magic_link_email')
     def test_send_magic_link_returns_missing_user_for_vibe_raising(self, mock_send):
@@ -314,6 +331,28 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.data['user']['id'], user.id)
         self.assertEqual(response.data['redirect'], '/founder-tools')
         self.assertTrue(response.data['next_url'].endswith('/founder-tools'))
+        self.assertIn('access_token', response.cookies)
+        self.assertIn('refresh_token', response.cookies)
+
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'watt-verify@example.com'})
+    def test_verify_magic_link_defaults_to_watt_the_hack_dashboard(self, mock_verify):
+        user = User.objects.create_user(
+            email='watt-verify@example.com',
+            role='participant',
+            first_name='Watt',
+            last_name='Verify',
+        )
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=watt-the-hack'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['user']['id'], user.id)
+        self.assertEqual(response.data['redirect'], '/watt-the-hack/dashboard')
+        self.assertTrue(response.data['next_url'].endswith('/watt-the-hack/dashboard'))
         self.assertIn('access_token', response.cookies)
         self.assertIn('refresh_token', response.cookies)
 
