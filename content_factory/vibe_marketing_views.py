@@ -3657,11 +3657,14 @@ def _publish_evidence_from_run(run, *, compact=False):
         return {}
     result = run.result or {}
     diagnostics = result.get("diagnostics") or run.verification_summary or {}
+    preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
+    if _run_has_article_review_preview_marker(run):
+        preview_url = None
     evidence = {
         "runId": run.run_id,
         "status": run.status,
         "approvalState": run.approval_state,
-        "previewUrl": result.get("preview_url") or result.get("article_url") or result.get("url"),
+        "previewUrl": preview_url,
         "prUrl": result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url"),
         "prNumber": result.get("pr_number") or result.get("pull_request_number") or result.get("draft_pr_number"),
         "mergeStatus": result.get("merge_status"),
@@ -3693,6 +3696,32 @@ def _publish_evidence_from_run(run, *, compact=False):
     return evidence
 
 
+def _run_has_article_review_preview_marker(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    result = _run_mapping(run.result)
+    nested_result = _run_mapping(result.get("result"))
+    latest_control = _run_mapping(result.get("latest_control_response"))
+    for mapping in (result, nested_result, latest_control):
+        review_surface_kind = str(
+            mapping.get("review_surface_kind")
+            or mapping.get("reviewSurfaceKind")
+            or ""
+        ).strip().lower()
+        if review_surface_kind == "component_live_preview":
+            return True
+        status_value = str(
+            mapping.get("status")
+            or mapping.get("final_status")
+            or mapping.get("finalStatus")
+            or ""
+        ).strip().lower()
+        if status_value == "preview_ready":
+            return True
+    current_step = str(getattr(run, "current_step", "") or "").strip().lower()
+    return current_step in {"await_review", "await_publish_approval"}
+
+
 def _run_has_external_publish_evidence(run):
     result = _run_mapping(run.result)
     evidence = _publish_evidence_from_run(run)
@@ -3710,6 +3739,13 @@ def _run_has_publish_pr_or_preview_evidence(run):
     result = _run_mapping(run.result)
     evidence = _publish_evidence_from_run(run)
     live_preview = _live_preview_from_run(run)
+    if _run_has_article_review_preview_marker(run):
+        return bool(
+            evidence.get("prUrl")
+            or result.get("pr_url")
+            or result.get("pull_request_url")
+            or result.get("draft_pr_url")
+        )
     return bool(
         evidence.get("prUrl")
         or evidence.get("previewUrl")
@@ -5318,6 +5354,83 @@ def _ensure_local_publish_child_from_known_id(
         payload=publish_payload,
         remote_data=child_remote_data,
     )
+
+
+def _sync_publish_child_from_control_response(
+    *,
+    run,
+    remote_run,
+    request,
+    context,
+    payload,
+    remote_data,
+    mark_source_approved=False,
+):
+    child_run_id = str(
+        remote_data.get("run_id")
+        or remote_data.get("runId")
+        or remote_data.get("job_id")
+        or ""
+    ).strip()
+    if not child_run_id or child_run_id == run.run_id:
+        return None
+
+    review_source_run_id = run.run_id if remote_run.run_id != run.run_id else ""
+    publish_run = _ensure_local_publish_child_from_known_id(
+        child_run_id=child_run_id,
+        source_run=remote_run,
+        request=request,
+        context=context,
+        payload=payload,
+        remote_data=remote_data,
+        review_source_run_id=review_source_run_id,
+    )
+    if publish_run is None:
+        return None
+
+    publish_result = dict(publish_run.result or {})
+    publish_result["source_run_id"] = remote_run.run_id
+    publish_result["sourceRunId"] = remote_run.run_id
+    if review_source_run_id:
+        publish_result["review_source_run_id"] = review_source_run_id
+        publish_result["reviewSourceRunId"] = review_source_run_id
+    publish_run.result = publish_result
+    publish_run.save(update_fields=["result", "updated_at"])
+
+    timestamp = timezone.now().isoformat()
+    child_recoverable = _publish_child_run_recoverable(publish_run)
+    child_wait_reason = _publish_child_wait_reason(publish_run)
+    child_handoff_status = _publish_child_handoff_status(publish_run, recoverable=child_recoverable)
+    updated_pks = set()
+    for candidate in (run, remote_run):
+        if candidate is None or candidate.pk in updated_pks:
+            continue
+        result = dict(candidate.result or {})
+        result["publish_child_run_id"] = publish_run.run_id
+        result["promoted_publish_job_id"] = publish_run.run_id
+        result["latest_control_response"] = remote_data
+        result["promote_bundle_requested_at"] = timestamp
+        result["publish_handoff_pending"] = False
+        result["publish_handoff_stale"] = False
+        result["publish_child_status"] = publish_run.status
+        result["publish_child_recoverable"] = child_recoverable
+        result["publish_child_wait_reason"] = child_wait_reason
+        result["publish_handoff_status"] = child_handoff_status
+        candidate.result = result
+        update_fields = ["result", "updated_at"]
+        if mark_source_approved:
+            candidate.approval_state = ContentFactoryApprovalState.APPROVED
+            if candidate.status in {
+                ContentFactoryRunStatus.AWAITING_APPROVAL,
+                ContentFactoryRunStatus.APPROVAL_REQUIRED,
+                ContentFactoryRunStatus.RUNNING,
+                ContentFactoryRunStatus.QUEUED,
+            }:
+                candidate.status = ContentFactoryRunStatus.COMPLETED
+            update_fields.extend(["approval_state", "status"])
+        candidate.save(update_fields=update_fields)
+        updated_pks.add(candidate.pk)
+    return publish_run
 
 
 def _recover_publish_child_for_run(run, *, request, context):
@@ -10977,63 +11090,32 @@ class VibeMarketingRunControlView(APIView):
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action in {"promote-bundle", "publish-pr"}:
-            new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or remote_data.get("job_id") or "").strip()
-            if new_run_id and new_run_id != run.run_id:
-                config = _get_config(context.organization)
-                publish_payload = {
-                    **payload,
-                    "source_run_id": remote_run.run_id,
-                    "delivery_mode": "publish_code",
-                    "delivery_mode_confirmed": True,
-                }
-                if remote_run.run_id != run.run_id:
-                    publish_payload["review_source_run_id"] = run.run_id
-                publish_run = _create_local_run(
-                    workflow="article_generation",
-                    domain=context.organization.domain,
-                    github_repo=config.github_repo or run.github_repo or "",
-                    actor_id=founder_actor_id_for_user(request.user),
-                    payload=publish_payload,
-                    remote_data=remote_data,
-                )
-                publish_result = dict(publish_run.result or {})
-                publish_result["source_run_id"] = remote_run.run_id
-                publish_result["sourceRunId"] = remote_run.run_id
-                if remote_run.run_id != run.run_id:
-                    publish_result["review_source_run_id"] = run.run_id
-                    publish_result["reviewSourceRunId"] = run.run_id
-                publish_run.result = publish_result
-                publish_run.save(update_fields=["result", "updated_at"])
-                result = run.result or {}
-                result["publish_child_run_id"] = publish_run.run_id
-                result["latest_control_response"] = remote_data
-                result["promote_bundle_requested_at"] = timezone.now().isoformat()
-                result["publish_handoff_pending"] = False
-                result["publish_child_status"] = publish_run.status
-                result["publish_child_recoverable"] = _publish_child_run_recoverable(publish_run)
-                result["publish_child_wait_reason"] = _publish_child_wait_reason(publish_run)
-                result["publish_handoff_status"] = _publish_child_handoff_status(
-                    publish_run,
-                    recoverable=result["publish_child_recoverable"],
-                )
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
-                if remote_run.run_id != run.run_id:
-                    remote_result = remote_run.result or {}
-                    remote_result["publish_child_run_id"] = publish_run.run_id
-                    remote_result["latest_control_response"] = remote_data
-                    remote_result["promote_bundle_requested_at"] = result["promote_bundle_requested_at"]
-                    remote_result["publish_handoff_pending"] = False
-                    remote_result["publish_child_status"] = publish_run.status
-                    remote_result["publish_child_recoverable"] = result["publish_child_recoverable"]
-                    remote_result["publish_child_wait_reason"] = result["publish_child_wait_reason"]
-                    remote_result["publish_handoff_status"] = result["publish_handoff_status"]
-                    remote_run.result = remote_result
-                    remote_run.save(update_fields=["result", "updated_at"])
+            publish_run = _sync_publish_child_from_control_response(
+                run=run,
+                remote_run=remote_run,
+                request=request,
+                context=context,
+                payload=payload,
+                remote_data=remote_data,
+            )
+            if publish_run is not None:
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             if _content_factory_action_transport_pending(remote_data):
                 _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, remote_data=remote_data)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+        if action == "approve" and run.workflow in ARTICLE_WORKFLOWS:
+            publish_run = _sync_publish_child_from_control_response(
+                run=run,
+                remote_run=remote_run,
+                request=request,
+                context=context,
+                payload=payload,
+                remote_data=remote_data,
+                mark_source_approved=True,
+            )
+            if publish_run is not None:
+                return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve":
             run.approval_state = ContentFactoryApprovalState.APPROVED
