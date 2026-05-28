@@ -1628,7 +1628,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["fallbackPreviewUrl"], "https://fallback.example/articles")
 
     @patch('integrations.services.slack.SlackService.send_dm')
-    def test_article_system_setup_completed_waits_for_verification_scan(self, mock_send_dm):
+    def test_article_system_setup_completed_unlocks_before_verification_scan(self, mock_send_dm):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         config = OrganizationContentConfig.objects.create(
             organization=organization,
@@ -1662,9 +1662,13 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(completed_response.status_code, status.HTTP_200_OK)
         config.refresh_from_db()
         pending = config.article_system["pending_article_system_setup"]
-        self.assertEqual(pending["status"], "merged_verifying")
+        self.assertEqual(pending["status"], "merged")
+        self.assertEqual(pending["merge_status"], "merged")
+        self.assertTrue(pending["generationReady"])
         self.assertEqual(pending["rescan_run_id"], "verify-setup-complete")
-        self.assertFalse(config.articles_scaffolded)
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/9")
+        self.assertEqual(config.article_system["state"], "roo_scaffolded")
 
         scan_response = self.client.post(
             reverse('content_factory_callback'),
