@@ -1999,6 +1999,73 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
 
 
+def _mark_article_system_setup_generation_ready_for_domain(domain: str, *, pr_url="", preview_url="") -> None:
+    domain = str(domain or "").strip()
+    if not domain:
+        return
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = sanitize_json_for_postgres(dict(config.article_system or {}))
+        pending = sanitize_json_for_postgres(dict(article_system.get("pending_article_system_setup") or {}))
+        now = timezone.now().isoformat()
+        pending.update(
+            {
+                "status": "merged",
+                "setupStatus": "merged",
+                "setup_status": "merged",
+                "mergeStatus": "merged",
+                "merge_status": "merged",
+                "generationReady": True,
+                "generation_ready": True,
+                "updatedAt": now,
+                "updated_at": now,
+            }
+        )
+        if pr_url:
+            pending["prUrl"] = pr_url
+            pending["pr_url"] = pr_url
+        if preview_url:
+            pending["previewUrl"] = preview_url
+            pending["preview_url"] = preview_url
+        article_system["pending_article_system_setup"] = pending
+        article_system["generationReady"] = True
+        article_system["generation_ready"] = True
+        article_system.setdefault("generationReadySource", "setup_pr_merged")
+        article_system.setdefault("generation_ready_source", "setup_pr_merged")
+        article_system.setdefault("generationReadyAt", now)
+        article_system.setdefault("generation_ready_at", now)
+        if str(article_system.get("state") or "").strip() not in {
+            "existing",
+            "ready",
+            "detected",
+            "registry_driven_seo_ready",
+            "article_system_ready",
+            "roo_scaffolded",
+        }:
+            article_system["state"] = "roo_scaffolded"
+            article_system["source"] = article_system.get("source") or "setup_pr_merge"
+            article_system["confidence"] = article_system.get("confidence") or "high"
+
+        update_fields = ["article_system"]
+        config.article_system = sanitize_json_for_postgres(article_system)
+        if not config.articles_scaffolded:
+            config.articles_scaffolded = True
+            update_fields.append("articles_scaffolded")
+        if pr_url and config.articles_scaffold_pr_url != pr_url:
+            config.articles_scaffold_pr_url = pr_url
+            update_fields.append("articles_scaffold_pr_url")
+        if preview_url and config.articles_scaffold_preview_url != preview_url:
+            config.articles_scaffold_preview_url = preview_url
+            update_fields.append("articles_scaffold_preview_url")
+        update_fields.append("updated_at")
+        config.save(update_fields=update_fields)
+    except Exception as exc:
+        logger.warning("Failed to mark article system setup ready for %s: %s", domain, exc)
+
+
 def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: dict, result: dict) -> dict:
     resume_generation = _article_system_setup_resume_generation(data, setup_payload, result)
     fields = {
@@ -2659,6 +2726,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         mergeStatus=result.get("merge_status"),
         merge_status=result.get("merge_status"),
     )
+    if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
+        _mark_article_system_setup_generation_ready_for_domain(
+            result["domain"],
+            pr_url=result.get("pr_url") or setup_payload.get("pr_url") or "",
+            preview_url=result.get("preview_url") or setup_payload.get("preview_url") or "",
+        )
     return run
 
 

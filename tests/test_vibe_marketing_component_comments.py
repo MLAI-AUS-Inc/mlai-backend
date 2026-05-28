@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from integrations import http_client
-from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
+from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment, WrittenArticle
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
@@ -3033,6 +3033,136 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(setup_run.result["merge_status"], "pending")
         self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "pending")
 
+    def test_merge_setup_pr_records_manual_merge_required_when_github_blocks_api_merge(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-merge-protected",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/47",
+                "pr_number": 47,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-merge-protected",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/47",
+                    "pr_number": 47,
+                    "merge_status": "not_merged",
+                },
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": True, "state": "success", "message": "Checks are passing."},
+                ),
+            ),
+            patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("Merge blocked by branch protection.")),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Merge blocked by branch protection", response.data["detail"])
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.result["merge_status"], "manual_merge_required")
+        self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "manual_merge_required")
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["merge_status"], "manual_merge_required")
+        self.assertFalse(config.articles_scaffolded)
+
+    def test_refresh_setup_pr_status_detects_manual_github_merge_without_rescan(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-manual-refresh",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+                "pr_number": 48,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-manual-refresh",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+                    "pr_number": 48,
+                    "merge_status": "not_merged",
+                },
+            },
+        )
+        article_calls = []
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"number": 48, "merged": True}),
+            patch("content_factory.vibe_marketing_views._queue_content_factory_run", side_effect=lambda **kwargs: article_calls.append(kwargs)),
+            patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/refresh-setup-pr-status", {}, format="json")
+            bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result"]["merge_status"], "merged")
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.result["merge_status"], "merged")
+        config.refresh_from_db()
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.article_system["state"], "roo_scaffolded")
+        self.assertEqual(bootstrap_response.status_code, 200)
+        scaffold = bootstrap_response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["setupBlocked"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertFalse(bootstrap_response.data["articleSetupState"]["setupBlocked"])
+        self.assertTrue(bootstrap_response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
+        self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
+        self.assertEqual(article_calls, [])
+
+    def test_written_article_history_overrides_stale_setup_blocker(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        WrittenArticle.objects.create(
+            organization=self.organization,
+            title="How AI Founders Choose Startup Tools",
+            slug="how-ai-founders-choose-startup-tools",
+            category="startups",
+            primary_keyword="ai founder tools",
+            article_url="https://mlai.au/articles/how-ai-founders-choose-startup-tools",
+            published_at=timezone.now(),
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"number": 12, "merged": False}),
+            patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}),
+        ):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["setupBlocked"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertFalse(response.data["articleSetupState"]["setupBlocked"])
+        self.assertTrue(response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(response.data["hasCompletedArticleFlow"])
+        self.assertEqual(response.data["startPageMode"], "topic_picker")
+        config.refresh_from_db()
+        self.assertFalse(config.articles_scaffolded)
+
     def test_merge_setup_pr_marks_setup_merged_and_daily_ready(self):
         config = self._prepare_articles_setup_gate(status="pr_created")
         config.connected_slack_user_id = "U123"
@@ -3084,16 +3214,21 @@ class VibeMarketingComponentCommentTests(TestCase):
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["status"], "merged")
         self.assertEqual(pending["merge_status"], "merged")
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46")
+        self.assertEqual(config.article_system["state"], "roo_scaffolded")
 
         with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
             bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
 
         self.assertEqual(bootstrap_response.status_code, 200)
         scaffold = bootstrap_response.data["checks"]["scaffold"]
-        self.assertFalse(scaffold["passed"])
+        self.assertTrue(scaffold["passed"])
         self.assertFalse(scaffold["setupBlocked"])
         self.assertTrue(scaffold["setupMerged"])
-        self.assertFalse(bootstrap_response.data["hasCompletedArticleFlow"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertTrue(bootstrap_response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
         self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
         self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}

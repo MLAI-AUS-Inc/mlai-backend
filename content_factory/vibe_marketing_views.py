@@ -286,6 +286,13 @@ ARTICLE_SYSTEM_PUBLISHED_STATES = {
     "registry_driven_seo_ready",
     "article_system_ready",
 }
+ARTICLE_SYSTEM_SETUP_MERGED_STATUSES = {
+    "merged",
+    "merged_verifying",
+    "verifying",
+    "published",
+    "verified",
+}
 ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "pending",
     "pending_generation",
@@ -307,9 +314,7 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "manual_merge_required",
     "manual_blocked",
     "completed",
-    "merged",
-    "merged_verifying",
-    "verifying",
+    *ARTICLE_SYSTEM_SETUP_MERGED_STATUSES,
 }
 ARTICLE_DELIVERY_MODES = {"content_only", "review_draft", "publish_code"}
 LEGACY_REVIEW_BLOCKING_DELIVERY_MODES = {"content_only", "publish_code"}
@@ -2004,7 +2009,9 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     return drafts
 
 
-def _has_completed_article_flow(organization, latest_runs=None):
+def _article_generation_history_exists(organization, latest_runs=None):
+    if not organization:
+        return False
     if WrittenArticle.objects.filter(organization=organization).exists():
         return True
     for run in latest_runs or []:
@@ -2014,6 +2021,43 @@ def _has_completed_article_flow(organization, latest_runs=None):
         if content_package and content_package.get("contentPackaged"):
             return True
     return False
+
+
+def _article_system_setup_status_is_merged(*, setup_status="", merge_status="") -> bool:
+    return str(merge_status or "").strip().lower() == "merged" or str(setup_status or "").strip().lower() in ARTICLE_SYSTEM_SETUP_MERGED_STATUSES
+
+
+def _article_generation_ready_for_config(config, latest_runs=None, article_system=None) -> bool:
+    if not config:
+        return False
+    article_system = article_system if isinstance(article_system, dict) else resolve_article_system(config)
+    if bool(getattr(config, "articles_scaffolded", False)):
+        return True
+    if _article_system_is_published(config, article_system):
+        return True
+
+    pending = _pending_article_system_setup_from_config(config)
+    pending_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
+    pending_merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
+    if _article_system_setup_status_is_merged(setup_status=pending_status, merge_status=pending_merge_status):
+        return True
+
+    pending_setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
+    setup_run = _latest_article_system_setup_run(latest_runs or [], setup_run_id=pending_setup_run_id)
+    if setup_run:
+        setup_meta = _setup_metadata_from_run(setup_run)
+        if _article_system_setup_status_is_merged(
+            setup_status=setup_meta.get("setupStatus"),
+            merge_status=setup_meta.get("mergeStatus"),
+        ):
+            return True
+    return False
+
+
+def _has_completed_article_flow(organization, latest_runs=None, config=None):
+    if config is not None and _article_generation_ready_for_config(config, latest_runs):
+        return True
+    return _article_generation_history_exists(organization, latest_runs)
 
 
 def _start_page_mode(organization, latest_runs=None):
@@ -3875,11 +3919,12 @@ def _pull_request_url_from_run(run) -> str:
     ).strip()
 
 
-def _mark_pending_article_system_setup_merged(config, *, run, result):
+def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, pr_url="", pr_number=None):
     if not config:
         return
     article_system = dict(config.article_system or {})
     pending = dict(article_system.get("pending_article_system_setup") or {})
+    result = _run_mapping(result)
     setup = _run_mapping(result.get("article_system_setup"))
     setup_run_id = str(
         setup.get("setup_run_id")
@@ -3889,8 +3934,25 @@ def _mark_pending_article_system_setup_merged(config, *, run, result):
         or getattr(run, "run_id", "")
         or ""
     ).strip()
-    pr_url = str(result.get("pr_url") or result.get("prUrl") or setup.get("pr_url") or setup.get("prUrl") or "").strip()
-    pr_number = result.get("pr_number") or result.get("prNumber") or setup.get("pr_number") or setup.get("prNumber")
+    pr_url = str(
+        pr_url
+        or result.get("pr_url")
+        or result.get("prUrl")
+        or setup.get("pr_url")
+        or setup.get("prUrl")
+        or pending.get("prUrl")
+        or pending.get("pr_url")
+        or ""
+    ).strip()
+    pr_number = (
+        pr_number
+        or result.get("pr_number")
+        or result.get("prNumber")
+        or setup.get("pr_number")
+        or setup.get("prNumber")
+        or pending.get("prNumber")
+        or pending.get("pr_number")
+    )
     if setup_run_id:
         pending["setupRunId"] = setup_run_id
         pending["setup_run_id"] = setup_run_id
@@ -3911,9 +3973,31 @@ def _mark_pending_article_system_setup_merged(config, *, run, result):
     pending["setup_current_step"] = "merged"
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
+    pending["generationReady"] = True
+    pending["generation_ready"] = True
     article_system["pending_article_system_setup"] = pending
-    config.article_system = article_system
-    config.save(update_fields=["article_system", "updated_at"])
+    article_system["generationReady"] = True
+    article_system["generation_ready"] = True
+    article_system.setdefault("generationReadySource", "setup_pr_merged")
+    article_system.setdefault("generation_ready_source", "setup_pr_merged")
+    article_system.setdefault("generationReadyAt", pending["updatedAt"])
+    article_system.setdefault("generation_ready_at", pending["updated_at"])
+    existing_state = str(article_system.get("state") or "").strip()
+    if existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded":
+        article_system["state"] = "roo_scaffolded"
+        article_system["source"] = article_system.get("source") or "setup_pr_merge"
+        article_system["confidence"] = article_system.get("confidence") or "high"
+
+    update_fields = ["article_system"]
+    config.article_system = sanitize_json_for_postgres(article_system)
+    if not config.articles_scaffolded:
+        config.articles_scaffolded = True
+        update_fields.append("articles_scaffolded")
+    if pr_url and config.articles_scaffold_pr_url != pr_url:
+        config.articles_scaffold_pr_url = pr_url
+        update_fields.append("articles_scaffold_pr_url")
+    update_fields.append("updated_at")
+    config.save(update_fields=update_fields)
 
 
 def _mark_pending_article_system_setup_pr_created(config, *, run, result):
@@ -4006,6 +4090,69 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     return run
 
 
+def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required"):
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    status_value = str(status_value or "manual_merge_required").strip()
+    reason = str(reason or "GitHub did not allow this PR to be merged from Content Factory. Merge it in GitHub, then refresh merge status.").strip()
+    result["status"] = status_value
+    result["setup_status"] = status_value
+    result["setupStatus"] = status_value
+    result["merge_status"] = status_value
+    result["mergeStatus"] = status_value
+    result["checks_status"] = status_value
+    result["checksStatus"] = status_value
+    result["merge_blocked_reason"] = reason
+    result["mergeBlockedReason"] = reason
+    result["current_step"] = status_value
+    result["currentStep"] = status_value
+    setup["status"] = status_value
+    setup["setup_status"] = status_value
+    setup["setupStatus"] = status_value
+    setup["merge_status"] = status_value
+    setup["mergeStatus"] = status_value
+    setup["checks_status"] = status_value
+    setup["checksStatus"] = status_value
+    setup["merge_blocked_reason"] = reason
+    setup["mergeBlockedReason"] = reason
+    setup["current_step"] = status_value
+    setup["currentStep"] = status_value
+    setup.setdefault("setup_run_id", run.run_id)
+    setup.setdefault("setupRunId", run.run_id)
+    result["article_system_setup"] = setup
+    run.result = sanitize_json_for_postgres(result)
+    run.current_step = status_value
+    run.save(update_fields=["current_step", "result", "updated_at"])
+
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    pending.update(
+        {
+            "status": status_value,
+            "setupStatus": status_value,
+            "setup_status": status_value,
+            "mergeStatus": status_value,
+            "merge_status": status_value,
+            "checksStatus": status_value,
+            "checks_status": status_value,
+            "mergeBlockedReason": reason,
+            "merge_blocked_reason": reason,
+            "currentStep": status_value,
+            "current_step": status_value,
+            "setupCurrentStep": status_value,
+            "setup_current_step": status_value,
+            "setupRunId": run.run_id,
+            "setup_run_id": run.run_id,
+            "updatedAt": timezone.now().isoformat(),
+        }
+    )
+    pending["updated_at"] = pending["updatedAt"]
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = sanitize_json_for_postgres(article_system)
+    config.save(update_fields=["article_system", "updated_at"])
+    return run
+
+
 def _merge_setup_pr_for_run(*, run, context):
     if run.workflow != "article_system_setup":
         return None, Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
@@ -4051,10 +4198,14 @@ def _merge_setup_pr_for_run(*, run, context):
                 {"detail": checks.get("message") or "Setup PR checks are not ready.", "checks": checks},
                 status=status.HTTP_409_CONFLICT,
             )
-        merge_payload = {
-            "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
-            "merge_method": "squash",
-        }
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+    merge_payload = {
+        "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
+        "merge_method": "squash",
+    }
+    try:
         merged = _github_api_request(
             "PUT",
             f"/repos/{repo}/pulls/{pr_number}/merge",
@@ -4062,8 +4213,16 @@ def _merge_setup_pr_for_run(*, run, context):
             body=merge_payload,
             expected=(200, 201),
         )
-    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
-        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+    except (ValueError, http_client.RequestException) as exc:
+        config = _get_config(context.organization)
+        _mark_setup_merge_blocked(run=run, config=config, reason=str(exc), status_value="manual_merge_required")
+        return None, Response(
+            {
+                "detail": f"{exc} Merge the setup PR in GitHub, then refresh merge status.",
+                "checks": {"state": "manual_merge_required", "ready": False, "message": str(exc)},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     return _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged), None
 
@@ -4114,6 +4273,114 @@ def _github_pull_checks_state(*, repo, pr_number, token):
     if failed_runs:
         return pull, {"state": "failed", "ready": False, "message": "One or more GitHub Actions checks failed."}
     return pull, {"state": "success", "ready": True, "message": "Checks are passing."}
+
+
+def _pull_request_number_from_values(*values):
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            match = re.search(r"/pull/(\d+)", str(value))
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _refresh_pending_article_system_setup_pr_status(*, context, config=None, latest_runs=None, run=None):
+    config = config or _get_config(context.organization)
+    pending = _pending_article_system_setup_from_config(config)
+    if not pending and not (run and run.workflow == "article_system_setup"):
+        return run, False
+
+    setup_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
+    merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
+    if _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status):
+        if not bool(getattr(config, "articles_scaffolded", False)):
+            _mark_pending_article_system_setup_merged(config, run=run, result=getattr(run, "result", {}) if run else pending)
+        return run, False
+
+    setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
+    setup_run = run if run and run.workflow == "article_system_setup" else None
+    if setup_run is None and setup_run_id:
+        setup_run = (
+            _article_setup_state_run_from_latest(latest_runs or [], setup_run_id)
+            or ContentFactoryRun.objects.filter(run_id=setup_run_id, workflow="article_system_setup").first()
+        )
+
+    pr_url = str(
+        pending.get("prUrl")
+        or pending.get("pr_url")
+        or (_pull_request_url_from_run(setup_run) if setup_run else "")
+        or ""
+    ).strip()
+    pr_number = _pull_request_number_from_values(
+        pending.get("prNumber"),
+        pending.get("pr_number"),
+        _pull_request_number_from_run(setup_run) if setup_run else None,
+        pr_url,
+    )
+    repo = str(
+        (getattr(setup_run, "github_repo", "") if setup_run else "")
+        or pending.get("githubRepo")
+        or pending.get("github_repo")
+        or config.github_repo
+        or ""
+    ).strip()
+    if not repo or not pr_number:
+        return run, False
+
+    try:
+        token, token_source = _github_token_for_repo_operation(
+            domain=context.organization.domain,
+            github_repo=repo,
+            permission_mode="read",
+        )
+        logger.info(
+            "vibe_marketing_setup_pr_status_token_source repo=%s pr_number=%s token_source=%s",
+            repo,
+            pr_number,
+            token_source,
+        )
+        pull = _github_api_request("GET", f"/repos/{repo}/pulls/{pr_number}", token=token)
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        logger.info(
+            "vibe_marketing_setup_pr_status_refresh_skipped domain=%s repo=%s pr_number=%s error=%s",
+            context.organization.domain,
+            repo,
+            pr_number,
+            exc,
+        )
+        return run, False
+
+    if not pull.get("merged"):
+        return run, False
+
+    if setup_run is not None:
+        refreshed = _apply_setup_merge_result(
+            run=setup_run,
+            context=context,
+            checks_status="merged",
+            merge_response={"source": "github_pr_status", "pull": {"number": pr_number, "merged": True}},
+        )
+        return refreshed, True
+
+    _mark_pending_article_system_setup_merged(
+        config,
+        run=None,
+        result={
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "article_system_setup": {
+                "pr_url": pr_url,
+                "pr_number": pr_number,
+                "merge_status": "merged",
+                "status": "merged",
+            },
+        },
+    )
+    return run, True
 
 
 def _merge_publish_pr_for_run(*, run, context):
@@ -5310,7 +5577,7 @@ def _article_system_setup_run_is_dispatch_blocked(run) -> bool:
     return "content factory did not return a run id" in technical_error
 
 
-def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> dict:
+def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organization=None, generation_ready=None) -> dict:
     latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
     article_system = resolve_article_system(config) if config else {}
@@ -5351,6 +5618,11 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         setup_run = None
     related_runs = _dedupe_runs(latest_runs, explicit_runs, [latest_scan, setup_run])
     setup_gate = _article_system_setup_gate(config, related_runs, article_system)
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or bool(generation_ready)
+        or (generation_ready is None and organization is not None and _article_generation_history_exists(organization, related_runs))
+    )
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
         setup_run = (
             _article_setup_state_run_from_latest(related_runs, setup_gate.get("setupRunId"))
@@ -5442,8 +5714,10 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         "setupStatus": str(setup_status or "").strip() or None,
         "setupRunStatus": setup_run.status if setup_run else None,
         "setupCurrentStep": (setup_payload.get("currentStep") or setup_payload.get("current_step") or getattr(setup_run, "current_step", "") or None) if setup_run else None,
-        "setupBlocked": bool(setup_gate.get("setupBlocked")),
+        "setupBlocked": bool(setup_gate.get("setupBlocked") and not generation_ready),
         "setupMerged": bool(setup_gate.get("setupMerged")),
+        "generationReady": bool(generation_ready),
+        "generation_ready": bool(generation_ready),
         "published": bool(setup_gate.get("published")),
         "routePath": route_path or None,
         "previewUrl": preview_url or None,
@@ -5470,7 +5744,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     }
 
 
-def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
+def _article_setup_state(*, context=None, run=None, latest_runs=None, generation_ready=None) -> dict:
     organization = context.organization if context is not None else None
     if organization is None and run is not None and run.domain:
         organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
@@ -5485,6 +5759,8 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         }
@@ -5500,10 +5776,18 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         }
-    return _article_setup_state_for_config(config, latest_runs=latest_runs, run=run)
+    return _article_setup_state_for_config(
+        config,
+        latest_runs=latest_runs,
+        run=run,
+        organization=organization,
+        generation_ready=generation_ready,
+    )
 
 
 def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None):
@@ -5827,9 +6111,9 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     setup_status = str(meta.get("setupStatus") or "").strip().lower()
     merge_status = str(meta.get("mergeStatus") or "").strip().lower()
     setup_merged = bool(
-        merge_status == "merged"
-        or setup_status in {"merged", "merged_verifying", "verifying", "published", "verified"}
+        _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status)
     )
+    generation_ready = bool(_article_generation_ready_for_config(config, latest_runs, article_system) or setup_merged)
     completed_with_pending_verification = bool(
         meta.get("rescanRunId") and not verification_published
     )
@@ -5851,6 +6135,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         published = _article_system_is_published(config, article_system)
     if setup_merged:
         setup_blocked = False
+    if generation_ready:
+        setup_blocked = False
     if verification_published:
         setup_blocked = False
         published = True
@@ -5858,6 +6144,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     meta["published"] = bool(published)
     meta["setupBlocked"] = bool(setup_blocked)
     meta["setupMerged"] = bool(setup_merged)
+    meta["generationReady"] = bool(generation_ready)
     for key in ("setupRunId", "setupStatus", "rescanRunId", "mergeStatus", "prUrl", "prNumber", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
@@ -5956,6 +6243,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     scaffold_check = checks.get("scaffold", {})
     setup_blocked = bool(scaffold_check.get("setupBlocked"))
     setup_merged = bool(scaffold_check.get("setupMerged"))
+    generation_ready = bool(scaffold_check.get("generationReady"))
 
     if not checks.get("websiteProfile", {}).get("passed"):
         status_by_id["profile"] = "needs_action"
@@ -6009,10 +6297,10 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         elif discovery_run.status in FAILED_RUN_STATUSES:
             status_by_id["research"] = "blocked"
             action_by_id["research"] = _workflow_step_action("Open research run", href=_run_url(discovery_run))
-    if setup_merged and not setup_blocked:
+    if (setup_merged or generation_ready) and not setup_blocked:
         status_by_id["article_system"] = "complete"
         action_by_id.pop("article_system", None)
-    if (checks.get("scaffold", {}).get("passed") or setup_merged) and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
+    if (checks.get("scaffold", {}).get("passed") or setup_merged or generation_ready) and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
@@ -6456,7 +6744,12 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
-    article_setup_state = _article_setup_state(context=context, run=run, latest_runs=latest_runs)
+    article_setup_state = _article_setup_state(
+        context=context,
+        run=run,
+        latest_runs=latest_runs,
+        generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
+    )
     if compact:
         return {
             "runId": run.run_id,
@@ -6581,7 +6874,15 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
-    article_system_ready = bool(setup_gate.get("published") and not setup_gate.get("setupBlocked"))
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or _article_generation_ready_for_config(config, latest_runs, article_system)
+        or _article_generation_history_exists(organization, latest_runs)
+    )
+    if generation_ready:
+        setup_gate["setupBlocked"] = False
+        setup_gate["generationReady"] = True
+    article_system_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
     setup_pr_merged = bool(setup_gate.get("setupMerged"))
     missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
     component_catalog_ready = not missing_featured_components
@@ -6667,6 +6968,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "published": bool(setup_gate.get("published")),
             "setupBlocked": bool(setup_gate.get("setupBlocked")),
             "setupMerged": bool(setup_gate.get("setupMerged")),
+            "generationReady": bool(generation_ready),
             "setupRunId": setup_gate.get("setupRunId"),
             "setupStatus": setup_gate.get("setupStatus"),
             "rescanRunId": setup_gate.get("rescanRunId"),
@@ -6693,12 +6995,17 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
 def _bootstrap_topic_picker_ready(*, checks, article_setup_state=None, has_completed_article_flow=False):
     scaffold = checks.get("scaffold", {}) if isinstance(checks, dict) else {}
     article_setup_state = article_setup_state if isinstance(article_setup_state, dict) else {}
+    if (
+        has_completed_article_flow
+        or scaffold.get("generationReady")
+        or article_setup_state.get("generationReady")
+    ):
+        return True
     setup_blocked = bool(scaffold.get("setupBlocked") or article_setup_state.get("setupBlocked"))
     if setup_blocked:
         return False
     return bool(
-        has_completed_article_flow
-        or scaffold.get("passed")
+        scaffold.get("passed")
         or scaffold.get("published")
         or scaffold.get("setupMerged")
         or article_setup_state.get("published")
@@ -6710,6 +7017,9 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     compact = view == "summary"
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
+    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
+    if setup_pr_refreshed:
+        latest_runs = _latest_runs_for_org(context.organization)
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
@@ -6747,7 +7057,12 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     )
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
-    article_setup_state = _article_setup_state_for_config(config, latest_runs=latest_runs)
+    article_setup_state = _article_setup_state_for_config(
+        config,
+        latest_runs=latest_runs,
+        organization=context.organization,
+        generation_ready=checks.get("scaffold", {}).get("generationReady"),
+    )
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
     run_mode = "summary" if compact else "full"
@@ -6759,7 +7074,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
-    has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs)
+    has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs, config=config)
     topic_picker_ready = _bootstrap_topic_picker_ready(
         checks=checks,
         article_setup_state=article_setup_state,
@@ -6841,6 +7156,7 @@ def _serialize_bootstrap_without_domain(company):
             "passed": False,
             "published": False,
             "setupBlocked": False,
+            "generationReady": False,
             "setupRunId": None,
             "setupStatus": None,
             "rescanRunId": None,
@@ -6906,6 +7222,8 @@ def _serialize_bootstrap_without_domain(company):
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         },
@@ -6919,6 +7237,8 @@ def _serialize_bootstrap_without_domain(company):
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         },
@@ -6970,6 +7290,9 @@ def _setup_blocked_response_for_generation(context, config):
     if not (config and config.github_connection_state == "connected" and config.github_repo):
         return None
     latest_runs = _latest_runs_for_org(context.organization)
+    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
+    if setup_pr_refreshed:
+        latest_runs = _latest_runs_for_org(context.organization)
     checks = _profile_checks(
         context.organization,
         config,
@@ -6981,7 +7304,7 @@ def _setup_blocked_response_for_generation(context, config):
         return None
     return Response(
         {
-            "detail": "Finish approving, merging, and verifying the articles directory setup before starting topic research or article generation.",
+            "detail": "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
             "code": "article_system_setup_blocked",
             "check": "scaffold",
             "scaffold": scaffold_check,
@@ -7003,6 +7326,8 @@ def _recommended_next_action(checks):
         ("dailyAutomation", "Enable daily generation"),
     ]
     for key, label in order:
+        if key == "scaffold" and checks.get("scaffold", {}).get("generationReady"):
+            continue
         if not checks.get(key, {}).get("passed"):
             return {"key": key, "label": label}
     return {"key": "ready", "label": "Daily generation is ready"}
@@ -7026,6 +7351,8 @@ def _guided_steps(checks):
     payload = []
     for key, label, check_key in steps:
         passed = bool(checks.get(check_key, {}).get("passed"))
+        if check_key == "scaffold" and checks.get("scaffold", {}).get("generationReady"):
+            passed = True
         status_label = "complete" if passed else "pending"
         if not passed and first_incomplete is None:
             first_incomplete = key
@@ -9752,6 +10079,10 @@ class VibeMarketingRunView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
+        if run.workflow == "article_system_setup":
+            refreshed_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
+            if setup_pr_refreshed and refreshed_run is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
         payload = _serialize_run(run, context=context, mode=view)
         if view == "status":
             _log_terminal_repo_scan_status(run, payload)
@@ -10536,6 +10867,14 @@ class VibeMarketingRunControlView(APIView):
             if merge_error:
                 return merge_error
             return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
+
+        if action == "refresh-setup-pr-status":
+            if run.workflow != "article_system_setup":
+                return Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
+            refreshed_run, _refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
+            if refreshed_run is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
         if action == "merge-setup-pr":
             merged_run, merge_error = _merge_setup_pr_for_run(run=run, context=context)
