@@ -160,6 +160,12 @@ MLAI_AU_FEATURED_REQUIRED_COMPONENTS = {
     "ArticleTocPlaceholder",
     "MLAITemplateResourceCTA",
 }
+FIXED_ARTICLE_REVIEW_COMPONENTS = (
+    {"id": "disclaimer", "type": "disclaimer", "label": "Disclaimer"},
+    {"id": "references", "type": "references", "label": "Authoritative References"},
+    {"id": "authoritative-references", "type": "references", "label": "Authoritative References"},
+    {"id": "events-cta", "type": "events-cta", "label": "Upcoming events CTA"},
+)
 REMOTE_REQUIRED_WORKFLOWS = {
     "article_system_setup",
     "article_generation",
@@ -2337,6 +2343,7 @@ def _component_manifest_from_run(run):
     components = manifest.get("components")
     if not isinstance(components, list):
         components = []
+    components = _augment_article_review_manifest_components(run, components)
     if not components and not artifact_path:
         return None
     return {
@@ -2344,6 +2351,61 @@ def _component_manifest_from_run(run):
         "components": components,
         "artifactPath": artifact_path,
     }
+
+
+def _augment_article_review_manifest_components(run, components):
+    normalized_components = [
+        dict(component)
+        for component in (components or [])
+        if isinstance(component, dict)
+    ]
+    if not _should_augment_article_review_manifest(run):
+        return normalized_components
+    seen = {
+        str(component.get("id") or "").strip()
+        for component in normalized_components
+        if str(component.get("id") or "").strip()
+    }
+    for component in FIXED_ARTICLE_REVIEW_COMPONENTS:
+        component_id = component["id"]
+        if component_id in seen:
+            continue
+        normalized_components.append(
+            {
+                **component,
+                "selector": f'[data-cf-component-id="{component_id}"]',
+                "sourceSectionId": "",
+                "editable": True,
+            }
+        )
+        seen.add(component_id)
+    return normalized_components
+
+
+def _should_augment_article_review_manifest(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    result = run.result or {}
+    if result.get("pr_url") or result.get("prUrl") or result.get("publish_child_run_id") or result.get("publishChildRunId"):
+        return False
+    review_surface_kind = str(result.get("review_surface_kind") or result.get("reviewSurfaceKind") or "").strip()
+    status_value = str(result.get("status") or run.status or "").strip()
+    current_step = str(run.current_step or "").strip()
+    approval_state = str(run.approval_state or "").strip()
+    live_preview = result.get("livePreview") or result.get("live_preview") or {}
+    preview_url = ""
+    if isinstance(live_preview, dict):
+        preview_url = str(live_preview.get("previewUrl") or live_preview.get("preview_url") or "").strip()
+    preview_url = preview_url or str(result.get("preview_url") or result.get("previewUrl") or "").strip()
+    return bool(
+        preview_url
+        and (
+            review_surface_kind == "component_live_preview"
+            or current_step == "await_review"
+            or status_value in {"preview_ready", "approval_required"}
+            or approval_state == ContentFactoryApprovalState.APPROVAL_REQUIRED
+        )
+    )
 
 
 def _normalize_live_preview_payload(payload):
@@ -6400,6 +6462,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     if checks.get("github", {}).get("passed") and not checks.get("scaffold", {}).get("passed") and status_by_id["article_system"] == "locked":
         status_by_id["article_system"] = "ready"
         action_by_id["article_system"] = _workflow_step_action("Run repository scan", href=href_by_id["article_system"])
+    if article_run and content_package_ready and not setup_blocked:
+        status_by_id["article_system"] = "complete"
+        action_by_id.pop("article_system", None)
 
     if discovery_run and not checks.get("research", {}).get("passed") and not setup_blocked:
         run_by_id["research"] = discovery_run.run_id
