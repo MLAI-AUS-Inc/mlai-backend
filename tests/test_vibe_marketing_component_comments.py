@@ -1381,6 +1381,29 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(list_response.data["comments"][0]["anchor"]["createdFrom"], "live_preview_click")
         self.assertEqual(list_response.data["comments"][0]["context"]["previewMode"], "exact")
 
+    def test_comment_crud_accepts_fixed_review_target_missing_from_manifest(self):
+        self.run.result = {
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments",
+            {
+                "componentId": "authoritative-references",
+                "componentType": "references",
+                "componentLabel": "Authoritative References",
+                "selector": '[data-cf-component-id="authoritative-references"]',
+                "body": "Use the generated article sources here.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["componentId"], "authoritative-references")
+        self.assertEqual(response.data["componentType"], "references")
+        self.assertEqual(response.data["selector"], '[data-cf-component-id="authoritative-references"]')
+
     def test_revision_run_does_not_serialize_source_run_comments(self):
         VibeMarketingComponentComment.objects.create(
             run=self.run,
@@ -2202,6 +2225,11 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["previewUrl"], "https://preview.example/articles/generated")
+        component_ids = {
+            component["id"]
+            for component in response.data["componentManifest"]["components"]
+        }
+        self.assertTrue({"title", "disclaimer", "references", "authoritative-references", "events-cta"}.issubset(component_ids))
         progress = response.data["workflowProgress"]
         steps = {step["id"]: step for step in progress["steps"]}
         self.assertEqual(progress["currentStepId"], "review")
@@ -2209,6 +2237,55 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["status"], "ready")
         self.assertNotEqual(steps["publish"]["status"], "complete")
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
+
+    def test_preview_ready_article_augments_missing_fixed_review_manifest(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "publish_code"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.run.run_request = {"delivery_mode": "publish_code"}
+        self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
+        self.run.current_step = "await_review"
+        self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        self.run.result = {
+            "status": "preview_ready",
+            "delivery_mode": "publish_code",
+            "review_surface_kind": "component_live_preview",
+            "preview_url": "https://preview.example/articles/generated",
+            "livePreview": {
+                "available": True,
+                "status": "ready",
+                "previewUrl": "https://preview.example/articles/generated",
+                "exactRender": True,
+            },
+        }
+        self.run.save(update_fields=["run_request", "status", "current_step", "approval_state", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        component_ids = {
+            component["id"]
+            for component in response.data["componentManifest"]["components"]
+        }
+        self.assertTrue({"disclaimer", "references", "authoritative-references", "events-cta"}.issubset(component_ids))
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_approve_preview_ready_article_creates_local_publish_child_run(self):
