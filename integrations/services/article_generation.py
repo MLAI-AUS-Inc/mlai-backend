@@ -9,6 +9,8 @@ from content_factory.article_system import (
 )
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
 from content_factory.billing import (
+    CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+    CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
     CONTENT_FACTORY_ARTICLE_COST_POINTS,
     CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
     FREE_CONTENT_FACTORY_DOMAINS,
@@ -16,6 +18,7 @@ from content_factory.billing import (
     build_roo_points_payload,
     get_content_factory_ai_agent_required_points,
     get_content_factory_article_cost_points,
+    get_content_factory_content_island_topic_cost_points,
     is_free_content_factory_domain,
 )
 from content_factory.progress import upsert_live_progress_card
@@ -541,6 +544,19 @@ def _build_content_factory_charge_description(resolved_domain: str, article_requ
     return f"Content Factory article research for {resolved_domain}"
 
 
+def _build_content_factory_topic_generation_charge_description(resolved_domain: str, article_request: dict) -> str:
+    island = str(
+        article_request.get("content_island_name")
+        or article_request.get("contentIslandName")
+        or article_request.get("content_island_slug")
+        or article_request.get("contentIslandSlug")
+        or ""
+    ).strip()
+    if island:
+        return f"Content Factory topic ideas for {resolved_domain}: {island}"
+    return f"Content Factory content-island topic ideas for {resolved_domain}"
+
+
 def _content_factory_balance_for_user(user) -> int:
     from roo.services import PointsService
 
@@ -672,7 +688,7 @@ def _charge_content_factory_user(
         raise InsufficientRooPointsError(
             build_roo_points_payload(
                 domain=resolved_domain,
-                action="article_generation",
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
                 current_balance=_content_factory_balance_for_user(user),
                 required_points=get_content_factory_ai_agent_required_points(resolved_domain),
                 cost_points=cost_points,
@@ -706,6 +722,51 @@ def charge_content_factory_request_for_user(
         article_request=article_request,
         resolved_domain=resolved_domain,
     )
+
+
+def charge_content_factory_topic_generation_for_user(
+    *,
+    user,
+    actor_id: str,
+    article_request: dict,
+    resolved_domain: str,
+):
+    from roo.models import Ledger
+    from roo.permissions import InsufficientBalanceError
+    from roo.services import PointsService
+
+    client_request_id = _get_client_request_id(article_request)
+    cost_points = get_content_factory_content_island_topic_cost_points(resolved_domain)
+    if cost_points == 0:
+        return user, None, 0
+    if Ledger.objects.filter(idempotency_key=f"content_factory:topic_generation:refund:{client_request_id}").exists():
+        raise ArticleGenerationError(
+            "This Content Factory topic generation request was already refunded after a failed start. Please generate topics again."
+        )
+
+    try:
+        ledger, _ = PointsService.spend(
+            user=user,
+            delta=cost_points,
+            source=CONTENT_FACTORY_LEDGER_SOURCE,
+            description=_build_content_factory_topic_generation_charge_description(resolved_domain, article_request),
+            created_by_slack_id=actor_id,
+            idempotency_key=f"content_factory:topic_generation:charge:{client_request_id}",
+            reference_type="CONTENT_FACTORY",
+            reference_id=client_request_id,
+        )
+    except InsufficientBalanceError:
+        raise InsufficientRooPointsError(
+            build_roo_points_payload(
+                domain=resolved_domain,
+                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                current_balance=_content_factory_balance_for_user(user),
+                required_points=cost_points,
+                cost_points=cost_points,
+            )
+        )
+
+    return user, ledger, cost_points
 
 
 def _refund_content_factory_request(
@@ -758,6 +819,34 @@ def refund_content_factory_request_for_user(
         resolved_domain=resolved_domain,
         reason=reason,
     )
+
+
+def refund_content_factory_topic_generation_for_user(
+    *,
+    user,
+    actor_id: str,
+    article_request: dict,
+    resolved_domain: str,
+    reason: str,
+):
+    from roo.services import PointsService
+
+    client_request_id = _get_client_request_id(article_request)
+    cost_points = get_content_factory_content_island_topic_cost_points(resolved_domain)
+    if cost_points == 0:
+        return None
+
+    ledger, _ = PointsService.refund(
+        user=user,
+        delta=cost_points,
+        source=CONTENT_FACTORY_LEDGER_SOURCE,
+        description=f"Automatic refund for failed Content Factory topic generation for {resolved_domain}: {reason}",
+        created_by_slack_id=actor_id,
+        idempotency_key=f"content_factory:topic_generation:refund:{client_request_id}",
+        reference_type="CONTENT_FACTORY",
+        reference_id=client_request_id,
+    )
+    return ledger
 
 
 def _get_content_factory_user_for_job(job):
@@ -1957,7 +2046,7 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
     payload.update(
         _content_factory_authorization_payload(
             resolved_domain=resolved_domain,
-            action="article_generation",
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
             cost_points=charge_amount,
             billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED,
             ledger=charge_ledger,
@@ -2634,7 +2723,7 @@ def confirm_topic(
         payload.update(
             _content_factory_authorization_payload(
                 resolved_domain=normalized_domain,
-                action="article_generation",
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
                 cost_points=source_charge_amount,
                 billing_status=str(getattr(source_job, "billing_status", "") or "reused"),
                 ledger=getattr(source_job, "billing_ledger", None),
@@ -2645,7 +2734,7 @@ def confirm_topic(
         payload.update(
             _content_factory_authorization_payload(
                 resolved_domain=normalized_domain,
-                action="article_generation",
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
                 cost_points=0,
                 billing_status="free",
                 current_balance=None,

@@ -1592,6 +1592,85 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(comment.status, "submitted")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_submit_component_revision_reuses_original_article_billing_without_balance_gate(self):
+        _config, account = self._prepare_billable_vibe_context(balance=0)
+        self.run.domain = "example.com"
+        self.run.github_repo = "example/site"
+        self.run.run_request = {
+            "topic": "Reliable Content Harnesses",
+            "target_keyword": "content harness",
+            "delivery_mode": "content_only",
+            "roo_points_authorized": True,
+            "roo_points_action": "article_generation",
+            "roo_points_cost": 6,
+            "roo_points_required": 6,
+            "roo_points_billing_status": "charged",
+            "roo_points_ledger_id": "ledger-article-original",
+        }
+        self.run.save(update_fields=["domain", "github_repo", "run_request", "updated_at"])
+        comment = VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Make the title sharper.",
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": "article-run-comments-revision-paid", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/component-revisions")
+        self.assertEqual(captured["payload"]["roo_points_action"], "article_generation")
+        self.assertEqual(captured["payload"]["roo_points_billing_status"], "reused")
+        self.assertEqual(captured["payload"]["roo_points_ledger_id"], "ledger-article-original")
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "submitted")
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 0)
+        self.assertEqual(account.lifetime_spent, 0)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_submit_component_revision_requires_original_article_billing(self):
+        _config, account = self._prepare_billable_vibe_context(balance=0)
+        self.run.domain = "example.com"
+        self.run.github_repo = "example/site"
+        self.run.run_request = {
+            "topic": "Legacy Content Harnesses",
+            "target_keyword": "legacy content harness",
+            "delivery_mode": "content_only",
+        }
+        self.run.save(update_fields=["domain", "github_repo", "run_request", "updated_at"])
+        comment = VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Make the title sharper.",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "roo_points_billing_required")
+        post.assert_not_called()
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "draft")
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 0)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_submits_setup_pinned_comments(self):
         setup_run = ContentFactoryRun.objects.create(
             run_id="article-system-setup-comments",

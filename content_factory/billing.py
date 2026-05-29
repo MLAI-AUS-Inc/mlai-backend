@@ -5,9 +5,12 @@ from urllib.parse import urlsplit
 
 
 CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_CONTENT_ISLAND_TOPIC_COST_POINTS = 1
 CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS = 6
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 INSUFFICIENT_ROO_POINTS_ERROR_CODE = "INSUFFICIENT_ROO_POINTS"
+CONTENT_FACTORY_ACTION_ARTICLE_GENERATION = "article_generation"
+CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION = "content_island_topic_generation"
 
 
 def normalize_content_factory_domain(domain: Optional[str]) -> str:
@@ -32,6 +35,12 @@ def get_content_factory_article_cost_points(domain: Optional[str]) -> int:
     if is_free_content_factory_domain(domain):
         return 0
     return CONTENT_FACTORY_ARTICLE_COST_POINTS
+
+
+def get_content_factory_content_island_topic_cost_points(domain: Optional[str]) -> int:
+    if is_free_content_factory_domain(domain):
+        return 0
+    return CONTENT_FACTORY_CONTENT_ISLAND_TOPIC_COST_POINTS
 
 
 def get_content_factory_ai_agent_required_points(domain: Optional[str]) -> int:
@@ -60,7 +69,10 @@ def build_roo_points_payload(
         else get_content_factory_article_cost_points(normalized_domain)
     )
     balance = int(current_balance or 0)
-    if cost > 0:
+    if cost > 0 and action == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+        plural = "point" if cost == 1 else "points"
+        message = f"Generating content-island topics costs {cost} Roo {plural}, and this user does not have enough."
+    elif cost > 0:
         message = f"Creating an article costs {cost} Roo points, and this user does not have enough."
     else:
         message = f"This AI action requires at least {required} Roo points before it can start."
