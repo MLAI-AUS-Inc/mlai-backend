@@ -1,3 +1,4 @@
+import json
 import os
 from unittest.mock import patch
 
@@ -120,6 +121,68 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertIsNone(payload["scanProgress"])
         self.assertIsNone(payload["scan_progress"])
 
+    def test_run_sync_sanitizes_nul_payload_before_persisting(self):
+        response = self.client.put(
+            "/api/content-factory/runs/run-sync-nul-1/",
+            {
+                "run_id": "run-sync-nul-1",
+                "workflow": "article_system_setup",
+                "status": "blocked",
+                "current_step": "verify_directory_build",
+                "error": "Preview failed near \x00vite-plugin",
+                "result": {
+                    "status": "preview_failed",
+                    "logs": "[plugin vite:reporter] (!) \x00virtual-module and literal \\u0000 marker",
+                    "article_system_setup": {"error": "Rollup module \x00entry failed"},
+                },
+                "step_order": ["verify_directory_build"],
+                "step_states": {
+                    "verify_directory_build": {
+                        "name": "verify_directory_build",
+                        "required": True,
+                        "status": "blocked",
+                        "attempts": 1,
+                        "message": "Reporter saw \x00vite/reporter",
+                        "error": "Unable to compile \\u0000virtual",
+                        "artifacts": ["logs/\x00build.txt"],
+                        "attempt_history": [
+                            {
+                                "attempt": 1,
+                                "status": "blocked",
+                                "message": "Attempt saw \x00plugin",
+                                "error": "Attempt failed at \\u0000module",
+                                "artifacts": [{"path": "logs/\x00attempt.txt"}],
+                            }
+                        ],
+                    }
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        run = ContentFactoryRun.objects.get(run_id="run-sync-nul-1")
+        step = run.steps.get(step_key="verify_directory_build")
+        attempt = step.attempt_history.get(attempt=1)
+        persisted = json.dumps(
+            {
+                "result": run.result,
+                "error": run.error,
+                "step_message": step.message,
+                "step_error": step.error,
+                "step_artifacts": step.artifacts,
+                "attempt_message": attempt.message,
+                "attempt_error": attempt.error,
+                "attempt_artifacts": attempt.artifacts,
+            }
+        )
+
+        self.assertNotIn("\x00", persisted)
+        self.assertNotIn("\\u0000", persisted.lower())
+        self.assertIn("[NUL]virtual-module", run.result["logs"])
+        self.assertIn("[NUL]vite/reporter", step.message)
+        self.assertIn("[NUL]module", attempt.error)
+
     def test_run_sync_accepts_running_article_setup_retry_over_terminal_local_state(self):
         ContentFactoryRun.objects.create(
             run_id="setup-retry-sync-1",
@@ -236,6 +299,60 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(synced.result["article_system_setup"]["status"], "running")
         self.assertNotIn("error", synced.result)
 
+    def test_status_poll_sync_sanitizes_nul_payload_before_save(self):
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+
+        run = ContentFactoryRun.objects.create(
+            run_id="setup-poll-nul-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            result={},
+        )
+
+        synced = _sync_local_run_from_remote(
+            run,
+            {
+                "run_id": "setup-poll-nul-1",
+                "workflow": "article_system_setup",
+                "status": "preview_failed",
+                "current_step": "verify_directory_build",
+                "error": "Preview failed near \x00vite-plugin",
+                "result": {
+                    "status": "preview_failed",
+                    "logs": "[plugin vite:reporter] (!) \x00virtual-module",
+                    "article_system_setup": {"status": "preview_failed", "error": "Build output included \\u0000module"},
+                },
+                "step_states": {
+                    "verify_directory_build": {
+                        "name": "verify_directory_build",
+                        "status": "blocked",
+                        "message": "Reporter saw \x00vite/reporter",
+                        "error": "Unable to compile \\u0000virtual",
+                    }
+                },
+            },
+        )
+
+        synced.refresh_from_db()
+        step = synced.steps.get(step_key="verify_directory_build")
+        persisted = json.dumps(
+            {
+                "result": synced.result,
+                "error": synced.error,
+                "step_message": step.message,
+                "step_error": step.error,
+            }
+        )
+
+        self.assertEqual(synced.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertNotIn("\x00", persisted)
+        self.assertNotIn("\\u0000", persisted.lower())
+        self.assertIn("[NUL]virtual-module", synced.result["logs"])
+        self.assertIn("[NUL]vite/reporter", step.message)
+
     def test_article_setup_progress_callback_updates_pending_setup_state(self):
         organization = Organization.objects.create(name="MLAI", domain="mlai.au")
         OrganizationContentConfig.objects.create(
@@ -295,6 +412,73 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(pending["setupCurrentStep"], "verify_directory_build")
         self.assertEqual(pending["resumeGeneration"], 3)
         self.assertNotIn("error", pending)
+
+    def test_article_setup_preview_failed_callback_sanitizes_nul_payload_before_save(self):
+        organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            article_system={
+                "pending_article_system_setup": {
+                    "setupRunId": "setup-preview-nul-1",
+                    "setupStatus": "running",
+                    "status": "running",
+                }
+            },
+        )
+        ContentFactoryRun.objects.create(
+            run_id="scan-preview-nul-parent",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="article_system_setup",
+            result={"article_system_setup": {"status": "running"}},
+        )
+
+        response = self.client.post(
+            "/api/content-factory/callback/",
+            {
+                "event_type": "article_system_setup_preview_failed",
+                "job_id": "setup-preview-nul-1",
+                "run_id": "setup-preview-nul-1",
+                "workflow": "article_system_setup",
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "status": "failed",
+                "current_step": "verify_directory_build",
+                "parent_run_id": "scan-preview-nul-parent",
+                "error": "Preview failed near \x00vite-plugin",
+                "error_code": "DIRECTORY_SEMANTIC_SLOTS_MISSING",
+                "live_preview": {
+                    "logs": "[plugin vite:reporter] (!) \x00virtual-module",
+                    "error": "Build output included \\u0000module",
+                },
+                "article_system_setup": {
+                    "status": "preview_failed",
+                    "error": "Build output included \\u0000module",
+                    "directory_quality_gates": {"logs": "Gate saw \x00virtual-module"},
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        run = ContentFactoryRun.objects.get(run_id="setup-preview-nul-1")
+        parent = ContentFactoryRun.objects.get(run_id="scan-preview-nul-parent")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        persisted = json.dumps(
+            {
+                "run_result": run.result,
+                "run_error": run.error,
+                "parent_result": parent.result,
+                "pending": config.article_system.get("pending_article_system_setup"),
+            }
+        )
+
+        self.assertNotIn("\x00", persisted)
+        self.assertNotIn("\\u0000", persisted.lower())
+        self.assertIn("[NUL]virtual-module", persisted)
+        self.assertIn("[NUL]module", persisted)
 
     def test_article_setup_state_prefers_active_setup_run_over_stale_pending_config(self):
         from content_factory.vibe_marketing_views import _article_setup_state_for_config

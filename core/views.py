@@ -38,6 +38,9 @@ APP_CONTEXT_ALIASES = {
     "hospital": "hospital",
     "esafety": "esafety",
     "e-safety": "esafety",
+    "watt-the-hack": "watt-the-hack",
+    "watt_the_hack": "watt-the-hack",
+    "wattthehack": "watt-the-hack",
     "founder-tools": "founder-tools",
     "founder_tools": "founder-tools",
     "foundertools": "founder-tools",
@@ -117,6 +120,8 @@ def _frontend_base_url(app_context):
         return _origin_from_url(getattr(settings, 'MEDHACK_URL', None), default_origin)
     if app_context == 'esafety':
         return _origin_from_url(getattr(settings, 'ESAFETY_URL', None), default_origin)
+    if app_context == 'watt-the-hack':
+        return _origin_from_url(getattr(settings, 'WATT_THE_HACK_URL', None), default_origin)
     if app_context == 'founder-tools':
         return _origin_from_url(
             getattr(settings, 'FOUNDER_TOOLS_URL', None)
@@ -325,6 +330,8 @@ class MagicLinkVerifyView(APIView):
                     redirect_path = "/esafety/dashboard"
                 elif app_param == 'founder-tools':
                     redirect_path = "/founder-tools"
+                elif app_param == 'watt-the-hack':
+                    redirect_path = "/watt-the-hack/dashboard"
                 elif app_param == 'content-factory':
                     redirect_path = "/content-factory"
                 else:
@@ -485,6 +492,7 @@ class CurrentUserView(APIView):
         primary_team_data = hospital_team_data or esafety_team_data
 
         data = {
+            'id': user.id,
             'first_name': user.first_name,
             'last_name': user.last_name,
             'full_name': user.full_name,
@@ -611,6 +619,17 @@ class UpdateProfileView(APIView):
                 team = user.hospital_teams.first()
             elif app_context == 'esafety':
                 team = user.esafety_teams.first()
+            elif app_context == 'watt-the-hack':
+                try:
+                    from generic_hackathons.models import GenericHackathonTeam
+
+                    team = GenericHackathonTeam.objects.filter(
+                        hackathon__slug='watt-the-hack',
+                        members=user,
+                    ).first()
+                except Exception as e:
+                    logger.error(f"Error resolving Watt The Hack team avatar target: {e}")
+                    team = None
             else:
                 team = (
                     user.hospital_teams.first()
@@ -672,6 +691,7 @@ class UpdateProfileView(APIView):
         primary_team_data = hospital_team_data or esafety_team_data
 
         data = {
+            'id': user.id,
             'full_name': user.full_name,
             'email': user.email,
             'phone': user.phone,

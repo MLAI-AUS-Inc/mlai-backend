@@ -70,6 +70,7 @@ from workflow_runs.serializers import (
     ContentFactoryRunSyncSerializer,
     ContentFactoryRunValleyJobSerializer,
 )
+from workflow_runs.sanitization import sanitize_json_for_postgres
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -362,7 +363,7 @@ class ContentFactoryOrgConfigView(APIView):
         - component_generation: summary of generation pipeline result
         - component_mapping: dict of component name -> match result
         """
-        data = request.data
+        data = sanitize_json_for_postgres(request.data if isinstance(request.data, dict) else dict(request.data))
         domain = data.get('domain')
         name = data.get('name')
         
@@ -1938,13 +1939,14 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
     domain = str(domain or "").strip()
     if not domain:
         return
+    updates = sanitize_json_for_postgres(updates)
     try:
         org = Organization.objects.filter(domain=domain).first()
         if not org:
             return
         config = org.content_config
-        article_system = dict(config.article_system or {})
-        pending = dict(article_system.get("pending_article_system_setup") or {})
+        article_system = sanitize_json_for_postgres(dict(config.article_system or {}))
+        pending = sanitize_json_for_postgres(dict(article_system.get("pending_article_system_setup") or {}))
         clearable_empty_keys = {
             "error",
             "errorCode",
@@ -1991,10 +1993,77 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
         pending["updatedAt"] = timezone.now().isoformat()
         pending["updated_at"] = pending["updatedAt"]
         article_system["pending_article_system_setup"] = pending
-        config.article_system = article_system
+        config.article_system = sanitize_json_for_postgres(article_system)
         config.save(update_fields=["article_system", "updated_at"])
     except Exception as exc:
         logger.warning("Failed to update pending article system setup for %s: %s", domain, exc)
+
+
+def _mark_article_system_setup_generation_ready_for_domain(domain: str, *, pr_url="", preview_url="") -> None:
+    domain = str(domain or "").strip()
+    if not domain:
+        return
+    try:
+        org = Organization.objects.filter(domain=domain).first()
+        if not org:
+            return
+        config = org.content_config
+        article_system = sanitize_json_for_postgres(dict(config.article_system or {}))
+        pending = sanitize_json_for_postgres(dict(article_system.get("pending_article_system_setup") or {}))
+        now = timezone.now().isoformat()
+        pending.update(
+            {
+                "status": "merged",
+                "setupStatus": "merged",
+                "setup_status": "merged",
+                "mergeStatus": "merged",
+                "merge_status": "merged",
+                "generationReady": True,
+                "generation_ready": True,
+                "updatedAt": now,
+                "updated_at": now,
+            }
+        )
+        if pr_url:
+            pending["prUrl"] = pr_url
+            pending["pr_url"] = pr_url
+        if preview_url:
+            pending["previewUrl"] = preview_url
+            pending["preview_url"] = preview_url
+        article_system["pending_article_system_setup"] = pending
+        article_system["generationReady"] = True
+        article_system["generation_ready"] = True
+        article_system.setdefault("generationReadySource", "setup_pr_merged")
+        article_system.setdefault("generation_ready_source", "setup_pr_merged")
+        article_system.setdefault("generationReadyAt", now)
+        article_system.setdefault("generation_ready_at", now)
+        if str(article_system.get("state") or "").strip() not in {
+            "existing",
+            "ready",
+            "detected",
+            "registry_driven_seo_ready",
+            "article_system_ready",
+            "roo_scaffolded",
+        }:
+            article_system["state"] = "roo_scaffolded"
+            article_system["source"] = article_system.get("source") or "setup_pr_merge"
+            article_system["confidence"] = article_system.get("confidence") or "high"
+
+        update_fields = ["article_system"]
+        config.article_system = sanitize_json_for_postgres(article_system)
+        if not config.articles_scaffolded:
+            config.articles_scaffolded = True
+            update_fields.append("articles_scaffolded")
+        if pr_url and config.articles_scaffold_pr_url != pr_url:
+            config.articles_scaffold_pr_url = pr_url
+            update_fields.append("articles_scaffold_pr_url")
+        if preview_url and config.articles_scaffold_preview_url != preview_url:
+            config.articles_scaffold_preview_url = preview_url
+            update_fields.append("articles_scaffold_preview_url")
+        update_fields.append("updated_at")
+        config.save(update_fields=update_fields)
+    except Exception as exc:
+        logger.warning("Failed to mark article system setup ready for %s: %s", domain, exc)
 
 
 def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: dict, result: dict) -> dict:
@@ -2040,18 +2109,24 @@ def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: d
             value = result.get(key)
         if value not in (None, "", {}, []):
             fields[key] = value
-    return fields
+    return sanitize_json_for_postgres(fields)
 
 
 def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -> Optional[ContentFactoryRun]:
+    data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
+    event_type = str(sanitize_json_for_postgres(event_type) or "")
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-    setup_payload = data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
-    live_preview = data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
-    result = dict((existing_run.result if existing_run else None) or {})
+    setup_payload = sanitize_json_for_postgres(
+        data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
+    )
+    live_preview = sanitize_json_for_postgres(
+        data.get("live_preview") if isinstance(data.get("live_preview"), dict) else {}
+    )
+    result = sanitize_json_for_postgres(dict((existing_run.result if existing_run else None) or {}))
     incoming_generation = _article_system_setup_resume_generation(data, setup_payload)
     existing_generation = _article_system_setup_resume_generation(
         result,
@@ -2519,9 +2594,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         current_step = "await_review"
         error = ""
 
-    run, _created = ContentFactoryRun.objects.update_or_create(
-        run_id=run_id,
-        defaults={
+    result = sanitize_json_for_postgres(result)
+    setup_payload = sanitize_json_for_postgres(setup_payload)
+    live_preview = sanitize_json_for_postgres(live_preview)
+    error = str(sanitize_json_for_postgres(error) or "")
+    run_defaults = sanitize_json_for_postgres(
+        {
             "workflow": "article_system_setup",
             "domain": result["domain"],
             "github_repo": result["github_repo"],
@@ -2543,15 +2621,20 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "result": result,
             "error": error,
             "resume_available": bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
-        },
+        }
+    )
+
+    run, _created = ContentFactoryRun.objects.update_or_create(
+        run_id=run_id,
+        defaults=run_defaults,
     )
 
     parent_run_id = str(data.get("parent_run_id") or data.get("scan_run_id") or "").strip()
     if parent_run_id:
         parent = ContentFactoryRun.objects.filter(run_id=parent_run_id).first()
         if parent:
-            parent_result = dict(parent.result or {})
-            parent_setup = dict(parent_result.get("article_system_setup") or {})
+            parent_result = sanitize_json_for_postgres(dict(parent.result or {}))
+            parent_setup = sanitize_json_for_postgres(dict(parent_result.get("article_system_setup") or {}))
             parent_setup.update(setup_payload)
             parent_setup["setup_run_id"] = run_id
             parent_result.update(
@@ -2576,7 +2659,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     "live_preview_url": result.get("live_preview_url"),
                 }
             )
-            parent.result = parent_result
+            parent.result = sanitize_json_for_postgres(parent_result)
             if parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
                 parent.status = ContentFactoryRunStatus.COMPLETED
                 parent.current_step = (
@@ -2643,6 +2726,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         mergeStatus=result.get("merge_status"),
         merge_status=result.get("merge_status"),
     )
+    if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
+        _mark_article_system_setup_generation_ready_for_domain(
+            result["domain"],
+            pr_url=result.get("pr_url") or setup_payload.get("pr_url") or "",
+            preview_url=result.get("preview_url") or setup_payload.get("preview_url") or "",
+        )
     return run
 
 
@@ -6901,6 +6990,8 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
 
 
 def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: dict):
+    data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
+    step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
         existing_run = (
             ContentFactoryRun.objects.select_for_update()
@@ -6998,12 +7089,12 @@ class ContentFactoryRunView(APIView):
 
     def put(self, request, run_id: str):
         existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-        payload = dict(request.data)
+        payload = sanitize_json_for_postgres(dict(request.data))
         payload["run_id"] = run_id
         serializer = ContentFactoryRunSyncSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        step_states = request.data.get("step_states", {}) or {}
+        step_states = data.get("step_states", {}) or {}
         incoming_status = str(data.get("status") or "").strip()
 
         if (
@@ -7034,7 +7125,7 @@ class ContentFactoryRunView(APIView):
             and not _article_system_setup_snapshot_is_current_retry(
                 existing_run=existing_run,
                 data=data,
-                raw_payload=request.data if isinstance(request.data, dict) else {},
+                raw_payload=payload if isinstance(payload, dict) else {},
             )
         ):
             response_payload = _serialize_content_factory_run(existing_run)

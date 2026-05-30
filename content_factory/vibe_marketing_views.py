@@ -87,6 +87,25 @@ from workflow_runs.models import (
     ContentFactoryRunStatus,
     ContentFactoryStepStatus,
 )
+from workflow_runs.sanitization import sanitize_json_for_postgres
+from content_factory.billing import (
+    CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+    CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+    CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+    build_roo_points_authorization_payload,
+    build_roo_points_payload,
+    get_content_factory_ai_agent_required_points,
+    get_content_factory_article_cost_points,
+    get_content_factory_content_island_topic_cost_points,
+    is_free_content_factory_domain,
+)
+from integrations.services.article_generation import (
+    InsufficientRooPointsError,
+    charge_content_factory_request_for_user,
+    charge_content_factory_topic_generation_for_user,
+    refund_content_factory_request_for_user,
+    refund_content_factory_topic_generation_for_user,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -146,6 +165,12 @@ MLAI_AU_FEATURED_REQUIRED_COMPONENTS = {
     "ArticleTocPlaceholder",
     "MLAITemplateResourceCTA",
 }
+FIXED_ARTICLE_REVIEW_COMPONENTS = (
+    {"id": "disclaimer", "type": "disclaimer", "label": "Disclaimer"},
+    {"id": "references", "type": "references", "label": "Authoritative References"},
+    {"id": "authoritative-references", "type": "references", "label": "Authoritative References"},
+    {"id": "events-cta", "type": "events-cta", "label": "Upcoming events CTA"},
+)
 REMOTE_REQUIRED_WORKFLOWS = {
     "article_system_setup",
     "article_generation",
@@ -272,6 +297,13 @@ ARTICLE_SYSTEM_PUBLISHED_STATES = {
     "registry_driven_seo_ready",
     "article_system_ready",
 }
+ARTICLE_SYSTEM_SETUP_MERGED_STATUSES = {
+    "merged",
+    "merged_verifying",
+    "verifying",
+    "published",
+    "verified",
+}
 ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "pending",
     "pending_generation",
@@ -293,9 +325,7 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "manual_merge_required",
     "manual_blocked",
     "completed",
-    "merged",
-    "merged_verifying",
-    "verifying",
+    *ARTICLE_SYSTEM_SETUP_MERGED_STATUSES,
 }
 ARTICLE_DELIVERY_MODES = {"content_only", "review_draft", "publish_code"}
 LEGACY_REVIEW_BLOCKING_DELIVERY_MODES = {"content_only", "publish_code"}
@@ -389,6 +419,245 @@ def _resolve_context_or_response(request, *, require_domain=True):
 def _get_config(organization):
     config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
     return config
+
+
+def _roo_points_balance_for_user(user) -> int:
+    from roo.services import PointsService
+
+    balance_data = PointsService.get_balance(user)
+    try:
+        return int(balance_data.get("balance") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _roo_points_response(*, domain: str, action: str, current_balance: int, cost_points: int = 0) -> Response:
+    return Response(
+        build_roo_points_payload(
+            domain=domain,
+            action=action,
+            current_balance=current_balance,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            cost_points=cost_points,
+        ),
+        status=status.HTTP_402_PAYMENT_REQUIRED,
+    )
+
+
+def _require_roo_points_for_ai_agent(user, *, domain: str, action: str):
+    required_points = get_content_factory_ai_agent_required_points(domain)
+    if required_points <= 0:
+        return None, None
+    current_balance = _roo_points_balance_for_user(user)
+    if current_balance < required_points:
+        return _roo_points_response(
+            domain=domain,
+            action=action,
+            current_balance=current_balance,
+            cost_points=0,
+        ), current_balance
+    return None, current_balance
+
+
+def _mark_roo_points_gate_authorized(payload: dict, *, domain: str, action: str, current_balance: int | None) -> None:
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action=action,
+            cost_points=0,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            current_balance=current_balance,
+            billing_status="free" if is_free_content_factory_domain(domain) else "gated",
+        )
+    )
+
+
+def _charge_roo_points_for_article(request, *, context, payload: dict):
+    domain = context.organization.domain
+    client_request_id = str(
+        payload.get("client_request_id")
+        or _request_value(request.data, "client_request_id", "clientRequestId", default="")
+        or f"vibe-article:{context.organization.id}:{uuid.uuid4().hex}"
+    ).strip()
+    payload["client_request_id"] = client_request_id
+    actor_id = founder_actor_id_for_user(request.user)
+    article_request = {
+        **payload,
+        "user_email": getattr(request.user, "email", ""),
+        "user_first_name": getattr(request.user, "first_name", ""),
+        "user_last_name": getattr(request.user, "last_name", ""),
+        "user_avatar_url": getattr(request.user, "avatar_url", ""),
+    }
+    try:
+        charged_user, charge_ledger, charge_amount = charge_content_factory_request_for_user(
+            user=request.user,
+            actor_id=actor_id,
+            article_request=article_request,
+            resolved_domain=domain,
+        )
+    except InsufficientRooPointsError as exc:
+        return None, None, None, Response(
+            getattr(exc, "payload", None) or build_roo_points_payload(
+                domain=domain,
+                action="article_generation",
+                current_balance=_roo_points_balance_for_user(request.user),
+                required_points=CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
+                cost_points=get_content_factory_article_cost_points(domain),
+            ),
+            status=status.HTTP_402_PAYMENT_REQUIRED,
+        )
+
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+            cost_points=charge_amount,
+            required_points=get_content_factory_ai_agent_required_points(domain),
+            current_balance=_roo_points_balance_for_user(request.user),
+            billing_status="charged" if charge_amount > 0 else "free",
+            ledger_id=getattr(charge_ledger, "id", None),
+        )
+    )
+    return charged_user, charge_ledger, article_request, None
+
+
+def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict):
+    domain = context.organization.domain
+    content_island_slug = str(payload.get("content_island_slug") or "").strip()
+    client_request_id = str(
+        payload.get("client_request_id")
+        or _request_value(request.data, "client_request_id", "clientRequestId", default="")
+        or f"vibe-content-island-topics:{context.organization.id}:{content_island_slug or 'unknown'}:{uuid.uuid4().hex}"
+    ).strip()
+    payload["client_request_id"] = client_request_id
+    actor_id = founder_actor_id_for_user(request.user)
+    article_request = {
+        **payload,
+        "user_email": getattr(request.user, "email", ""),
+        "user_first_name": getattr(request.user, "first_name", ""),
+        "user_last_name": getattr(request.user, "last_name", ""),
+        "user_avatar_url": getattr(request.user, "avatar_url", ""),
+    }
+    cost_points = get_content_factory_content_island_topic_cost_points(domain)
+    try:
+        charged_user, charge_ledger, charge_amount = charge_content_factory_topic_generation_for_user(
+            user=request.user,
+            actor_id=actor_id,
+            article_request=article_request,
+            resolved_domain=domain,
+        )
+    except InsufficientRooPointsError as exc:
+        return None, None, Response(
+            getattr(exc, "payload", None) or build_roo_points_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                current_balance=_roo_points_balance_for_user(request.user),
+                required_points=cost_points,
+                cost_points=cost_points,
+            ),
+            status=status.HTTP_402_PAYMENT_REQUIRED,
+        )
+    except ArticleGenerationError as exc:
+        return None, None, Response(
+            {"detail": str(exc), "code": "roo_points_billing_required"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+            cost_points=charge_amount,
+            required_points=cost_points,
+            current_balance=_roo_points_balance_for_user(request.user),
+            billing_status="charged" if charge_amount > 0 else "free",
+            ledger_id=getattr(charge_ledger, "id", None),
+        )
+    )
+    return charged_user, article_request, None
+
+
+def _refund_roo_points_for_article_start(*, charged_user, actor_id: str, article_request: dict, domain: str, reason: str):
+    if not charged_user or not article_request:
+        return None
+    return refund_content_factory_request_for_user(
+        user=charged_user,
+        actor_id=actor_id,
+        article_request=article_request,
+        resolved_domain=domain,
+        reason=reason,
+    )
+
+
+def _refund_roo_points_for_content_island_topic_start(*, charged_user, actor_id: str, article_request: dict, domain: str, reason: str):
+    if not charged_user or not article_request:
+        return None
+    return refund_content_factory_topic_generation_for_user(
+        user=charged_user,
+        actor_id=actor_id,
+        article_request=article_request,
+        resolved_domain=domain,
+        reason=reason,
+    )
+
+
+def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
+    if is_free_content_factory_domain(domain):
+        payload.update(
+            build_roo_points_authorization_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                cost_points=0,
+                required_points=get_content_factory_ai_agent_required_points(domain),
+                current_balance=None,
+                billing_status="free",
+            )
+        )
+        return None
+
+    run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    try:
+        authorized = bool(run_request.get("roo_points_authorized"))
+        action = str(run_request.get("roo_points_action") or "").strip()
+        cost_points = int(run_request.get("roo_points_cost") or 0)
+        required_points = int(run_request.get("roo_points_required") or get_content_factory_ai_agent_required_points(domain) or 0)
+        ledger_id = str(run_request.get("roo_points_ledger_id") or "").strip()
+    except (TypeError, ValueError):
+        authorized = False
+        action = ""
+        cost_points = 0
+        required_points = get_content_factory_ai_agent_required_points(domain)
+        ledger_id = ""
+    billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
+    if not (
+        authorized
+        and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
+        and cost_points >= get_content_factory_article_cost_points(domain)
+        and billing_status in {"charged", "reused", "free"}
+        and ledger_id
+    ):
+        return Response(
+            {
+                "detail": failure_detail,
+                "code": "roo_points_billing_required",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    payload.update(
+        build_roo_points_authorization_payload(
+            domain=domain,
+            action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+            cost_points=cost_points,
+            required_points=required_points,
+            current_balance=None,
+            billing_status="reused",
+            ledger_id=ledger_id,
+        )
+    )
+    payload["original_billing_source_run_id"] = run.run_id
+    return None
+
 
 
 def _assign_config_actor(config, user) -> list[str]:
@@ -1931,7 +2200,9 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     return drafts
 
 
-def _has_completed_article_flow(organization, latest_runs=None):
+def _article_generation_history_exists(organization, latest_runs=None):
+    if not organization:
+        return False
     if WrittenArticle.objects.filter(organization=organization).exists():
         return True
     for run in latest_runs or []:
@@ -1941,6 +2212,43 @@ def _has_completed_article_flow(organization, latest_runs=None):
         if content_package and content_package.get("contentPackaged"):
             return True
     return False
+
+
+def _article_system_setup_status_is_merged(*, setup_status="", merge_status="") -> bool:
+    return str(merge_status or "").strip().lower() == "merged" or str(setup_status or "").strip().lower() in ARTICLE_SYSTEM_SETUP_MERGED_STATUSES
+
+
+def _article_generation_ready_for_config(config, latest_runs=None, article_system=None) -> bool:
+    if not config:
+        return False
+    article_system = article_system if isinstance(article_system, dict) else resolve_article_system(config)
+    if bool(getattr(config, "articles_scaffolded", False)):
+        return True
+    if _article_system_is_published(config, article_system):
+        return True
+
+    pending = _pending_article_system_setup_from_config(config)
+    pending_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
+    pending_merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
+    if _article_system_setup_status_is_merged(setup_status=pending_status, merge_status=pending_merge_status):
+        return True
+
+    pending_setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
+    setup_run = _latest_article_system_setup_run(latest_runs or [], setup_run_id=pending_setup_run_id)
+    if setup_run:
+        setup_meta = _setup_metadata_from_run(setup_run)
+        if _article_system_setup_status_is_merged(
+            setup_status=setup_meta.get("setupStatus"),
+            merge_status=setup_meta.get("mergeStatus"),
+        ):
+            return True
+    return False
+
+
+def _has_completed_article_flow(organization, latest_runs=None, config=None):
+    if config is not None and _article_generation_ready_for_config(config, latest_runs):
+        return True
+    return _article_generation_history_exists(organization, latest_runs)
 
 
 def _start_page_mode(organization, latest_runs=None):
@@ -2220,6 +2528,7 @@ def _component_manifest_from_run(run):
     components = manifest.get("components")
     if not isinstance(components, list):
         components = []
+    components = _augment_article_review_manifest_components(run, components)
     if not components and not artifact_path:
         return None
     return {
@@ -2227,6 +2536,61 @@ def _component_manifest_from_run(run):
         "components": components,
         "artifactPath": artifact_path,
     }
+
+
+def _augment_article_review_manifest_components(run, components):
+    normalized_components = [
+        dict(component)
+        for component in (components or [])
+        if isinstance(component, dict)
+    ]
+    if not _should_augment_article_review_manifest(run):
+        return normalized_components
+    seen = {
+        str(component.get("id") or "").strip()
+        for component in normalized_components
+        if str(component.get("id") or "").strip()
+    }
+    for component in FIXED_ARTICLE_REVIEW_COMPONENTS:
+        component_id = component["id"]
+        if component_id in seen:
+            continue
+        normalized_components.append(
+            {
+                **component,
+                "selector": f'[data-cf-component-id="{component_id}"]',
+                "sourceSectionId": "",
+                "editable": True,
+            }
+        )
+        seen.add(component_id)
+    return normalized_components
+
+
+def _should_augment_article_review_manifest(run):
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    result = run.result or {}
+    if result.get("pr_url") or result.get("prUrl") or result.get("publish_child_run_id") or result.get("publishChildRunId"):
+        return False
+    review_surface_kind = str(result.get("review_surface_kind") or result.get("reviewSurfaceKind") or "").strip()
+    status_value = str(result.get("status") or run.status or "").strip()
+    current_step = str(run.current_step or "").strip()
+    approval_state = str(run.approval_state or "").strip()
+    live_preview = result.get("livePreview") or result.get("live_preview") or {}
+    preview_url = ""
+    if isinstance(live_preview, dict):
+        preview_url = str(live_preview.get("previewUrl") or live_preview.get("preview_url") or "").strip()
+    preview_url = preview_url or str(result.get("preview_url") or result.get("previewUrl") or "").strip()
+    return bool(
+        preview_url
+        and (
+            review_surface_kind == "component_live_preview"
+            or current_step == "await_review"
+            or status_value in {"preview_ready", "approval_required"}
+            or approval_state == ContentFactoryApprovalState.APPROVAL_REQUIRED
+        )
+    )
 
 
 def _normalize_live_preview_payload(payload):
@@ -3838,11 +4202,12 @@ def _pull_request_url_from_run(run) -> str:
     ).strip()
 
 
-def _mark_pending_article_system_setup_merged(config, *, run, result):
+def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, pr_url="", pr_number=None):
     if not config:
         return
     article_system = dict(config.article_system or {})
     pending = dict(article_system.get("pending_article_system_setup") or {})
+    result = _run_mapping(result)
     setup = _run_mapping(result.get("article_system_setup"))
     setup_run_id = str(
         setup.get("setup_run_id")
@@ -3852,8 +4217,25 @@ def _mark_pending_article_system_setup_merged(config, *, run, result):
         or getattr(run, "run_id", "")
         or ""
     ).strip()
-    pr_url = str(result.get("pr_url") or result.get("prUrl") or setup.get("pr_url") or setup.get("prUrl") or "").strip()
-    pr_number = result.get("pr_number") or result.get("prNumber") or setup.get("pr_number") or setup.get("prNumber")
+    pr_url = str(
+        pr_url
+        or result.get("pr_url")
+        or result.get("prUrl")
+        or setup.get("pr_url")
+        or setup.get("prUrl")
+        or pending.get("prUrl")
+        or pending.get("pr_url")
+        or ""
+    ).strip()
+    pr_number = (
+        pr_number
+        or result.get("pr_number")
+        or result.get("prNumber")
+        or setup.get("pr_number")
+        or setup.get("prNumber")
+        or pending.get("prNumber")
+        or pending.get("pr_number")
+    )
     if setup_run_id:
         pending["setupRunId"] = setup_run_id
         pending["setup_run_id"] = setup_run_id
@@ -3874,9 +4256,31 @@ def _mark_pending_article_system_setup_merged(config, *, run, result):
     pending["setup_current_step"] = "merged"
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
+    pending["generationReady"] = True
+    pending["generation_ready"] = True
     article_system["pending_article_system_setup"] = pending
-    config.article_system = article_system
-    config.save(update_fields=["article_system", "updated_at"])
+    article_system["generationReady"] = True
+    article_system["generation_ready"] = True
+    article_system.setdefault("generationReadySource", "setup_pr_merged")
+    article_system.setdefault("generation_ready_source", "setup_pr_merged")
+    article_system.setdefault("generationReadyAt", pending["updatedAt"])
+    article_system.setdefault("generation_ready_at", pending["updated_at"])
+    existing_state = str(article_system.get("state") or "").strip()
+    if existing_state not in ARTICLE_SYSTEM_PUBLISHED_STATES and existing_state != "roo_scaffolded":
+        article_system["state"] = "roo_scaffolded"
+        article_system["source"] = article_system.get("source") or "setup_pr_merge"
+        article_system["confidence"] = article_system.get("confidence") or "high"
+
+    update_fields = ["article_system"]
+    config.article_system = sanitize_json_for_postgres(article_system)
+    if not config.articles_scaffolded:
+        config.articles_scaffolded = True
+        update_fields.append("articles_scaffolded")
+    if pr_url and config.articles_scaffold_pr_url != pr_url:
+        config.articles_scaffold_pr_url = pr_url
+        update_fields.append("articles_scaffold_pr_url")
+    update_fields.append("updated_at")
+    config.save(update_fields=update_fields)
 
 
 def _mark_pending_article_system_setup_pr_created(config, *, run, result):
@@ -3969,6 +4373,69 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     return run
 
 
+def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required"):
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    status_value = str(status_value or "manual_merge_required").strip()
+    reason = str(reason or "GitHub did not allow this PR to be merged from Content Factory. Merge it in GitHub, then refresh merge status.").strip()
+    result["status"] = status_value
+    result["setup_status"] = status_value
+    result["setupStatus"] = status_value
+    result["merge_status"] = status_value
+    result["mergeStatus"] = status_value
+    result["checks_status"] = status_value
+    result["checksStatus"] = status_value
+    result["merge_blocked_reason"] = reason
+    result["mergeBlockedReason"] = reason
+    result["current_step"] = status_value
+    result["currentStep"] = status_value
+    setup["status"] = status_value
+    setup["setup_status"] = status_value
+    setup["setupStatus"] = status_value
+    setup["merge_status"] = status_value
+    setup["mergeStatus"] = status_value
+    setup["checks_status"] = status_value
+    setup["checksStatus"] = status_value
+    setup["merge_blocked_reason"] = reason
+    setup["mergeBlockedReason"] = reason
+    setup["current_step"] = status_value
+    setup["currentStep"] = status_value
+    setup.setdefault("setup_run_id", run.run_id)
+    setup.setdefault("setupRunId", run.run_id)
+    result["article_system_setup"] = setup
+    run.result = sanitize_json_for_postgres(result)
+    run.current_step = status_value
+    run.save(update_fields=["current_step", "result", "updated_at"])
+
+    article_system = dict(config.article_system or {})
+    pending = dict(article_system.get("pending_article_system_setup") or {})
+    pending.update(
+        {
+            "status": status_value,
+            "setupStatus": status_value,
+            "setup_status": status_value,
+            "mergeStatus": status_value,
+            "merge_status": status_value,
+            "checksStatus": status_value,
+            "checks_status": status_value,
+            "mergeBlockedReason": reason,
+            "merge_blocked_reason": reason,
+            "currentStep": status_value,
+            "current_step": status_value,
+            "setupCurrentStep": status_value,
+            "setup_current_step": status_value,
+            "setupRunId": run.run_id,
+            "setup_run_id": run.run_id,
+            "updatedAt": timezone.now().isoformat(),
+        }
+    )
+    pending["updated_at"] = pending["updatedAt"]
+    article_system["pending_article_system_setup"] = pending
+    config.article_system = sanitize_json_for_postgres(article_system)
+    config.save(update_fields=["article_system", "updated_at"])
+    return run
+
+
 def _merge_setup_pr_for_run(*, run, context):
     if run.workflow != "article_system_setup":
         return None, Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
@@ -4014,10 +4481,14 @@ def _merge_setup_pr_for_run(*, run, context):
                 {"detail": checks.get("message") or "Setup PR checks are not ready.", "checks": checks},
                 status=status.HTTP_409_CONFLICT,
             )
-        merge_payload = {
-            "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
-            "merge_method": "squash",
-        }
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+    merge_payload = {
+        "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
+        "merge_method": "squash",
+    }
+    try:
         merged = _github_api_request(
             "PUT",
             f"/repos/{repo}/pulls/{pr_number}/merge",
@@ -4025,8 +4496,16 @@ def _merge_setup_pr_for_run(*, run, context):
             body=merge_payload,
             expected=(200, 201),
         )
-    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
-        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+    except (ValueError, http_client.RequestException) as exc:
+        config = _get_config(context.organization)
+        _mark_setup_merge_blocked(run=run, config=config, reason=str(exc), status_value="manual_merge_required")
+        return None, Response(
+            {
+                "detail": f"{exc} Merge the setup PR in GitHub, then refresh merge status.",
+                "checks": {"state": "manual_merge_required", "ready": False, "message": str(exc)},
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
 
     return _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged), None
 
@@ -4077,6 +4556,114 @@ def _github_pull_checks_state(*, repo, pr_number, token):
     if failed_runs:
         return pull, {"state": "failed", "ready": False, "message": "One or more GitHub Actions checks failed."}
     return pull, {"state": "success", "ready": True, "message": "Checks are passing."}
+
+
+def _pull_request_number_from_values(*values):
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            match = re.search(r"/pull/(\d+)", str(value))
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _refresh_pending_article_system_setup_pr_status(*, context, config=None, latest_runs=None, run=None):
+    config = config or _get_config(context.organization)
+    pending = _pending_article_system_setup_from_config(config)
+    if not pending and not (run and run.workflow == "article_system_setup"):
+        return run, False
+
+    setup_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
+    merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
+    if _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status):
+        if not bool(getattr(config, "articles_scaffolded", False)):
+            _mark_pending_article_system_setup_merged(config, run=run, result=getattr(run, "result", {}) if run else pending)
+        return run, False
+
+    setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
+    setup_run = run if run and run.workflow == "article_system_setup" else None
+    if setup_run is None and setup_run_id:
+        setup_run = (
+            _article_setup_state_run_from_latest(latest_runs or [], setup_run_id)
+            or ContentFactoryRun.objects.filter(run_id=setup_run_id, workflow="article_system_setup").first()
+        )
+
+    pr_url = str(
+        pending.get("prUrl")
+        or pending.get("pr_url")
+        or (_pull_request_url_from_run(setup_run) if setup_run else "")
+        or ""
+    ).strip()
+    pr_number = _pull_request_number_from_values(
+        pending.get("prNumber"),
+        pending.get("pr_number"),
+        _pull_request_number_from_run(setup_run) if setup_run else None,
+        pr_url,
+    )
+    repo = str(
+        (getattr(setup_run, "github_repo", "") if setup_run else "")
+        or pending.get("githubRepo")
+        or pending.get("github_repo")
+        or config.github_repo
+        or ""
+    ).strip()
+    if not repo or not pr_number:
+        return run, False
+
+    try:
+        token, token_source = _github_token_for_repo_operation(
+            domain=context.organization.domain,
+            github_repo=repo,
+            permission_mode="read",
+        )
+        logger.info(
+            "vibe_marketing_setup_pr_status_token_source repo=%s pr_number=%s token_source=%s",
+            repo,
+            pr_number,
+            token_source,
+        )
+        pull = _github_api_request("GET", f"/repos/{repo}/pulls/{pr_number}", token=token)
+    except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
+        logger.info(
+            "vibe_marketing_setup_pr_status_refresh_skipped domain=%s repo=%s pr_number=%s error=%s",
+            context.organization.domain,
+            repo,
+            pr_number,
+            exc,
+        )
+        return run, False
+
+    if not pull.get("merged"):
+        return run, False
+
+    if setup_run is not None:
+        refreshed = _apply_setup_merge_result(
+            run=setup_run,
+            context=context,
+            checks_status="merged",
+            merge_response={"source": "github_pr_status", "pull": {"number": pr_number, "merged": True}},
+        )
+        return refreshed, True
+
+    _mark_pending_article_system_setup_merged(
+        config,
+        run=None,
+        result={
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "article_system_setup": {
+                "pr_url": pr_url,
+                "pr_number": pr_number,
+                "merge_status": "merged",
+                "status": "merged",
+            },
+        },
+    )
+    return run, True
 
 
 def _merge_publish_pr_for_run(*, run, context):
@@ -4446,6 +5033,17 @@ def _restart_article_run(*, run, context):
             status=status.HTTP_409_CONFLICT,
         )
 
+    billing_error = _reuse_roo_points_authorization_for_article_job(
+        run=run,
+        payload=payload,
+        domain=context.organization.domain,
+        failure_detail="This draft cannot be restarted because its original Roo points payment could not be verified.",
+    )
+    if billing_error is not None:
+        return None, billing_error
+
+    client_request_id = str(payload.get("client_request_id") or f"vibe-article-restart:{run.run_id}:{uuid.uuid4().hex}").strip()
+    payload["client_request_id"] = client_request_id
     restarted_run = _queue_content_factory_run(
         endpoint="article",
         workflow="article_generation",
@@ -5307,7 +5905,7 @@ def _article_system_setup_run_is_dispatch_blocked(run) -> bool:
     return "content factory did not return a run id" in technical_error
 
 
-def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> dict:
+def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organization=None, generation_ready=None) -> dict:
     latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
     article_system = resolve_article_system(config) if config else {}
@@ -5348,6 +5946,11 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         setup_run = None
     related_runs = _dedupe_runs(latest_runs, explicit_runs, [latest_scan, setup_run])
     setup_gate = _article_system_setup_gate(config, related_runs, article_system)
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or bool(generation_ready)
+        or (generation_ready is None and organization is not None and _article_generation_history_exists(organization, related_runs))
+    )
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
         setup_run = (
             _article_setup_state_run_from_latest(related_runs, setup_gate.get("setupRunId"))
@@ -5439,8 +6042,10 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
         "setupStatus": str(setup_status or "").strip() or None,
         "setupRunStatus": setup_run.status if setup_run else None,
         "setupCurrentStep": (setup_payload.get("currentStep") or setup_payload.get("current_step") or getattr(setup_run, "current_step", "") or None) if setup_run else None,
-        "setupBlocked": bool(setup_gate.get("setupBlocked")),
+        "setupBlocked": bool(setup_gate.get("setupBlocked") and not generation_ready),
         "setupMerged": bool(setup_gate.get("setupMerged")),
+        "generationReady": bool(generation_ready),
+        "generation_ready": bool(generation_ready),
         "published": bool(setup_gate.get("published")),
         "routePath": route_path or None,
         "previewUrl": preview_url or None,
@@ -5467,7 +6072,7 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None) -> di
     }
 
 
-def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
+def _article_setup_state(*, context=None, run=None, latest_runs=None, generation_ready=None) -> dict:
     organization = context.organization if context is not None else None
     if organization is None and run is not None and run.domain:
         organization = Organization.objects.filter(domain__iexact=normalize_company_domain(run.domain)).first()
@@ -5482,6 +6087,8 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         }
@@ -5497,10 +6104,18 @@ def _article_setup_state(*, context=None, run=None, latest_runs=None) -> dict:
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         }
-    return _article_setup_state_for_config(config, latest_runs=latest_runs, run=run)
+    return _article_setup_state_for_config(
+        config,
+        latest_runs=latest_runs,
+        run=run,
+        organization=organization,
+        generation_ready=generation_ready,
+    )
 
 
 def _workflow_progress_context(*, context=None, run=None, latest_runs=None, checks=None):
@@ -5824,9 +6439,9 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     setup_status = str(meta.get("setupStatus") or "").strip().lower()
     merge_status = str(meta.get("mergeStatus") or "").strip().lower()
     setup_merged = bool(
-        merge_status == "merged"
-        or setup_status in {"merged", "merged_verifying", "verifying", "published", "verified"}
+        _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status)
     )
+    generation_ready = bool(_article_generation_ready_for_config(config, latest_runs, article_system) or setup_merged)
     completed_with_pending_verification = bool(
         meta.get("rescanRunId") and not verification_published
     )
@@ -5848,6 +6463,8 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         published = _article_system_is_published(config, article_system)
     if setup_merged:
         setup_blocked = False
+    if generation_ready:
+        setup_blocked = False
     if verification_published:
         setup_blocked = False
         published = True
@@ -5855,6 +6472,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     meta["published"] = bool(published)
     meta["setupBlocked"] = bool(setup_blocked)
     meta["setupMerged"] = bool(setup_merged)
+    meta["generationReady"] = bool(generation_ready)
     for key in ("setupRunId", "setupStatus", "rescanRunId", "mergeStatus", "prUrl", "prNumber", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
@@ -5953,6 +6571,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     scaffold_check = checks.get("scaffold", {})
     setup_blocked = bool(scaffold_check.get("setupBlocked"))
     setup_merged = bool(scaffold_check.get("setupMerged"))
+    generation_ready = bool(scaffold_check.get("generationReady"))
 
     if not checks.get("websiteProfile", {}).get("passed"):
         status_by_id["profile"] = "needs_action"
@@ -5996,6 +6615,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     if checks.get("github", {}).get("passed") and not checks.get("scaffold", {}).get("passed") and status_by_id["article_system"] == "locked":
         status_by_id["article_system"] = "ready"
         action_by_id["article_system"] = _workflow_step_action("Run repository scan", href=href_by_id["article_system"])
+    if article_run and content_package_ready and not setup_blocked:
+        status_by_id["article_system"] = "complete"
+        action_by_id.pop("article_system", None)
 
     if discovery_run and not checks.get("research", {}).get("passed") and not setup_blocked:
         run_by_id["research"] = discovery_run.run_id
@@ -6006,10 +6628,10 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         elif discovery_run.status in FAILED_RUN_STATUSES:
             status_by_id["research"] = "blocked"
             action_by_id["research"] = _workflow_step_action("Open research run", href=_run_url(discovery_run))
-    if setup_merged and not setup_blocked:
+    if (setup_merged or generation_ready) and not setup_blocked:
         status_by_id["article_system"] = "complete"
         action_by_id.pop("article_system", None)
-    if (checks.get("scaffold", {}).get("passed") or setup_merged) and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
+    if (checks.get("scaffold", {}).get("passed") or setup_merged or generation_ready) and not setup_blocked and not checks.get("research", {}).get("passed") and status_by_id["research"] == "locked":
         status_by_id["research"] = "ready"
         action_by_id["research"] = _workflow_step_action("Start topic research", href=href_by_id["research"])
 
@@ -6507,7 +7129,12 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
-    article_setup_state = _article_setup_state(context=context, run=run, latest_runs=latest_runs)
+    article_setup_state = _article_setup_state(
+        context=context,
+        run=run,
+        latest_runs=latest_runs,
+        generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
+    )
     scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     if compact:
         return {
@@ -6637,7 +7264,15 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
-    article_system_ready = bool(setup_gate.get("published") and not setup_gate.get("setupBlocked"))
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or _article_generation_ready_for_config(config, latest_runs, article_system)
+        or _article_generation_history_exists(organization, latest_runs)
+    )
+    if generation_ready:
+        setup_gate["setupBlocked"] = False
+        setup_gate["generationReady"] = True
+    article_system_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
     setup_pr_merged = bool(setup_gate.get("setupMerged"))
     missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
     component_catalog_ready = not missing_featured_components
@@ -6723,6 +7358,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "published": bool(setup_gate.get("published")),
             "setupBlocked": bool(setup_gate.get("setupBlocked")),
             "setupMerged": bool(setup_gate.get("setupMerged")),
+            "generationReady": bool(generation_ready),
             "setupRunId": setup_gate.get("setupRunId"),
             "setupStatus": setup_gate.get("setupStatus"),
             "rescanRunId": setup_gate.get("rescanRunId"),
@@ -6749,12 +7385,17 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
 def _bootstrap_topic_picker_ready(*, checks, article_setup_state=None, has_completed_article_flow=False):
     scaffold = checks.get("scaffold", {}) if isinstance(checks, dict) else {}
     article_setup_state = article_setup_state if isinstance(article_setup_state, dict) else {}
+    if (
+        has_completed_article_flow
+        or scaffold.get("generationReady")
+        or article_setup_state.get("generationReady")
+    ):
+        return True
     setup_blocked = bool(scaffold.get("setupBlocked") or article_setup_state.get("setupBlocked"))
     if setup_blocked:
         return False
     return bool(
-        has_completed_article_flow
-        or scaffold.get("passed")
+        scaffold.get("passed")
         or scaffold.get("published")
         or scaffold.get("setupMerged")
         or article_setup_state.get("published")
@@ -6766,6 +7407,9 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     compact = view == "summary"
     config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
+    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
+    if setup_pr_refreshed:
+        latest_runs = _latest_runs_for_org(context.organization)
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
@@ -6806,7 +7450,12 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     topic_pillars = _canonicalize_topic_pillars(topic_pillars)
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
-    article_setup_state = _article_setup_state_for_config(config, latest_runs=latest_runs)
+    article_setup_state = _article_setup_state_for_config(
+        config,
+        latest_runs=latest_runs,
+        organization=context.organization,
+        generation_ready=checks.get("scaffold", {}).get("generationReady"),
+    )
     guided_steps, current_guided_step = _guided_steps(checks)
     latest_runs_by_workflow = {}
     run_mode = "summary" if compact else "full"
@@ -6818,7 +7467,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
     google_status = google_baseline_connection_status(context.profile.user)
     google_status["connectUrl"] = _google_baseline_connect_url(request)
-    has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs)
+    has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs, config=config)
     topic_picker_ready = _bootstrap_topic_picker_ready(
         checks=checks,
         article_setup_state=article_setup_state,
@@ -6900,6 +7549,7 @@ def _serialize_bootstrap_without_domain(company):
             "passed": False,
             "published": False,
             "setupBlocked": False,
+            "generationReady": False,
             "setupRunId": None,
             "setupStatus": None,
             "rescanRunId": None,
@@ -6965,6 +7615,8 @@ def _serialize_bootstrap_without_domain(company):
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         },
@@ -6978,6 +7630,8 @@ def _serialize_bootstrap_without_domain(company):
             "setupRunId": None,
             "setupStatus": None,
             "setupBlocked": False,
+            "generationReady": False,
+            "generation_ready": False,
             "published": False,
             "source": "none",
         },
@@ -7029,6 +7683,9 @@ def _setup_blocked_response_for_generation(context, config):
     if not (config and config.github_connection_state == "connected" and config.github_repo):
         return None
     latest_runs = _latest_runs_for_org(context.organization)
+    _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
+    if setup_pr_refreshed:
+        latest_runs = _latest_runs_for_org(context.organization)
     checks = _profile_checks(
         context.organization,
         config,
@@ -7040,7 +7697,7 @@ def _setup_blocked_response_for_generation(context, config):
         return None
     return Response(
         {
-            "detail": "Finish approving, merging, and verifying the articles directory setup before starting topic research or article generation.",
+            "detail": "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
             "code": "article_system_setup_blocked",
             "check": "scaffold",
             "scaffold": scaffold_check,
@@ -7062,6 +7719,8 @@ def _recommended_next_action(checks):
         ("dailyAutomation", "Enable daily generation"),
     ]
     for key, label in order:
+        if key == "scaffold" and checks.get("scaffold", {}).get("generationReady"):
+            continue
         if not checks.get(key, {}).get("passed"):
             return {"key": key, "label": label}
     return {"key": "ready", "label": "Daily generation is ready"}
@@ -7085,6 +7744,8 @@ def _guided_steps(checks):
     payload = []
     for key, label, check_key in steps:
         passed = bool(checks.get(check_key, {}).get("passed"))
+        if check_key == "scaffold" and checks.get("scaffold", {}).get("generationReady"):
+            passed = True
         status_label = "complete" if passed else "pending"
         if not passed and first_incomplete is None:
             first_incomplete = key
@@ -7698,7 +8359,8 @@ def _article_system_setup_current_retry_attempt(*payloads) -> bool:
 
 
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
-    remote_data = remote_data or {}
+    remote_data = sanitize_json_for_postgres(remote_data or {})
+    payload = sanitize_json_for_postgres(payload or {})
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
     if not run_id:
         run_id = f"vibe-marketing-{workflow}-{uuid.uuid4().hex[:12]}"
@@ -7777,7 +8439,7 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         )
 
     if response.status_code == 200:
-        return response.json() if response.content else {}
+        return sanitize_json_for_postgres(response.json() if response.content else {})
     if response.status_code == 404:
         if workflow == "startup_autofill" or _remote_required_for_workflow(workflow):
             detail = f"Content Factory run {run_id} was not found."
@@ -7800,7 +8462,8 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
         response_payload = response.json()
     except Exception:
         response_payload = {}
-    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    response_payload = sanitize_json_for_postgres(response_payload)
+    detail = sanitize_json_for_postgres(response_payload.get("detail") or response_payload.get("error") or response.text)
     if response.status_code >= 500:
         logger.warning(
             "content_factory_status_poll_unavailable run_id=%s workflow=%s status_code=%s",
@@ -7841,6 +8504,7 @@ def _call_content_factory_run_status(run_id, *, workflow=""):
 
 
 def _sync_steps_from_remote(run, remote_data):
+    remote_data = sanitize_json_for_postgres(remote_data if isinstance(remote_data, dict) else {})
     raw_steps = remote_data.get("steps") or remote_data.get("step_states")
     if not raw_steps:
         return
@@ -7892,6 +8556,7 @@ def _sync_steps_from_remote(run, remote_data):
 def _sync_local_run_from_remote(run, remote_data):
     if not isinstance(remote_data, dict) or not remote_data:
         return run
+    remote_data = sanitize_json_for_postgres(remote_data)
 
     original_snapshot = {
         "workflow": run.workflow,
@@ -8064,10 +8729,11 @@ def _sync_local_run_from_remote(run, remote_data):
     return run
 
 
-def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
+def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
     actor_id = founder_actor_id_for_user(context.profile.user)
     remote_config = _content_factory_remote_config()
     remote_data = {}
+    remote_run_id = ""
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
     if requires_remote and not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -8100,6 +8766,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
             if response.status_code in (200, 202):
                 remote_data = response.json() if response.content else {}
                 run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
+                remote_run_id = run_id
                 logger.info(
                     "content_factory_dispatch_result workflow=%s endpoint=%s status_code=%s run_id=%s",
                     workflow,
@@ -8157,6 +8824,19 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload):
                 diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
                 retryable=True,
             )
+
+    if billing_refund_context and not remote_run_id:
+        refund_kwargs = {
+            "charged_user": billing_refund_context.get("charged_user"),
+            "actor_id": actor_id,
+            "article_request": billing_refund_context.get("article_request") or {},
+            "domain": context.organization.domain,
+            "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
+        }
+        if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+            _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+        else:
+            _refund_roo_points_for_article_start(**refund_kwargs)
 
     return _create_local_run(
         workflow=workflow,
@@ -8969,6 +9649,13 @@ class VibeMarketingAutofillView(APIView):
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=domain,
+            action="startup_autofill",
+        )
+        if gate_response is not None:
+            return gate_response
 
         with transaction.atomic():
             company_id = _company_id_from_request(request)
@@ -9051,6 +9738,12 @@ class VibeMarketingAutofillView(APIView):
             "requested_by_slack_user_id": actor_id,
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=organization.domain,
+            action="startup_autofill",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="autofill",
             workflow="startup_autofill",
@@ -9067,6 +9760,13 @@ class VibeMarketingBaselineView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="website_baseline",
+        )
+        if gate_response is not None:
+            return gate_response
         config.baseline_skipped_at = None
         config.baseline_skip_reason = ""
         config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
@@ -9080,6 +9780,12 @@ class VibeMarketingBaselineView(APIView):
             "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="website_baseline",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="baseline",
             workflow="website_baseline",
@@ -9286,6 +9992,13 @@ class VibeMarketingScanView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="repo_scan",
+        )
+        if gate_response is not None:
+            return gate_response
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
@@ -9328,6 +10041,12 @@ class VibeMarketingScanView(APIView):
             "article_surface_mode": article_surface_mode,
             "scan_purpose": scan_purpose,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="repo_scan",
+            current_balance=gate_balance,
+        )
         if article_surface_url:
             payload["article_surface_url"] = article_surface_url
         if article_surface_hint:
@@ -9377,6 +10096,13 @@ class VibeMarketingArticleSystemSetupView(APIView):
         if error_response:
             return error_response
         config = _get_config(context.organization)
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="article_system_setup",
+        )
+        if gate_response is not None:
+            return gate_response
         if request.data.get("github_repo") or request.data.get("githubRepo"):
             config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
             config.save(update_fields=["github_repo", "updated_at"])
@@ -9413,6 +10139,12 @@ class VibeMarketingArticleSystemSetupView(APIView):
             "article_surface_mode": article_surface_mode,
             "article_surface_hint": article_surface_hint,
         }
+        _mark_roo_points_gate_authorized(
+            payload,
+            domain=context.organization.domain,
+            action="article_system_setup",
+            current_balance=gate_balance,
+        )
         run = _queue_content_factory_run(
             endpoint="article-system-setup",
             workflow="article_system_setup",
@@ -9483,6 +10215,7 @@ class VibeMarketingDiscoveryView(APIView):
         content_island_slug = str(
             _request_value(request.data, "contentIslandSlug", "content_island_slug", default="") or ""
         ).strip()
+        billing_refund_context = None
         if content_island_slug:
             content_island_name = str(
                 _request_value(request.data, "contentIslandName", "content_island_name", default="") or ""
@@ -9512,12 +10245,40 @@ class VibeMarketingDiscoveryView(APIView):
                     "requested_topic_count": max(1, min(requested_topic_count, 8)),
                 }
             )
+            charged_user, article_request, billing_error = _charge_roo_points_for_content_island_topic_generation(
+                request,
+                context=context,
+                payload=payload,
+            )
+            if billing_error is not None:
+                return billing_error
+            billing_refund_context = {
+                "kind": CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+                "charged_user": charged_user,
+                "article_request": article_request,
+                "reason": "Vibe Marketing content-island topic generation queue did not start.",
+            }
+        else:
+            gate_response, gate_balance = _require_roo_points_for_ai_agent(
+                request.user,
+                domain=context.organization.domain,
+                action="topic_discovery",
+            )
+            if gate_response is not None:
+                return gate_response
+            _mark_roo_points_gate_authorized(
+                payload,
+                domain=context.organization.domain,
+                action="topic_discovery",
+                current_balance=gate_balance,
+            )
         run = _queue_content_factory_run(
             endpoint="discovery",
             workflow="auto_discovery",
             context=context,
             config=config,
             payload=payload,
+            billing_refund_context=billing_refund_context,
         )
         response_payload = _run_start_payload(run)
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE if run.status == ContentFactoryRunStatus.BLOCKED else status.HTTP_202_ACCEPTED
@@ -9789,6 +10550,13 @@ class VibeMarketingArticleView(APIView):
             },
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
+            request,
+            context=context,
+            payload=payload,
+        )
+        if billing_error is not None:
+            return billing_error
         logger.info(
             "vibe_marketing_article_selection domain=%s topic_candidate_id=%s title=%s keyword=%s source_run_id=%s",
             context.organization.domain,
@@ -9803,6 +10571,11 @@ class VibeMarketingArticleView(APIView):
             context=context,
             config=config,
             payload=payload,
+            billing_refund_context={
+                "charged_user": charged_user,
+                "article_request": article_request,
+                "reason": "Vibe Marketing article queue did not start.",
+            },
         )
         if run.status not in FAILED_RUN_STATUSES:
             _mark_keyword_in_progress(context.organization, payload["target_keyword"])
@@ -9885,6 +10658,10 @@ class VibeMarketingRunView(APIView):
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
+        if run.workflow == "article_system_setup":
+            refreshed_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
+            if setup_pr_refreshed and refreshed_run is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
         payload = _serialize_run(run, context=context, mode=view)
         if view == "status":
             _log_terminal_repo_scan_status(run, payload)
@@ -9925,6 +10702,13 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             .order_by("created_at", "id")
         )
         draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(
+            request.user,
+            domain=context.organization.domain,
+            action="article_system_revision",
+        )
+        if gate_response is not None:
+            return gate_response
         retry_existing_batch = False
         submitted_local_comments = []
         if draft_comments:
@@ -9987,6 +10771,12 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             "request_source": "founder_tools_article_system_feedback",
             "comments": remote_comments,
         }
+        _mark_roo_points_gate_authorized(
+            remote_payload,
+            domain=context.organization.domain,
+            action="article_system_revision",
+            current_balance=gate_balance,
+        )
         remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
         if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
             result = dict(run.result or {})
@@ -10188,6 +10978,15 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     .order_by("created_at", "id")
                 )
                 draft_comments = [comment for comment in draft_comments if str(comment.body or "").strip()]
+        billing_payload = {}
+        billing_error = _reuse_roo_points_authorization_for_article_job(
+            run=source_run,
+            payload=billing_payload,
+            domain=context.organization.domain,
+            failure_detail="This article cannot be revised because its original Roo points payment could not be verified.",
+        )
+        if billing_error is not None:
+            return billing_error
         retry_existing_batch = False
         if draft_comments:
             batch_id = str(uuid.uuid4())
@@ -10232,6 +11031,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             "comments": [_remote_comment_payload(comment) for comment in draft_comments],
             "request_source": "founder_tools_component_feedback",
         }
+        remote_payload.update(billing_payload)
         remote_data = _call_content_factory_component_revision(run_id=source_run.run_id, payload=remote_payload)
         new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
         if remote_data.get("error") and not new_run_id:
@@ -10644,6 +11444,14 @@ class VibeMarketingRunControlView(APIView):
                 return merge_error
             return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
 
+        if action == "refresh-setup-pr-status":
+            if run.workflow != "article_system_setup":
+                return Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
+            refreshed_run, _refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
+            if refreshed_run is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=refreshed_run.pk)
+            return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
+
         if action == "merge-setup-pr":
             merged_run, merge_error = _merge_setup_pr_for_run(run=run, context=context)
             if merge_error:
@@ -10685,6 +11493,20 @@ class VibeMarketingRunControlView(APIView):
                     _annotate_publish_handoff_staleness(candidate)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
             _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action)
+        if action == "revise":
+            gate_response, gate_balance = _require_roo_points_for_ai_agent(
+                request.user,
+                domain=context.organization.domain,
+                action="article_revision",
+            )
+            if gate_response is not None:
+                return gate_response
+            _mark_roo_points_gate_authorized(
+                payload,
+                domain=context.organization.domain,
+                action="article_revision",
+                current_balance=gate_balance,
+            )
         remote_data = _call_content_factory_run_action(
             run_id=remote_run.run_id,
             action=action,

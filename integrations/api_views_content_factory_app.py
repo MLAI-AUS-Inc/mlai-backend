@@ -34,6 +34,7 @@ from integrations.content_factory_contract import CONTENT_FACTORY_REQUEST_SOURCE
 from integrations.services.article_generation import (
     ArticleGenerationError,
     ContentFactoryBackendUnavailableError,
+    InsufficientRooPointsError,
     confirm_topic,
     publish_article_as_pr,
     set_article_delivery_mode,
@@ -584,6 +585,8 @@ class ContentFactoryAppDiscoveryView(APIView):
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except InsufficientRooPointsError as exc:
+            return Response(exc.payload, status=status.HTTP_402_PAYMENT_REQUIRED)
         except ArticleGenerationError as exc:
             payload = getattr(exc, "payload", None)
             if isinstance(payload, dict):
@@ -645,6 +648,8 @@ class ContentFactoryAppArticleView(APIView):
             return Response(result, status=status.HTTP_202_ACCEPTED)
         except ContentFactoryBackendUnavailableError as exc:
             return Response(exc.payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except InsufficientRooPointsError as exc:
+            return Response(exc.payload, status=status.HTTP_402_PAYMENT_REQUIRED)
         except ArticleGenerationError as exc:
             payload = getattr(exc, "payload", None)
             if isinstance(payload, dict):

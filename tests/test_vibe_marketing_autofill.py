@@ -35,6 +35,7 @@ from founder_tools.serializers import FounderCompanySerializer
 from integrations import http_client
 from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
+from roo.models import PointsAccount
 from startup_updates.models import StartupProfile
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 
@@ -135,6 +136,10 @@ class VibeMarketingAutofillTransactionTests(TransactionTestCase):
         )
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
+        PointsAccount.objects.update_or_create(
+            user=self.user,
+            defaults={"balance": 20, "earned_balance": 20},
+        )
         self.client.force_authenticate(user=self.user)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
@@ -184,6 +189,10 @@ class VibeMarketingAutofillTests(TestCase):
         )
         self.profile.active_company = self.company
         self.profile.save(update_fields=["active_company", "updated_at"])
+        PointsAccount.objects.update_or_create(
+            user=self.user,
+            defaults={"balance": 20, "earned_balance": 20},
+        )
         self.client.force_authenticate(user=self.user)
 
     def test_bootstrap_exposes_company_avatar_url(self):
@@ -1123,7 +1132,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(response.status_code, 200)
         candidates = response.data["topicCandidates"]
         self.assertGreaterEqual(len(candidates), 1)
-        self.assertEqual(candidates[0]["id"], "aus-founders-ai")
+        self.assertEqual(candidates[0]["id"], "topic:run:discovery-selection-1:australian-founders")
+        self.assertEqual(candidates[0]["rawCandidateId"], "aus-founders-ai")
         self.assertEqual(candidates[0]["keyword"], "australian founders")
         self.assertEqual(candidates[0]["title"], "What Australian Founders Need to Know Before Investing in AI Products")
         self.assertEqual(candidates[0]["opportunityScore"], 82)
@@ -1434,6 +1444,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/discovery/",
                 {
+                    "clientRequestId": "vibe-topic-generation-ai-growth-1",
                     "contentIslandSlug": "ai-growth",
                     "contentIslandName": "AI Growth",
                     "contentIslandKeyword": "ai growth strategy",
@@ -1452,6 +1463,14 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["json"]["content_island_icon_key"], "rocket")
         self.assertEqual(captured["json"]["content_island_color_key"], "blue")
         self.assertEqual(captured["json"]["requested_topic_count"], 4)
+        self.assertEqual(captured["json"]["client_request_id"], "vibe-topic-generation-ai-growth-1")
+        self.assertEqual(captured["json"]["roo_points_action"], "content_island_topic_generation")
+        self.assertEqual(captured["json"]["roo_points_cost"], 1)
+        self.assertEqual(captured["json"]["roo_points_required"], 1)
+        self.assertEqual(captured["json"]["roo_points_billing_status"], "charged")
+        self.assertTrue(captured["json"]["roo_points_ledger_id"])
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 19)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_scoped_discovery_returns_service_unavailable_when_dispatch_fails(self):
@@ -1464,6 +1483,7 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/discovery/",
                 {
+                    "clientRequestId": "vibe-topic-generation-ai-growth-fail",
                     "contentIslandSlug": "ai-growth",
                     "contentIslandName": "AI Growth",
                     "contentIslandKeyword": "ai growth strategy",
@@ -1484,6 +1504,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.workflow, "auto_discovery")
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
 
     def test_bootstrap_returns_first_article_mode_without_domain(self):
         self.company.domain = ""
@@ -1971,6 +1993,28 @@ class VibeMarketingAutofillTests(TestCase):
         config.github_repo = "acme/site"
         config.baseline_skipped_at = timezone.now()
         config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="discovery-selection-1",
+            workflow="auto_discovery",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            current_step="finalize",
+            result={
+                "selection": {
+                    "options": [
+                        {
+                            "id": "aus-founders-ai",
+                            "keyword": "australian founders",
+                            "title": "What Australian Founders Need to Know Before Investing in AI Products",
+                            "reason": "Matches founder purchase intent.",
+                            "volume": 120,
+                            "difficulty": "medium",
+                            "opportunityScore": 82,
+                        }
+                    ],
+                }
+            },
+        )
         captured = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -1981,7 +2025,8 @@ class VibeMarketingAutofillTests(TestCase):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
                 {
-                    "topicCandidateId": "aus-founders-ai",
+                    "clientRequestId": "vibe-article-selected-1",
+                    "topicCandidateId": "topic:run:discovery-selection-1:australian-founders",
                     "selectedTitle": "What Australian Founders Need to Know Before Investing in AI Products",
                     "targetKeyword": "australian founders",
                     "sourceRunId": "discovery-selection-1",
@@ -1990,12 +2035,19 @@ class VibeMarketingAutofillTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(captured["topic"], "What Australian Founders Need to Know Before Investing in AI Products")
         self.assertEqual(captured["target_keyword"], "australian founders")
         self.assertEqual(captured["custom_title"], "What Australian Founders Need to Know Before Investing in AI Products")
         self.assertEqual(captured["source_run_id"], "discovery-selection-1")
+        self.assertEqual(captured["client_request_id"], "vibe-article-selected-1")
+        self.assertEqual(captured["roo_points_action"], "article_generation")
+        self.assertEqual(captured["roo_points_cost"], 6)
+        self.assertEqual(captured["roo_points_billing_status"], "charged")
+        self.assertTrue(captured["roo_points_ledger_id"])
         self.assertNotIn("source_discovery_run_id", captured)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 14)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_start_uses_review_draft_when_connected_config_is_legacy_content_only(self):
@@ -2413,6 +2465,12 @@ class VibeMarketingAutofillTests(TestCase):
                 "delivery_mode": "content_only",
                 "delivery_mode_explicit": True,
                 "context": "Keep this context",
+                "roo_points_authorized": True,
+                "roo_points_action": "article_generation",
+                "roo_points_cost": 6,
+                "roo_points_required": 6,
+                "roo_points_billing_status": "charged",
+                "roo_points_ledger_id": "ledger-article-original",
             },
         )
         captured = {}
@@ -2430,9 +2488,14 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(captured["topic"], "Restartable Draft")
         self.assertEqual(captured["target_keyword"], "restartable draft")
         self.assertEqual(captured["restart_source_run_id"], run.run_id)
+        self.assertEqual(captured["roo_points_action"], "article_generation")
+        self.assertEqual(captured["roo_points_billing_status"], "reused")
+        self.assertEqual(captured["roo_points_ledger_id"], "ledger-article-original")
         self.assertNotIn("run_id", captured)
         run.refresh_from_db()
         self.assertEqual(run.result["restart_child_run_id"], "article-restarted-1")
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
 
     def test_nonrestartable_article_draft_returns_clear_error(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
@@ -2452,6 +2515,37 @@ class VibeMarketingAutofillTests(TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("Only article generation drafts", response.data["detail"])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_blocked_article_restart_requires_existing_billing_authorization(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.save(update_fields=["github_repo", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-blocked-legacy-restart",
+            workflow="article_generation",
+            domain="acme.com",
+            github_repo="acme/site",
+            status=ContentFactoryRunStatus.BLOCKED,
+            resume_available=False,
+            run_request={
+                "topic": "Legacy Draft",
+                "target_keyword": "legacy draft",
+                "delivery_mode": "content_only",
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "roo_points_billing_required")
+        post.assert_not_called()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
 
     @override_settings(CONTENT_FACTORY_URL="", CONTENT_FACTORY_API_KEY="", IS_LOCAL_ENV=True)
     def test_article_start_blocks_when_content_factory_is_unconfigured_without_marking_keyword(self):

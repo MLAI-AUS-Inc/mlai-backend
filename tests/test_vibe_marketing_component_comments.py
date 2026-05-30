@@ -9,9 +9,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from integrations import http_client
-from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment
+from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment, WrittenArticle
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
+from roo.models import PointsAccount
 from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
 from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run, _sync_local_run_from_remote
 
@@ -121,6 +122,126 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.run.status = ContentFactoryRunStatus.CANCELLED
         self.run.save(update_fields=["status", "updated_at"])
         return config
+
+    def _prepare_billable_vibe_context(self, *, balance=6):
+        self.organization.name = "Example"
+        self.organization.domain = "example.com"
+        self.organization.seed_keywords = ["startup automation"]
+        self.organization.competitors = ["competitor.example"]
+        self.organization.save(update_fields=["name", "domain", "seed_keywords", "competitors"])
+        self.company.name = "Example"
+        self.company.domain = "example.com"
+        self.company.save(update_fields=["name", "domain", "updated_at"])
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.brand_name = "Example"
+        config.company_context = "Example helps startups automate marketing operations."
+        config.github_repo = "example/site"
+        config.github_token_encrypted = "encrypted-token"
+        config.baseline_skipped_at = timezone.now()
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.last_scanned_at = timezone.now()
+        config.save(
+            update_fields=[
+                "brand_name",
+                "company_context",
+                "github_repo",
+                "github_token_encrypted",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "last_scanned_at",
+                "updated_at",
+            ]
+        )
+        account, _ = PointsAccount.objects.update_or_create(
+            user=self.user,
+            defaults={"balance": balance, "earned_balance": balance},
+        )
+        return config, account
+
+    def test_vibe_zero_cost_ai_routes_require_six_roo_points_without_spending(self):
+        _config, account = self._prepare_billable_vibe_context(balance=5)
+
+        with patch(
+            "content_factory.vibe_marketing_views._queue_content_factory_run",
+            side_effect=AssertionError("AI route should not queue without enough Roo points"),
+        ):
+            requests = [
+                (
+                    "/api/v1/vibe-marketing/autofill/",
+                    {"companyName": "Example", "domain": "example.com"},
+                ),
+                ("/api/v1/vibe-marketing/baseline/", {}),
+                (
+                    "/api/v1/vibe-marketing/scan/",
+                    {"githubRepo": "example/site", "scanPurpose": "inventory"},
+                ),
+                (
+                    "/api/v1/vibe-marketing/article-system-setup/",
+                    {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
+                ),
+                ("/api/v1/vibe-marketing/discovery/", {}),
+            ]
+            for path, payload in requests:
+                response = self.client.post(path, payload, format="json")
+                self.assertEqual(response.status_code, 402, path)
+                self.assertEqual(response.data["error_code"], "INSUFFICIENT_ROO_POINTS")
+                self.assertEqual(response.data["required_points"], 6)
+                self.assertEqual(response.data["current_balance"], 5)
+                self.assertEqual(response.data["cost_points"], 0)
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 5)
+        self.assertEqual(account.lifetime_spent, 0)
+
+    def test_vibe_zero_cost_ai_routes_authorize_without_spending(self):
+        _config, account = self._prepare_billable_vibe_context(balance=6)
+        queued_payloads = {}
+
+        def fake_queue(endpoint, workflow, context, config, payload, **kwargs):
+            queued_payloads[endpoint] = dict(payload)
+            return ContentFactoryRun.objects.create(
+                run_id=f"{endpoint}-roo-gate-run",
+                workflow=workflow,
+                domain=context.organization.domain,
+                github_repo=config.github_repo,
+                status=ContentFactoryRunStatus.QUEUED,
+                result={},
+            )
+
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", side_effect=fake_queue):
+            requests = [
+                (
+                    "autofill",
+                    "/api/v1/vibe-marketing/autofill/",
+                    {"companyName": "Example", "domain": "example.com"},
+                ),
+                ("baseline", "/api/v1/vibe-marketing/baseline/", {}),
+                (
+                    "scan",
+                    "/api/v1/vibe-marketing/scan/",
+                    {"githubRepo": "example/site", "scanPurpose": "inventory"},
+                ),
+                ("discovery", "/api/v1/vibe-marketing/discovery/", {}),
+                (
+                    "article-system-setup",
+                    "/api/v1/vibe-marketing/article-system-setup/",
+                    {"githubRepo": "example/site", "articleSurfaceUrl": "/articles"},
+                ),
+            ]
+            for endpoint, path, payload in requests:
+                response = self.client.post(path, payload, format="json")
+                self.assertEqual(response.status_code, 202, path)
+                self.assertIn(endpoint, queued_payloads)
+                self.assertTrue(queued_payloads[endpoint]["roo_points_authorized"])
+                self.assertEqual(queued_payloads[endpoint]["roo_points_cost"], 0)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_required"], 6)
+                self.assertEqual(queued_payloads[endpoint]["roo_points_balance"], 6)
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 6)
+        self.assertEqual(account.lifetime_spent, 0)
 
     def test_completed_article_run_auto_prepares_live_preview(self):
         self.run.result = {
@@ -1260,6 +1381,29 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(list_response.data["comments"][0]["anchor"]["createdFrom"], "live_preview_click")
         self.assertEqual(list_response.data["comments"][0]["context"]["previewMode"], "exact")
 
+    def test_comment_crud_accepts_fixed_review_target_missing_from_manifest(self):
+        self.run.result = {
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+        }
+        self.run.save(update_fields=["result", "updated_at"])
+
+        response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments",
+            {
+                "componentId": "authoritative-references",
+                "componentType": "references",
+                "componentLabel": "Authoritative References",
+                "selector": '[data-cf-component-id="authoritative-references"]',
+                "body": "Use the generated article sources here.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["componentId"], "authoritative-references")
+        self.assertEqual(response.data["componentType"], "references")
+        self.assertEqual(response.data["selector"], '[data-cf-component-id="authoritative-references"]')
+
     def test_revision_run_does_not_serialize_source_run_comments(self):
         VibeMarketingComponentComment.objects.create(
             run=self.run,
@@ -1446,6 +1590,85 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         comment.refresh_from_db()
         self.assertEqual(comment.status, "submitted")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_submit_component_revision_reuses_original_article_billing_without_balance_gate(self):
+        _config, account = self._prepare_billable_vibe_context(balance=0)
+        self.run.domain = "example.com"
+        self.run.github_repo = "example/site"
+        self.run.run_request = {
+            "topic": "Reliable Content Harnesses",
+            "target_keyword": "content harness",
+            "delivery_mode": "content_only",
+            "roo_points_authorized": True,
+            "roo_points_action": "article_generation",
+            "roo_points_cost": 6,
+            "roo_points_required": 6,
+            "roo_points_billing_status": "charged",
+            "roo_points_ledger_id": "ledger-article-original",
+        }
+        self.run.save(update_fields=["domain", "github_repo", "run_request", "updated_at"])
+        comment = VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Make the title sharper.",
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(status_code=202, payload={"run_id": "article-run-comments-revision-paid", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments/component-revisions")
+        self.assertEqual(captured["payload"]["roo_points_action"], "article_generation")
+        self.assertEqual(captured["payload"]["roo_points_billing_status"], "reused")
+        self.assertEqual(captured["payload"]["roo_points_ledger_id"], "ledger-article-original")
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "submitted")
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 0)
+        self.assertEqual(account.lifetime_spent, 0)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_submit_component_revision_requires_original_article_billing(self):
+        _config, account = self._prepare_billable_vibe_context(balance=0)
+        self.run.domain = "example.com"
+        self.run.github_repo = "example/site"
+        self.run.run_request = {
+            "topic": "Legacy Content Harnesses",
+            "target_keyword": "legacy content harness",
+            "delivery_mode": "content_only",
+        }
+        self.run.save(update_fields=["domain", "github_repo", "run_request", "updated_at"])
+        comment = VibeMarketingComponentComment.objects.create(
+            run=self.run,
+            actor=self.user,
+            component_id="title",
+            component_type="title",
+            component_label="Title",
+            selector='[data-cf-component-id="title"]',
+            body="Make the title sharper.",
+        )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/comments/submit", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "roo_points_billing_required")
+        post.assert_not_called()
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "draft")
+        account.refresh_from_db()
+        self.assertEqual(account.balance, 0)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_submits_setup_pinned_comments(self):
@@ -2081,6 +2304,11 @@ class VibeMarketingComponentCommentTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["previewUrl"], "https://preview.example/articles/generated")
+        component_ids = {
+            component["id"]
+            for component in response.data["componentManifest"]["components"]
+        }
+        self.assertTrue({"title", "disclaimer", "references", "authoritative-references", "events-cta"}.issubset(component_ids))
         progress = response.data["workflowProgress"]
         steps = {step["id"]: step for step in progress["steps"]}
         self.assertEqual(progress["currentStepId"], "review")
@@ -2088,6 +2316,55 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["status"], "ready")
         self.assertNotEqual(steps["publish"]["status"], "complete")
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
+
+    def test_preview_ready_article_augments_missing_fixed_review_manifest(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "publish_code"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.run.run_request = {"delivery_mode": "publish_code"}
+        self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
+        self.run.current_step = "await_review"
+        self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        self.run.result = {
+            "status": "preview_ready",
+            "delivery_mode": "publish_code",
+            "review_surface_kind": "component_live_preview",
+            "preview_url": "https://preview.example/articles/generated",
+            "livePreview": {
+                "available": True,
+                "status": "ready",
+                "previewUrl": "https://preview.example/articles/generated",
+                "exactRender": True,
+            },
+        }
+        self.run.save(update_fields=["run_request", "status", "current_step", "approval_state", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        component_ids = {
+            component["id"]
+            for component in response.data["componentManifest"]["components"]
+        }
+        self.assertTrue({"disclaimer", "references", "authoritative-references", "events-cta"}.issubset(component_ids))
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_approve_preview_ready_article_creates_local_publish_child_run(self):
@@ -3054,6 +3331,136 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(setup_run.result["merge_status"], "pending")
         self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "pending")
 
+    def test_merge_setup_pr_records_manual_merge_required_when_github_blocks_api_merge(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-merge-protected",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/47",
+                "pr_number": 47,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-merge-protected",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/47",
+                    "pr_number": 47,
+                    "merge_status": "not_merged",
+                },
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": True, "state": "success", "message": "Checks are passing."},
+                ),
+            ),
+            patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("Merge blocked by branch protection.")),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Merge blocked by branch protection", response.data["detail"])
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.result["merge_status"], "manual_merge_required")
+        self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "manual_merge_required")
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["merge_status"], "manual_merge_required")
+        self.assertFalse(config.articles_scaffolded)
+
+    def test_refresh_setup_pr_status_detects_manual_github_merge_without_rescan(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-manual-refresh",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+                "pr_number": 48,
+                "merge_status": "not_merged",
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-manual-refresh",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/48",
+                    "pr_number": 48,
+                    "merge_status": "not_merged",
+                },
+            },
+        )
+        article_calls = []
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"number": 48, "merged": True}),
+            patch("content_factory.vibe_marketing_views._queue_content_factory_run", side_effect=lambda **kwargs: article_calls.append(kwargs)),
+            patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/refresh-setup-pr-status", {}, format="json")
+            bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result"]["merge_status"], "merged")
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.result["merge_status"], "merged")
+        config.refresh_from_db()
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.article_system["state"], "roo_scaffolded")
+        self.assertEqual(bootstrap_response.status_code, 200)
+        scaffold = bootstrap_response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["setupBlocked"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertFalse(bootstrap_response.data["articleSetupState"]["setupBlocked"])
+        self.assertTrue(bootstrap_response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
+        self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
+        self.assertEqual(article_calls, [])
+
+    def test_written_article_history_overrides_stale_setup_blocker(self):
+        config = self._prepare_articles_setup_gate(status="pr_created")
+        WrittenArticle.objects.create(
+            organization=self.organization,
+            title="How AI Founders Choose Startup Tools",
+            slug="how-ai-founders-choose-startup-tools",
+            category="startups",
+            primary_keyword="ai founder tools",
+            article_url="https://mlai.au/articles/how-ai-founders-choose-startup-tools",
+            published_at=timezone.now(),
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"number": 12, "merged": False}),
+            patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}),
+        ):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["setupBlocked"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertFalse(response.data["articleSetupState"]["setupBlocked"])
+        self.assertTrue(response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(response.data["hasCompletedArticleFlow"])
+        self.assertEqual(response.data["startPageMode"], "topic_picker")
+        config.refresh_from_db()
+        self.assertFalse(config.articles_scaffolded)
+
     def test_merge_setup_pr_marks_setup_merged_and_daily_ready(self):
         config = self._prepare_articles_setup_gate(status="pr_created")
         config.connected_slack_user_id = "U123"
@@ -3105,16 +3512,21 @@ class VibeMarketingComponentCommentTests(TestCase):
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["status"], "merged")
         self.assertEqual(pending["merge_status"], "merged")
+        self.assertTrue(config.articles_scaffolded)
+        self.assertEqual(config.articles_scaffold_pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/46")
+        self.assertEqual(config.article_system["state"], "roo_scaffolded")
 
         with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
             bootstrap_response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
 
         self.assertEqual(bootstrap_response.status_code, 200)
         scaffold = bootstrap_response.data["checks"]["scaffold"]
-        self.assertFalse(scaffold["passed"])
+        self.assertTrue(scaffold["passed"])
         self.assertFalse(scaffold["setupBlocked"])
         self.assertTrue(scaffold["setupMerged"])
-        self.assertFalse(bootstrap_response.data["hasCompletedArticleFlow"])
+        self.assertTrue(scaffold["generationReady"])
+        self.assertTrue(bootstrap_response.data["articleSetupState"]["generationReady"])
+        self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
         self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
         self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
