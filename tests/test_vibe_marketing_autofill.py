@@ -2050,6 +2050,88 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(self.user.points_account.balance, 14)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_accepts_legacy_frontend_stored_keyword_topic_id(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        keyword = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="doctor jobs sydney",
+            volume=120,
+            difficulty=0,
+            opportunity_index=900,
+            status=KeywordStatus.PENDING,
+        )
+        legacy_frontend_id = f"topic:keyword-{keyword.id}:doctor-jobs-sydney"
+        canonical_backend_id = f"topic:keyword{keyword.id}:doctor-jobs-sydney"
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-stored-keyword-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {
+                    "clientRequestId": "vibe-article-stored-keyword-1",
+                    "topicCandidateId": legacy_frontend_id,
+                    "selectedTitle": "doctor jobs sydney",
+                    "targetKeyword": "doctor jobs sydney",
+                    "deliveryMode": "content_only",
+                    "deliveryModeExplicit": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(captured["topic"], "doctor jobs sydney")
+        self.assertEqual(captured["target_keyword"], "doctor jobs sydney")
+        self.assertEqual(captured["topic_candidate_id"], legacy_frontend_id)
+        self.assertEqual(captured["topic_selection"]["resolved"]["id"], canonical_backend_id)
+        self.assertEqual(captured["topic_selection"]["resolved"]["rawCandidateId"], f"keyword:{keyword.id}")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_start_rejects_legacy_frontend_topic_id_with_stale_keyword(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.baseline_skipped_at = timezone.now()
+        config.save(update_fields=["github_repo", "baseline_skipped_at", "updated_at"])
+        keyword = ResearchedKeyword.objects.create(
+            organization=organization,
+            keyword="doctor jobs sydney",
+            volume=120,
+            difficulty=0,
+            opportunity_index=900,
+            status=KeywordStatus.PENDING,
+        )
+        legacy_frontend_id = f"topic:keyword-{keyword.id}:doctor-jobs-sydney"
+
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article/",
+                {
+                    "topicCandidateId": legacy_frontend_id,
+                    "selectedTitle": "doctor jobs sydney",
+                    "targetKeyword": "doctor australia jobs",
+                    "deliveryMode": "content_only",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["field"], "topicCandidateId")
+        self.assertIn("target_keyword", response.data["conflicts"])
+        post.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_start_uses_review_draft_when_connected_config_is_legacy_content_only(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
