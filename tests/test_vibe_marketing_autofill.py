@@ -2090,7 +2090,8 @@ class VibeMarketingAutofillTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(captured["delivery_mode"], "review_draft")
+        self.assertNotIn("delivery_mode", captured)
+        self.assertFalse(captured["delivery_mode_confirmed"])
         self.assertFalse(captured["delivery_mode_explicit"])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
@@ -2496,6 +2497,65 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.result["restart_child_run_id"], "article-restarted-1")
         self.user.points_account.refresh_from_db()
         self.assertEqual(self.user.points_account.balance, 20)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_content_only_preview_unavailable_restart_omits_implicit_delivery_mode(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        config.github_repo = "acme/site"
+        config.github_token_encrypted = "token"
+        config.github_token_expires_at = timezone.now() + timezone.timedelta(hours=1)
+        config.article_delivery_mode = "content_only"
+        config.publish_targets = [{"id": "react_article_system", "state": "ready"}]
+        config.save(update_fields=["github_repo", "github_token_encrypted", "github_token_expires_at", "article_delivery_mode", "publish_targets", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="article-content-only-preview-missing-1",
+            workflow="article_generation",
+            domain="acme.com",
+            github_repo="acme/site",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            resume_available=False,
+            run_request={
+                "run_id": "article-content-only-preview-missing-1",
+                "topic": "Content Only Draft",
+                "target_keyword": "content only draft",
+                "delivery_mode": "content_only",
+                "delivery_mode_explicit": False,
+                "delivery_mode_confirmed": False,
+                "roo_points_authorized": True,
+                "roo_points_action": "article_generation",
+                "roo_points_cost": 6,
+                "roo_points_required": 6,
+                "roo_points_billing_status": "charged",
+                "roo_points_ledger_id": "ledger-content-only-original",
+            },
+            result={
+                "livePreview": {
+                    "status": "not_available",
+                    "retryable": False,
+                    "proof": {"previewUnavailableReason": "content_only_no_render_artifact"},
+                }
+            },
+        )
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.update(json or {})
+            return _Response(status_code=202, payload={"run_id": "article-exact-preview-restart-1", "status": "queued"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-exact-preview-restart-1")
+        self.assertNotIn("delivery_mode", captured)
+        self.assertFalse(captured["delivery_mode_confirmed"])
+        self.assertFalse(captured["delivery_mode_explicit"])
+        run.refresh_from_db()
+        self.assertEqual(run.result["restart_child_run_id"], "article-exact-preview-restart-1")
 
     def test_nonrestartable_article_draft_returns_clear_error(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

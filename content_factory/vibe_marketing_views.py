@@ -2131,6 +2131,8 @@ def _article_draft_stage_label(run):
 
 def _article_draft_action(run):
     status_value = str(run.status or "").strip()
+    if _article_content_only_preview_not_available(run) and _article_restart_available(run):
+        return "restart", "Restart"
     if status_value in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}:
         if run.resume_available:
             return "resume", "Resume"
@@ -2140,10 +2142,39 @@ def _article_draft_action(run):
     return "continue", "Continue"
 
 
+def _article_preview_unavailable_reason(run) -> str:
+    result = _run_mapping(run.result)
+    live_preview = _run_mapping(result.get("livePreview") or result.get("live_preview"))
+    proof = _run_mapping(live_preview.get("proof"))
+    native_failure = _run_mapping(live_preview.get("nativePreviewFailure") or live_preview.get("native_preview_failure"))
+    return str(
+        live_preview.get("previewUnavailableReason")
+        or live_preview.get("preview_unavailable_reason")
+        or proof.get("previewUnavailableReason")
+        or proof.get("preview_unavailable_reason")
+        or native_failure.get("previewUnavailableReason")
+        or native_failure.get("preview_unavailable_reason")
+        or ""
+    ).strip()
+
+
+def _article_content_only_preview_not_available(run) -> bool:
+    if run.workflow not in ARTICLE_WORKFLOWS:
+        return False
+    result = _run_mapping(run.result)
+    live_preview = _run_mapping(result.get("livePreview") or result.get("live_preview"))
+    status_value = str(result.get("status") or run.status or "").strip().lower()
+    live_status = str(live_preview.get("status") or "").strip().lower()
+    return bool(
+        _article_preview_unavailable_reason(run) == "content_only_no_render_artifact"
+        and (status_value in {"preview_not_available", "completed"} or live_status == "not_available")
+    )
+
+
 def _article_restart_available(run):
     if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
         return False
-    if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}:
+    if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
         return False
     title, keyword = _article_draft_title_keyword(run)
     return bool(title or keyword)
@@ -2635,6 +2666,14 @@ def _live_preview_from_run(run):
     payload = _normalize_live_preview_payload(payload)
     if run and payload:
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
+    proof = payload.get("proof") if isinstance(payload.get("proof"), dict) else {}
+    preview_unavailable_reason = str(
+        payload.get("previewUnavailableReason")
+        or payload.get("preview_unavailable_reason")
+        or proof.get("previewUnavailableReason")
+        or proof.get("preview_unavailable_reason")
+        or ""
+    ).strip()
     return {
         "available": bool(payload.get("available")),
         "status": payload.get("status") or "not_started",
@@ -2674,6 +2713,8 @@ def _live_preview_from_run(run):
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
         "fallbackReason": payload.get("fallbackReason") or payload.get("fallback_reason") or "",
+        "previewUnavailableReason": preview_unavailable_reason,
+        "proof": proof,
         "fallbackPreviewUrl": payload.get("fallbackPreviewUrl") or payload.get("fallback_preview_url") or "",
         "previewBuildMode": payload.get("previewBuildMode") or payload.get("preview_build_mode") or "",
         "fullSiteBuildSkipped": bool(payload.get("fullSiteBuildSkipped") or payload.get("full_site_build_skipped")),
@@ -4958,6 +4999,11 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
     if not topic and not target_keyword:
         return None
 
+    delivery_mode_explicit = _bool_from_request(
+        run_request.get("delivery_mode_explicit")
+        if "delivery_mode_explicit" in run_request
+        else run_request.get("deliveryModeExplicit")
+    )
     requested_delivery_mode = str(
         run_request.get("delivery_mode")
         or run_request.get("deliveryMode")
@@ -4965,33 +5011,32 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
         or result.get("deliveryMode")
         or ""
     ).strip()
-    delivery_mode_explicit = _bool_from_request(
-        run_request.get("delivery_mode_explicit")
-        if "delivery_mode_explicit" in run_request
-        else run_request.get("deliveryModeExplicit")
+    delivery_mode = (
+        _effective_article_delivery_mode(
+            config,
+            requested_mode=requested_delivery_mode or None,
+            explicit=True,
+        )
+        if delivery_mode_explicit
+        else ""
     )
-    delivery_mode = _effective_article_delivery_mode(
-        config,
-        requested_mode=requested_delivery_mode or None,
-        explicit=delivery_mode_explicit,
-    )
-    return {
+    payload = {
         "domain": context.organization.domain,
         "slack_user_id": actor_id,
         "topic": topic,
         "target_keyword": target_keyword or topic,
         "context": str(run_request.get("context") or result.get("context") or ""),
         "github_repo": config.github_repo or run.github_repo or run_request.get("github_repo") or run_request.get("githubRepo") or "",
-        "delivery_mode": delivery_mode,
-        "delivery_mode_confirmed": _bool_from_request(
-            run_request.get("delivery_mode_confirmed", run_request.get("deliveryModeConfirmed", True))
-        ),
         "delivery_mode_explicit": delivery_mode_explicit,
+        "delivery_mode_confirmed": bool(delivery_mode_explicit),
         "source_run_id": run_request.get("source_run_id") or run_request.get("sourceRunId") or "",
         "custom_title": run_request.get("custom_title") or run_request.get("customTitle") or title or None,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         "restart_source_run_id": run.run_id,
     }
+    if delivery_mode_explicit and delivery_mode:
+        payload["delivery_mode"] = delivery_mode
+    return payload
 
 
 def _restart_article_run(*, run, context):
@@ -5000,9 +5045,9 @@ def _restart_article_run(*, run, context):
             {"detail": "Only article generation drafts can be restarted from the marketing dashboard."},
             status=status.HTTP_409_CONFLICT,
         )
-    if run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}:
+    if run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
         return None, Response(
-            {"detail": "Only failed or blocked article drafts can be restarted."},
+            {"detail": "Only failed, blocked, or exact-preview-unavailable article drafts can be restarted."},
             status=status.HTTP_409_CONFLICT,
         )
     if run.resume_available:
@@ -7147,6 +7192,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "approvalState": run.approval_state,
             "sourceRunId": _run_source_run_id(run) or None,
             "resumeAvailable": run.resume_available,
+            "restartAvailable": _article_restart_available(run),
             "createdAt": run.created_at.isoformat(),
             "updatedAt": run.updated_at.isoformat(),
             "stepOrder": run.step_order or [],
@@ -7191,6 +7237,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "approvalState": run.approval_state,
         "sourceRunId": _run_source_run_id(run) or None,
         "resumeAvailable": run.resume_available,
+        "restartAvailable": _article_restart_available(run),
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
         "stepOrder": run.step_order or [],
@@ -10515,10 +10562,35 @@ class VibeMarketingArticleView(APIView):
                 default=False,
             )
         )
-        delivery_mode = _effective_article_delivery_mode(
-            config,
-            requested_mode=requested_delivery_mode,
-            explicit=delivery_mode_explicit,
+        github_ready = bool(
+            config.github_repo
+            and (
+                config.github_connection_state == "connected"
+                or config.github_token_encrypted
+            )
+        )
+        has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
+        repo_review_capable = _article_repo_is_review_capable(config, github_ready=github_ready)
+        if not delivery_mode_explicit and has_repo_setup_intent and not repo_review_capable:
+            return Response(
+                {
+                    "status": "setup_required",
+                    "nextRequiredStep": "connect_repo_articles_location",
+                    "next_required_step": "connect_repo_articles_location",
+                    "detail": "Connect and verify the article repository location before generating an exact preview article.",
+                    "fallbackReason": "repo_articles_setup_not_trusted",
+                    "fallback_reason": "repo_articles_setup_not_trusted",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        delivery_mode = (
+            _effective_article_delivery_mode(
+                config,
+                requested_mode=requested_delivery_mode,
+                explicit=True,
+            )
+            if delivery_mode_explicit
+            else ""
         )
         payload = {
             "domain": context.organization.domain,
@@ -10527,11 +10599,8 @@ class VibeMarketingArticleView(APIView):
             "target_keyword": target_keyword or topic,
             "context": str(request.data.get("context") or ""),
             "github_repo": config.github_repo,
-            "delivery_mode": delivery_mode,
-            "delivery_mode_confirmed": _bool_from_request(
-                request.data.get("delivery_mode_confirmed", request.data.get("deliveryModeConfirmed", True))
-            ),
             "delivery_mode_explicit": delivery_mode_explicit,
+            "delivery_mode_confirmed": bool(delivery_mode_explicit),
             "source_run_id": source_run_id,
             "custom_title": selected_title or custom_title or None,
             "topic_candidate_id": None if is_custom_topic else topic_candidate_id,
@@ -10550,6 +10619,8 @@ class VibeMarketingArticleView(APIView):
             },
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        if delivery_mode_explicit and delivery_mode:
+            payload["delivery_mode"] = delivery_mode
         charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
             request,
             context=context,
