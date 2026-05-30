@@ -1211,6 +1211,59 @@ def _topic_candidate_from_strategy_topic(raw_topic, *, pillar_slug, pillar_name,
     }
 
 
+def _topic_candidate_id_part(value, *, fallback="topic") -> str:
+    normalized = slugify(str(value or "").strip()).strip("-")
+    return normalized or fallback
+
+
+def _stable_topic_candidate_id(candidate, *, namespace="topic") -> str:
+    namespace_part = _topic_candidate_id_part(namespace)
+    keyword_part = _topic_candidate_id_part(candidate.get("keyword") or candidate.get("title"))
+    source_run_id = str(candidate.get("sourceRunId") or candidate.get("source_run_id") or "").strip()
+    raw_id = str(candidate.get("rawCandidateId") or candidate.get("raw_candidate_id") or candidate.get("id") or "").strip()
+    if raw_id.startswith(f"{namespace_part}:"):
+        return raw_id
+    if source_run_id:
+        return f"{namespace_part}:run:{_topic_candidate_id_part(source_run_id, fallback='source')}:{keyword_part}"
+    if raw_id:
+        return f"{namespace_part}:{_topic_candidate_id_part(raw_id, fallback='candidate')}:{keyword_part}"
+    return f"{namespace_part}:{_topic_candidate_id_part(candidate.get('source'), fallback='candidate')}:{keyword_part}"
+
+
+def _canonicalize_topic_candidate_ids(candidates, *, namespace="topic"):
+    seen = {}
+    canonical = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        raw_id = str(candidate.get("rawCandidateId") or candidate.get("raw_candidate_id") or candidate.get("id") or "").strip()
+        next_candidate = {**candidate, "rawCandidateId": raw_id}
+        stable_id = _stable_topic_candidate_id(next_candidate, namespace=namespace)
+        seen_count = seen.get(stable_id, 0) + 1
+        seen[stable_id] = seen_count
+        next_candidate["id"] = stable_id if seen_count == 1 else f"{stable_id}:{seen_count}"
+        canonical.append(next_candidate)
+    return canonical
+
+
+def _canonicalize_topic_pillars(pillars):
+    canonical_pillars = []
+    for pillar in pillars or []:
+        if not isinstance(pillar, dict):
+            continue
+        slug = str(pillar.get("slug") or pillar.get("id") or "pillar").strip()
+        canonical_pillars.append(
+            {
+                **pillar,
+                "topicCandidates": _canonicalize_topic_candidate_ids(
+                    pillar.get("topicCandidates") or [],
+                    namespace=f"pillar:{slug}",
+                ),
+            }
+        )
+    return canonical_pillars
+
+
 def _topic_pillars_from_strategy(config, *, compact=False):
     pillars = []
     candidate_limit = 8 if compact else 30
@@ -6393,14 +6446,69 @@ def _serialize_run_steps(run, *, compact=False):
     return step_states
 
 
+def _scan_progress_number(value, *, default=0, clamp_percent=False):
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    if clamp_percent:
+        return max(0, min(100, number))
+    return max(0, number)
+
+
+def _scan_progress_payloads(run):
+    if run.workflow not in SCAN_WORKFLOWS:
+        return None, None
+    result = _run_mapping(run.result)
+    raw_progress = result.get("scanProgress") or result.get("scan_progress")
+    if not isinstance(raw_progress, dict):
+        return None, None
+
+    phase_key = str(raw_progress.get("phaseKey") or raw_progress.get("phase_key") or "").strip()
+    phase_label = str(raw_progress.get("phaseLabel") or raw_progress.get("phase_label") or "").strip()
+    message = str(raw_progress.get("message") or "").strip()
+    current_step = str(raw_progress.get("currentStep") or raw_progress.get("current_step") or run.current_step or "").strip()
+    updated_at = raw_progress.get("updatedAt") or raw_progress.get("updated_at") or None
+    detail = raw_progress.get("detail") if isinstance(raw_progress.get("detail"), dict) else {}
+
+    phase_index = _scan_progress_number(raw_progress.get("phaseIndex") or raw_progress.get("phase_index"))
+    phase_count = _scan_progress_number(raw_progress.get("phaseCount") or raw_progress.get("phase_count"))
+    percent = _scan_progress_number(raw_progress.get("percent"), clamp_percent=True)
+
+    camel_payload = {
+        "phaseKey": phase_key,
+        "phaseLabel": phase_label,
+        "phaseIndex": phase_index,
+        "phaseCount": phase_count,
+        "percent": percent,
+        "message": message,
+        "detail": detail,
+        "currentStep": current_step or None,
+        "updatedAt": updated_at,
+    }
+    snake_payload = {
+        "phase_key": phase_key,
+        "phase_label": phase_label,
+        "phase_index": phase_index,
+        "phase_count": phase_count,
+        "percent": percent,
+        "message": message,
+        "detail": detail,
+        "current_step": current_step or None,
+        "updated_at": updated_at,
+    }
+    return camel_payload, snake_payload
+
+
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
-    result = run.result or {}
+    result = _run_mapping(run.result)
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
     article_setup_state = _article_setup_state(context=context, run=run, latest_runs=latest_runs)
+    scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     if compact:
         return {
             "runId": run.run_id,
@@ -6439,6 +6547,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "livePreview": live_preview,
             "articleSetupState": article_setup_state,
             "article_setup_state": article_setup_state,
+            "scanProgress": scan_progress,
+            "scan_progress": scan_progress_snake,
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
             "result": _compact_result_for_run(run),
         }
@@ -6483,6 +6593,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "livePreview": live_preview,
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
+        "scanProgress": scan_progress,
+        "scan_progress": scan_progress_snake,
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": result,
@@ -6673,6 +6785,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         coverage_memory=coverage_memory,
         written_memory=written_memory,
     )
+    topic_candidates = _canonicalize_topic_candidate_ids(topic_candidates, namespace="topic")
     hidden_topic_candidates = _topic_candidates_from_runs(
         discovery_topic_runs,
         organization=context.organization,
@@ -6682,6 +6795,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         coverage_memory=coverage_memory,
         written_memory=written_memory,
     )
+    hidden_topic_candidates = _canonicalize_topic_candidate_ids(hidden_topic_candidates, namespace="hidden")
     topic_pillars = _topic_pillars_for_bootstrap(
         context.organization,
         config,
@@ -6689,6 +6803,7 @@ def _serialize_bootstrap(context, request=None, *, view="full"):
         coverage_memory=coverage_memory,
         compact=compact,
     )
+    topic_pillars = _canonicalize_topic_pillars(topic_pillars)
     baseline_snapshot = _latest_baseline_snapshot(context.organization)
     checks = _profile_checks(context.organization, config, latest_runs, baseline_snapshot)
     article_setup_state = _article_setup_state_for_config(config, latest_runs=latest_runs)
@@ -9409,6 +9524,91 @@ class VibeMarketingDiscoveryView(APIView):
         return Response(response_payload, status=response_status)
 
 
+def _topic_selection_candidate_pool(organization, config):
+    discovery_topic_runs = _recent_discovery_topic_runs_for_org(organization)
+    declined_topic_feedback = list_topic_feedback(organization, feedback_type="declined", limit=100)
+    declined_keyword_keys = {
+        normalize_topic_feedback_keyword(item.keyword)
+        for item in declined_topic_feedback
+        if normalize_topic_feedback_keyword(item.keyword)
+    }
+    coverage_memory = build_topic_coverage_memory(organization)
+    written_memory = _written_topic_memory(organization)
+    topic_candidates = _canonicalize_topic_candidate_ids(
+        _topic_candidates_from_runs(
+            discovery_topic_runs,
+            organization=organization,
+            declined_keyword_keys=declined_keyword_keys,
+            coverage_memory=coverage_memory,
+            written_memory=written_memory,
+        ),
+        namespace="topic",
+    )
+    hidden_candidates = _canonicalize_topic_candidate_ids(
+        _topic_candidates_from_runs(
+            discovery_topic_runs,
+            organization=organization,
+            include_written=True,
+            declined_keyword_keys=declined_keyword_keys,
+            coverage_memory=coverage_memory,
+            written_memory=written_memory,
+        ),
+        namespace="hidden",
+    )
+    topic_pillars = _canonicalize_topic_pillars(
+        _topic_pillars_for_bootstrap(
+            organization,
+            config,
+            declined_keyword_keys=declined_keyword_keys,
+            coverage_memory=coverage_memory,
+        )
+    )
+    pillar_candidates = [
+        candidate
+        for pillar in topic_pillars
+        for candidate in pillar.get("topicCandidates") or []
+        if isinstance(candidate, dict)
+    ]
+    return [*topic_candidates, *pillar_candidates, *hidden_candidates]
+
+
+def _resolve_topic_selection_candidate(organization, config, topic_candidate_id):
+    requested_id = str(topic_candidate_id or "").strip()
+    if not requested_id:
+        return None
+    candidates = _topic_selection_candidate_pool(organization, config)
+    exact_matches = [candidate for candidate in candidates if str(candidate.get("id") or "").strip() == requested_id]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+    raw_matches = [
+        candidate
+        for candidate in candidates
+        if requested_id
+        in {
+            str(candidate.get("rawCandidateId") or "").strip(),
+            str(candidate.get("raw_candidate_id") or "").strip(),
+        }
+    ]
+    return raw_matches[0] if len(raw_matches) == 1 else None
+
+
+def _selection_text_key(value):
+    return normalize_topic_feedback_keyword(value)
+
+
+def _article_selection_conflicts(*, submitted, resolved):
+    conflicts = {}
+    for field_name, expected in resolved.items():
+        actual = str(submitted.get(field_name) or "").strip()
+        if not actual:
+            continue
+        if _selection_text_key(actual) != _selection_text_key(expected):
+            conflicts[field_name] = {"submitted": actual, "resolved": expected}
+    return conflicts
+
+
 class VibeMarketingArticleView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -9440,6 +9640,72 @@ class VibeMarketingArticleView(APIView):
             )
             or ""
         ).strip()
+        topic_candidate_id = str(_request_value(request.data, "topic_candidate_id", "topicCandidateId", default="") or "").strip()
+        is_custom_topic = not topic_candidate_id or topic_candidate_id == "__custom__"
+        client_source_run_id = str(
+            _request_value(
+                request.data,
+                "source_run_id",
+                "sourceRunId",
+                "source_discovery_run_id",
+                "sourceDiscoveryRunId",
+                default="",
+            )
+            or ""
+        ).strip()
+        client_selection = {
+            "topic": topic_value,
+            "selected_title": selected_title,
+            "custom_title": custom_title,
+            "target_keyword": target_keyword,
+            "source_run_id": client_source_run_id,
+        }
+        selected_candidate = None
+        selection_conflicts = {}
+        if not is_custom_topic:
+            selected_candidate = _resolve_topic_selection_candidate(context.organization, config, topic_candidate_id)
+            if not selected_candidate:
+                return Response(
+                    {
+                        "detail": "That topic is no longer available. Choose another topic or enter a custom one.",
+                        "field": "topicCandidateId",
+                        "topicCandidateId": topic_candidate_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            resolved_title = str(selected_candidate.get("title") or selected_candidate.get("keyword") or "").strip()
+            resolved_keyword = str(selected_candidate.get("keyword") or resolved_title or "").strip()
+            resolved_source_run_id = str(selected_candidate.get("sourceRunId") or "").strip()
+            selection_conflicts = _article_selection_conflicts(
+                submitted=client_selection,
+                resolved={
+                    "topic": resolved_title,
+                    "selected_title": resolved_title,
+                    "custom_title": resolved_title,
+                    "target_keyword": resolved_keyword,
+                    "source_run_id": resolved_source_run_id,
+                },
+            )
+            if selection_conflicts:
+                logger.warning(
+                    "vibe_marketing_topic_selection_conflict domain=%s topic_candidate_id=%s conflicts=%s",
+                    context.organization.domain,
+                    topic_candidate_id,
+                    selection_conflicts,
+                )
+                return Response(
+                    {
+                        "detail": "The selected topic no longer matches the submitted article fields. Refresh and choose the topic again.",
+                        "field": "topicCandidateId",
+                        "topicCandidateId": topic_candidate_id,
+                        "conflicts": selection_conflicts,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            selected_title = resolved_title
+            custom_title = ""
+            topic_value = resolved_title
+            target_keyword = resolved_keyword
         topic = selected_title or custom_title or topic_value or target_keyword
         if not (selected_title or custom_title or topic_value or target_keyword):
             return Response(
@@ -9478,14 +9744,7 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        source_run_id = _request_value(
-            request.data,
-            "source_run_id",
-            "sourceRunId",
-            "source_discovery_run_id",
-            "sourceDiscoveryRunId",
-            default=None,
-        )
+        source_run_id = str(selected_candidate.get("sourceRunId") or "").strip() if selected_candidate else None
         requested_delivery_mode = _request_value(request.data, "delivery_mode", "deliveryMode", default=None)
         delivery_mode_explicit = _bool_from_request(
             _request_value(
@@ -9514,8 +9773,30 @@ class VibeMarketingArticleView(APIView):
             "delivery_mode_explicit": delivery_mode_explicit,
             "source_run_id": source_run_id,
             "custom_title": selected_title or custom_title or None,
+            "topic_candidate_id": None if is_custom_topic else topic_candidate_id,
+            "topic_selection": {
+                "topicCandidateId": None if is_custom_topic else topic_candidate_id,
+                "resolved": {
+                    "id": selected_candidate.get("id") if selected_candidate else None,
+                    "rawCandidateId": selected_candidate.get("rawCandidateId") if selected_candidate else None,
+                    "title": selected_title or custom_title or topic,
+                    "keyword": target_keyword or topic,
+                    "sourceRunId": source_run_id or "",
+                    "source": selected_candidate.get("source") if selected_candidate else "custom",
+                },
+                "submitted": client_selection,
+                "conflicts": selection_conflicts,
+            },
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         }
+        logger.info(
+            "vibe_marketing_article_selection domain=%s topic_candidate_id=%s title=%s keyword=%s source_run_id=%s",
+            context.organization.domain,
+            payload.get("topic_candidate_id") or "custom",
+            topic,
+            payload["target_keyword"],
+            source_run_id or "",
+        )
         run = _queue_content_factory_run(
             endpoint="article",
             workflow="article_generation",
