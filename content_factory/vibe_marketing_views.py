@@ -10380,7 +10380,71 @@ def _topic_selection_candidate_pool(organization, config):
     return [*topic_candidates, *pillar_candidates, *hidden_candidates]
 
 
-def _resolve_topic_selection_candidate(organization, config, topic_candidate_id):
+def _candidate_namespace_prefix(candidate_id):
+    candidate_id = str(candidate_id or "").strip()
+    for prefix in ("topic:", "hidden:", "pillar:"):
+        if candidate_id.startswith(prefix):
+            return prefix
+    return ""
+
+
+def _selection_candidate_text_keys(candidate):
+    return {
+        key
+        for key in (
+            normalize_topic_feedback_keyword(candidate.get("keyword")),
+            normalize_topic_feedback_keyword(candidate.get("title")),
+        )
+        if key
+    }
+
+
+def _submitted_selection_text_keys(submitted):
+    if not isinstance(submitted, dict):
+        return set()
+    return {
+        key
+        for key in (
+            normalize_topic_feedback_keyword(submitted.get("target_keyword") or submitted.get("targetKeyword")),
+            normalize_topic_feedback_keyword(submitted.get("topic")),
+            normalize_topic_feedback_keyword(submitted.get("selected_title") or submitted.get("selectedTitle")),
+            normalize_topic_feedback_keyword(submitted.get("custom_title") or submitted.get("customTitle")),
+        )
+        if key
+    }
+
+
+def _submitted_selection_source_run_id(submitted):
+    if not isinstance(submitted, dict):
+        return ""
+    return str(
+        submitted.get("source_run_id")
+        or submitted.get("sourceRunId")
+        or submitted.get("source_discovery_run_id")
+        or submitted.get("sourceDiscoveryRunId")
+        or ""
+    ).strip()
+
+
+def _resolve_topic_selection_candidate_by_submission(candidates, *, requested_id, submitted):
+    submitted_keys = _submitted_selection_text_keys(submitted)
+    if not submitted_keys:
+        return None
+    namespace_prefix = _candidate_namespace_prefix(requested_id)
+    source_run_id = _submitted_selection_source_run_id(submitted)
+    matches = []
+    for candidate in candidates:
+        candidate_id = str(candidate.get("id") or "").strip()
+        if namespace_prefix and not candidate_id.startswith(namespace_prefix):
+            continue
+        if source_run_id and str(candidate.get("sourceRunId") or candidate.get("source_run_id") or "").strip() != source_run_id:
+            continue
+        if submitted_keys & _selection_candidate_text_keys(candidate):
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_topic_selection_candidate(organization, config, topic_candidate_id, *, submitted=None):
     requested_id = str(topic_candidate_id or "").strip()
     if not requested_id:
         return None
@@ -10399,7 +10463,13 @@ def _resolve_topic_selection_candidate(organization, config, topic_candidate_id)
             str(candidate.get("raw_candidate_id") or "").strip(),
         }
     ]
-    return raw_matches[0] if len(raw_matches) == 1 else None
+    if len(raw_matches) == 1:
+        return raw_matches[0]
+    return _resolve_topic_selection_candidate_by_submission(
+        candidates,
+        requested_id=requested_id,
+        submitted=submitted,
+    )
 
 
 def _selection_text_key(value):
@@ -10471,7 +10541,12 @@ class VibeMarketingArticleView(APIView):
         selected_candidate = None
         selection_conflicts = {}
         if not is_custom_topic:
-            selected_candidate = _resolve_topic_selection_candidate(context.organization, config, topic_candidate_id)
+            selected_candidate = _resolve_topic_selection_candidate(
+                context.organization,
+                config,
+                topic_candidate_id,
+                submitted=client_selection,
+            )
             if not selected_candidate:
                 return Response(
                     {

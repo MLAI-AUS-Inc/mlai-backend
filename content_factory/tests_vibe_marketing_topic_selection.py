@@ -1,6 +1,6 @@
 from django.test import TestCase
 
-from content_factory.models import OrganizationContentConfig
+from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword
 from content_factory.vibe_marketing_views import (
     _article_selection_conflicts,
     _resolve_topic_selection_candidate,
@@ -56,6 +56,49 @@ class VibeMarketingTopicSelectionTest(TestCase):
         resolved = _resolve_topic_selection_candidate(self.organization, self.config, "2")
 
         self.assertIsNone(resolved)
+
+    def test_stored_keyword_canonical_candidate_id_resolves(self):
+        keyword = ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="doctor jobs sydney",
+            volume=120,
+            difficulty=0,
+            opportunity_index=900,
+            status=KeywordStatus.PENDING,
+        )
+        candidates = _topic_selection_candidate_pool(self.organization, self.config)
+        stored_candidate = next(candidate for candidate in candidates if candidate["keyword"] == "doctor jobs sydney")
+
+        self.assertEqual(stored_candidate["id"], f"topic:keyword{keyword.id}:doctor-jobs-sydney")
+        resolved = _resolve_topic_selection_candidate(self.organization, self.config, stored_candidate["id"])
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["keyword"], "doctor jobs sydney")
+
+    def test_frontend_hyphenated_stored_keyword_candidate_id_resolves_from_submission(self):
+        keyword = ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword="doctor jobs sydney",
+            volume=120,
+            difficulty=0,
+            opportunity_index=900,
+            status=KeywordStatus.PENDING,
+        )
+        legacy_frontend_id = f"topic:keyword-{keyword.id}:doctor-jobs-sydney"
+
+        resolved = _resolve_topic_selection_candidate(
+            self.organization,
+            self.config,
+            legacy_frontend_id,
+            submitted={
+                "selected_title": "doctor jobs sydney",
+                "target_keyword": "doctor jobs sydney",
+            },
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["id"], f"topic:keyword{keyword.id}:doctor-jobs-sydney")
+        self.assertEqual(resolved["keyword"], "doctor jobs sydney")
 
     def test_stale_client_keyword_conflicts_with_resolved_candidate(self):
         candidates = _topic_selection_candidate_pool(self.organization, self.config)
