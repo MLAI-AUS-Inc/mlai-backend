@@ -7068,10 +7068,64 @@ def _serialize_run_steps(run, *, compact=False):
     return step_states
 
 
+def _scan_progress_number(value, *, default=0, clamp_percent=False):
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    if clamp_percent:
+        return max(0, min(100, number))
+    return max(0, number)
+
+
+def _scan_progress_payloads(run):
+    if run.workflow not in SCAN_WORKFLOWS:
+        return None, None
+    result = _run_mapping(run.result)
+    raw_progress = result.get("scanProgress") or result.get("scan_progress")
+    if not isinstance(raw_progress, dict):
+        return None, None
+
+    phase_key = str(raw_progress.get("phaseKey") or raw_progress.get("phase_key") or "").strip()
+    phase_label = str(raw_progress.get("phaseLabel") or raw_progress.get("phase_label") or "").strip()
+    message = str(raw_progress.get("message") or "").strip()
+    current_step = str(raw_progress.get("currentStep") or raw_progress.get("current_step") or run.current_step or "").strip()
+    updated_at = raw_progress.get("updatedAt") or raw_progress.get("updated_at") or None
+    detail = raw_progress.get("detail") if isinstance(raw_progress.get("detail"), dict) else {}
+
+    phase_index = _scan_progress_number(raw_progress.get("phaseIndex") or raw_progress.get("phase_index"))
+    phase_count = _scan_progress_number(raw_progress.get("phaseCount") or raw_progress.get("phase_count"))
+    percent = _scan_progress_number(raw_progress.get("percent"), clamp_percent=True)
+
+    camel_payload = {
+        "phaseKey": phase_key,
+        "phaseLabel": phase_label,
+        "phaseIndex": phase_index,
+        "phaseCount": phase_count,
+        "percent": percent,
+        "message": message,
+        "detail": detail,
+        "currentStep": current_step or None,
+        "updatedAt": updated_at,
+    }
+    snake_payload = {
+        "phase_key": phase_key,
+        "phase_label": phase_label,
+        "phase_index": phase_index,
+        "phase_count": phase_count,
+        "percent": percent,
+        "message": message,
+        "detail": detail,
+        "current_step": current_step or None,
+        "updated_at": updated_at,
+    }
+    return camel_payload, snake_payload
+
+
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
-    result = run.result or {}
+    result = _run_mapping(run.result)
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
@@ -7081,6 +7135,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         latest_runs=latest_runs,
         generation_ready=(checks or {}).get("scaffold", {}).get("generationReady") if checks else None,
     )
+    scan_progress, scan_progress_snake = _scan_progress_payloads(run)
     if compact:
         return {
             "runId": run.run_id,
@@ -7119,6 +7174,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "livePreview": live_preview,
             "articleSetupState": article_setup_state,
             "article_setup_state": article_setup_state,
+            "scanProgress": scan_progress,
+            "scan_progress": scan_progress_snake,
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
             "result": _compact_result_for_run(run),
         }
@@ -7163,6 +7220,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "livePreview": live_preview,
         "articleSetupState": article_setup_state,
         "article_setup_state": article_setup_state,
+        "scanProgress": scan_progress,
+        "scan_progress": scan_progress_snake,
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
         "result": result,

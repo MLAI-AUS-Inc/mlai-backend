@@ -70,6 +70,57 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(run.workflow, "repo_scan")
         self.assertEqual(run.run_request.get("domain"), "mlai.au")
 
+    def test_repo_scan_status_serialization_includes_scan_progress(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        run = ContentFactoryRun.objects.create(
+            run_id="scan-progress-serializer-1",
+            workflow="repo_scan",
+            domain="statdoctor.app",
+            github_repo="DrAnuG1995/website",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="scan_structure",
+            result={
+                "scan_progress": {
+                    "phase_key": "generate_components",
+                    "phase_label": "Generating components",
+                    "phase_index": 8,
+                    "phase_count": 9,
+                    "percent": 78,
+                    "message": "Completed 12 of 30 components",
+                    "detail": {"completed": 12, "total": 30},
+                    "current_step": "scan_structure",
+                    "updated_at": "2026-05-29T22:50:30+00:00",
+                }
+            },
+        )
+
+        payload = _serialize_run(run, mode="status")
+
+        self.assertEqual(payload["scanProgress"]["phaseKey"], "generate_components")
+        self.assertEqual(payload["scanProgress"]["phaseCount"], 9)
+        self.assertEqual(payload["scanProgress"]["percent"], 78)
+        self.assertEqual(payload["scanProgress"]["detail"], {"completed": 12, "total": 30})
+        self.assertEqual(payload["scan_progress"]["phase_key"], "generate_components")
+        self.assertEqual(payload["scan_progress"]["phase_count"], 9)
+
+    def test_article_run_status_serialization_does_not_invent_scan_progress(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        run = ContentFactoryRun.objects.create(
+            run_id="article-status-no-scan-progress-1",
+            workflow="article",
+            domain="statdoctor.app",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="draft_section",
+            result={"status": "running"},
+        )
+
+        payload = _serialize_run(run, mode="status")
+
+        self.assertIsNone(payload["scanProgress"])
+        self.assertIsNone(payload["scan_progress"])
+
     def test_run_sync_sanitizes_nul_payload_before_persisting(self):
         response = self.client.put(
             "/api/content-factory/runs/run-sync-nul-1/",
