@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
 from integrations.models import UserIntegration
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
 
 @override_settings(SCHEDULED_DISCOVERY_MAX_TARGETS=1)
@@ -82,6 +83,71 @@ class ContentFactoryOrgConfigTests(TestCase):
             get_response.data["default_publish_target_id"],
             publish_targets[0]["target_id"],
         )
+
+    def test_article_setup_reset_clears_setup_fields_and_preserves_scan(self):
+        self.config.github_repo = "mlai/site"
+        self.config.article_system = {
+            "state": "existing",
+            "directory_name": "articles",
+            "pending_article_system_setup": {
+                "setupRunId": "setup-old-1",
+                "routePath": "/articles",
+                "status": "published",
+            },
+            "scan": {
+                "scanRunId": "scan-1",
+                "githubRepo": "mlai/site",
+                "status": "completed",
+            },
+        }
+        self.config.publish_targets = [{"target_id": "react_article_system"}]
+        self.config.default_publish_target_id = "react_article_system"
+        self.config.articles_scaffolded = True
+        self.config.articles_scaffold_pr_url = "https://github.com/mlai/site/pull/1"
+        self.config.articles_scaffold_preview_url = "https://setup-preview.example.com"
+        self.config.save()
+        ContentFactoryRun.objects.create(
+            run_id="setup-old-1",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="mlai/site",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={"setup_run_id": "setup-old-1", "route_path": "/articles"},
+        )
+
+        response = self.client.post(
+            "/api/content-factory/org/article-setup/reset/",
+            {"domain": "mlai.au", "github_repo": "mlai/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "reset")
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.article_system["state"], "missing")
+        self.assertNotIn("pending_article_system_setup", self.config.article_system)
+        self.assertEqual(self.config.article_system["scan"]["scanRunId"], "scan-1")
+        self.assertTrue(self.config.article_system["article_setup_reset_at"])
+        self.assertEqual(self.config.publish_targets, [])
+        self.assertIsNone(self.config.default_publish_target_id)
+        self.assertFalse(self.config.articles_scaffolded)
+        self.assertFalse(self.config.articles_scaffold_pr_url)
+        self.assertFalse(self.config.articles_scaffold_preview_url)
+
+    def test_article_setup_reset_is_scoped_to_repo(self):
+        self.config.github_repo = "mlai/site"
+        self.config.article_system = {"state": "existing", "pending_article_system_setup": {"routePath": "/articles"}}
+        self.config.save(update_fields=["github_repo", "article_system", "updated_at"])
+
+        response = self.client.post(
+            "/api/content-factory/org/article-setup/reset/",
+            {"domain": "mlai.au", "github_repo": "other/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.article_system["state"], "existing")
 
     def test_org_config_round_trips_registry_driven_publish_target_metadata(self):
         publish_targets = [

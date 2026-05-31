@@ -2400,6 +2400,138 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertFalse(state["setupBlocked"])
         self.assertFalse(response.data["checks"]["scaffold"]["setupBlocked"])
 
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_setup_reset_proxies_and_clears_local_setup_state(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config.github_repo = "Acme/site"
+        config.publish_targets = [{"id": "registry", "kind": "registry_driven_seo"}]
+        config.default_publish_target_id = "registry"
+        config.articles_scaffolded = True
+        config.articles_scaffold_pr_url = "https://github.com/Acme/site/pull/10"
+        config.articles_scaffold_preview_url = "https://preview.example/articles"
+        config.article_system = {
+            "state": "existing",
+            "directory_path": "app/articles",
+            "routePath": "/articles",
+            "pending_article_system_setup": {
+                "setupRunId": "setup-run-stale",
+                "setup_run_id": "setup-run-stale",
+                "sourceScanRunId": "scan-run-canonical",
+                "source_scan_run_id": "scan-run-canonical",
+                "status": "completed",
+                "routePath": "/articles",
+                "route_path": "/articles",
+            },
+            "scan": {
+                "githubRepo": "Acme/site",
+                "defaultBranch": "main",
+                "defaultBranchSha": "abc123",
+                "scanRunId": "scan-run-canonical",
+                "status": "completed",
+                "completedAt": (timezone.now() - timedelta(hours=2)).isoformat(),
+            },
+        }
+        config.save(
+            update_fields=[
+                "github_repo",
+                "publish_targets",
+                "default_publish_target_id",
+                "articles_scaffolded",
+                "articles_scaffold_pr_url",
+                "articles_scaffold_preview_url",
+                "article_system",
+                "updated_at",
+            ]
+        )
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-run-stale",
+            workflow="article_system_setup",
+            domain="acme.com",
+            github_repo="Acme/site",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="complete",
+            result={
+                "article_system_setup": {
+                    "setup_run_id": "setup-run-stale",
+                    "status": ContentFactoryRunStatus.COMPLETED,
+                    "route_path": "/articles",
+                    "preview_url": "https://preview.example/articles",
+                }
+            },
+        )
+        ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
+        observed = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            observed["url"] = url
+            observed["json"] = json
+            observed["headers"] = headers
+            observed["timeout"] = timeout
+            return _Response(status_code=200, payload={"status": "reset", "remoteReset": True})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/article-setup/reset/",
+                {"githubRepo": "Acme/site"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["url"], "https://content-factory.test/api/org/article-setup/reset")
+        self.assertEqual(observed["headers"]["X-API-KEY"], "secret-key")
+        self.assertEqual(observed["json"], {"domain": "acme.com", "github_repo": "Acme/site"})
+        self.assertEqual(response.data["status"], "reset")
+        self.assertEqual(response.data["remote"]["remoteReset"], True)
+        config.refresh_from_db()
+        self.assertEqual(config.publish_targets, [])
+        self.assertIsNone(config.default_publish_target_id)
+        self.assertFalse(config.articles_scaffolded)
+        self.assertIsNone(config.articles_scaffold_pr_url)
+        self.assertIsNone(config.articles_scaffold_preview_url)
+        self.assertEqual(config.article_system["state"], "missing")
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertEqual(config.article_system["scan"]["scanRunId"], "scan-run-canonical")
+        self.assertTrue(config.article_system["article_setup_reset_at"])
+        state = response.data["articleSetupState"]
+        self.assertEqual(state["scanRunId"], "scan-run-canonical")
+        self.assertEqual(state["scanStatus"], "completed")
+        self.assertIsNone(state["setupRunId"])
+        self.assertIsNone(state["setupStatus"])
+        self.assertIsNone(state["routePath"])
+        self.assertFalse(state["setupBlocked"])
+        self.assertFalse(state["generationReady"])
+
+    def test_scan_status_exposes_blocking_reason_and_code(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        OrganizationContentConfig.objects.get_or_create(organization=organization)
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="scan-blocked-runtime-1",
+            workflow="repo_scan",
+            domain="acme.com",
+            github_repo="Acme/site",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="validate_plan",
+            result={
+                "blocking_reason": "No build script was found for the repository web app.",
+                "blocking_code": "ARTICLE_DIRECTORY_UNSUPPORTED_RUNTIME",
+                "errors": ["No build script was found for the repository web app."],
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/runs/scan-blocked-runtime-1/?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["blockingReason"], "No build script was found for the repository web app.")
+        self.assertEqual(response.data["blockingCode"], "ARTICLE_DIRECTORY_UNSUPPORTED_RUNTIME")
+        self.assertEqual(response.data["result"]["blocking_reason"], "No build script was found for the repository web app.")
+        self.assertEqual(response.data["result"]["blocking_code"], "ARTICLE_DIRECTORY_UNSUPPORTED_RUNTIME")
+
     def test_bootstrap_article_setup_state_keeps_completed_scan_without_scan_run(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         config, _created = OrganizationContentConfig.objects.get_or_create(organization=organization)
