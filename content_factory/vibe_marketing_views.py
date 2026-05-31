@@ -32,6 +32,7 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from content_factory.article_setup_reset import article_setup_reset_ignores_run, reset_article_setup_config
 from content_factory.article_system import resolve_article_system
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
@@ -5896,7 +5897,7 @@ def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_
     run_id = str(run_id or "").strip()
     if run_id:
         run = ContentFactoryRun.objects.filter(run_id=run_id).prefetch_related("steps").first()
-        if run is not None:
+        if run is not None and not article_setup_reset_ignores_run(config, run):
             return run
     queryset = (
         ContentFactoryRun.objects.filter(domain=domain, workflow__in=workflows)
@@ -5907,9 +5908,10 @@ def _latest_persisted_run_for_article_setup(config, workflows: set[str], *, run_
     repo = str(getattr(config, "github_repo", "") or "").strip()
     if repo:
         repo_run = queryset.filter(github_repo__iexact=repo).first()
-        if repo_run is not None:
+        if repo_run is not None and not article_setup_reset_ignores_run(config, repo_run):
             return repo_run
-    return queryset.first()
+    run = queryset.first()
+    return None if article_setup_reset_ignores_run(config, run) else run
 
 
 def _dedupe_runs(*groups):
@@ -5953,6 +5955,7 @@ def _article_system_setup_run_is_dispatch_blocked(run) -> bool:
 def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organization=None, generation_ready=None) -> dict:
     latest_runs = _dedupe_runs([run] if run else [], latest_runs or [])
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
+    latest_runs = [candidate for candidate in latest_runs if not article_setup_reset_ignores_run(config, candidate)]
     article_system = resolve_article_system(config) if config else {}
     pending = _pending_article_system_setup_from_config(config) if config else {}
     pending_setup_run_id = str(
@@ -6890,6 +6893,10 @@ COMPACT_RUN_RESULT_KEYS = {
     "articleSurfaceMode",
     "article_system_readiness",
     "article_system_setup",
+    "blocking_code",
+    "blockingCode",
+    "blocking_reason",
+    "blockingReason",
     "detected_candidates",
     "delivery_mode",
     "deliveryMode",
@@ -7167,10 +7174,51 @@ def _scan_progress_payloads(run):
     return camel_payload, snake_payload
 
 
+def _run_blocking_detail(result):
+    root = _run_mapping(result)
+    sources = [
+        root,
+        _run_mapping(root.get("result")),
+        _run_mapping(root.get("latest_control_response")),
+        _run_mapping(root.get("latestControlResponse")),
+        _run_mapping(root.get("article_system_setup")),
+        _run_mapping(root.get("articleSystemSetup")),
+        _run_mapping(root.get("article_system_readiness")),
+        _run_mapping(root.get("articleSystemReadiness")),
+        _run_mapping(root.get("model_adapter_report")),
+        _run_mapping(root.get("modelAdapterReport")),
+        _run_mapping(root.get("diagnostics")),
+        _run_mapping(root.get("content_factory_response")),
+        _run_mapping(root.get("contentFactoryResponse")),
+        _run_mapping(root.get("livePreview")),
+        _run_mapping(root.get("live_preview")),
+        _run_mapping(root.get("proof")),
+        _run_mapping(root.get("nativePreviewFailure")),
+        _run_mapping(root.get("native_preview_failure")),
+    ]
+
+    def first_value(*keys):
+        for source in sources:
+            for key in keys:
+                value = source.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
+    return {
+        "reason": first_value("blocking_reason", "blockingReason", "model_adapter_blocking_reason", "modelAdapterBlockingReason"),
+        "code": first_value("blocking_code", "blockingCode", "model_adapter_blocking_code", "modelAdapterBlockingCode"),
+    }
+
+
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
     result = _run_mapping(run.result)
+    blocking_detail = _run_blocking_detail(result)
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
@@ -7200,6 +7248,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
             "errors": [run.error] if run.error else result.get("errors") or [],
             "errorCode": result.get("error_code"),
+            "blockingReason": blocking_detail["reason"] or None,
+            "blockingCode": blocking_detail["code"] or None,
             "artifacts": [],
             "previewUrl": preview_url,
             "prUrl": pr_url,
@@ -7245,6 +7295,8 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
         "errors": [run.error] if run.error else result.get("errors") or [],
         "errorCode": result.get("error_code"),
+        "blockingReason": blocking_detail["reason"] or None,
+        "blockingCode": blocking_detail["code"] or None,
         "artifacts": result.get("artifacts") or [],
         "previewUrl": preview_url,
         "prUrl": pr_url,
@@ -8069,6 +8121,14 @@ def _run_result_from_remote(remote_data):
         "errors",
         "error",
         "error_code",
+        "blocking_reason",
+        "blockingReason",
+        "blocking_code",
+        "blockingCode",
+        "model_adapter_blocking_reason",
+        "modelAdapterBlockingReason",
+        "model_adapter_blocking_code",
+        "modelAdapterBlockingCode",
         "message",
         "diagnostics",
         "retryable",
@@ -9095,6 +9155,52 @@ def _call_content_factory_article_system_revision(*, run_id, payload):
             diagnostics=_content_factory_diagnostics(remote_config, run_id=run_id, workflow="article_system_setup"),
             retryable=True,
         )
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
+        "content_factory_status_code": response.status_code,
+        "content_factory_response": response_payload,
+        "retryable": response.status_code >= 500,
+    }
+
+
+def _call_content_factory_article_setup_reset(*, payload):
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        technical_error = _content_factory_unavailable_message(remote_config)
+        logger.warning("content_factory_article_setup_reset_blocked reason=%s", technical_error)
+        return {
+            "error": technical_error,
+            "errors": [technical_error],
+            "content_factory_unavailable": True,
+            "retryable": True,
+            "diagnostics": _content_factory_diagnostics(remote_config, workflow="article_system_setup", action="reset"),
+        }
+
+    try:
+        response = http_client.post(
+            f"{remote_config['base_url']}/api/org/article-setup/reset",
+            json=payload or {},
+            headers=_content_factory_headers(),
+            timeout=(5, 30),
+        )
+    except http_client.RequestException as exc:
+        return {
+            "error": str(exc),
+            "errors": [str(exc)],
+            "content_factory_transport_error": True,
+            "retryable": True,
+            "diagnostics": _content_factory_diagnostics(remote_config, workflow="article_system_setup", action="reset"),
+        }
 
     if response.status_code in (200, 202):
         return response.json() if response.content else {}
@@ -10242,6 +10348,46 @@ class VibeMarketingArticleSystemSetupView(APIView):
                 "status": run.status,
             },
             status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class VibeMarketingArticleSetupResetView(APIView):
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+        requested_repo = str(_request_value(request.data, "githubRepo", "github_repo", default="") or "").strip()
+        github_repo = requested_repo or str(config.github_repo or "").strip()
+        if not github_repo:
+            return Response({"detail": "Choose a GitHub repository before resetting articles setup."}, status=status.HTTP_400_BAD_REQUEST)
+        configured_repo = str(config.github_repo or "").strip()
+        if configured_repo and configured_repo.lower() != github_repo.lower():
+            return Response({"detail": "Repository does not match the connected project."}, status=status.HTTP_409_CONFLICT)
+
+        payload = {
+            "domain": context.organization.domain,
+            "github_repo": github_repo,
+        }
+        remote_data = _call_content_factory_article_setup_reset(payload=payload)
+        if isinstance(remote_data, dict) and remote_data.get("error"):
+            status_code = int(remote_data.get("content_factory_status_code") or status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(remote_data, status=status_code)
+
+        reset_payload = reset_article_setup_config(config, github_repo=github_repo)
+        latest_runs = _latest_runs_for_org(context.organization, limit=12)
+        article_setup_state = _article_setup_state(
+            context=context,
+            latest_runs=latest_runs,
+        )
+        return Response(
+            {
+                **reset_payload,
+                "remote": remote_data if isinstance(remote_data, dict) else {},
+                "articleSetupState": article_setup_state,
+                "article_setup_state": article_setup_state,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

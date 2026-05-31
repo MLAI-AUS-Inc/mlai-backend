@@ -25,6 +25,7 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
+from content_factory.article_setup_reset import reset_article_setup_config
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -619,6 +620,46 @@ class ContentFactoryOrgConfigView(APIView):
             }
         
         return Response(response_data, status=status.HTTP_201_CREATED if org_created else status.HTTP_200_OK)
+
+
+class ContentFactoryArticleSetupResetView(APIView):
+    """
+    Reset the persisted article setup state for one organization/repository.
+    Used by content-factory's public reset endpoint.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def _normalize_domain(self, domain: str) -> str:
+        return ContentFactoryOrgConfigView()._normalize_domain(domain)
+
+    def post(self, request):
+        data = sanitize_json_for_postgres(request.data if isinstance(request.data, dict) else dict(request.data))
+        domain = self._normalize_domain(str(data.get("domain") or ""))
+        github_repo = str(data.get("github_repo") or data.get("githubRepo") or "").strip()
+        if not domain:
+            return Response({"error": "domain is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not github_repo:
+            return Response({"error": "github_repo is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            org = Organization.objects.get(domain=domain)
+        except Organization.DoesNotExist:
+            return Response({"error": "Organization not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        config = getattr(org, "content_config", None)
+        if config is None:
+            return Response({"error": "Organization content config not found."}, status=status.HTTP_404_NOT_FOUND)
+        configured_repo = str(config.github_repo or "").strip()
+        if configured_repo and configured_repo.lower() != github_repo.lower():
+            return Response(
+                {"error": "Repository does not match this organization.", "github_repo": configured_repo},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        payload = reset_article_setup_config(config, github_repo=github_repo)
+        payload.update({"domain": org.domain, "org_id": org.id})
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class ContentFactoryHealingRecordView(APIView):
