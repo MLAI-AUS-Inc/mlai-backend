@@ -1,0 +1,4 @@
+# Watt The Hack simulation engine (scenario data ships inside this package).
+# Pinned to a tag so Docker re-pip-installs ONLY when this file changes. Bump the
+# tag on each scenario release (e.g. v0.1.2) and redeploy to pull new scenarios.
+watt-the-hack @ git+https://github.com/AaronEliasZachariah/Watt-The-Hack-Engine-Public.git@v0.1.1

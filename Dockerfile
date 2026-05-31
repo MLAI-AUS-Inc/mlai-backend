@@ -16,6 +16,12 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m playwright install --with-deps chromium
 
+# Install the WTH engine LAST, in its own layer. Bumping the engine tag in
+# requirements-engine.txt invalidates only this small layer (not the expensive
+# pip/playwright layers above), so scenario-release redeploys stay fast.
+COPY requirements-engine.txt /app/
+RUN pip install --no-cache-dir -r requirements-engine.txt
+
 COPY . /app/
 
 # Collect static files

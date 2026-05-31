@@ -35,6 +35,9 @@ firebase-admin==6.6.0
 Pillow==11.0.0
 PyGithub>=2.0.0
 pydantic>=2.6
+# NOTE: the Watt The Hack engine is pinned in requirements-engine.txt and installed
+# in a later Docker layer (after the slow playwright/chromium step) so that bumping
+# the engine ref per scenario release does not re-download Chromium.
 
 # Roo - Agentic Slack Bot dependencies
 slack-sdk>=3.21.0
