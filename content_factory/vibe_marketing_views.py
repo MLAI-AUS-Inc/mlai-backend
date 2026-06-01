@@ -9173,52 +9173,6 @@ def _call_content_factory_article_system_revision(*, run_id, payload):
     }
 
 
-def _call_content_factory_article_setup_reset(*, payload):
-    remote_config = _content_factory_remote_config()
-    if not remote_config["enabled"]:
-        technical_error = _content_factory_unavailable_message(remote_config)
-        logger.warning("content_factory_article_setup_reset_blocked reason=%s", technical_error)
-        return {
-            "error": technical_error,
-            "errors": [technical_error],
-            "content_factory_unavailable": True,
-            "retryable": True,
-            "diagnostics": _content_factory_diagnostics(remote_config, workflow="article_system_setup", action="reset"),
-        }
-
-    try:
-        response = http_client.post(
-            f"{remote_config['base_url']}/api/org/article-setup/reset",
-            json=payload or {},
-            headers=_content_factory_headers(),
-            timeout=(5, 30),
-        )
-    except http_client.RequestException as exc:
-        return {
-            "error": str(exc),
-            "errors": [str(exc)],
-            "content_factory_transport_error": True,
-            "retryable": True,
-            "diagnostics": _content_factory_diagnostics(remote_config, workflow="article_system_setup", action="reset"),
-        }
-
-    if response.status_code in (200, 202):
-        return response.json() if response.content else {}
-
-    try:
-        response_payload = response.json()
-    except Exception:
-        response_payload = {}
-    detail = response_payload.get("detail") or response_payload.get("error") or response.text
-    return {
-        "error": str(detail or f"Content Factory returned {response.status_code}."),
-        "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
-        "content_factory_status_code": response.status_code,
-        "content_factory_response": response_payload,
-        "retryable": response.status_code >= 500,
-    }
-
-
 def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
@@ -10365,15 +10319,9 @@ class VibeMarketingArticleSetupResetView(APIView):
         if configured_repo and configured_repo.lower() != github_repo.lower():
             return Response({"detail": "Repository does not match the connected project."}, status=status.HTTP_409_CONFLICT)
 
-        payload = {
-            "domain": context.organization.domain,
-            "github_repo": github_repo,
-        }
-        remote_data = _call_content_factory_article_setup_reset(payload=payload)
-        if isinstance(remote_data, dict) and remote_data.get("error"):
-            status_code = int(remote_data.get("content_factory_status_code") or status.HTTP_503_SERVICE_UNAVAILABLE)
-            return Response(remote_data, status=status_code)
-
+        # The persisted setup state lives in this service's
+        # OrganizationContentConfig, so reset stays local and avoids a
+        # re-entrant backend -> content-factory -> backend relay.
         reset_payload = reset_article_setup_config(config, github_repo=github_repo)
         latest_runs = _latest_runs_for_org(context.organization, limit=12)
         article_setup_state = _article_setup_state(
@@ -10383,7 +10331,7 @@ class VibeMarketingArticleSetupResetView(APIView):
         return Response(
             {
                 **reset_payload,
-                "remote": remote_data if isinstance(remote_data, dict) else {},
+                "remote": {},
                 "articleSetupState": article_setup_state,
                 "article_setup_state": article_setup_state,
             },

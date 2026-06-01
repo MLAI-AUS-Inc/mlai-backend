@@ -2463,16 +2463,7 @@ class VibeMarketingAutofillTests(TestCase):
             },
         )
         ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
-        observed = {}
-
-        def fake_post(url, json=None, headers=None, timeout=None):
-            observed["url"] = url
-            observed["json"] = json
-            observed["headers"] = headers
-            observed["timeout"] = timeout
-            return _Response(status_code=200, payload={"status": "reset", "remoteReset": True})
-
-        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
                 "/api/v1/vibe-marketing/article-setup/reset/",
                 {"githubRepo": "Acme/site"},
@@ -2480,11 +2471,9 @@ class VibeMarketingAutofillTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(observed["url"], "https://content-factory.test/api/org/article-setup/reset")
-        self.assertEqual(observed["headers"]["X-API-KEY"], "secret-key")
-        self.assertEqual(observed["json"], {"domain": "acme.com", "github_repo": "Acme/site"})
+        post.assert_not_called()
         self.assertEqual(response.data["status"], "reset")
-        self.assertEqual(response.data["remote"]["remoteReset"], True)
+        self.assertEqual(response.data["remote"], {})
         config.refresh_from_db()
         self.assertEqual(config.publish_targets, [])
         self.assertIsNone(config.default_publish_target_id)
