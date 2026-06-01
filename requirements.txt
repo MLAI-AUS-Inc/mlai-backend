@@ -35,7 +35,6 @@ firebase-admin==6.6.0
 Pillow==11.0.0
 PyGithub>=2.0.0
 pydantic>=2.6
-watt-the-hack @ git+https://github.com/AaronEliasZachariah/Watt-The-Hack-Engine-Public.git
 
 # Roo - Agentic Slack Bot dependencies
 slack-sdk>=3.21.0
