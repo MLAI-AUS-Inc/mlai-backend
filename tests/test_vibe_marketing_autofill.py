@@ -2465,7 +2465,7 @@ class VibeMarketingAutofillTests(TestCase):
         ContentFactoryRun.objects.filter(run_id=setup_run.run_id).update(updated_at=timezone.now() - timedelta(days=1))
         with patch("content_factory.vibe_marketing_views.http_client.post") as post:
             response = self.client.post(
-                "/api/v1/vibe-marketing/article-setup/reset/",
+                "/api/v1/vibe-marketing/article-setup/reset",
                 {"githubRepo": "Acme/site"},
                 format="json",
             )
@@ -2492,6 +2492,18 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertIsNone(state["routePath"])
         self.assertFalse(state["setupBlocked"])
         self.assertFalse(state["generationReady"])
+        with patch("content_factory.vibe_marketing_views.http_client.post") as post:
+            second_response = self.client.post(
+                "/api/v1/vibe-marketing/article-setup/reset/",
+                {"githubRepo": "Acme/site"},
+                format="json",
+            )
+        self.assertEqual(second_response.status_code, 200)
+        post.assert_not_called()
+        self.assertEqual(second_response.data["status"], "reset")
+        self.assertIsNone(second_response.data["articleSetupState"]["setupRunId"])
+        self.assertIsNone(second_response.data["articleSetupState"]["routePath"])
+        self.assertFalse(second_response.data["articleSetupState"]["generationReady"])
 
     def test_scan_status_exposes_blocking_reason_and_code(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
