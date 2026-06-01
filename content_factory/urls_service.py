@@ -5,8 +5,6 @@ from . import service_views as views
 urlpatterns = [
     path('org/config/', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config'),
     path('org/config', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config_no_slash'),
-    path('org/article-setup/reset/', views.ContentFactoryArticleSetupResetView.as_view(), name='content_factory_article_setup_reset'),
-    path('org/article-setup/reset', views.ContentFactoryArticleSetupResetView.as_view(), name='content_factory_article_setup_reset_no_slash'),
     path('healing-records/', views.ContentFactoryHealingRecordView.as_view(), name='content_factory_healing_records'),
     path('healing-records', views.ContentFactoryHealingRecordView.as_view(), name='content_factory_healing_records_no_slash'),
     path('org/components/', views.ContentFactoryComponentsView.as_view(), name='content_factory_components'),
