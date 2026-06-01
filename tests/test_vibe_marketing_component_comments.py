@@ -1500,6 +1500,141 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertNotIn(self.run.run_id, [item["runId"] for item in bootstrap.data["latestRuns"]])
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_removes_all_dedup_attempts_and_releases_topic(self):
+        source_run_id = "disc-ai-detectors"
+        keyword = "how do ai detectors work"
+        attempts = [
+            ContentFactoryRun.objects.create(
+                run_id=f"ai-detectors-{idx}",
+                workflow="article_generation",
+                domain="mlai.au",
+                github_repo="MLAI-AUS-Inc/mlai-au",
+                status=ContentFactoryRunStatus.BLOCKED,
+                run_request={"source_run_id": source_run_id, "target_keyword": keyword},
+                result={"target_keyword": keyword},
+            )
+            for idx in range(3)
+        ]
+        ResearchedKeyword.objects.create(
+            organization=self.organization,
+            keyword=keyword,
+            keyword_normalized=keyword,
+            status=KeywordStatus.IN_PROGRESS,
+        )
+        other = ContentFactoryRun.objects.create(
+            run_id="unrelated-topic",
+            workflow="article_generation",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={"source_run_id": "disc-other", "target_keyword": "unrelated topic"},
+            result={"target_keyword": "unrelated topic"},
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
+
+        representative = attempts[0]
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{representative.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(sorted(response.data["cancelledRunIds"]), sorted(a.run_id for a in attempts))
+        self.assertEqual(response.data["protectedRunIds"], [])
+        for attempt in attempts:
+            attempt.refresh_from_db()
+            self.assertEqual(attempt.status, ContentFactoryRunStatus.CANCELLED)
+        other.refresh_from_db()
+        self.assertEqual(other.status, ContentFactoryRunStatus.BLOCKED)
+        released = ResearchedKeyword.objects.get(organization=self.organization, keyword_normalized=keyword)
+        self.assertEqual(released.status, KeywordStatus.PENDING)
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+        self.assertEqual(bootstrap.status_code, 200)
+        draft_run_ids = {item["runId"] for item in bootstrap.data["draftArticles"]}
+        draft_source_run_ids = {item.get("sourceRunId") for item in bootstrap.data["draftArticles"]}
+        self.assertTrue(draft_run_ids.isdisjoint({attempt.run_id for attempt in attempts}))
+        self.assertNotIn(source_run_id, draft_source_run_ids)
+        self.assertIn(other.run_id, draft_run_ids)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_skips_publish_protected_attempts_and_reports_them(self):
+        source_run_id = "disc-protected-ai-detectors"
+        keyword = "how ai detector reports work"
+        cancellable_one = ContentFactoryRun.objects.create(
+            run_id="ai-detectors-cancellable-one",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={"source_run_id": source_run_id, "target_keyword": keyword},
+            result={"target_keyword": keyword},
+        )
+        protected = ContentFactoryRun.objects.create(
+            run_id="ai-detectors-protected",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            run_request={"source_run_id": source_run_id, "target_keyword": keyword},
+            result={
+                "target_keyword": keyword,
+                "draft_pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77",
+            },
+        )
+        cancellable_two = ContentFactoryRun.objects.create(
+            run_id="ai-detectors-cancellable-two",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.FAILED,
+            run_request={"source_run_id": source_run_id, "target_keyword": keyword},
+            result={"target_keyword": keyword},
+        )
+
+        cancelled_urls = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            cancelled_urls.append(url)
+            return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{cancellable_one.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            sorted(response.data["cancelledRunIds"]),
+            sorted([cancellable_one.run_id, cancellable_two.run_id]),
+        )
+        self.assertEqual(response.data["protectedRunIds"], [protected.run_id])
+        self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
+        self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
+        self.assertFalse(any(protected.run_id in url for url in cancelled_urls))
+
+        cancellable_one.refresh_from_db()
+        cancellable_two.refresh_from_db()
+        protected.refresh_from_db()
+        self.assertEqual(cancellable_one.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(protected.status, ContentFactoryRunStatus.BLOCKED)
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+        self.assertEqual(bootstrap.status_code, 200)
+        draft_run_ids = {item["runId"] for item in bootstrap.data["draftArticles"]}
+        draft_source_run_ids = {item.get("sourceRunId") for item in bootstrap.data["draftArticles"]}
+        self.assertIn(protected.run_id, draft_run_ids)
+        self.assertIn(source_run_id, draft_source_run_ids)
+        self.assertNotIn(cancellable_one.run_id, draft_run_ids)
+        self.assertNotIn(cancellable_two.run_id, draft_run_ids)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):
         revision_run = ContentFactoryRun.objects.create(
             run_id="article-run-comments-revision",

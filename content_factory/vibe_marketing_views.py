@@ -5354,6 +5354,28 @@ def _run_source_run_id(run):
     ).strip()
 
 
+def _article_draft_group_members(run, organization):
+    """Return every non-cancelled article run represented by the same draft card as ``run``.
+
+    The dashboard draft list dedupes by ``source_run_id or run_id``. If a topic has
+    been regenerated several times, a single visible draft card can represent many
+    attempts; deleting the card should cancel the whole represented group.
+    """
+    source_run_id = _run_source_run_id(run)
+    if not source_run_id:
+        return [run]
+    members = list(
+        ContentFactoryRun.objects.filter(
+            domain=organization.domain,
+            workflow__in=ARTICLE_WORKFLOWS,
+        ).exclude(status=ContentFactoryRunStatus.CANCELLED)
+    )
+    group = [member for member in members if _run_source_run_id(member) == source_run_id]
+    if all(member.pk != run.pk for member in group):
+        group.append(run)
+    return group
+
+
 def _run_delivery_mode(run):
     run_request = _run_mapping(run.run_request)
     result = _run_mapping(run.result)
@@ -11632,6 +11654,39 @@ class VibeMarketingRunControlView(APIView):
 
             if run.workflow not in ARTICLE_WORKFLOWS:
                 return Response({"detail": "Only article runs can be cancelled from this action."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if bool(payload.get("cancel_group") or payload.get("cancelGroup")):
+                members = _article_draft_group_members(run, context.organization)
+                cancelled_ids = []
+                protected_ids = []
+                for member in members:
+                    if _run_has_external_publish_evidence(member):
+                        protected_ids.append(member.run_id)
+                        continue
+                    member_remote = _call_content_factory_run_action(
+                        run_id=member.run_id,
+                        action="cancel",
+                        payload=payload,
+                        workflow=member.workflow,
+                    )
+                    if int(member_remote.get("content_factory_status_code") or 0) == 409:
+                        protected_ids.append(member.run_id)
+                        continue
+                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote)
+                    cancelled_ids.append(member.run_id)
+
+                if not cancelled_ids and protected_ids:
+                    return Response(
+                        {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+                body = _serialize_run(run, context=context)
+                body["cancelledRunIds"] = cancelled_ids
+                body["protectedRunIds"] = protected_ids
+                return Response(body, status=status.HTTP_202_ACCEPTED)
+
             if _run_has_external_publish_evidence(run):
                 return Response(
                     {"detail": "This article already has external publish evidence. Close or clean up the external PR manually before cancelling."},
