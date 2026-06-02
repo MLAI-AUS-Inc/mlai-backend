@@ -14,7 +14,12 @@ from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
 from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
-from content_factory.vibe_marketing_views import _call_content_factory_live_preview, _live_preview_from_run, _sync_local_run_from_remote
+from content_factory.vibe_marketing_views import (
+    _call_content_factory_live_preview,
+    _live_preview_from_run,
+    _resolve_article_root_run_id,
+    _sync_local_run_from_remote,
+)
 
 
 User = get_user_model()
@@ -1559,6 +1564,130 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertTrue(draft_run_ids.isdisjoint({attempt.run_id for attempt in attempts}))
         self.assertNotIn(source_run_id, draft_source_run_ids)
         self.assertIn(other.run_id, draft_run_ids)
+
+    # --- Revision lineage collapses to one dashboard card ------------------
+
+    def _set_updated_at(self, run, when):
+        # updated_at is auto_now; bypass it to control draft-scan ordering.
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=when)
+
+    def _make_article_run(self, run_id, *, workflow, status, source_run_id="", keyword="", updated_at=None):
+        run_request = {"target_keyword": keyword} if keyword else {}
+        result = {"target_keyword": keyword} if keyword else {}
+        if source_run_id:
+            run_request["source_run_id"] = source_run_id
+            result["source_run_id"] = source_run_id
+        run = ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow=workflow,
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=status,
+            run_request=run_request,
+            result=result,
+        )
+        if updated_at is not None:
+            self._set_updated_at(run, updated_at)
+        return run
+
+    def _lineage_cards(self, drafts, run_ids, root_run_id):
+        return [
+            d
+            for d in drafts
+            if d["runId"] in run_ids or d.get("sourceRunId") == root_run_id
+        ]
+
+    def test_resolve_article_root_run_id_walks_chain_and_guards(self):
+        # full chain C <- B <- A(root)
+        chain = {"C": "B", "B": "A", "A": ""}
+        self.assertEqual(_resolve_article_root_run_id("C", chain), "A")
+        self.assertEqual(_resolve_article_root_run_id("A", chain), "A")
+        # ancestor outside the scanned window: source present but not a key
+        self.assertEqual(_resolve_article_root_run_id("B", {"B": "A"}), "A")
+        # self-root (no source)
+        self.assertEqual(_resolve_article_root_run_id("A", {"A": ""}), "A")
+        # cycle must terminate and return a stable id
+        self.assertIn(_resolve_article_root_run_id("A", {"A": "B", "B": "A"}), {"A", "B"})
+
+    def test_chained_revisions_collapse_into_single_draft_card(self):
+        now = timezone.now()
+        keyword = "how do ai detectors work"
+        root = self._make_article_run("ad-root", workflow="article_generation", status=ContentFactoryRunStatus.BLOCKED, keyword=keyword, updated_at=now - timedelta(minutes=10))
+        rev1 = self._make_article_run("ad-rev1", workflow="article_revision", status=ContentFactoryRunStatus.COMPLETED, source_run_id=root.run_id, keyword=keyword, updated_at=now - timedelta(minutes=5))
+        rev2 = self._make_article_run("ad-rev2", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=rev1.run_id, keyword=keyword, updated_at=now - timedelta(minutes=1))
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary")
+        self.assertEqual(bootstrap.status_code, 200)
+        drafts = bootstrap.data["draftArticles"]
+        lineage = self._lineage_cards(drafts, {root.run_id, rev1.run_id, rev2.run_id}, root.run_id)
+        self.assertEqual(len(lineage), 1, lineage)
+        card = lineage[0]
+        self.assertEqual(card["runId"], rev2.run_id)  # newest member represents the lineage
+        self.assertEqual(card["sourceRunId"], root.run_id)  # stable lineage key = root
+        self.assertEqual(card["stageLabel"], "Needs attention")  # reflects the latest (blocked) edit
+
+    def test_revision_card_reflects_latest_blocked_over_earlier_ready(self):
+        now = timezone.now()
+        keyword = "ai detector accuracy"
+        root = self._make_article_run("acc-root", workflow="article_generation", status=ContentFactoryRunStatus.AWAITING_APPROVAL, keyword=keyword, updated_at=now - timedelta(minutes=10))
+        rev = self._make_article_run("acc-rev", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=root.run_id, keyword=keyword, updated_at=now - timedelta(minutes=1))
+
+        drafts = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary").data["draftArticles"]
+        lineage = self._lineage_cards(drafts, {root.run_id, rev.run_id}, root.run_id)
+        self.assertEqual(len(lineage), 1, lineage)
+        self.assertEqual(lineage[0]["runId"], rev.run_id)
+        self.assertEqual(lineage[0]["stageLabel"], "Needs attention")
+
+    def test_written_original_hidden_revision_visible_single_card(self):
+        now = timezone.now()
+        keyword = "detector false positives"
+        WrittenArticle.objects.create(
+            organization=self.organization,
+            title="Detector False Positives",
+            slug="detector-false-positives",
+            category="featured",
+            primary_keyword=keyword,
+        )
+        root = self._make_article_run("fp-root", workflow="article_generation", status=ContentFactoryRunStatus.COMPLETED, keyword=keyword, updated_at=now - timedelta(minutes=10))
+        rev = self._make_article_run("fp-rev", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=root.run_id, keyword=keyword, updated_at=now - timedelta(minutes=1))
+
+        drafts = self.client.get("/api/v1/vibe-marketing/bootstrap/?view=summary").data["draftArticles"]
+        draft_run_ids = {d["runId"] for d in drafts}
+        # the published/written original is hidden; only the revision remains, once.
+        self.assertNotIn(root.run_id, draft_run_ids)
+        lineage = self._lineage_cards(drafts, {root.run_id, rev.run_id}, root.run_id)
+        self.assertEqual(len(lineage), 1, lineage)
+        self.assertEqual(lineage[0]["runId"], rev.run_id)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_group_cancels_full_revision_lineage(self):
+        keyword = "ai detector lineage"
+        root = self._make_article_run("lin-root", workflow="article_generation", status=ContentFactoryRunStatus.BLOCKED, keyword=keyword)
+        rev1 = self._make_article_run("lin-rev1", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=root.run_id, keyword=keyword)
+        rev2 = self._make_article_run("lin-rev2", workflow="article_revision", status=ContentFactoryRunStatus.BLOCKED, source_run_id=rev1.run_id, keyword=keyword)
+        unrelated = self._make_article_run("lin-unrelated", workflow="article_generation", status=ContentFactoryRunStatus.BLOCKED, keyword="different topic")
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=202, payload={"status": "cancelled", "cleanup": {}})
+
+        # Deleting the visible card (newest = rev2) must cancel the whole lineage.
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{rev2.run_id}/cancel",
+                {"cancel_group": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            sorted(response.data["cancelledRunIds"]),
+            sorted([root.run_id, rev1.run_id, rev2.run_id]),
+        )
+        for run in (root, rev1, rev2):
+            run.refresh_from_db()
+            self.assertEqual(run.status, ContentFactoryRunStatus.CANCELLED)
+        unrelated.refresh_from_db()
+        self.assertEqual(unrelated.status, ContentFactoryRunStatus.BLOCKED)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_cancel_group_skips_publish_protected_attempts_and_reports_them(self):

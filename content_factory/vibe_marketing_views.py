@@ -2214,7 +2214,7 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     written_keys = _written_article_identity_keys(organization)
     drafts = []
     seen = set()
-    runs = (
+    runs = list(
         ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
         .exclude(status=ContentFactoryRunStatus.CANCELLED)
         # verification_summary (can be ~tens of KB/run) and step_order are not read
@@ -2226,14 +2226,23 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
         .prefetch_related("steps")
         .order_by("-updated_at")[:scan_limit]
     )
+    # A component revision is a separate run that records its IMMEDIATE parent as
+    # source_run_id. Dedup by the resolved lineage ROOT so an article and all its
+    # edits collapse into a single card (naive one-level dedup fragments chained
+    # revisions into multiple cards). Runs are ordered newest-first, so the first
+    # member kept per lineage is the most-recently-updated representative.
+    source_map = {run.run_id: _run_source_run_id(run) for run in runs}
     for run in runs:
         draft = _serialize_article_draft(run, written_keys=written_keys)
         if not draft:
             continue
-        identity = draft.get("sourceRunId") or draft.get("runId")
-        if identity in seen:
+        root_run_id = _resolve_article_root_run_id(run.run_id, source_map)
+        if root_run_id in seen:
             continue
-        seen.add(identity)
+        seen.add(root_run_id)
+        # Carry the resolved lineage root as the card's sourceRunId (stable key);
+        # leave it null when the representative IS the root article.
+        draft["sourceRunId"] = root_run_id if root_run_id != run.run_id else None
         drafts.append(draft)
         if len(drafts) >= limit:
             break
@@ -5362,23 +5371,57 @@ def _run_source_run_id(run):
     ).strip()
 
 
-def _article_draft_group_members(run, organization):
-    """Return every non-cancelled article run represented by the same draft card as ``run``.
+def _resolve_article_root_run_id(run_id, source_map, *, visited=None):
+    """Follow the revision lineage to its root run id.
 
-    The dashboard draft list dedupes by ``source_run_id or run_id``. If a topic has
-    been regenerated several times, a single visible draft card can represent many
-    attempts; deleting the card should cancel the whole represented group.
+    ``source_map`` maps ``run_id -> source_run_id`` (the immediate parent, since
+    component revisions record their immediate parent rather than the root
+    article). Returns the deepest reachable ancestor so an article and all of its
+    revisions resolve to one stable lineage key.
+
+    - Empty/missing source -> the run is its own root.
+    - Source present but absent from ``source_map`` (ancestor outside the scan
+      window) -> that source id is used as the root key.
+    - ``visited`` guards against cycles so a malformed chain cannot infinite-loop.
     """
-    source_run_id = _run_source_run_id(run)
-    if not source_run_id:
-        return [run]
+    visited = visited if visited is not None else set()
+    current = run_id
+    while True:
+        if current in visited:
+            return current
+        visited.add(current)
+        source = source_map.get(current, "")
+        if not source:
+            return current
+        if source not in source_map:
+            return source
+        current = source
+
+
+def _article_draft_group_members(run, organization):
+    """Return every non-cancelled article run in the same revision lineage as ``run``.
+
+    The dashboard draft list collapses a whole revision lineage (root article +
+    all its edits) into one card keyed by the resolved lineage root. Deleting that
+    card must cancel the whole lineage; otherwise cancelling only the
+    representative run just promotes another member back into the card.
+    """
     members = list(
         ContentFactoryRun.objects.filter(
             domain=organization.domain,
             workflow__in=ARTICLE_WORKFLOWS,
         ).exclude(status=ContentFactoryRunStatus.CANCELLED)
     )
-    group = [member for member in members if _run_source_run_id(member) == source_run_id]
+    source_map = {member.run_id: _run_source_run_id(member) for member in members}
+    # The clicked run may not be in the fetched set; make sure it is resolvable.
+    if run.run_id not in source_map:
+        source_map[run.run_id] = _run_source_run_id(run)
+    target_root = _resolve_article_root_run_id(run.run_id, source_map)
+    group = [
+        member
+        for member in members
+        if _resolve_article_root_run_id(member.run_id, source_map) == target_root
+    ]
     if all(member.pk != run.pk for member in group):
         group.append(run)
     return group
