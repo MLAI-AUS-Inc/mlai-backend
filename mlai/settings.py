@@ -245,8 +245,15 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/hour',  # Rate limit for MedHack endpoints
+        'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
     }
 }
+
+WATT_HACKATHON_CLASS_ID = os.getenv('WATT_HACKATHON_CLASS_ID', 'WATT')
+WATT_HACKATHON_API_BASE_URL = os.getenv('WATT_HACKATHON_API_BASE_URL', '')
+WATT_UNITY_SESSION_TICKET_TTL_SECONDS = int(os.getenv('WATT_UNITY_SESSION_TICKET_TTL_SECONDS', '300'))
+VAGON_STREAM_ID = os.getenv('VAGON_STREAM_ID', '')
+VAGON_STREAM_URL = os.getenv('VAGON_STREAM_URL', '')
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=1440),

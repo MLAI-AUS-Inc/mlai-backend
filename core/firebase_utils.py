@@ -1,6 +1,6 @@
 # core/firebase_utils.py
 import firebase_admin
-from firebase_admin import credentials, firestore, storage
+from firebase_admin import auth, credentials, db as rtdb, firestore, storage
 from google.api_core.exceptions import NotFound
 import logging
 import os
@@ -22,6 +22,11 @@ FIREBASE_PRIVATE_KEY_ID = os.getenv('FIREBASE_PRIVATE_KEY_ID')
 FIREBASE_CLIENT_ID = os.getenv('FIREBASE_CLIENT_ID')
 FIREBASE_CERT_URL = os.getenv('FIREBASE_CERT_URL')
 FIREBASE_STORAGE_BUCKET = os.getenv('FIREBASE_STORAGE_BUCKET', 'mlai-main-website.firebasestorage.app')
+# Realtime Database URL — needed for the Watt smart-home device-command bus (RTDB reads/writes).
+FIREBASE_DATABASE_URL = os.getenv(
+    'FIREBASE_DATABASE_URL',
+    'https://mlai-main-website-default-rtdb.asia-southeast1.firebasedatabase.app',
+)
 
 def initialize_firebase():
     """Initialize Firebase Admin SDK"""
@@ -78,7 +83,8 @@ def initialize_firebase():
         cred = credentials.Certificate(firebase_credentials)
         
         firebase_admin.initialize_app(cred, {
-            'storageBucket': FIREBASE_STORAGE_BUCKET
+            'storageBucket': FIREBASE_STORAGE_BUCKET,
+            'databaseURL': FIREBASE_DATABASE_URL,
         })
         logger.info("Firebase app initialized successfully")
         
@@ -95,6 +101,38 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize Firebase on module load: {str(e)}")
     db = None
+
+
+def get_rtdb_reference(path):
+    """Return a Realtime Database reference at ``path`` (ensures Firebase is initialized).
+
+    The default Firebase app must have been initialized with ``databaseURL``
+    (see ``initialize_firebase``). Used by the Watt smart-home command bus to read
+    observations and write device commands under ``classes/{classId}/hackathon/...``.
+    """
+    initialize_firebase()
+    return rtdb.reference(path)
+
+
+def rtdb_get(path):
+    """Read and return the value at a Realtime Database path (``None`` if absent)."""
+    return get_rtdb_reference(path).get()
+
+
+def rtdb_set(path, value):
+    """Overwrite the value at a Realtime Database path."""
+    get_rtdb_reference(path).set(value)
+
+
+def rtdb_update(path, value):
+    """Shallow-merge child keys at a Realtime Database path."""
+    get_rtdb_reference(path).update(value)
+
+
+def rtdb_delete(path):
+    """Delete the node at a Realtime Database path."""
+    get_rtdb_reference(path).delete()
+
 
 def get_storage_bucket():
     """Get Firebase storage bucket instance"""
@@ -149,6 +187,13 @@ def upload_file_to_storage(file_obj, destination_path, content_type=None):
     except Exception as e:
         logger.error(f'Failed to upload file to Firebase Storage: {str(e)}', exc_info=True)
         raise
+
+
+def create_firebase_custom_token(uid, claims):
+    """Mint a Firebase custom token with developer claims."""
+    initialize_firebase()
+    token = auth.create_custom_token(uid, developer_claims=claims)
+    return token.decode("utf-8") if isinstance(token, bytes) else str(token)
 
 
 def firebase_storage_media_url(destination_path, token=None):
