@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import uuid
@@ -17,8 +18,9 @@ from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
 from django.conf import settings
+from django.core.cache import cache
 from django.db import OperationalError, connection, transaction
-from django.db.models import Prefetch
+from django.db.models import Count, Max, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
@@ -2215,6 +2217,12 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     runs = (
         ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS)
         .exclude(status=ContentFactoryRunStatus.CANCELLED)
+        # verification_summary (can be ~tens of KB/run) and step_order are not read
+        # by _serialize_article_draft or its helpers; defer them so the draft scan
+        # (up to scan_limit rows) doesn't haul those blobs out of Postgres.
+        # NOTE: result / run_request / acceptance_summary ARE read here, so they
+        # must stay loaded to avoid a per-row deferred-field query (N+1).
+        .defer("verification_summary", "step_order")
         .prefetch_related("steps")
         .order_by("-updated_at")[:scan_limit]
     )
@@ -7524,9 +7532,148 @@ def _bootstrap_topic_picker_ready(*, checks, article_setup_state=None, has_compl
     )
 
 
+_BOOTSTRAP_CACHE_PREFIX = "vibe_bootstrap"
+_BOOTSTRAP_CACHE_DEFAULT_SECONDS = 20
+
+
+def _bootstrap_cache_seconds() -> int:
+    """TTL backstop for the per-org bootstrap cache. 0 disables caching entirely.
+
+    Tunable at runtime via the VIBE_BOOTSTRAP_CACHE_SECONDS env var (e.g. set it to
+    0 to disable instantly without a code deploy).
+    """
+    try:
+        return max(0, int(os.environ.get("VIBE_BOOTSTRAP_CACHE_SECONDS", _BOOTSTRAP_CACHE_DEFAULT_SECONDS)))
+    except (TypeError, ValueError):
+        return _BOOTSTRAP_CACHE_DEFAULT_SECONDS
+
+
+def _bootstrap_state_fingerprint(organization, company, config) -> str:
+    """Cheap DB-derived version string of the org state the bootstrap depends on.
+
+    Prod runs a per-process LocMemCache (no shared cache), so cross-worker explicit
+    invalidation is impossible. Instead the cache key embeds this fingerprint: any
+    relevant write shifts it, so every worker auto-misses and recomputes. No
+    mutation endpoint needs to know the cache exists.
+
+    Uses run created_at/count (not updated_at) deliberately: the ~2.5s status
+    poll-sync rewrites runs constantly, and busting on that would defeat the cache
+    exactly during active generation. Live run state is served by the run/status
+    endpoints, not the bootstrap, so a <=TTL lag on run-derived bootstrap fields is
+    invisible. The TTL backstop bounds staleness for the long tail (run status
+    transitions, semantic clusters, component comments, profile edits).
+    """
+    domain = getattr(organization, "domain", "") or ""
+    runs = ContentFactoryRun.objects.filter(domain=domain).aggregate(c=Count("id"), m=Max("created_at"))
+    keywords = ResearchedKeyword.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("metrics_updated_at"))
+    feedback = TopicFeedback.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+    articles = WrittenArticle.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("created_at"))
+    baseline_updated = WebsiteBaselineSnapshot.objects.filter(organization=organization).aggregate(m=Max("updated_at"))["m"]
+    parts = (
+        getattr(config, "updated_at", None),
+        runs["c"], runs["m"],
+        keywords["c"], keywords["m"],
+        feedback["c"], feedback["m"],
+        articles["c"], articles["m"],
+        baseline_updated,
+        # Already-loaded identity fields (no extra query) so company/profile edits —
+        # including the endpoints that mutate then return bootstrap in the same
+        # response (avatar upload, company info) — are reflected immediately rather
+        # than lagging up to the TTL.
+        getattr(company, "name", "") if company is not None else "",
+        getattr(company, "domain", "") if company is not None else "",
+        getattr(company, "location", "") if company is not None else "",
+        getattr(company, "abn", "") if company is not None else "",
+        getattr(company, "avatar_url", "") if company is not None else "",
+        getattr(organization, "name", ""),
+        getattr(organization, "domain", ""),
+        getattr(organization, "company_linkedin_url", ""),
+        getattr(organization, "competitors", None),
+        getattr(organization, "seed_keywords", None),
+    )
+
+    def _stamp(value):
+        if value is None:
+            return ""
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    return "|".join(_stamp(value) for value in parts)
+
+
+def _bootstrap_cache_key(context, config, view):
+    try:
+        organization = context.organization
+        user = getattr(getattr(context, "profile", None), "user", None)
+        user_id = getattr(user, "id", None)
+        company = getattr(context, "company", None)
+        fingerprint = _bootstrap_state_fingerprint(organization, company, config)
+        return f"{_BOOTSTRAP_CACHE_PREFIX}:{organization.id}:{user_id}:{view}:{fingerprint}"
+    except Exception:
+        logger.exception(
+            "vibe_bootstrap_cache_key_failed org_id=%s",
+            getattr(getattr(context, "organization", None), "id", None),
+        )
+        return None
+
+
+def _overlay_live_bootstrap_fields(payload, *, context, request):
+    """Recompute the only per-user / per-request fields so they are never cached.
+
+    googleBaselineConnection depends on the authenticated user's Google credentials
+    and its connectUrl is derived from the request, so both must reflect the live
+    request even on a cache hit. Every other field in the payload is org-derived.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    try:
+        google_status = google_baseline_connection_status(context.profile.user)
+        google_status["connectUrl"] = _google_baseline_connect_url(request)
+        payload["googleBaselineConnection"] = google_status
+    except Exception:
+        logger.exception(
+            "vibe_bootstrap_google_overlay_failed org_id=%s",
+            getattr(getattr(context, "organization", None), "id", None),
+        )
+    return payload
+
+
 def _serialize_bootstrap(context, request=None, *, view="full"):
-    compact = view == "summary"
     config = _get_config(context.organization)
+    ttl = _bootstrap_cache_seconds()
+    cache_key = _bootstrap_cache_key(context, config, view) if ttl > 0 else None
+
+    payload = None
+    if cache_key is not None:
+        try:
+            payload = cache.get(cache_key)
+        except Exception:
+            logger.exception(
+                "vibe_bootstrap_cache_get_failed org_id=%s",
+                getattr(context.organization, "id", None),
+            )
+            payload = None
+
+    if payload is None:
+        payload = _compute_bootstrap_payload(context, request=request, view=view, config=config)
+        if cache_key is not None:
+            try:
+                cache.set(cache_key, payload, ttl)
+            except Exception:
+                logger.exception(
+                    "vibe_bootstrap_cache_set_failed org_id=%s",
+                    getattr(context.organization, "id", None),
+                )
+
+    # Per-user / per-request fields are always recomputed; never served from cache.
+    return _overlay_live_bootstrap_fields(payload, context=context, request=request)
+
+
+def _compute_bootstrap_payload(context, request=None, *, view="full", config=None):
+    compact = view == "summary"
+    if config is None:
+        config = _get_config(context.organization)
     latest_runs = _latest_runs_for_org(context.organization)
     _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
     if setup_pr_refreshed:

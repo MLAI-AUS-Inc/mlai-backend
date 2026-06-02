@@ -69,6 +69,11 @@ class ContentFactoryRun(models.Model):
         indexes = [
             models.Index(fields=["workflow", "status"], name="cf_run_workflow_status_idx"),
             models.Index(fields=["domain", "status"], name="cf_run_domain_status_idx"),
+            # Covers the hot org-scoped recency queries (recent article drafts,
+            # latest runs, discovery runs) which all filter domain + workflow and
+            # order by -updated_at. Without this Postgres filters then sorts every
+            # matching row for the domain on each bootstrap call.
+            models.Index(fields=["domain", "workflow", "-updated_at"], name="cf_run_domain_wf_updated_idx"),
         ]
 
     def __str__(self):
