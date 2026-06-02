@@ -1,0 +1,119 @@
+"""Tests for article-setup reset behavior:
+
+1. ``_delete_article_setup_scaffold_branches`` asks content-factory to cancel
+   recent article_system_setup runs (which deletes their generated scaffold
+   branches), is best-effort, and never raises.
+2. A scan-detected *existing* article surface must NOT populate ``routePath`` in
+   the article-setup state — only an explicit user selection / setup run does.
+   This is what lets "Reset articles setup" return the wizard to a clean picker
+   instead of a stale "scaffold is live" view.
+"""
+from unittest.mock import patch
+
+from django.test import TestCase
+
+from content_factory.models import OrganizationContentConfig
+from content_factory.vibe_marketing_views import (
+    _article_setup_state_for_config,
+    _delete_article_setup_scaffold_branches,
+)
+from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+
+
+class ArticleSetupResetBranchCleanupTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(domain="statdoctor.app", name="StatDoctor")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="DrAnuG1995/website",
+        )
+
+    def _make_setup_run(self, run_id, *, status="completed", repo="DrAnuG1995/website"):
+        return ContentFactoryRun.objects.create(
+            domain=self.org.domain,
+            run_id=run_id,
+            workflow="article_system_setup",
+            github_repo=repo,
+            status=status,
+        )
+
+    def test_cancels_recent_setup_runs_to_delete_branches(self):
+        self._make_setup_run("setup-1")
+        self._make_setup_run("setup-2")
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            return_value={"status": "cancelled"},
+        ) as call_mock:
+            result = _delete_article_setup_scaffold_branches(self.config)
+        self.assertEqual(result["status"], "requested")
+        cancelled = {call.kwargs["run_id"] for call in call_mock.call_args_list}
+        self.assertEqual(cancelled, {"setup-1", "setup-2"})
+        for call in call_mock.call_args_list:
+            self.assertEqual(call.kwargs["action"], "cancel")
+            self.assertEqual(call.kwargs["workflow"], "article_system_setup")
+
+    def test_ignores_other_repos_and_cancelled_runs(self):
+        self._make_setup_run("other-repo", repo="someone/else")
+        self._make_setup_run("already-cancelled", status=ContentFactoryRunStatus.CANCELLED)
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            return_value={},
+        ) as call_mock:
+            result = _delete_article_setup_scaffold_branches(self.config)
+        call_mock.assert_not_called()
+        self.assertEqual(result["status"], "skipped")
+
+    def test_best_effort_never_raises_on_relay_failure(self):
+        self._make_setup_run("setup-x")
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            side_effect=RuntimeError("relay down"),
+        ):
+            result = _delete_article_setup_scaffold_branches(self.config)
+        self.assertEqual(result["status"], "requested")
+        self.assertEqual(result["runs"][0]["status"], "error")
+
+    def test_skips_when_repo_missing(self):
+        org2 = Organization.objects.create(domain="norepo.example", name="NoRepo")
+        config2 = OrganizationContentConfig.objects.create(organization=org2, github_repo="")
+        result = _delete_article_setup_scaffold_branches(config2)
+        self.assertEqual(result["status"], "skipped")
+
+
+class ArticleSetupExistingSurfaceStateTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(domain="statdoctor.app", name="StatDoctor")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="DrAnuG1995/website",
+        )
+
+    def test_existing_scan_surface_does_not_set_route_path(self):
+        # Scan detected an existing blog surface, but the user has not run setup:
+        # there is no pending selection and no article_system_setup run.
+        self.config.article_system = {
+            "state": "existing",
+            "path": "app/blog/[slug]/page.tsx",
+            "route_template": "/blog/{slug}",
+            "scan": {"status": "completed"},
+        }
+        self.config.save(update_fields=["article_system"])
+        state = _article_setup_state_for_config(self.config)
+        # The detected surface must not read as a saved/selected route, otherwise
+        # the wizard reports setup as complete and reset appears to do nothing.
+        self.assertFalse(state.get("routePath"), state.get("routePath"))
+        self.assertFalse(state.get("setupRunId"), state.get("setupRunId"))
+
+    def test_pending_user_selection_sets_route_path(self):
+        self.config.article_system = {
+            "state": "missing",
+            "scan": {"status": "completed"},
+            "pending_article_system_setup": {
+                "routePath": "/blog",
+                "route_path": "/blog",
+            },
+        }
+        self.config.save(update_fields=["article_system"])
+        state = _article_setup_state_for_config(self.config)
+        self.assertEqual(state.get("routePath"), "/blog")
