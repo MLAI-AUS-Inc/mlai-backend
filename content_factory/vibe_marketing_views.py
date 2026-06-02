@@ -10435,6 +10435,32 @@ class VibeMarketingDiscoveryView(APIView):
                 action="topic_discovery",
                 current_balance=gate_balance,
             )
+            # Optional free-form custom idea: scopes discovery to the user's angle/keyword.
+            # Billed as the same topic_discovery action above (no separate gate).
+            custom_topic_title = str(
+                _request_value(request.data, "customTopicTitle", "custom_topic_title", default="") or ""
+            ).strip()
+            custom_topic_keyword = str(
+                _request_value(request.data, "customTopicKeyword", "custom_topic_keyword", default="") or ""
+            ).strip()
+            custom_topic_context = str(
+                _request_value(request.data, "customTopicContext", "custom_topic_context", default="") or ""
+            ).strip()
+            if custom_topic_title or custom_topic_keyword:
+                try:
+                    custom_topic_count = int(
+                        _request_value(request.data, "requestedTopicCount", "requested_topic_count", default=4) or 4
+                    )
+                except (TypeError, ValueError):
+                    custom_topic_count = 4
+                payload.update(
+                    {
+                        "custom_topic_title": custom_topic_title,
+                        "custom_topic_keyword": custom_topic_keyword or custom_topic_title,
+                        "custom_topic_context": custom_topic_context,
+                        "requested_topic_count": max(1, min(custom_topic_count, 8)),
+                    }
+                )
         run = _queue_content_factory_run(
             endpoint="discovery",
             workflow="auto_discovery",
