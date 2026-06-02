@@ -3,6 +3,7 @@ from django.test import SimpleTestCase
 
 from generic_hackathons import smart_home_blocks as blocks
 from generic_hackathons import smart_home_firebase as shf
+from generic_hackathons import smart_home_policy as policy
 
 
 class CompileBlocksTests(SimpleTestCase):
@@ -94,3 +95,47 @@ class ObservationLivenessTests(SimpleTestCase):
     def test_stale_observation_is_not_live(self):
         now = 1_000_000
         self.assertFalse(shf.is_observation_live({"published_at_ms": now - 60_000}, now))
+
+
+class CompilePolicyTests(SimpleTestCase):
+    SUNNY = {"tariff": {"period": "off-peak"}, "weather": {"condition": "sunny", "solar_forecast_kw": [3, 3, 3], "outdoor_c": 24}, "loads": {"grid_import_kw": 0.5}}
+    CLOUDY_OFFPEAK = {"tariff": {"period": "off-peak"}, "weather": {"condition": "cloudy", "solar_forecast_kw": [0.2, 0.3], "outdoor_c": 8}, "loads": {"grid_import_kw": 1.0}}
+    PEAK_HIGHLOAD = {"tariff": {"period": "peak"}, "weather": {"condition": "normal", "solar_forecast_kw": [1, 1], "outdoor_c": 30}, "loads": {"grid_import_kw": 5.0}}
+
+    def _battery_modes(self, result):
+        return [c["params"].get("mode") for c in result["commands"] if c["target_type"] == "battery"]
+
+    def test_price_aware_battery_is_auto(self):
+        p = {"inputs": [], "schedule": ["sc_price"], "brain": ["br_gemini"], "actions": ["ac_charge"], "outputs": ["ou_battery"], "safety": []}
+        self.assertIn("auto", self._battery_modes(policy.compile_policy(p, self.CLOUDY_OFFPEAK)))
+
+    def test_weather_input_forecast_precharge(self):
+        p = {"inputs": ["in_weather"], "schedule": ["sc_price"], "brain": ["br_gemini"], "actions": ["ac_charge"], "outputs": ["ou_battery"], "safety": []}
+        result = policy.compile_policy(p, self.CLOUDY_OFFPEAK)
+        self.assertIn("charge", self._battery_modes(result))  # pre-charge before peak on a cloudy off-peak morning
+        self.assertTrue(any("forecast" in d.lower() or "cloudy" in d.lower() for d in result["decisions"]))
+
+    def test_smart_meter_trims_thermostat_under_load(self):
+        p = {"inputs": ["in_smart_meter"], "schedule": ["sc_time"], "brain": ["br_gemini"], "actions": ["ac_reduce"], "outputs": ["ou_plugs"], "safety": []}
+        result = policy.compile_policy(p, self.PEAK_HIGHLOAD)
+        setpoints = [c["params"]["setpoint_c"] for c in result["commands"] if c["action"] == "set_thermostat_setpoint"]
+        self.assertTrue(setpoints and setpoints[0] <= 19)
+
+    def test_brain_bias_changes_setpoint(self):
+        base = {"inputs": [], "schedule": ["sc_time"], "actions": ["ac_reduce"], "outputs": ["ou_plugs"], "safety": []}
+        claude = policy.compile_policy({**base, "brain": ["br_claude"]}, self.SUNNY)
+        chatgpt = policy.compile_policy({**base, "brain": ["br_chatgpt"]}, self.SUNNY)
+        sp = lambda r: [c["params"]["setpoint_c"] for c in r["commands"] if c["action"] == "set_thermostat_setpoint"][0]
+        self.assertEqual(sp(claude), 21)
+        self.assertEqual(sp(chatgpt), 19)
+
+    def test_ev_pause_vs_charge(self):
+        charge = policy.compile_policy({"inputs": [], "schedule": ["sc_time"], "brain": [], "actions": ["ac_shift"], "outputs": ["ou_ev"], "safety": []}, self.SUNNY)
+        self.assertTrue(any(c["params"].get("enabled") is True for c in charge["commands"] if c["target_type"] == "ev"))
+        pause = policy.compile_policy({"inputs": [], "schedule": ["sc_time"], "brain": [], "actions": ["ac_reduce"], "outputs": ["ou_ev"], "safety": []}, self.SUNNY)
+        self.assertTrue(any(c["params"].get("enabled") is False for c in pause["commands"] if c["target_type"] == "ev"))
+
+    def test_empty_pipeline_no_commands(self):
+        result = policy.compile_policy({"inputs": [], "schedule": [], "brain": [], "actions": [], "outputs": [], "safety": []}, self.SUNNY)
+        self.assertEqual(result["commands"], [])
+        self.assertTrue(result["decisions"])

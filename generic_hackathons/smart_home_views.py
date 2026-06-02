@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 
 from generic_hackathons import smart_home_blocks as blocks
 from generic_hackathons import smart_home_firebase as shf
+from generic_hackathons import smart_home_policy as policy
 from generic_hackathons.watt_views import (
     _class_id,
     _current_team,
@@ -47,25 +48,42 @@ class SmartHomeDeployView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        raw_blocks = request.data.get("blocks", [])
-        if not isinstance(raw_blocks, list):
-            return Response(
-                {"error": "blocks must be a list of block ids."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        block_ids = [str(b).strip() for b in raw_blocks if str(b).strip()]
-
-        unknown = sorted({b for b in block_ids if b not in blocks.known_block_ids()})
-        if unknown:
-            return Response(
-                {"error": f"Unknown block ids: {', '.join(unknown)}."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Path B-lite: prefer a structured `pipeline` (Inputs/Schedule/Brain/Actions/Outputs/Safety)
+        # which the server compiles against live game state. Fall back to a flat `blocks` list.
+        pipeline = request.data.get("pipeline")
+        use_pipeline = isinstance(pipeline, dict)
+        block_ids = []
+        if not use_pipeline:
+            raw_blocks = request.data.get("blocks", [])
+            if not isinstance(raw_blocks, list):
+                return Response(
+                    {"error": "Provide a pipeline object or a blocks list."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            block_ids = [str(b).strip() for b in raw_blocks if str(b).strip()]
+            unknown = sorted({b for b in block_ids if b not in blocks.known_block_ids()})
+            if unknown:
+                return Response(
+                    {"error": f"Unknown block ids: {', '.join(unknown)}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            all_ids = [
+                str(b).strip()
+                for slot in pipeline.values() if isinstance(slot, list)
+                for b in slot if str(b).strip()
+            ]
+            unknown = sorted({b for b in all_ids if b not in policy.KNOWN_PIPELINE_IDS})
+            if unknown:
+                return Response(
+                    {"error": f"Unknown pipeline block ids: {', '.join(unknown)}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         class_id = _class_id()
         household_id = _household_id(team)
 
-        # Need the live game tick to stamp commands, or Unity rejects them as stale.
+        # Need the live game tick (and live state for the policy), or Unity rejects commands as stale.
         try:
             observation = shf.read_observation(class_id, household_id)
         except Exception as exc:  # noqa: BLE001
@@ -80,7 +98,16 @@ class SmartHomeDeployView(APIView):
             )
         tick = shf.read_current_tick(observation)
 
-        specs = blocks.compile_blocks(block_ids)
+        decisions = []
+        brain_label = None
+        if use_pipeline:
+            compiled = policy.compile_policy(pipeline, observation)
+            specs = compiled["commands"]
+            decisions = compiled["decisions"]
+            brain_label = compiled.get("brain")
+        else:
+            specs = blocks.compile_blocks(block_ids)
+
         commands = []
         rows = []
         for spec in specs:
@@ -95,7 +122,7 @@ class SmartHomeDeployView(APIView):
             rows.append(
                 {
                     "command_id": command["command_id"],
-                    "block_id": spec["block_id"],
+                    "block_id": spec.get("block_id"),
                     "action": spec["action"],
                     "target_id": spec["target_id"],
                 }
@@ -115,6 +142,59 @@ class SmartHomeDeployView(APIView):
                 "tick_seen": tick,
                 "deployed_count": len(written),
                 "commands": rows,
+                "decisions": decisions,
+                "brain": brain_label,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SmartHomeStateView(APIView):
+    """Live status for the web meta-layer: goal/day/wallet/cost/comfort, read from the
+    score summary + observation the streamed game already publishes each tick."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        hackathon = _get_watt_hackathon()
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response(
+                {"error": "Join or create a Watt team to view your smart home."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        class_id = _class_id()
+        household_id = _household_id(team)
+        try:
+            observation = shf.read_observation(class_id, household_id)
+            score = shf.read_score(class_id, household_id)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"error": f"Could not reach the smart-home game state: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        obs = observation if isinstance(observation, dict) else {}
+        sc = score if isinstance(score, dict) else {}
+        tariff = obs.get("tariff") or {}
+        weather = obs.get("weather") or {}
+        live = isinstance(observation, dict) and shf.is_observation_live(observation, shf.now_ms())
+
+        return Response(
+            {
+                "live": live,
+                "household_id": household_id,
+                "day": sc.get("day") if sc.get("day") is not None else obs.get("day"),
+                "tick": obs.get("tick"),
+                "game_time": obs.get("game_time"),
+                "wallet": sc.get("money"),
+                "cost": sc.get("energy_cost"),
+                "energy_kwh": sc.get("energy_kwh"),
+                "comfort": sc.get("mood"),
+                "score": sc.get("score"),
+                "tariff_period": tariff.get("period"),
+                "weather_condition": weather.get("condition"),
             },
             status=status.HTTP_200_OK,
         )

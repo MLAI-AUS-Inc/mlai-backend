@@ -54,6 +54,15 @@ def read_observation(class_id, household_id):
     return rtdb_get(observations_current_path(class_id, household_id))
 
 
+def score_current_path(class_id, household_id):
+    return f"{household_root(class_id, household_id)}/score/current"
+
+
+def read_score(class_id, household_id):
+    """Return the current published score summary dict (wallet/cost/mood/day/...), or ``None``."""
+    return rtdb_get(score_current_path(class_id, household_id))
+
+
 def read_current_tick(observation):
     """Extract the integer game tick from an observation dict (defaults to 0)."""
     if not isinstance(observation, dict):
