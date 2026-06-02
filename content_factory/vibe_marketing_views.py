@@ -6108,9 +6108,15 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     setup_meta = _setup_metadata_from_run(setup_run) if setup_run else {}
     setup_status = setup_meta.get("setupStatus") or setup_gate.get("setupStatus") or (setup_run.status if setup_run else "") or ""
     setup_run_id = setup_meta.get("setupRunId") or setup_gate.get("setupRunId") or (setup_run.run_id if setup_run else "") or ""
+    # Derive the saved/selected route from EXPLICIT setup signals only — a user
+    # selection stored in `pending`, or a real setup run's metadata. NOT from the
+    # scan-derived `article_system`: a scan that merely *detects* an existing blog
+    # surface should pre-fill the step-3 route picker, not make the wizard report
+    # setup as already complete (which made "Reset articles setup" appear to do
+    # nothing and hid the Build action behind a stale "scaffold is live" view).
     route_path = _article_setup_state_value(
         pending,
-        article_system,
+        setup_meta,
         keys=("routePath", "route_path", "path", "publicPath", "public_path", "listingPath", "listing_path"),
     )
     preview_url = setup_meta.get("previewUrl") or setup_gate.get("previewUrl") or ""
@@ -10517,6 +10523,51 @@ class VibeMarketingArticleSystemSetupView(APIView):
         )
 
 
+def _delete_article_setup_scaffold_branches(config, *, limit: int = 10) -> dict:
+    """Best-effort cleanup of generated article-setup scaffold branches.
+
+    Asks content-factory to cancel recent ``article_system_setup`` runs for this
+    repo, which deletes the generated ``feature/...-publish-route-...`` branch that
+    run created. Content factory only removes branches it owns and skips when a PR
+    is open, so this is safe. Never raises — reset must not depend on the relay.
+    """
+    repo = str(getattr(config, "github_repo", "") or "").strip()
+    organization = getattr(config, "organization", None)
+    domain = str(getattr(organization, "domain", "") or "").strip()
+    if not repo or not domain:
+        return {"status": "skipped", "reason": "missing_repo_or_domain"}
+    try:
+        runs = list(
+            ContentFactoryRun.objects.filter(
+                domain=domain,
+                workflow="article_system_setup",
+                github_repo__iexact=repo,
+            )
+            .exclude(status=ContentFactoryRunStatus.CANCELLED)
+            .order_by("-updated_at")[:limit]
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("article_setup_reset_branch_lookup_failed repo=%s error=%s", repo, exc)
+        return {"status": "error", "error": str(exc)}
+    results = []
+    for run in runs:
+        run_id = str(getattr(run, "run_id", "") or "").strip()
+        if not run_id:
+            continue
+        try:
+            remote = _call_content_factory_run_action(
+                run_id=run_id,
+                action="cancel",
+                payload={},
+                workflow="article_system_setup",
+            )
+            results.append({"runId": run_id, "status": "requested", "remote": remote})
+        except Exception as exc:
+            logger.warning("article_setup_reset_branch_cleanup_failed run_id=%s error=%s", run_id, exc)
+            results.append({"runId": run_id, "status": "error", "error": str(exc)})
+    return {"status": "requested" if results else "skipped", "runs": results}
+
+
 class VibeMarketingArticleSetupResetView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -10531,9 +10582,13 @@ class VibeMarketingArticleSetupResetView(APIView):
         if configured_repo and configured_repo.lower() != github_repo.lower():
             return Response({"detail": "Repository does not match the connected project."}, status=status.HTTP_409_CONFLICT)
 
-        # The persisted setup state lives in this service's
-        # OrganizationContentConfig, so reset stays local and avoids a
-        # re-entrant backend -> content-factory -> backend relay.
+        # Best-effort: delete the generated scaffold branch(es) in content-factory
+        # before clearing local state (the runs are still resolvable here). Content
+        # factory only deletes branches it generated and skips when a PR is open, so
+        # this is safe; failures never block the local reset.
+        scaffold_cleanup = _delete_article_setup_scaffold_branches(config)
+        # The persisted setup state lives in this service's OrganizationContentConfig,
+        # so the local clear is the source of truth that _article_setup_state reads.
         reset_payload = reset_article_setup_config(config, github_repo=github_repo)
         latest_runs = _latest_runs_for_org(context.organization, limit=12)
         article_setup_state = _article_setup_state(
@@ -10543,7 +10598,7 @@ class VibeMarketingArticleSetupResetView(APIView):
         return Response(
             {
                 **reset_payload,
-                "remote": {},
+                "remote": scaffold_cleanup,
                 "articleSetupState": article_setup_state,
                 "article_setup_state": article_setup_state,
             },
