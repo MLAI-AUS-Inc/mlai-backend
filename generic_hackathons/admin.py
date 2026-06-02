@@ -5,6 +5,7 @@ from .models import (
     GenericHackathonResource,
     GenericHackathonSubmission,
     GenericHackathonTeam,
+    WattTheHackSettings,
 )
 
 
@@ -35,3 +36,13 @@ class GenericHackathonResourceAdmin(admin.ModelAdmin):
     list_display = ('title', 'hackathon', 'category', 'order')
     list_filter = ('hackathon', 'category')
     search_fields = ('title', 'summary', 'body')
+
+
+@admin.register(WattTheHackSettings)
+class WattTheHackSettingsAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        # Restrict adding new objects since it's a singleton
+        return False if self.model.objects.count() > 0 else super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Any
 
 from django.conf import settings
+
+# Point the WTH engine to the local scenarios folder synced directly to mlai-backend
+os.environ["SCENARIOS_DATA_DIR"] = os.path.join(settings.BASE_DIR, "scenarios")
+
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from generic_hackathons.models import GenericHackathonTeam
+from generic_hackathons.models import GenericHackathonTeam, WattTheHackSettings
 
 from .engine import ensure_engine_importable
 from .serializers import InitRequestSerializer, RunRequestSerializer, StepRequestSerializer
@@ -50,15 +55,20 @@ def _settings_list(name: str, default: list[str]) -> list[str]:
 
 
 def _unlocked_scenarios() -> set[str]:
-    default = {"t1_welcome", "t2_first_code"}
-    unlocked = set(_settings_list("WATT_THE_HACK_UNLOCKED_SCENARIOS", list(default)))
-    if getattr(settings, "WATT_THE_HACK_AUTO_UNLOCK", True):
+    db_settings = WattTheHackSettings.get_settings()
+    unlocked_list = [
+        item.strip() 
+        for item in db_settings.unlocked_scenarios.replace(",", " ").split() 
+        if item.strip()
+    ]
+    unlocked = set(unlocked_list)
+    if db_settings.auto_unlock:
         unlocked.update(s["id"] for s in list_scenarios(include_judging=False))
     return unlocked
 
 
 def _sim_access_allowed(user) -> bool:
-    if not getattr(settings, "WATT_THE_HACK_REQUIRE_TEAM_FOR_SIM", False):
+    if not WattTheHackSettings.get_settings().require_team_for_sim:
         return True
     return GenericHackathonTeam.objects.filter(
         hackathon__slug=WATT_THE_HACK_SLUG,

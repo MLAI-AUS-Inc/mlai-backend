@@ -1,0 +1,29 @@
+id: evening_peak_vic_jul09
+title: "Victorian Winter Rush"
+archetype: evening_peak
+pool: training
+
+# Data source - real AEMO day, Victoria 9 July 2024
+data_source: aemo
+aemo:
+  region: VIC
+  date: "2024-07-09"
+  scaling_mode: scale_up_engine
+
+forecast:
+  horizon_steps: 16          # 4 hours of lookahead
+  sigma_0: 6.0               # MW - winter forecasts are noisier than spring
+  sigma_growth: 1.0
+  # seed omitted- training scenario; randomised per playground run
+
+narrative:
+  one_liner: "Victoria, cold Tuesday in July 2024. Demand surged 800 MW between 5 PM and 7 PM."
+  teaching_moment: "The grid stress you face at 6 PM was decided by your choices at noon. A half-charged battery during cheap solar midday is debt collected at peak time."
+  real_event: "AEMO issued a Medium Term PASA advisory at 16:30 requesting voluntary demand response as VIC demand approached the regional reference node cap. Price reached $14,500/MWh at 18:15."
+  hero_chart_url: ""
+
+# Per-scenario scoring- stability matters more on a peak-stress day
+scoring:
+  weight_cost: 1.0
+  weight_renewable: 0.8
+  weight_stability: 1.2

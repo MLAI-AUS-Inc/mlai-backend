@@ -131,3 +131,31 @@ class GenericHackathonResource(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.hackathon.slug})"
+
+
+class WattTheHackSettings(models.Model):
+    unlocked_scenarios = models.CharField(
+        max_length=2000,
+        default="t1_welcome,t2_first_code",
+        help_text="Comma-separated list of unlocked scenario IDs (e.g. 't1_welcome,t2_first_code,s1_duck_curve')",
+    )
+    auto_unlock = models.BooleanField(
+        default=True,
+        help_text="If checked, all scenarios NOT marked as judging will be unlocked automatically.",
+    )
+    require_team_for_sim = models.BooleanField(
+        default=False,
+        help_text="If checked, users must be in a WTH team to use the sandbox.",
+    )
+    
+    class Meta:
+        verbose_name = "Watt The Hack Settings"
+        verbose_name_plural = "Watt The Hack Settings"
+
+    def __str__(self):
+        return "Watt The Hack Settings"
+
+    @classmethod
+    def get_settings(cls):
+        obj, created = cls.objects.get_or_create(id=1)
+        return obj
