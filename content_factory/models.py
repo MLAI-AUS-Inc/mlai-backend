@@ -810,6 +810,9 @@ class WrittenArticle(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['organization', 'primary_keyword']),
+            # Covers build_topic_coverage_memory's filter(organization).order_by('-created_at'),
+            # run on every bootstrap/navigation.
+            models.Index(fields=['organization', '-created_at'], name='wa_org_created_idx'),
         ]
 
     def __str__(self):
