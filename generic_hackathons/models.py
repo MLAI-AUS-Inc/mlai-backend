@@ -58,6 +58,34 @@ class GenericHackathonTeam(models.Model):
         return f"{self.team_name} ({self.hackathon.slug})"
 
 
+class GenericHackathonJoinRequest(models.Model):
+    """A pending request to join a team. The leader accepts (-> member) or rejects/cancels (-> row
+    deleted), so an existing row always represents a *pending* request."""
+    team = models.ForeignKey(
+        GenericHackathonTeam,
+        on_delete=models.CASCADE,
+        related_name='join_requests',
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='generic_hackathon_join_requests',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['team', 'user'],
+                name='unique_generic_hackathon_join_request',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} -> {self.team.team_name}"
+
+
 class GenericHackathonSubmission(models.Model):
     hackathon = models.ForeignKey(
         'core.Hackathon',
