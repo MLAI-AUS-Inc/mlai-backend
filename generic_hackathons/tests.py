@@ -49,7 +49,7 @@ class GenericHackathonApiTests(TestCase):
         self.assertEqual(response.data['team']['code'], 'TEAM1')
         self.assertTrue(GenericHackathonTeam.objects.get(team_name='Grid Builders').members.filter(id=self.user.id).exists())
 
-    def test_join_team_accepts_code_and_switches_existing_team(self):
+    def test_join_while_on_a_team_is_blocked(self):
         old_team = GenericHackathonTeam.objects.create(hackathon=self.hackathon, team_name='Old Team')
         new_team = GenericHackathonTeam.objects.create(hackathon=self.hackathon, team_name='New Team')
         old_team.members.add(self.user)
@@ -60,12 +60,12 @@ class GenericHackathonApiTests(TestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['team_name'], 'New Team')
-        self.assertFalse(old_team.members.filter(id=self.user.id).exists())
-        self.assertTrue(new_team.members.filter(id=self.user.id).exists())
+        # Phase 3: joining is a request, and you must leave your current team first.
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(old_team.members.filter(id=self.user.id).exists())
+        self.assertFalse(new_team.members.filter(id=self.user.id).exists())
 
-    def test_join_team_accepts_name(self):
+    def test_join_team_creates_pending_request(self):
         team = GenericHackathonTeam.objects.create(hackathon=self.hackathon, team_name='Name Team')
 
         response = self.client.post(
@@ -74,9 +74,11 @@ class GenericHackathonApiTests(TestCase):
             format='json',
         )
 
-        self.assertEqual(response.status_code, 200)
+        # Phase 3: a teamless user's join is a pending request, not instant membership.
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['pending'])
         self.assertEqual(response.data['team_name'], 'Name Team')
-        self.assertTrue(team.members.filter(id=self.user.id).exists())
+        self.assertFalse(team.members.filter(id=self.user.id).exists())
 
     def test_join_team_enforces_max_six_members(self):
         team = GenericHackathonTeam.objects.create(hackathon=self.hackathon, team_name='Full Team')
