@@ -993,8 +993,8 @@
       "stability_abs": 17092.29,
       "unmet": 5.0,
       "renewable": 0.2249,
-      "naive_cost": 1409587.57,
-      "optimal_cost": 1431149.83
+      "naive_cost": 3206093.365000001,
+      "optimal_cost": 1286587.8219385257
     },
     "weights": {
       "cost": 1.0,

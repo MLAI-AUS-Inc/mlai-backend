@@ -920,13 +920,26 @@
     {
       "id": "d1_gpu_sat_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 13,
       "end_step": 20,
       "title": "Forecast Bias: Day 1 \u2014 GPU cluster saturation",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 55.0
+    },
+    {
+      "id": "d1_gpu_sat_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 13,
+      "end_step": 20,
+      "title": "Price Lag: Day 1 \u2014 GPU cluster saturation",
+      "description": "Spot price forecast is understating the true cost of imports. Price will catch up in 2-3 steps.",
+      "icon": "trending-down",
+      "bias": -0.42
     },
     {
       "id": "d1_oversupply",
@@ -1021,13 +1034,26 @@
     {
       "id": "d1_peak_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 80,
       "end_step": 86,
       "title": "Forecast Bias: Day 1 \u2014 Peak GPU load: production inference surge",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 45.0
+    },
+    {
+      "id": "d1_peak_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 80,
+      "end_step": 86,
+      "title": "Price Lag: Day 1 \u2014 Peak GPU load",
+      "description": "Spot price forecast is understating the true cost of imports. Price will catch up in 2-3 steps.",
+      "icon": "trending-down",
+      "bias": -0.12
     },
     {
       "id": "d1_idle",
@@ -1062,13 +1088,26 @@
     {
       "id": "d2_gpu_sat_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 108,
       "end_step": 116,
       "title": "Forecast Bias: Day 2 \u2014 GPU cluster saturation",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 45.0
+    },
+    {
+      "id": "d2_gpu_sat_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 108,
+      "end_step": 116,
+      "title": "Price Lag: Day 2 \u2014 GPU cluster saturation",
+      "description": "Price lag is wider today than Day 1. Forecast price will understate true import cost for longer.",
+      "icon": "trending-down",
+      "bias": -0.45
     },
     {
       "id": "d2_oversupply",
@@ -1133,13 +1172,26 @@
     {
       "id": "d2_peak_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 177,
       "end_step": 183,
       "title": "Forecast Bias: Day 2 \u2014 Peak GPU load: production inference",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 55.0
+    },
+    {
+      "id": "d2_peak_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 177,
+      "end_step": 183,
+      "title": "Price Lag: Day 2 \u2014 Peak GPU load",
+      "description": "Spot price forecast is understating the true cost of imports. Price will catch up in 2-3 steps.",
+      "icon": "trending-down",
+      "bias": -0.35
     },
     {
       "id": "d2_idle",
@@ -1174,13 +1226,26 @@
     {
       "id": "d3_gpu_sat_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 205,
       "end_step": 213,
       "title": "Forecast Bias: Day 3 \u2014 GPU cluster saturation: longest event",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 55.0
+    },
+    {
+      "id": "d3_gpu_sat_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 205,
+      "end_step": 213,
+      "title": "Price Lag: Day 3 \u2014 GPU cluster saturation",
+      "description": "Price lag is at its most severe today. Spot price understates true import cost by the widest margin of the period.",
+      "icon": "trending-down",
+      "bias": -0.18
     },
     {
       "id": "d3_oversupply",
@@ -1235,13 +1300,26 @@
     {
       "id": "d3_peak_bias",
       "type": "forecast_bias",
+      "channel": "demand",
       "severity": "high",
       "at_step": 270,
       "end_step": 278,
       "title": "Forecast Bias: Day 3 \u2014 Peak GPU load: longest sustained event",
       "description": "The raw demand forecast is significantly underestimating true load during this regime.",
       "icon": "alert-triangle",
-      "bias": 25.0
+      "bias": 45.0
+    },
+    {
+      "id": "d3_peak_price_lag",
+      "type": "forecast_bias",
+      "channel": "demand",
+      "severity": "high",
+      "at_step": 270,
+      "end_step": 278,
+      "title": "Price Lag: Day 3 \u2014 Peak GPU load",
+      "description": "Price lag at maximum. Spot price at onset is far below true import cost.",
+      "icon": "trending-down",
+      "bias": -0.18
     },
     {
       "id": "d3_idle",
@@ -1274,8 +1352,8 @@
       "stability_abs": 61218.0,
       "unmet": 29.0,
       "renewable": 0.2995,
-      "naive_cost": 1302380.0,
-      "optimal_cost": 1172580.0
+      "naive_cost": 5761717.15,
+      "optimal_cost": 1728536.32
     },
     "weights": {
       "cost": 1.0,
