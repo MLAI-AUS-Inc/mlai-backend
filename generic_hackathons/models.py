@@ -23,6 +23,22 @@ class GenericHackathonTeam(models.Model):
         null=True,
         blank=True,
     )
+    # FastAPI eval-server credentials, populated by the
+    # `approve_teams_for_eval` admin action. Together they form the auth pair
+    # participants paste into the WTH submission portal — neither value alone
+    # lets a team submit, so both are populated atomically or not at all.
+    eval_token = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Plaintext token issued by the eval gateway (stored in teams.token_hash on the cluster).",
+    )
+    eval_team_uuid = models.UUIDField(
+        blank=True,
+        null=True,
+        unique=True,
+        help_text="teams.id UUID from the eval gateway. Participants paste this into the portal Team ID field.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -22,6 +22,13 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
     member_count = serializers.SerializerMethodField()
     members = serializers.SerializerMethodField()
     leader_id = serializers.SerializerMethodField()
+    # The eval credentials are a pair — both are sensitive (the UUID identifies
+    # the team to the eval cluster and, together with the token, lets anyone
+    # submit on the team's behalf). Both go through the same member-check, so
+    # any future list endpoint that wires up this serializer can't accidentally
+    # leak either half. Non-members see `null` for both.
+    eval_token = serializers.SerializerMethodField()
+    eval_team_uuid = serializers.SerializerMethodField()
 
     class Meta:
         model = GenericHackathonTeam
@@ -34,10 +41,12 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
             'member_count',
             'members',
             'leader_id',
+            'eval_token',
+            'eval_team_uuid',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'team_id', 'code', 'member_count', 'members', 'leader_id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'team_id', 'code', 'member_count', 'members', 'leader_id', 'eval_token', 'eval_team_uuid', 'created_at', 'updated_at']
 
     def get_code(self, obj):
         return obj.code
@@ -47,6 +56,22 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
 
     def get_leader_id(self, obj):
         return obj.leader_id
+
+    def _requesting_member(self, obj) -> bool:
+        """Whether the request's user belongs to this team."""
+        request = self.context.get('request')
+        if not (request and request.user and request.user.is_authenticated):
+            return False
+        return obj.members.filter(id=request.user.id).exists()
+
+    def get_eval_token(self, obj):
+        return obj.eval_token if self._requesting_member(obj) else None
+
+    def get_eval_team_uuid(self, obj):
+        # UUIDField → str so the JSON wire format is stable. None for non-members.
+        if not self._requesting_member(obj):
+            return None
+        return str(obj.eval_team_uuid) if obj.eval_team_uuid else None
 
     def get_members(self, obj):
         leader_id = obj.leader_id
