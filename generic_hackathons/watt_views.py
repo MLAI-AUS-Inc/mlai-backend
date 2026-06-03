@@ -40,9 +40,13 @@ def _get_watt_hackathon():
 
 
 def _current_team(user, hackathon):
+    # Deterministic resolution: a user on >1 Watt team must always resolve to the SAME
+    # household, or their stream/deploy/shop could hop between teams across requests and
+    # laptops. Order by pk (earliest team the user joined wins) so it is stable everywhere.
     return (
         GenericHackathonTeam.objects
         .filter(hackathon=hackathon, members=user)
+        .order_by("pk")
         .prefetch_related("members")
         .first()
     )
