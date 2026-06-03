@@ -997,8 +997,8 @@
       "stability_abs": 8143.0,
       "unmet": 5.0,
       "renewable": 0.3348,
-      "naive_cost": 975594.6,
-      "optimal_cost": 852112.07
+      "naive_cost": 975594.5999999994,
+      "optimal_cost": 852112.0737802947
     },
     "baseline_breakdown": {
       "tariff_import": 813229.25,

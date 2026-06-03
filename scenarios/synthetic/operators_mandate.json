@@ -999,7 +999,7 @@
       "at_step": 168,
       "end_step": 184,
       "min_soc_floor": 0.8,
-      "penalty_multiplier": 0.5,
+      "penalty_multiplier": 1.0,
       "title": "AEMO Augmented Reserve Window (Day 2)",
       "description": "Engine-enforced. Active simultaneously with the SES window. Operators must arbitrate: life-safety overrides reserve.",
       "icon": "shield"
@@ -1112,8 +1112,8 @@
       "stability_abs": 12634.27,
       "unmet": 5.0,
       "renewable": 0.3584,
-      "naive_cost": 45309359.9,
-      "optimal_cost": 28675052.99
+      "naive_cost": 45310996.798873626,
+      "optimal_cost": 26561513.231675807
     },
     "baseline_breakdown": {
       "tariff_import": 32762209.2,
@@ -1127,7 +1127,7 @@
       "ramp_charge": 12634.27,
       "fcas_revenue": 0.0,
       "fcas_ramp_charge": 0.0,
-      "compliance_penalty": 63800000.0,
+      "compliance_penalty": 12800000.0,
       "ids_cost": 0.0,
       "diesel_ban_penalty": 0.0,
       "fcas_dispatch_bonus": 0.0,

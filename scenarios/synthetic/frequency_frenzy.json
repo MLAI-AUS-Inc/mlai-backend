@@ -1,6 +1,6 @@
 {
-  "id": "melbourne_cold_winter",
-  "title": "Melbourne Cold Winter",
+  "id": "frequency_frenzy",
+  "title": "Frequency Frenzy (Melbourne)",
   "archetype": "multi_peak",
   "pool": "synthetic",
   "data_source": "synthetic",
@@ -994,7 +994,7 @@
       "unmet": 5.0,
       "renewable": 0.2249,
       "naive_cost": 3206093.365000001,
-      "optimal_cost": 1286587.8219385257
+      "optimal_cost": 1431149.8373061211
     },
     "weights": {
       "cost": 1.0,
