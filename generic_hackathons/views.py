@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from core.models import Hackathon
 from .models import (
     GenericHackathonAnnouncement,
+    GenericHackathonJoinRequest,
     GenericHackathonResource,
     GenericHackathonSubmission,
     GenericHackathonTeam,
@@ -125,36 +126,46 @@ class GenericHackathonTeamListCreateView(APIView):
         if not team_name:
             return Response({'error': 'team_name is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        team = GenericHackathonTeam.objects.filter(
+        existing = GenericHackathonTeam.objects.filter(
             hackathon=hackathon,
             team_name__iexact=team_name,
         ).first()
-        created = False
-        if team is None:
-            try:
-                team = GenericHackathonTeam.objects.create(
-                    hackathon=hackathon,
-                    team_name=team_name,
-                    avatar_url=avatar_url,
+        if existing is not None:
+            # You can only "create" a team you already belong to (idempotent save). Otherwise the
+            # name is taken and you must REQUEST to join -- creating must not be an instant-join
+            # backdoor around the approval flow.
+            if existing.members.filter(id=request.user.id).exists():
+                if avatar_url and not existing.avatar_url:
+                    existing.avatar_url = avatar_url
+                    existing.save(update_fields=['avatar_url'])
+                return Response(
+                    {'created': False, 'team': GenericHackathonTeamSerializer(existing).data},
+                    status=status.HTTP_200_OK,
                 )
-                created = True
-            except IntegrityError:
-                return Response({'error': 'Team already exists.'}, status=status.HTTP_409_CONFLICT)
-        elif avatar_url and not team.avatar_url:
-            team.avatar_url = avatar_url
-            team.save(update_fields=['avatar_url'])
-
-        if not team.members.filter(id=request.user.id).exists() and team.members.count() >= GENERIC_HACKATHON_MAX_TEAM_MEMBERS:
             return Response(
-                {'error': 'Team is full.', 'max_members': GENERIC_HACKATHON_MAX_TEAM_MEMBERS},
+                {'error': f'A team named "{existing.team_name}" already exists. Search for it to request to join.'},
                 status=status.HTTP_409_CONFLICT,
             )
 
-        _switch_user_to_team(request.user, hackathon, team)
+        if _current_team(request.user, hackathon) is not None:
+            return Response(
+                {'error': 'Leave your current team before creating a new one.'},
+                status=status.HTTP_409_CONFLICT,
+            )
 
+        try:
+            team = GenericHackathonTeam.objects.create(
+                hackathon=hackathon,
+                team_name=team_name,
+                avatar_url=avatar_url,
+            )
+        except IntegrityError:
+            return Response({'error': 'Team already exists.'}, status=status.HTTP_409_CONFLICT)
+
+        _switch_user_to_team(request.user, hackathon, team)
         return Response(
-            {'created': created, 'team': GenericHackathonTeamSerializer(team).data},
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            {'created': True, 'team': GenericHackathonTeamSerializer(team).data},
+            status=status.HTTP_201_CREATED,
         )
 
 
@@ -195,14 +206,32 @@ class GenericHackathonJoinTeamView(APIView):
         if team is None:
             return Response({'error': 'Team not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if not team.members.filter(id=request.user.id).exists() and team.members.count() >= GENERIC_HACKATHON_MAX_TEAM_MEMBERS:
+        if team.members.filter(id=request.user.id).exists():
+            return Response({'error': "You're already on this team."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Must leave first: no requesting elsewhere while active on a team (prevents stream-hopping).
+        if _current_team(request.user, hackathon) is not None:
+            return Response(
+                {'error': 'Leave your current team before requesting to join another.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if team.members.count() >= GENERIC_HACKATHON_MAX_TEAM_MEMBERS:
             return Response(
                 {'error': 'Team is full.', 'max_members': GENERIC_HACKATHON_MAX_TEAM_MEMBERS},
                 status=status.HTTP_409_CONFLICT,
             )
 
-        _switch_user_to_team(request.user, hackathon, team)
-        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+        join_request, created = GenericHackathonJoinRequest.objects.get_or_create(team=team, user=request.user)
+        return Response(
+            {
+                'pending': True,
+                'request_id': join_request.id,
+                'team_id': team.team_id,
+                'team_name': team.team_name,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class GenericHackathonLeaveTeamView(APIView):
@@ -289,6 +318,127 @@ class GenericHackathonDisbandTeamView(APIView):
         team.leader = None
         team.save(update_fields=['leader'])
         return Response({'disbanded': True}, status=status.HTTP_200_OK)
+
+
+def _serialize_join_request(req):
+    user = req.user
+    return {
+        'id': req.id,
+        'user': {
+            'id': user.id,
+            'full_name': user.full_name,
+            'email': user.email,
+            'avatar_url': user.avatar_url,
+        },
+        'team_id': req.team.team_id,
+        'team_name': req.team.team_name,
+        'created_at': req.created_at.isoformat(),
+    }
+
+
+class GenericHackathonJoinRequestsView(APIView):
+    """`incoming` = requests to the team you lead; `outgoing` = your own pending requests."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, slug):
+        hackathon = _get_hackathon(slug)
+        led_team = GenericHackathonTeam.objects.filter(hackathon=hackathon, leader=request.user).first()
+        incoming = []
+        if led_team is not None:
+            incoming = [
+                _serialize_join_request(req)
+                for req in led_team.join_requests.select_related('user', 'team').all()
+            ]
+        outgoing = [
+            _serialize_join_request(req)
+            for req in (
+                GenericHackathonJoinRequest.objects
+                .filter(user=request.user, team__hackathon=hackathon)
+                .select_related('user', 'team')
+            )
+        ]
+        return Response({'incoming': incoming, 'outgoing': outgoing}, status=status.HTTP_200_OK)
+
+
+class GenericHackathonAcceptRequestView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug, request_id):
+        hackathon = _get_hackathon(slug)
+        join_request = (
+            GenericHackathonJoinRequest.objects
+            .filter(id=request_id, team__hackathon=hackathon)
+            .select_related('team', 'user')
+            .first()
+        )
+        if join_request is None:
+            return Response({'error': 'Request not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        team = join_request.team
+        if team.leader_id != request.user.id:
+            return Response(
+                {'error': 'Only the team leader can accept join requests.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        applicant = join_request.user
+        if team.members.filter(id=applicant.id).exists():
+            join_request.delete()
+            return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+        if _current_team(applicant, hackathon) is not None:
+            join_request.delete()
+            return Response(
+                {'error': 'That person already joined another team.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if team.members.count() >= GENERIC_HACKATHON_MAX_TEAM_MEMBERS:
+            return Response(
+                {'error': 'Team is full.', 'max_members': GENERIC_HACKATHON_MAX_TEAM_MEMBERS},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        team.members.add(applicant)
+        # The applicant now has a team -- clear every pending request they have in this hackathon.
+        GenericHackathonJoinRequest.objects.filter(user=applicant, team__hackathon=hackathon).delete()
+        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+
+
+class GenericHackathonRejectRequestView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug, request_id):
+        hackathon = _get_hackathon(slug)
+        join_request = (
+            GenericHackathonJoinRequest.objects
+            .filter(id=request_id, team__hackathon=hackathon)
+            .select_related('team')
+            .first()
+        )
+        if join_request is None:
+            return Response({'error': 'Request not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if join_request.team.leader_id != request.user.id:
+            return Response(
+                {'error': 'Only the team leader can reject join requests.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        join_request.delete()
+        return Response({'rejected': True}, status=status.HTTP_200_OK)
+
+
+class GenericHackathonCancelRequestView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug, request_id):
+        hackathon = _get_hackathon(slug)
+        deleted, _ = (
+            GenericHackathonJoinRequest.objects
+            .filter(id=request_id, team__hackathon=hackathon, user=request.user)
+            .delete()
+        )
+        if not deleted:
+            return Response({'error': 'Request not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'cancelled': True}, status=status.HTTP_200_OK)
 
 
 class GenericHackathonSubmissionListCreateView(APIView):
