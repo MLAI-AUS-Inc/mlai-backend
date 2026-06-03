@@ -23,6 +23,7 @@ from .serializers import (
 
 
 GENERIC_HACKATHON_MAX_TEAM_MEMBERS = 6
+GENERIC_HACKATHON_MIN_TEAM_MEMBERS = 2
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 ALLOWED_ATTACHMENT_CONTENT_TYPES = {
     'application/pdf',
@@ -71,6 +72,11 @@ def _switch_user_to_team(user, hackathon, team):
         if existing_team.id != team.id:
             existing_team.members.remove(user)
     team.members.add(user)
+    # The creator of a team (its first member) becomes its leader; this also re-seeds a leader for
+    # a team that was left leaderless (e.g. after a disband).
+    if team.leader_id is None:
+        team.leader = user
+        team.save(update_fields=['leader'])
 
 
 def _validate_attachment(file_obj):
@@ -197,6 +203,92 @@ class GenericHackathonJoinTeamView(APIView):
 
         _switch_user_to_team(request.user, hackathon, team)
         return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+
+
+class GenericHackathonLeaveTeamView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug):
+        hackathon = _get_hackathon(slug)
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response({'error': 'You are not on a team.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        member_count = team.members.count()
+        # Per design: the leader must hand off (or disband) before leaving a populated team.
+        if team.leader_id == request.user.id and member_count > 1:
+            return Response(
+                {'error': 'Transfer leadership to a teammate before leaving, or disband the team.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Min-2 guard: don't let a leave drop the team below the playable size.
+        if member_count <= GENERIC_HACKATHON_MIN_TEAM_MEMBERS:
+            return Response(
+                {
+                    'error': (
+                        f'Your team needs at least {GENERIC_HACKATHON_MIN_TEAM_MEMBERS} members — '
+                        'leaving would drop it below that. Ask the leader to disband instead.'
+                    ),
+                    'min_members': GENERIC_HACKATHON_MIN_TEAM_MEMBERS,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        team.members.remove(request.user)
+        return Response({'left': True}, status=status.HTTP_200_OK)
+
+
+class GenericHackathonTransferLeadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug):
+        hackathon = _get_hackathon(slug)
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response({'error': 'You are not on a team.'}, status=status.HTTP_400_BAD_REQUEST)
+        if team.leader_id != request.user.id:
+            return Response(
+                {'error': 'Only the team leader can transfer leadership.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            new_leader_id = int(request.data.get('member_id') or request.data.get('user_id') or 0)
+        except (TypeError, ValueError):
+            new_leader_id = 0
+        if not new_leader_id:
+            return Response({'error': 'member_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_leader_id == request.user.id:
+            return Response({'error': 'You are already the leader.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_leader = team.members.filter(id=new_leader_id).first()
+        if new_leader is None:
+            return Response({'error': 'That user is not on your team.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        team.leader = new_leader
+        team.save(update_fields=['leader'])
+        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+
+
+class GenericHackathonDisbandTeamView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, slug):
+        hackathon = _get_hackathon(slug)
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response({'error': 'You are not on a team.'}, status=status.HTTP_400_BAD_REQUEST)
+        if team.leader_id != request.user.id:
+            return Response(
+                {'error': 'Only the team leader can disband the team.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Empty the team (frees every member) but keep the record so FK'd submissions survive.
+        team.members.clear()
+        team.leader = None
+        team.save(update_fields=['leader'])
+        return Response({'disbanded': True}, status=status.HTTP_200_OK)
 
 
 class GenericHackathonSubmissionListCreateView(APIView):
