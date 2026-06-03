@@ -1203,8 +1203,8 @@
   },
   "scoring": {
     "baselines": {
-      "naive_cost": 4035662.0,
-      "optimal_cost": 1170907.0
+      "naive_cost": 2783395.32,
+      "optimal_cost": 1136592.79
     }
   }
 }
