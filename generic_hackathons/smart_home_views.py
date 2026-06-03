@@ -21,6 +21,7 @@ from generic_hackathons.watt_views import (
     _current_team,
     _get_watt_hackathon,
     _household_id,
+    _team_size_gate,
 )
 
 
@@ -49,6 +50,10 @@ class SmartHomeDeployView(APIView):
                 {"error": "Join or create a Watt team before deploying your smart home."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
 
         # Path B-lite: prefer a structured `pipeline` (Inputs/Schedule/Brain/Actions/Outputs/Safety)
         # which the server compiles against live game state. Fall back to a flat `blocks` list.
@@ -166,6 +171,10 @@ class SmartHomeStateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
+
         class_id = _class_id()
         household_id = _household_id(team)
         try:
@@ -216,6 +225,10 @@ class SmartHomeShopView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
+
         class_id = _class_id()
         household_id = _household_id(team)
         try:
@@ -252,6 +265,10 @@ class SmartHomeBuyView(APIView):
                 {"error": "Join or create a Watt team before buying upgrades."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
 
         item_id = str(request.data.get("item_id") or "").strip()
         if not item_id:

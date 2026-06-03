@@ -22,6 +22,11 @@ WATT_HACKATHON_SLUGS = ("watt", "watt-the-hack")
 UNITY_TICKET_CACHE_PREFIX = "watt_unity_session_ticket"
 FIREBASE_SEGMENT_RE = re.compile(r"[\.\#\$\[\]/\s]+")
 
+# A team may enter the streamed game only with 2..6 members. Max mirrors
+# GENERIC_HACKATHON_MAX_TEAM_MEMBERS in views.py; the min is enforced here and in the web gate.
+WATT_MIN_TEAM_MEMBERS = 2
+WATT_MAX_TEAM_MEMBERS = 6
+
 
 class WattUnityTicketRedeemThrottle(AnonRateThrottle):
     scope = "watt_unity_ticket_redeem"
@@ -54,6 +59,30 @@ def _class_id():
 
 def _household_id(team):
     return _firebase_segment(team.code or f"TEAM{team.pk}", f"TEAM{team.pk}")
+
+
+def _team_size_gate(team):
+    """Return a 403 ``Response`` when the team can't enter the game (needs 2..6 members), else ``None``.
+
+    Enforces the same rule as the web ``requireValidWattTeam`` gate at the source, so stream /
+    Firebase tokens and smart-home writes are never issued to an invalidly-sized team (rather
+    than merely hidden in the UI).
+    """
+    count = team.members.count()
+    if WATT_MIN_TEAM_MEMBERS <= count <= WATT_MAX_TEAM_MEMBERS:
+        return None
+    return Response(
+        {
+            "error": (
+                f"Your team needs between {WATT_MIN_TEAM_MEMBERS} and "
+                f"{WATT_MAX_TEAM_MEMBERS} members to enter the game (currently {count})."
+            ),
+            "member_count": count,
+            "min_members": WATT_MIN_TEAM_MEMBERS,
+            "max_members": WATT_MAX_TEAM_MEMBERS,
+        },
+        status=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def _ticket_ttl_seconds():
@@ -126,6 +155,10 @@ class WattUnitySessionCurrentView(APIView):
                 {"error": "Join or create a Watt team before starting a Unity session."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
 
         base_url = _vagon_stream_base_url()
         if not base_url:
@@ -225,6 +258,10 @@ class WattParticipantFirebaseTokenView(APIView):
                 {"error": "Join or create a Watt team before requesting a Firebase token."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        gate = _team_size_gate(team)
+        if gate is not None:
+            return gate
 
         class_id = _class_id()
         household_id = _household_id(team)
