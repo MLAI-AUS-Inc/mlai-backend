@@ -98,9 +98,17 @@ class SmartHomeDeployView(APIView):
                 {"error": f"Could not reach the smart-home game state: {exc}"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        if not isinstance(observation, dict) or not shf.is_observation_live(observation, shf.now_ms()):
+        now = shf.now_ms()
+        liveness = shf.observation_liveness(observation, now)
+        if not liveness["live"]:
             return Response(
-                {"error": "Your smart home isn't live yet. Start the stream, then deploy."},
+                {
+                    "error": "Your smart home isn't live yet. Start the stream, then deploy.",
+                    "reason": liveness["reason"],
+                    "observed_household": household_id,
+                    "published_age_ms": liveness["age_ms"],
+                    "server_now_ms": now,
+                },
                 status=status.HTTP_409_CONFLICT,
             )
         tick = shf.read_current_tick(observation)
@@ -190,11 +198,13 @@ class SmartHomeStateView(APIView):
         sc = score if isinstance(score, dict) else {}
         tariff = obs.get("tariff") or {}
         weather = obs.get("weather") or {}
-        live = isinstance(observation, dict) and shf.is_observation_live(observation, shf.now_ms())
+        liveness = shf.observation_liveness(observation, shf.now_ms())
 
         return Response(
             {
-                "live": live,
+                "live": liveness["live"],
+                "live_reason": liveness["reason"],
+                "published_age_ms": liveness["age_ms"],
                 "household_id": household_id,
                 "day": sc.get("day") if sc.get("day") is not None else obs.get("day"),
                 "tick": obs.get("tick"),
@@ -283,9 +293,17 @@ class SmartHomeBuyView(APIView):
                 {"error": f"Could not reach the smart-home game state: {exc}"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        if not isinstance(observation, dict) or not shf.is_observation_live(observation, shf.now_ms()):
+        now = shf.now_ms()
+        liveness = shf.observation_liveness(observation, now)
+        if not liveness["live"]:
             return Response(
-                {"error": "Your smart home isn't live yet. Start the stream, then buy."},
+                {
+                    "error": "Your smart home isn't live yet. Start the stream, then buy.",
+                    "reason": liveness["reason"],
+                    "observed_household": household_id,
+                    "published_age_ms": liveness["age_ms"],
+                    "server_now_ms": now,
+                },
                 status=status.HTTP_409_CONFLICT,
             )
         tick = shf.read_current_tick(observation)
