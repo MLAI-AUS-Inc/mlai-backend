@@ -100,17 +100,40 @@ def observation_published_at_ms(observation):
     return published or None
 
 
+def observation_liveness(observation, now_ms_value, max_age_ms=STALE_OBSERVATION_MS):
+    """Classify whether — and *why* — an observation counts as live.
+
+    Returns a dict ``{"live", "reason", "published_at_ms", "age_ms"}`` where ``reason`` is:
+
+    - ``"live"``             fresh observation — an authority is currently publishing.
+    - ``"no_observation"``   no ``observations/current`` node at all (no game has run for this
+                             household, or the wrong household was resolved).
+    - ``"missing_timestamp"`` node exists but has no ``published_at_ms`` (an old/incompatible
+                             build that doesn't stamp it).
+    - ``"stale"``            node exists but is older than ``max_age_ms`` — a leftover frozen in
+                             the DB by a stream that has since closed.
+
+    ``age_ms = now - published`` (positive ⇒ observation is in the past; a large negative value
+    would indicate the backend clock is well behind the game's). ``abs()`` keeps modest
+    backend/game clock skew either way from reading a live game as dead.
+    """
+    if not isinstance(observation, dict):
+        return {"live": False, "reason": "no_observation", "published_at_ms": None, "age_ms": None}
+    published = observation_published_at_ms(observation)
+    if published is None:
+        return {"live": False, "reason": "missing_timestamp", "published_at_ms": None, "age_ms": None}
+    age_ms = now_ms_value - published
+    if abs(age_ms) <= max_age_ms:
+        return {"live": True, "reason": "live", "published_at_ms": published, "age_ms": age_ms}
+    return {"live": False, "reason": "stale", "published_at_ms": published, "age_ms": age_ms}
+
+
 def is_observation_live(observation, now_ms_value, max_age_ms=STALE_OBSERVATION_MS):
     """True if the game published this observation recently (i.e. an authority is running).
 
-    A frozen/leftover observation from a closed stream stays in the DB indefinitely; comparing
-    its ``published_at_ms`` to ``now`` distinguishes a live game from a dead one. Uses abs() so
-    modest backend/game clock skew either way doesn't read a live game as dead.
+    Thin wrapper over :func:`observation_liveness` (kept for existing callers/tests).
     """
-    published = observation_published_at_ms(observation)
-    if published is None:
-        return False
-    return abs(now_ms_value - published) <= max_age_ms
+    return observation_liveness(observation, now_ms_value, max_age_ms)["live"]
 
 
 def build_command(action, target_type, target_id, params, tick_seen,

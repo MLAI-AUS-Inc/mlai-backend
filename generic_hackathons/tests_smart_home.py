@@ -96,6 +96,29 @@ class ObservationLivenessTests(SimpleTestCase):
         now = 1_000_000
         self.assertFalse(shf.is_observation_live({"published_at_ms": now - 60_000}, now))
 
+    def test_liveness_classifies_reason(self):
+        now = 1_000_000
+        # absent node vs node-without-timestamp are distinguished
+        self.assertEqual(shf.observation_liveness(None, now)["reason"], "no_observation")
+        self.assertEqual(shf.observation_liveness({}, now)["reason"], "missing_timestamp")
+        fresh = shf.observation_liveness({"published_at_ms": now - 3_000}, now)
+        self.assertTrue(fresh["live"])
+        self.assertEqual(fresh["reason"], "live")
+        self.assertEqual(fresh["age_ms"], 3_000)
+        stale = shf.observation_liveness({"published_at_ms": now - 60_000}, now)
+        self.assertFalse(stale["live"])
+        self.assertEqual(stale["reason"], "stale")
+        self.assertEqual(stale["age_ms"], 60_000)
+
+    def test_liveness_matches_is_observation_live(self):
+        # The boolean wrapper must agree with the classifier for every case.
+        now = 1_000_000
+        for obs in (None, {}, {"published_at_ms": now - 3_000}, {"published_at_ms": now - 60_000}):
+            self.assertEqual(
+                shf.is_observation_live(obs, now),
+                shf.observation_liveness(obs, now)["live"],
+            )
+
 
 class ShopContractTests(SimpleTestCase):
     """Lock the 2C shop/buy contract against Unity's HackathonFirebasePaths / authority."""
