@@ -7,6 +7,8 @@ exact Firebase path the streamed Unity game already listens to.
     GET  /api/v1/hackathons/watt/smart-home/blocks/   -> palette catalog
     POST /api/v1/hackathons/watt/smart-home/deploy/   -> compile placed blocks -> write commands
 """
+import time
+
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -196,5 +198,115 @@ class SmartHomeStateView(APIView):
                 "tariff_period": tariff.get("period"),
                 "weather_condition": weather.get("condition"),
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SmartHomeShopView(APIView):
+    """Return the upgrades shop the streamed game publishes (visible catalog items + wallet)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        hackathon = _get_watt_hackathon()
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response(
+                {"error": "Join or create a Watt team to view the shop."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        class_id = _class_id()
+        household_id = _household_id(team)
+        try:
+            shop = shf.read_shop(class_id, household_id)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"error": f"Could not reach the shop: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        shop = shop if isinstance(shop, dict) else {}
+        items = shop.get("items") if isinstance(shop.get("items"), list) else []
+        return Response(
+            {
+                "available": bool(shop),
+                "day": shop.get("day"),
+                "wallet": shop.get("wallet"),
+                "items": items,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SmartHomeBuyView(APIView):
+    """Buy a catalog upgrade by writing a purchase_upgrade command to the streamed game."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        hackathon = _get_watt_hackathon()
+        team = _current_team(request.user, hackathon)
+        if team is None:
+            return Response(
+                {"error": "Join or create a Watt team before buying upgrades."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item_id = str(request.data.get("item_id") or "").strip()
+        if not item_id:
+            return Response({"error": "item_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        class_id = _class_id()
+        household_id = _household_id(team)
+        try:
+            observation = shf.read_observation(class_id, household_id)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"error": f"Could not reach the smart-home game state: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if not isinstance(observation, dict) or not shf.is_observation_live(observation, shf.now_ms()):
+            return Response(
+                {"error": "Your smart home isn't live yet. Start the stream, then buy."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        tick = shf.read_current_tick(observation)
+
+        command = shf.build_command(
+            action="purchase_upgrade", target_type="upgrade", target_id=item_id, params={}, tick_seen=tick,
+        )
+        try:
+            shf.write_commands(class_id, household_id, [command])
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"error": f"Failed to send the purchase: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        # Briefly poll for the game's verdict so the UI can show "Purchased" or the failure reason.
+        result = None
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            try:
+                result = shf.read_command_result(class_id, household_id, command["command_id"])
+            except Exception:  # noqa: BLE001
+                result = None
+            if isinstance(result, dict):
+                break
+            time.sleep(0.4)
+
+        if isinstance(result, dict):
+            return Response(
+                {
+                    "ok": bool(result.get("accepted")),
+                    "item_id": item_id,
+                    "reason": result.get("reason"),
+                    "message": result.get("message"),
+                },
+                status=status.HTTP_200_OK,
+            )
+        return Response(
+            {"ok": True, "pending": True, "item_id": item_id, "command_id": command["command_id"]},
             status=status.HTTP_200_OK,
         )

@@ -63,6 +63,15 @@ def read_score(class_id, household_id):
     return rtdb_get(score_current_path(class_id, household_id))
 
 
+def shop_current_path(class_id, household_id):
+    return f"{household_root(class_id, household_id)}/shop/current"
+
+
+def read_shop(class_id, household_id):
+    """Return the current published shop state (visible catalog items + wallet), or ``None``."""
+    return rtdb_get(shop_current_path(class_id, household_id))
+
+
 def read_current_tick(observation):
     """Extract the integer game tick from an observation dict (defaults to 0)."""
     if not isinstance(observation, dict):

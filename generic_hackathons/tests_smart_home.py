@@ -97,6 +97,44 @@ class ObservationLivenessTests(SimpleTestCase):
         self.assertFalse(shf.is_observation_live({"published_at_ms": now - 60_000}, now))
 
 
+class ShopContractTests(SimpleTestCase):
+    """Lock the 2C shop/buy contract against Unity's HackathonFirebasePaths / authority."""
+
+    def test_shop_path_matches_unity_node(self):
+        # Unity: HackathonFirebasePaths.ShopCurrent = root + "/shop/current".
+        self.assertEqual(
+            shf.shop_current_path("WATT", "TEAM1"),
+            "classes/WATT/hackathon/households/TEAM1/shop/current",
+        )
+
+    def test_shop_path_cleans_segments(self):
+        self.assertEqual(
+            shf.shop_current_path("WA.TT", "TEAM/9"),
+            "classes/WA_TT/hackathon/households/TEAM_9/shop/current",
+        )
+
+    def test_purchase_command_shape(self):
+        # Unity routes on action == "purchase_upgrade" and reads target_id as the catalog id.
+        cmd = shf.build_command(
+            action="purchase_upgrade", target_type="upgrade",
+            target_id="solar_panel_3kw", params={}, tick_seen=12,
+        )
+        self.assertEqual(cmd["action"], "purchase_upgrade")
+        self.assertEqual(cmd["target_type"], "upgrade")
+        self.assertEqual(cmd["target_id"], "solar_panel_3kw")
+        self.assertEqual(cmd["tick_seen"], 12)
+        self.assertEqual(cmd["status"], "pending")
+        self.assertTrue(cmd["command_id"])  # non-empty Firebase key
+
+    def test_purchase_command_target_id_never_empty(self):
+        # target_id MUST be non-empty or Unity rejects the command outright.
+        cmd = shf.build_command(
+            action="purchase_upgrade", target_type="upgrade",
+            target_id="", params={}, tick_seen=1,
+        )
+        self.assertTrue(cmd["target_id"])
+
+
 class CompilePolicyTests(SimpleTestCase):
     SUNNY = {"tariff": {"period": "off-peak"}, "weather": {"condition": "sunny", "solar_forecast_kw": [3, 3, 3], "outdoor_c": 24}, "loads": {"grid_import_kw": 0.5}}
     CLOUDY_OFFPEAK = {"tariff": {"period": "off-peak"}, "weather": {"condition": "cloudy", "solar_forecast_kw": [0.2, 0.3], "outdoor_c": 8}, "loads": {"grid_import_kw": 1.0}}
