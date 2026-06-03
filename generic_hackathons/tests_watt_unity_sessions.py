@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from core.models import Hackathon
@@ -31,11 +31,13 @@ class WattUnitySessionTests(TestCase):
             end_date="2026-12-31",
         )
         self.user = User.objects.create_user(email="watt@example.com")
+        self.teammate = User.objects.create_user(email="watt-teammate@example.com")
         self.team = GenericHackathonTeam.objects.create(
             hackathon=self.hackathon,
             team_name="Grid Builders",
         )
-        self.team.members.add(self.user)
+        # A team needs 2..6 members to enter the game (see _team_size_gate).
+        self.team.members.add(self.user, self.teammate)
         self.client.force_authenticate(self.user)
 
     @patch("generic_hackathons.watt_views.create_firebase_custom_token", return_value="unity-token")
@@ -87,3 +89,53 @@ class WattUnitySessionTests(TestCase):
             claims,
             {"role": "watt_participant", "class_id": "CLASS", "household_id": "TEAM1"},
         )
+
+    def test_current_blocked_when_team_too_small(self):
+        self.team.members.remove(self.teammate)  # back down to a single member
+        response = self.client.post("/api/v1/hackathons/watt/unity-sessions/current/", {}, format="json")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["member_count"], 1)
+        self.assertEqual(response.data["min_members"], 2)
+
+    def test_participant_token_blocked_when_team_too_small(self):
+        self.team.members.remove(self.teammate)  # back down to a single member
+        response = self.client.post("/api/v1/hackathons/watt/firebase-token/", {}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+
+class _StubMembers:
+    def __init__(self, count):
+        self._count = count
+
+    def count(self):
+        return self._count
+
+
+class _StubTeam:
+    def __init__(self, count):
+        self.members = _StubMembers(count)
+
+
+class TeamSizeGateTests(SimpleTestCase):
+    """Pure (no-DB) coverage of the 2..6 team-size gate helper."""
+
+    def test_too_small_is_blocked(self):
+        from generic_hackathons.watt_views import _team_size_gate
+
+        gate = _team_size_gate(_StubTeam(1))
+        self.assertIsNotNone(gate)
+        self.assertEqual(gate.status_code, 403)
+        self.assertEqual(gate.data["member_count"], 1)
+
+    def test_valid_sizes_pass(self):
+        from generic_hackathons.watt_views import _team_size_gate
+
+        for count in (2, 3, 6):
+            self.assertIsNone(_team_size_gate(_StubTeam(count)))
+
+    def test_too_large_is_blocked(self):
+        from generic_hackathons.watt_views import _team_size_gate
+
+        gate = _team_size_gate(_StubTeam(7))
+        self.assertIsNotNone(gate)
+        self.assertEqual(gate.status_code, 403)
