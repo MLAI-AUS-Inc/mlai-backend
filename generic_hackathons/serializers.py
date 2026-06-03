@@ -21,6 +21,7 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
     code = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
     members = serializers.SerializerMethodField()
+    leader_id = serializers.SerializerMethodField()
 
     class Meta:
         model = GenericHackathonTeam
@@ -32,10 +33,11 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
             'avatar_url',
             'member_count',
             'members',
+            'leader_id',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'team_id', 'code', 'member_count', 'members', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'team_id', 'code', 'member_count', 'members', 'leader_id', 'created_at', 'updated_at']
 
     def get_code(self, obj):
         return obj.code
@@ -43,14 +45,18 @@ class GenericHackathonTeamSerializer(serializers.ModelSerializer):
     def get_member_count(self, obj):
         return obj.members.count()
 
+    def get_leader_id(self, obj):
+        return obj.leader_id
+
     def get_members(self, obj):
+        leader_id = obj.leader_id
         return [
             {
                 'id': member.id,
                 'email': member.email,
                 'full_name': member.full_name,
                 'avatar_url': member.avatar_url,
-                'role': DEFAULT_USER_ROLE,
+                'role': 'leader' if member.id == leader_id else DEFAULT_USER_ROLE,
             }
             for member in obj.members.all()
         ]
