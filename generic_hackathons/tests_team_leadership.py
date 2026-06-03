@@ -16,12 +16,15 @@ BASE = f"/api/v1/hackathons/{SLUG}/app"
 class TeamLeadershipTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.hackathon = Hackathon.objects.create(
+        # slug 'watt-the-hack' is seeded by migration 0001, so update_or_create (not create).
+        self.hackathon, _ = Hackathon.objects.update_or_create(
             slug=SLUG,
-            name="Watt The Hack",
-            description="Energy hackathon",
-            start_date="2026-06-01",
-            end_date="2026-12-31",
+            defaults={
+                "name": "Watt The Hack",
+                "description": "Energy hackathon",
+                "start_date": "2026-06-01",
+                "end_date": "2026-12-31",
+            },
         )
         self.alice = User.objects.create_user(email="alice@example.com")
         self.bob = User.objects.create_user(email="bob@example.com")
@@ -32,8 +35,10 @@ class TeamLeadershipTests(TestCase):
         return self.client.post(f"{BASE}/teams/", {"team_name": name}, format="json")
 
     def _join_team(self, user, name="Grid Builders"):
-        self.client.force_authenticate(user)
-        return self.client.post(f"{BASE}/teams/join/", {"code": name}, format="json")
+        # Phase 3 made the API join a request; for these leadership tests add the member directly.
+        team = GenericHackathonTeam.objects.get(team_name=name)
+        team.members.add(user)
+        return team
 
     def test_creator_becomes_leader(self):
         resp = self._create_team(self.alice)
@@ -46,12 +51,10 @@ class TeamLeadershipTests(TestCase):
 
     def test_join_keeps_original_leader(self):
         self._create_team(self.alice)
-        resp = self._join_team(self.bob)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["leader_id"], self.alice.id)
-        roles = {m["id"]: m["role"] for m in resp.data["members"]}
-        self.assertEqual(roles[self.bob.id], "participant")
-        self.assertEqual(roles[self.alice.id], "leader")
+        self._join_team(self.bob)  # bob added as a member
+        team = GenericHackathonTeam.objects.get(team_name="Grid Builders")
+        self.assertEqual(team.leader_id, self.alice.id)
+        self.assertTrue(team.members.filter(id=self.bob.id).exists())
 
     def test_leader_cannot_leave_populated_team(self):
         self._create_team(self.alice)

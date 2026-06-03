@@ -17,12 +17,15 @@ BASE = f"/api/v1/hackathons/{SLUG}/app"
 class JoinRequestTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.hackathon = Hackathon.objects.create(
+        # slug 'watt-the-hack' is seeded by migration 0001, so update_or_create (not create).
+        self.hackathon, _ = Hackathon.objects.update_or_create(
             slug=SLUG,
-            name="Watt The Hack",
-            description="Energy hackathon",
-            start_date="2026-06-01",
-            end_date="2026-12-31",
+            defaults={
+                "name": "Watt The Hack",
+                "description": "Energy hackathon",
+                "start_date": "2026-06-01",
+                "end_date": "2026-12-31",
+            },
         )
         self.alice = User.objects.create_user(email="alice@example.com")  # leader
         self.bob = User.objects.create_user(email="bob@example.com")      # member
