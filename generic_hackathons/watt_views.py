@@ -290,3 +290,47 @@ class WattParticipantFirebaseTokenView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class WattUnitySessionDevTokenView(APIView):
+    """DEV-ONLY: mint a watt_unity custom token for local Unity editor runs.
+
+    Production launches obtain this token through the ticket flow
+    (`unity-sessions/current/` -> `redeem-ticket/`). Local in-editor runs have no
+    ticket, so this endpoint hands a watt_unity token straight to the editor for a
+    given class/household. It is disabled unless ``settings.WATT_ALLOW_DEV_TOKEN``
+    (defaulting to ``settings.DEBUG``) is true, so it never functions in production.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        if not getattr(settings, "WATT_ALLOW_DEV_TOKEN", settings.DEBUG):
+            return Response(
+                {"error": "Dev token endpoint is disabled."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        class_id = _firebase_segment(request.data.get("class_id"), "CLASS")
+        household_id = _firebase_segment(request.data.get("household_id"), "household_001")
+        try:
+            unity_token = _mint_firebase_token(
+                "watt_unity",
+                class_id,
+                household_id,
+                "dev-local",
+            )
+        except Exception as exc:
+            return Response(
+                {"error": f"Firebase token minting failed: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "firebase_custom_token": unity_token,
+                "class_id": class_id,
+                "household_id": household_id,
+            },
+            status=status.HTTP_200_OK,
+        )

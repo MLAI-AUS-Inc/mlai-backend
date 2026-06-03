@@ -165,3 +165,50 @@ class CurrentTeamResolutionTests(TestCase):
         # Earliest (lowest-pk) team wins, and the answer is identical on repeated calls.
         resolved = {_current_team(user, hackathon).pk for _ in range(3)}
         self.assertEqual(resolved, {first_team.pk})
+
+
+@override_settings(WATT_ALLOW_DEV_TOKEN=True)
+class WattUnityDevTokenTests(SimpleTestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    @patch("generic_hackathons.watt_views.create_firebase_custom_token", return_value="dev-unity-token")
+    def test_dev_token_mints_watt_unity_claims(self, mint_token):
+        response = self.client.post(
+            "/api/v1/hackathons/watt/unity-sessions/dev-token/",
+            {"class_id": "CLASS", "household_id": "household_001"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["firebase_custom_token"], "dev-unity-token")
+        self.assertEqual(response.data["class_id"], "CLASS")
+        self.assertEqual(response.data["household_id"], "household_001")
+        _, claims = mint_token.call_args.args
+        self.assertEqual(
+            claims,
+            {"role": "watt_unity", "class_id": "CLASS", "household_id": "household_001"},
+        )
+
+    @patch("generic_hackathons.watt_views.create_firebase_custom_token", return_value="dev-unity-token")
+    def test_dev_token_defaults_class_and_household(self, mint_token):
+        response = self.client.post(
+            "/api/v1/hackathons/watt/unity-sessions/dev-token/", {}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        _, claims = mint_token.call_args.args
+        self.assertEqual(
+            claims,
+            {"role": "watt_unity", "class_id": "CLASS", "household_id": "household_001"},
+        )
+
+
+@override_settings(WATT_ALLOW_DEV_TOKEN=False)
+class WattUnityDevTokenDisabledTests(SimpleTestCase):
+    def test_disabled_returns_403(self):
+        client = APIClient()
+        response = client.post(
+            "/api/v1/hackathons/watt/unity-sessions/dev-token/", {}, format="json"
+        )
+        self.assertEqual(response.status_code, 403)
