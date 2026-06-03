@@ -139,3 +139,29 @@ class TeamSizeGateTests(SimpleTestCase):
         gate = _team_size_gate(_StubTeam(7))
         self.assertIsNotNone(gate)
         self.assertEqual(gate.status_code, 403)
+
+
+class CurrentTeamResolutionTests(TestCase):
+    """A user on >1 Watt team must always resolve to the SAME household."""
+
+    def test_multi_team_user_resolves_to_earliest_team_and_is_stable(self):
+        from generic_hackathons.watt_views import _current_team
+
+        hackathon = Hackathon.objects.create(
+            slug="watt",
+            name="Watt The Hack",
+            description="Energy hackathon",
+            start_date="2026-06-01",
+            end_date="2026-12-31",
+        )
+        user = User.objects.create_user(email="multi-team@example.com")
+        first_team = GenericHackathonTeam.objects.create(hackathon=hackathon, team_name="Alpha")
+        second_team = GenericHackathonTeam.objects.create(hackathon=hackathon, team_name="Bravo")
+        # Add in reverse creation order to prove resolution is by pk, not insert order.
+        second_team.members.add(user)
+        first_team.members.add(user)
+        self.assertLess(first_team.pk, second_team.pk)
+
+        # Earliest (lowest-pk) team wins, and the answer is identical on repeated calls.
+        resolved = {_current_team(user, hackathon).pk for _ in range(3)}
+        self.assertEqual(resolved, {first_team.pk})
