@@ -238,6 +238,7 @@ class SmartHomeStateView(APIView):
                 "wallet": sc.get("money"),
                 "cost": sc.get("energy_cost"),
                 "energy_kwh": sc.get("energy_kwh"),
+                "carbon": sc.get("carbon_kg"),
                 "comfort": sc.get("mood"),
                 "score": sc.get("score"),
                 "tariff_period": tariff.get("period"),
