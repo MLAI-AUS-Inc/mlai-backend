@@ -293,6 +293,18 @@ WATT_UNITY_SESSION_TICKET_TTL_SECONDS = int(os.getenv('WATT_UNITY_SESSION_TICKET
 VAGON_STREAM_ID = os.getenv('VAGON_STREAM_ID', '')
 VAGON_STREAM_URL = os.getenv('VAGON_STREAM_URL', '')
 
+# --- Global campaign window (deterministic resume) ---------------------------------------
+# The fixed-length campaign maps linearly onto [START, START + LENGTH * DAY_SECONDS] and is
+# shared by ALL teams and ALL sessions, so a player who first connects mid-window sees the
+# campaign already in progress (e.g. day 18). WATT_CAMPAIGN_START is an ISO-8601 datetime WITH
+# an explicit UTC offset, so the window is timezone-unambiguous regardless of the server /
+# Vagon-VM clock. Leave blank to disable (Unity then falls back to the classroom/local clock).
+# TEST VALUE = today 22:00 Australia/Melbourne (AEST, +10:00). CHANGE THIS FOR GO-LIVE (e.g.
+# the event date at 11:00 -> "2026-06-15T11:00:00+10:00").
+WATT_CAMPAIGN_START = os.getenv('WATT_CAMPAIGN_START', '2026-06-04T22:00:00+10:00')
+WATT_CAMPAIGN_LENGTH_DAYS = int(os.getenv('WATT_CAMPAIGN_LENGTH_DAYS', '46'))
+WATT_CAMPAIGN_DAY_SECONDS = float(os.getenv('WATT_CAMPAIGN_DAY_SECONDS', '700'))
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=1440),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
