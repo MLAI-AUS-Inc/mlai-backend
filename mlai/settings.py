@@ -214,17 +214,45 @@ DATABASES = {
 
 # Watt Unity session tickets must be shared across gunicorn workers: the request that MINTS a ticket
 # (unity-sessions/current/) and the one that REDEEMS it (redeem-ticket/) are typically served by
-# different worker processes, so a per-process LocMemCache 404s the redeem. `watt_session` is
-# DB-backed (no Redis needed) so any worker/container can find the ticket; `default` stays local.
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-    },
-    'watt_session': {
-        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
-        'LOCATION': 'watt_unity_session_cache',
-    },
-}
+# different worker processes, so a per-process LocMemCache 404s the redeem.
+#
+# Prefer Redis/Valkey (REDIS_URL) — a real shared cache across all workers, better under load and
+# off Postgres. Falls back to a Postgres DatabaseCache for `watt_session` (and a local `default`)
+# when REDIS_URL is unset OR the `redis` package isn't installed, so local/CI and un-rebuilt images
+# keep working instead of hard-crashing.
+_REDIS_URL = os.getenv('REDIS_URL', '').strip()
+if _REDIS_URL:
+    try:
+        import redis as _redis_dep  # noqa: F401  (Django's builtin RedisCache needs redis-py)
+        _REDIS_CACHE_AVAILABLE = True
+    except ImportError:
+        _REDIS_CACHE_AVAILABLE = False
+else:
+    _REDIS_CACHE_AVAILABLE = False
+
+if _REDIS_CACHE_AVAILABLE:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _REDIS_URL,
+            'KEY_PREFIX': 'mlai',
+        },
+        'watt_session': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _REDIS_URL,
+            'KEY_PREFIX': 'watt_session',
+        },
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        },
+        'watt_session': {
+            'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+            'LOCATION': 'watt_unity_session_cache',
+        },
+    }
 
 
 def _configure_sqlite_connection(sender, connection, **kwargs):
