@@ -8,6 +8,14 @@ ensure_engine_importable()
 
 from watt_the_hack.constants import DEFAULT_STEPS
 
+# Hard upper bound on a sandbox /sim/run or /sim/init request. The longest
+# real scenario is 288 steps (3 days @ 15 min); this leaves generous headroom
+# while preventing a participant from passing steps=100_000_000 and pinning a
+# gunicorn worker (the loop is synchronous and accumulates per-step state in
+# memory). Sandbox-only — judging runs on the GKE admin server with its own
+# fixed step count.
+MAX_SIM_STEPS = 2016
+
 
 class ParametricControllerParamsSerializer(serializers.Serializer):
     battery_flow_mw = serializers.FloatField(default=0.0)
@@ -43,7 +51,7 @@ class ControllerSpecField(serializers.Field):
 
 
 class InitRequestSerializer(serializers.Serializer):
-    steps = serializers.IntegerField(required=False, default=DEFAULT_STEPS, min_value=1)
+    steps = serializers.IntegerField(required=False, default=DEFAULT_STEPS, min_value=1, max_value=MAX_SIM_STEPS)
     scenario_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
@@ -59,7 +67,7 @@ class StepRequestSerializer(serializers.Serializer):
 class RunRequestSerializer(serializers.Serializer):
     state = serializers.JSONField()
     controller = ControllerSpecField(required=False)
-    steps = serializers.IntegerField(required=False, default=DEFAULT_STEPS, min_value=1)
+    steps = serializers.IntegerField(required=False, default=DEFAULT_STEPS, min_value=1, max_value=MAX_SIM_STEPS)
     scenario_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     team_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     team_token = serializers.CharField(required=False, allow_null=True, allow_blank=True)
