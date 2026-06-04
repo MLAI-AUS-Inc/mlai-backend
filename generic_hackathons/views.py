@@ -115,7 +115,7 @@ class GenericHackathonTeamListCreateView(APIView):
             .prefetch_related('members')
             .order_by('team_id')
         )
-        serializer = GenericHackathonTeamSerializer(teams, many=True)
+        serializer = GenericHackathonTeamSerializer(teams, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, slug):
@@ -139,7 +139,7 @@ class GenericHackathonTeamListCreateView(APIView):
                     existing.avatar_url = avatar_url
                     existing.save(update_fields=['avatar_url'])
                 return Response(
-                    {'created': False, 'team': GenericHackathonTeamSerializer(existing).data},
+                    {'created': False, 'team': GenericHackathonTeamSerializer(existing, context={'request': request}).data},
                     status=status.HTTP_200_OK,
                 )
             return Response(
@@ -164,7 +164,7 @@ class GenericHackathonTeamListCreateView(APIView):
 
         _switch_user_to_team(request.user, hackathon, team)
         return Response(
-            {'created': True, 'team': GenericHackathonTeamSerializer(team).data},
+            {'created': True, 'team': GenericHackathonTeamSerializer(team, context={'request': request}).data},
             status=status.HTTP_201_CREATED,
         )
 
@@ -177,7 +177,7 @@ class GenericHackathonCurrentTeamView(APIView):
         team = _current_team(request.user, hackathon)
         if team is None:
             return Response(None, status=status.HTTP_200_OK)
-        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+        return Response(GenericHackathonTeamSerializer(team, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class GenericHackathonJoinTeamView(APIView):
@@ -296,7 +296,7 @@ class GenericHackathonTransferLeadView(APIView):
 
         team.leader = new_leader
         team.save(update_fields=['leader'])
-        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+        return Response(GenericHackathonTeamSerializer(team, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class GenericHackathonDisbandTeamView(APIView):
@@ -385,7 +385,7 @@ class GenericHackathonAcceptRequestView(APIView):
         applicant = join_request.user
         if team.members.filter(id=applicant.id).exists():
             join_request.delete()
-            return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+            return Response(GenericHackathonTeamSerializer(team, context={'request': request}).data, status=status.HTTP_200_OK)
         if _current_team(applicant, hackathon) is not None:
             join_request.delete()
             return Response(
@@ -401,7 +401,7 @@ class GenericHackathonAcceptRequestView(APIView):
         team.members.add(applicant)
         # The applicant now has a team -- clear every pending request they have in this hackathon.
         GenericHackathonJoinRequest.objects.filter(user=applicant, team__hackathon=hackathon).delete()
-        return Response(GenericHackathonTeamSerializer(team).data, status=status.HTTP_200_OK)
+        return Response(GenericHackathonTeamSerializer(team, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class GenericHackathonRejectRequestView(APIView):
