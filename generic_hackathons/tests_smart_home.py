@@ -158,6 +158,23 @@ class ShopContractTests(SimpleTestCase):
         self.assertTrue(cmd["target_id"])
 
 
+class PolicyContractTests(SimpleTestCase):
+    """Lock the AI-brain policy node path against Unity's HackathonFirebasePaths.PolicyCurrent."""
+
+    def test_policy_path_matches_unity_node(self):
+        # Unity: HackathonFirebasePaths.PolicyCurrent = root + "/policy/current".
+        self.assertEqual(
+            shf.policy_current_path("WATT", "TEAM1"),
+            "classes/WATT/hackathon/households/TEAM1/policy/current",
+        )
+
+    def test_policy_path_cleans_segments(self):
+        self.assertEqual(
+            shf.policy_current_path("WA.TT", "TEAM/9"),
+            "classes/WA_TT/hackathon/households/TEAM_9/policy/current",
+        )
+
+
 class CompilePolicyTests(SimpleTestCase):
     SUNNY = {"tariff": {"period": "off-peak"}, "weather": {"condition": "sunny", "solar_forecast_kw": [3, 3, 3], "outdoor_c": 24}, "loads": {"grid_import_kw": 0.5}}
     CLOUDY_OFFPEAK = {"tariff": {"period": "off-peak"}, "weather": {"condition": "cloudy", "solar_forecast_kw": [0.2, 0.3], "outdoor_c": 8}, "loads": {"grid_import_kw": 1.0}}

@@ -72,6 +72,16 @@ def read_shop(class_id, household_id):
     return rtdb_get(shop_current_path(class_id, household_id))
 
 
+def policy_current_path(class_id, household_id):
+    return f"{household_root(class_id, household_id)}/policy/current"
+
+
+def write_policy(class_id, household_id, policy):
+    """Publish the active brain/policy so the streamed Unity game knows which AI brain is
+    running and can feature it in cutscenes (deploy / cold-shower / etc.)."""
+    rtdb_set(policy_current_path(class_id, household_id), policy)
+
+
 def read_current_tick(observation):
     """Extract the integer game tick from an observation dict (defaults to 0)."""
     if not isinstance(observation, dict):
