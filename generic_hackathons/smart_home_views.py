@@ -153,6 +153,29 @@ class SmartHomeDeployView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # Publish the active brain so the streamed game can feature the AI bot in cutscenes
+        # (which brain is running + its effect line). Best-effort: never fail a deploy over it.
+        if use_pipeline:
+            brain_id = next(
+                (str(b).strip() for b in (pipeline.get("brain") or []) if str(b).strip()),
+                None,
+            )
+            try:
+                shf.write_policy(
+                    class_id,
+                    household_id,
+                    {
+                        "schema_version": "watt_hackathon_v2",
+                        "brain_id": brain_id,
+                        "brain_label": brain_label,
+                        "brain_effect": brain_effect,
+                        "deployed_at_ms": now,
+                        "tick": tick,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         return Response(
             {
                 "household_id": household_id,
