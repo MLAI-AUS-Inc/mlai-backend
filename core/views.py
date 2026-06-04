@@ -245,15 +245,18 @@ class CreateUserView(APIView):
 
             magic_link = generate_magic_link(user, base_url=base_url)
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
+            magic_link_sent = False
             try:
                 send_magic_link_email(user, magic_link, message_id="2")
                 logger.info(f"Sent magic link to new user: {email} for app {app}")
-                message = "Account created and magic link sent."
+                message = "Account created. Check your email for the magic link to sign in."
+                magic_link_sent = True
             except Exception as e:
                 logger.error(f"Failed to send magic link to {email}: {e}")
-                # In development/hackathon, we might want to return the link if email fails
-                # or just log it. For now, we'll return a warning.
-                message = "Account created, but failed to send email. Please check logs for magic link."
+                # The magic link is intentionally NOT returned to the client; the user
+                # must use the link emailed to them. Surface a failure so the frontend
+                # can prompt a resend.
+                message = "Account created, but we couldn't send the email. Please use Resend to try again."
 
             return Response(
                 {
@@ -261,7 +264,7 @@ class CreateUserView(APIView):
                     "email": user.email,
                     "full_name": user.full_name,
                     "message": message,
-                    "magic_link": magic_link,
+                    "magic_link_sent": magic_link_sent,
                 },
                 status=status.HTTP_201_CREATED
             )
