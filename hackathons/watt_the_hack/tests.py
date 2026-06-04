@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from rest_framework.test import APIClient
+
+from generic_hackathons.models import WattTheHackSettings
 
 
 User = get_user_model()
@@ -70,6 +72,14 @@ class WattTheHackSimulationApiTests(TestCase):
         self.assertIn("metrics", run_response.data)
 
     def test_locked_scenario_rejects_init(self):
+        # Force every scenario locked: clear the unlocked list AND disable auto_unlock.
+        # Source of truth moved from Django settings to the WattTheHackSettings DB row
+        # in commit 7cc7b71 — these are the prod-equivalent knobs.
+        s = WattTheHackSettings.get_settings()
+        s.unlocked_scenarios = ""
+        s.auto_unlock = False
+        s.save()
+
         response = self.client.post(
             "/api/v1/hackathons/watt-the-hack/sim/init/",
             {"scenario_id": "t1_welcome"},
