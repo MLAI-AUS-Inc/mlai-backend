@@ -1,6 +1,6 @@
 import re
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -127,6 +127,31 @@ def _vagon_stream_base_url():
     return ""
 
 
+def _campaign_window_ms():
+    """Return ``(start_ms, end_ms)`` for the global campaign window, or ``(None, None)``.
+
+    The campaign maps linearly onto ``[START, START + LENGTH * DAY_SECONDS]``. The same epoch-ms
+    values are handed to every team and every session, so the in-game day is a pure function of
+    wall-clock time. ``WATT_CAMPAIGN_START`` must be an ISO-8601 datetime WITH an explicit UTC
+    offset; a naive (timezone-less) value is rejected so the window can't drift with the server tz.
+    """
+    raw = str(getattr(settings, "WATT_CAMPAIGN_START", "") or "").strip()
+    if not raw:
+        return None, None
+    try:
+        start_dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None, None
+    if start_dt.tzinfo is None:
+        return None, None
+
+    length_days = max(1, int(getattr(settings, "WATT_CAMPAIGN_LENGTH_DAYS", 46)))
+    day_seconds = float(getattr(settings, "WATT_CAMPAIGN_DAY_SECONDS", 700.0))
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = start_ms + int(round(length_days * day_seconds * 1000))
+    return start_ms, end_ms
+
+
 def _mint_firebase_token(role, class_id, household_id, uid_suffix):
     claims = {
         "role": role,
@@ -137,12 +162,14 @@ def _mint_firebase_token(role, class_id, household_id, uid_suffix):
     return create_firebase_custom_token(uid, claims)
 
 
-def _build_stream_url(base_url, household_id, ticket, api_base_url):
+def _build_stream_url(base_url, household_id, ticket, api_base_url, start_ms=None, end_ms=None):
     launch_flags = (
         f"--household-id {household_id} "
         f"--session-ticket {ticket} "
         f"--backend-url {api_base_url}"
     )
+    if start_ms is not None and end_ms is not None:
+        launch_flags += f" --campaign-start-ms {start_ms} --campaign-end-ms {end_ms}"
     query = urlencode(
         {
             "launchFlags": launch_flags,
@@ -179,6 +206,7 @@ class WattUnitySessionCurrentView(APIView):
 
         class_id = _class_id()
         household_id = _household_id(team)
+        campaign_start_ms, campaign_end_ms = _campaign_window_ms()
         expires_at = timezone.now() + timedelta(seconds=_ticket_ttl_seconds())
         ticket = secrets.token_urlsafe(32)
         try:
@@ -208,9 +236,18 @@ class WattUnitySessionCurrentView(APIView):
 
         return Response(
             {
-                "stream_url": _build_stream_url(base_url, household_id, ticket, _api_base_url(request)),
+                "stream_url": _build_stream_url(
+                    base_url,
+                    household_id,
+                    ticket,
+                    _api_base_url(request),
+                    campaign_start_ms,
+                    campaign_end_ms,
+                ),
                 "household_id": household_id,
                 "expires_at": expires_at.isoformat(),
+                "campaign_start_ms": campaign_start_ms,
+                "campaign_end_ms": campaign_end_ms,
             },
             status=status.HTTP_200_OK,
         )
