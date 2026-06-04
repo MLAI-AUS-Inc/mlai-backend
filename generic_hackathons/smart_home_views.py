@@ -115,11 +115,13 @@ class SmartHomeDeployView(APIView):
 
         decisions = []
         brain_label = None
+        brain_effect = None
         if use_pipeline:
             compiled = policy.compile_policy(pipeline, observation)
             specs = compiled["commands"]
             decisions = compiled["decisions"]
             brain_label = compiled.get("brain")
+            brain_effect = compiled.get("brain_effect")
         else:
             specs = blocks.compile_blocks(block_ids)
 
@@ -159,6 +161,7 @@ class SmartHomeDeployView(APIView):
                 "commands": rows,
                 "decisions": decisions,
                 "brain": brain_label,
+                "brain_effect": brain_effect,
             },
             status=status.HTTP_200_OK,
         )

@@ -196,7 +196,47 @@ class CompilePolicyTests(SimpleTestCase):
         pause = policy.compile_policy({"inputs": [], "schedule": ["sc_time"], "brain": [], "actions": ["ac_reduce"], "outputs": ["ou_ev"], "safety": []}, self.SUNNY)
         self.assertTrue(any(c["params"].get("enabled") is False for c in pause["commands"] if c["target_type"] == "ev"))
 
-    def test_empty_pipeline_no_commands(self):
+    def _by_target(self, result, target_type):
+        return [c for c in result["commands"] if c["target_type"] == target_type]
+
+    def test_empty_pipeline_emits_factory_defaults(self):
+        # Full-state: even an empty pipeline asserts every device's factory default, so the
+        # house is always in a known state instead of "stuck in the last command".
         result = policy.compile_policy({"inputs": [], "schedule": [], "brain": [], "actions": [], "outputs": [], "safety": []}, self.SUNNY)
-        self.assertEqual(result["commands"], [])
-        self.assertTrue(result["decisions"])
+        concerns = {c["target_type"] for c in result["commands"]}
+        self.assertEqual(concerns, {"battery", "ev", "thermostat", "lights", "hot_water"})
+        self.assertEqual(self._by_target(result, "battery")[0]["params"]["mode"], "auto")
+        self.assertEqual(self._by_target(result, "ev")[0]["params"]["enabled"], False)
+        self.assertEqual(self._by_target(result, "thermostat")[0]["params"]["setpoint_c"], 22)
+        self.assertEqual(self._by_target(result, "hot_water")[0]["params"]["mode"], "off")
+        self.assertTrue(any("factory default" in d.lower() for d in result["decisions"]))
+
+    def test_full_state_always_covers_every_persistent_concern(self):
+        # A real deploy that only manages the battery still emits a command for every other
+        # persistent device (ev/thermostat/lights/hot_water), so nothing is left stuck.
+        p = {"inputs": ["in_weather"], "schedule": ["sc_price"], "brain": ["br_claude"], "actions": ["ac_charge"], "outputs": ["ou_battery"], "safety": []}
+        concerns = {c["target_type"] for c in policy.compile_policy(p, self.SUNNY)["commands"]}
+        self.assertTrue({"battery", "ev", "thermostat", "lights", "hot_water"} <= concerns)
+
+    def test_removing_battery_block_reverts_to_auto(self):
+        # Battery managed in "charge"; with the battery block removed the next deploy puts it
+        # back to the default auto mode (self-healing -- removing a block changes the house).
+        managed = {"inputs": ["in_weather"], "schedule": ["sc_time"], "brain": ["br_gemini"], "actions": ["ac_charge"], "outputs": ["ou_battery"], "safety": []}
+        self.assertEqual(self._by_target(policy.compile_policy(managed, self.CLOUDY_OFFPEAK), "battery")[0]["params"]["mode"], "charge")
+        removed = {**managed, "outputs": ["ou_plugs"]}
+        self.assertEqual(self._by_target(policy.compile_policy(removed, self.CLOUDY_OFFPEAK), "battery")[0]["params"]["mode"], "auto")
+
+    def test_unmanaged_ev_charging_is_off(self):
+        # No EV block -> EV charging reverts to off (it won't top itself up).
+        p = {"inputs": [], "schedule": ["sc_time"], "brain": ["br_gemini"], "actions": ["ac_reduce"], "outputs": ["ou_plugs"], "safety": []}
+        self.assertEqual(self._by_target(policy.compile_policy(p, self.SUNNY), "ev")[0]["params"]["enabled"], False)
+
+    def test_brain_effect_present_and_varies(self):
+        base = {"inputs": [], "schedule": ["sc_time"], "actions": ["ac_reduce"], "outputs": ["ou_plugs"], "safety": []}
+        claude = policy.compile_policy({**base, "brain": ["br_claude"]}, self.SUNNY)
+        chatgpt = policy.compile_policy({**base, "brain": ["br_chatgpt"]}, self.SUNNY)
+        self.assertIn("Claude", claude["brain_effect"])
+        self.assertIn("ChatGPT", chatgpt["brain_effect"])
+        self.assertNotEqual(claude["brain_effect"], chatgpt["brain_effect"])
+        # No brain placed -> falls back to the balanced (Gemini) effect line.
+        self.assertEqual(policy.compile_policy({**base, "brain": []}, self.SUNNY)["brain_effect"], policy.DEFAULT_BRAIN_EFFECT)
