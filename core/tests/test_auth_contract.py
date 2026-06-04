@@ -98,9 +98,13 @@ class AuthContractTests(TestCase):
         self.assertIn('id', response.data)
         self.assertEqual(response.data['email'], 'new@example.com')
         self.assertEqual(response.data['full_name'], 'Jane Doe')
-        self.assertIn('magic_link', response.data)
-        self.assertIn('app=hospital', response.data['magic_link'])
-        self.assertIn('next=/hospital/app', response.data['magic_link'])
+        # The magic link must NOT be exposed in the API response; it is only emailed.
+        self.assertNotIn('magic_link', response.data)
+        self.assertTrue(response.data['magic_link_sent'])
+
+        emailed_magic_link = mock_send.call_args.args[1]
+        self.assertIn('app=hospital', emailed_magic_link)
+        self.assertIn('next=/hospital/app', emailed_magic_link)
 
         created_user = User.objects.get(email='new@example.com')
         self.assertFalse(created_user.is_active)
@@ -123,8 +127,10 @@ class AuthContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertIn('app=founder-tools', response.data['magic_link'])
-        self.assertIn('next=/vibe-raising', response.data['magic_link'])
+        self.assertNotIn('magic_link', response.data)
+        emailed_magic_link = mock_send.call_args.args[1]
+        self.assertIn('app=founder-tools', emailed_magic_link)
+        self.assertIn('next=/vibe-raising', emailed_magic_link)
         mock_generate.assert_called_once()
         mock_send.assert_called_once()
 
