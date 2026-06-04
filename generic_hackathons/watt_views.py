@@ -5,7 +5,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import caches
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -21,6 +21,11 @@ from .models import GenericHackathonTeam
 WATT_HACKATHON_SLUGS = ("watt", "watt-the-hack")
 UNITY_TICKET_CACHE_PREFIX = "watt_unity_session_ticket"
 FIREBASE_SEGMENT_RE = re.compile(r"[\.\#\$\[\]/\s]+")
+
+# Unity session tickets live in a DB-backed cache (settings.CACHES["watt_session"]) so a ticket
+# minted by one gunicorn worker can be redeemed by any other. The default LocMemCache is
+# per-process, which 404s the redeem when mint and redeem land on different workers.
+cache = caches["watt_session"]
 
 # A team may enter the streamed game only with 2..6 members. Max mirrors
 # GENERIC_HACKATHON_MAX_TEAM_MEMBERS in views.py; the min is enforced here and in the web gate.
@@ -90,7 +95,8 @@ def _team_size_gate(team):
 
 
 def _ticket_ttl_seconds():
-    return max(30, int(getattr(settings, "WATT_UNITY_SESSION_TICKET_TTL_SECONDS", 300)))
+    # Default 15 min so a slow Vagon cold-boot can still redeem before the ticket expires.
+    return max(30, int(getattr(settings, "WATT_UNITY_SESSION_TICKET_TTL_SECONDS", 900)))
 
 
 def _ticket_key(ticket):

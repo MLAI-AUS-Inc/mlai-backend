@@ -212,6 +212,21 @@ DATABASES = {
 }
 
 
+# Watt Unity session tickets must be shared across gunicorn workers: the request that MINTS a ticket
+# (unity-sessions/current/) and the one that REDEEMS it (redeem-ticket/) are typically served by
+# different worker processes, so a per-process LocMemCache 404s the redeem. `watt_session` is
+# DB-backed (no Redis needed) so any worker/container can find the ticket; `default` stays local.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    },
+    'watt_session': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'watt_unity_session_cache',
+    },
+}
+
+
 def _configure_sqlite_connection(sender, connection, **kwargs):
     if connection.vendor != 'sqlite':
         return
