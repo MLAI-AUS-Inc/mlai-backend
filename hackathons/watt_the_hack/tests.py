@@ -19,7 +19,6 @@ class WattTheHackSimulationApiTests(TestCase):
 
         self.assertIn(response.status_code, {401, 403})
 
-    @override_settings(WATT_THE_HACK_AUTO_UNLOCK=True)
     def test_scenarios_returns_unlocked_public_scenarios(self):
         response = self.client.get("/api/v1/hackathons/watt-the-hack/sim/scenarios/")
 
@@ -28,7 +27,6 @@ class WattTheHackSimulationApiTests(TestCase):
         self.assertIn("id", response.data[0])
         self.assertIn("title", response.data[0])
 
-    @override_settings(WATT_THE_HACK_AUTO_UNLOCK=True)
     def test_init_step_and_run_match_browser_contract(self):
         scenarios_response = self.client.get("/api/v1/hackathons/watt-the-hack/sim/scenarios/")
         scenario_id = scenarios_response.data[0]["id"]
@@ -71,7 +69,6 @@ class WattTheHackSimulationApiTests(TestCase):
         self.assertIn("outputs", run_response.data)
         self.assertIn("metrics", run_response.data)
 
-    @override_settings(WATT_THE_HACK_AUTO_UNLOCK=False, WATT_THE_HACK_UNLOCKED_SCENARIOS=[])
     def test_locked_scenario_rejects_init(self):
         response = self.client.post(
             "/api/v1/hackathons/watt-the-hack/sim/init/",

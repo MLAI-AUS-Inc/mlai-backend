@@ -410,10 +410,12 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
         from django.conf import settings
         is_production = not settings.DEBUG
+        cookie_domain = None if not is_production else '.mlai.au'
         response.set_cookie(
             key='access_token',
             value=access_token,
             httponly=True,
+            domain=cookie_domain,
             secure=is_production,
             samesite='None' if is_production else 'Lax',
         )
@@ -421,6 +423,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
             key='refresh_token',
             value=refresh_token,
             httponly=True,
+            domain=cookie_domain,
             secure=is_production,
             samesite='None' if is_production else 'Lax',
         )
@@ -442,10 +445,12 @@ class CookieTokenRefreshView(TokenRefreshView):
         response = Response()
         from django.conf import settings
         is_production = not settings.DEBUG
+        cookie_domain = None if not is_production else '.mlai.au'
         response.set_cookie(
             key='access_token',
             value=access_token,
             httponly=True,
+            domain=cookie_domain,
             secure=is_production,
             samesite='None' if is_production else 'Lax',
             path='/',
