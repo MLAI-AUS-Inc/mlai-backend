@@ -178,8 +178,7 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 
-    ['t1_welcome', 't2_first_code'],
-)
+
 WATT_THE_HACK_REGISTERED_TEAMS = {}
 WATT_THE_HACK_MAX_JUDGING_RUNS = int(os.getenv('WATT_THE_HACK_MAX_JUDGING_RUNS', '3'))
 
