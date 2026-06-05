@@ -95,8 +95,8 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
-    # Sized to droplet RAM (~250MB/worker). 8 is safe on the 4GB droplet; raise after a resize.
-    upsert_env_value GUNICORN_WORKERS "8"
+    # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
+    upsert_env_value GUNICORN_WORKERS "16"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
