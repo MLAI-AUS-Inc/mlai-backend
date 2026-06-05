@@ -5,9 +5,16 @@ from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
 from core.models import Hackathon
+from core.permissions import HasAPIKey, HasRooApiKey
+from core.slack_users import (
+    resolve_existing_user,
+    resolve_or_create_user,
+    validate_slack_id,
+)
 from .models import (
     GenericHackathonAnnouncement,
     GenericHackathonJoinRequest,
@@ -525,7 +532,19 @@ class GenericHackathonSubmissionDetailView(APIView):
 
 
 class GenericHackathonAnnouncementListView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    """Announcements for a generic hackathon.
+
+    GET  — participant-facing list (session/JWT auth).
+    POST — create an announcement via the Roo bot. Authenticated with the Roo
+           API key, and additionally gated so that only the requesting Slack
+           user who maps to a Django **superuser** may publish.
+    """
+    throttle_classes = [AnonRateThrottle]
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [(HasAPIKey | HasRooApiKey)()]
+        return [permissions.IsAuthenticated()]
 
     def get(self, request, slug):
         hackathon = _get_hackathon(slug)
@@ -537,6 +556,63 @@ class GenericHackathonAnnouncementListView(APIView):
         return Response(
             GenericHackathonAnnouncementSerializer(announcements, many=True).data,
             status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, slug):
+        """Create an announcement on behalf of a Slack superuser (Roo bot).
+
+        Payload:
+            title, body          — announcement content (required)
+            requester_slack_id   — Slack ID of the human who triggered it; must
+                                   resolve to a Django superuser (authorisation)
+            slack_user_id        — optional Slack ID to attribute as the author
+                                   (Roo's bot id); falls back to a generic
+                                   "MLAI" author when absent/unresolvable
+        """
+        hackathon = _get_hackathon(slug)
+
+        title = (request.data.get('title') or '').strip()
+        body = (request.data.get('body') or '').strip()
+        if not title or not body:
+            return Response(
+                {'detail': 'title and body are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        requester_slack_id = request.data.get('requester_slack_id')
+        is_valid, error_msg = validate_slack_id(requester_slack_id)
+        if not is_valid:
+            return Response(
+                {'detail': f'requester_slack_id is invalid: {error_msg}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        requester = resolve_existing_user(requester_slack_id)
+        if requester is None or not requester.is_superuser:
+            return Response(
+                {'detail': 'Only MLAI superusers can create announcements.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Attribute authorship to the Roo bot identity when supplied; otherwise
+        # the serializer renders a generic "MLAI" author.
+        author = None
+        author_slack_id = request.data.get('slack_user_id')
+        if author_slack_id:
+            author_valid, _ = validate_slack_id(author_slack_id)
+            if author_valid:
+                author = resolve_or_create_user(author_slack_id)
+
+        announcement = GenericHackathonAnnouncement.objects.create(
+            hackathon=hackathon,
+            title=title,
+            body=body,
+            author=author,
+        )
+
+        return Response(
+            GenericHackathonAnnouncementSerializer(announcement).data,
+            status=status.HTTP_201_CREATED,
         )
 
 
