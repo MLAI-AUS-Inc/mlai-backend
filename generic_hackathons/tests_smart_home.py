@@ -4,6 +4,7 @@ from django.test import SimpleTestCase
 from generic_hackathons import smart_home_blocks as blocks
 from generic_hackathons import smart_home_firebase as shf
 from generic_hackathons import smart_home_policy as policy
+from generic_hackathons import smart_home_progression as progression
 
 
 class CompileBlocksTests(SimpleTestCase):
@@ -257,3 +258,48 @@ class CompilePolicyTests(SimpleTestCase):
         self.assertNotEqual(claude["brain_effect"], chatgpt["brain_effect"])
         # No brain placed -> falls back to the balanced (Gemini) effect line.
         self.assertEqual(policy.compile_policy({**base, "brain": []}, self.SUNNY)["brain_effect"], policy.DEFAULT_BRAIN_EFFECT)
+
+
+class ProgressionTests(SimpleTestCase):
+    """Day-gated capability unlocks (mirror app/lib/smart-home-progression.ts)."""
+
+    def test_stage_boundaries(self):
+        self.assertEqual(progression.stage_for_day(1), 1)
+        self.assertEqual(progression.stage_for_day(progression.STAGE2_DAY - 1), 1)
+        self.assertEqual(progression.stage_for_day(progression.STAGE2_DAY), 2)
+        self.assertEqual(progression.stage_for_day(progression.STAGE3_DAY), 3)
+        self.assertEqual(progression.stage_for_day(progression.STAGE4_DAY), 4)
+        self.assertEqual(progression.stage_for_day(999), 4)
+
+    def test_bad_day_defaults_to_stage_1(self):
+        self.assertEqual(progression.stage_for_day(None), 1)
+        self.assertEqual(progression.stage_for_day("nope"), 1)
+        self.assertEqual(progression.stage_for_day(0), 1)
+
+    def test_unlocked_blocks_grow_with_stage(self):
+        self.assertEqual(progression.unlocked_block_ids(1), set())  # switchboard only
+        stage2 = progression.unlocked_block_ids(progression.STAGE2_DAY)
+        self.assertIn("ou_plugs", stage2)
+        self.assertIn("ac_reduce", stage2)
+        self.assertNotIn("sc_time", stage2)    # schedule still locked
+        self.assertNotIn("br_claude", stage2)  # brain still locked
+        stage3 = progression.unlocked_block_ids(progression.STAGE3_DAY)
+        self.assertIn("sc_time", stage3)
+        self.assertNotIn("br_claude", stage3)
+        stage4 = progression.unlocked_block_ids(progression.STAGE4_DAY)
+        self.assertIn("br_claude", stage4)
+        self.assertIn("in_weather", stage4)
+
+    def test_locked_blocks_in_pipeline(self):
+        p = {"brain": ["br_claude"], "actions": ["ac_reduce"], "outputs": ["ou_plugs"]}
+        self.assertIn("br_claude", progression.locked_block_ids_in(p, 1))
+        self.assertEqual(progression.locked_block_ids_in(p, progression.STAGE4_DAY), [])
+
+    def test_locked_blocks_fail_open_on_unknown_day(self):
+        p = {"brain": ["br_claude"]}
+        self.assertEqual(progression.locked_block_ids_in(p, None), [])
+        self.assertEqual(progression.locked_block_ids_in(p, "nope"), [])
+
+    def test_switch_devices_map_to_rooms(self):
+        self.assertEqual(progression.SWITCH_DEVICE_ROOM["bathroom"], "bathroom")
+        self.assertIn("living", progression.SWITCH_DEVICE_ROOM)
