@@ -4,4 +4,4 @@
 # SCENARIOS_DATA_DIR), NOT from this package — so scenario releases go via the
 # synced scenarios/ dir + redeploy. Bump this version only when the engine CODE
 # changes (keep it in lock-step with the admin base image's ENGINE_VERSION).
-watt-the-hack==0.2.4
+watt-the-hack==0.2.8
