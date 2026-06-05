@@ -303,3 +303,26 @@ class ProgressionTests(SimpleTestCase):
     def test_switch_devices_map_to_rooms(self):
         self.assertEqual(progression.SWITCH_DEVICE_ROOM["bathroom"], "bathroom")
         self.assertIn("living", progression.SWITCH_DEVICE_ROOM)
+
+    def test_switch_device_commands_cover_systems_and_appliances(self):
+        cmds = progression.SWITCH_DEVICE_COMMANDS
+        # Lights still resolve to a per-room set_lights command.
+        self.assertEqual(cmds["bathroom"]["on"]["action"], "set_lights")
+        self.assertEqual(cmds["bathroom"]["on"]["target_id"], "bathroom")
+        self.assertEqual(cmds["bathroom"]["on"]["params"], {"on": True})
+        self.assertEqual(cmds["office"]["off"]["params"], {"on": False})
+        # Systems map to their device actions, on/off flipping the right param.
+        self.assertEqual(cmds["ev"]["on"]["action"], "set_ev_charging")
+        self.assertTrue(cmds["ev"]["on"]["params"]["enabled"])
+        self.assertFalse(cmds["ev"]["off"]["params"]["enabled"])
+        self.assertEqual(cmds["battery"]["off"]["params"]["mode"], "hold")
+        self.assertEqual(cmds["hot_water"]["off"]["params"]["mode"], "off")
+        self.assertEqual(cmds["thermostat"]["on"]["params"]["setpoint_c"], 22)
+        # Appliances are run-once cycles: on = run now, off = defer to off-peak.
+        self.assertEqual(cmds["dishwasher"]["on"]["action"], "run_appliance")
+        self.assertEqual(cmds["dishwasher"]["off"]["action"], "defer_appliance")
+        self.assertEqual(cmds["dishwasher"]["off"]["params"]["until"], "23:59")
+
+    def test_switch_decision_is_human_readable(self):
+        self.assertEqual(progression.switch_decision("ev", True), "EV charger turned on.")
+        self.assertEqual(progression.switch_decision("bathroom", False), "Bathroom light turned off.")

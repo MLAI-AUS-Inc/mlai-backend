@@ -23,14 +23,73 @@ SLOT_BLOCK_IDS = {
     "safety": {"sa_manual", "sa_budget"},
 }
 
-# Stage-1 switchboard devices -> the room the direct set_lights command targets
-# (mirror HouseEnergyIds room ids in Unity).
-SWITCH_DEVICE_ROOM = {
-    "bathroom": "bathroom",
-    "living": "living",
-    "kitchen": "kitchen",
-    "bedroom": "bedroom",
+# Stage-1 switchboard devices -> the on/off device-command spec the deploy view writes.
+# Mirrors the frontend SWITCH_DEVICES ids; every (action, target_type) is one Unity's
+# HouseDeviceCommands.TryApply already accepts. Lights target a room (mirror HouseEnergyIds
+# in Unity); the thermostat has no on/off so "off" is an 18C eco setback; appliances are
+# run-once cycles ("on" runs now, "off" holds to late off-peak).
+_SWITCH_ROOMS = ("bathroom", "living", "kitchen", "bedroom", "child_bedroom", "office")
+
+
+def _light_spec(room, on):
+    return {"action": "set_lights", "target_type": "lights", "target_id": room, "params": {"on": on}}
+
+
+SWITCH_DEVICE_COMMANDS = {
+    room: {"on": _light_spec(room, True), "off": _light_spec(room, False)} for room in _SWITCH_ROOMS
 }
+SWITCH_DEVICE_COMMANDS.update(
+    {
+        "thermostat": {
+            "on": {"action": "set_thermostat_setpoint", "target_type": "thermostat", "target_id": "thermostat", "params": {"setpoint_c": 22}},
+            "off": {"action": "set_thermostat_setpoint", "target_type": "thermostat", "target_id": "thermostat", "params": {"setpoint_c": 18}},
+        },
+        "hot_water": {
+            "on": {"action": "set_hot_water", "target_type": "hot_water", "target_id": "hot_water", "params": {"mode": "auto"}},
+            "off": {"action": "set_hot_water", "target_type": "hot_water", "target_id": "hot_water", "params": {"mode": "off"}},
+        },
+        "ev": {
+            "on": {"action": "set_ev_charging", "target_type": "ev", "target_id": "ev", "params": {"enabled": True}},
+            "off": {"action": "set_ev_charging", "target_type": "ev", "target_id": "ev", "params": {"enabled": False}},
+        },
+        "battery": {
+            "on": {"action": "set_battery", "target_type": "battery", "target_id": "battery", "params": {"mode": "auto"}},
+            "off": {"action": "set_battery", "target_type": "battery", "target_id": "battery", "params": {"mode": "hold"}},
+        },
+        "dishwasher": {
+            "on": {"action": "run_appliance", "target_type": "appliance", "target_id": "dishwasher", "params": {}},
+            "off": {"action": "defer_appliance", "target_type": "appliance", "target_id": "dishwasher", "params": {"until": "23:59"}},
+        },
+        "washer": {
+            "on": {"action": "run_appliance", "target_type": "appliance", "target_id": "washer", "params": {}},
+            "off": {"action": "defer_appliance", "target_type": "appliance", "target_id": "washer", "params": {"until": "23:59"}},
+        },
+        "dryer": {
+            "on": {"action": "run_appliance", "target_type": "appliance", "target_id": "dryer", "params": {}},
+            "off": {"action": "defer_appliance", "target_type": "appliance", "target_id": "dryer", "params": {"until": "23:59"}},
+        },
+    }
+)
+
+# Back-compat: the lights-only {device: room} map (older callers/tests still read this).
+SWITCH_DEVICE_ROOM = {
+    dev: spec["on"]["target_id"]
+    for dev, spec in SWITCH_DEVICE_COMMANDS.items()
+    if spec["on"]["target_type"] == "lights"
+}
+
+SWITCH_DEVICE_LABELS = {
+    "bathroom": "Bathroom light", "living": "Living-room light", "kitchen": "Kitchen light",
+    "bedroom": "Bedroom light", "child_bedroom": "Child's-bedroom light", "office": "Office light",
+    "thermostat": "Thermostat", "hot_water": "Hot water", "ev": "EV charger",
+    "battery": "Home battery", "dishwasher": "Dishwasher", "washer": "Washing machine", "dryer": "Dryer",
+}
+
+
+def switch_decision(device_id, on):
+    """Human-readable line for the deploy-result feedback."""
+    label = SWITCH_DEVICE_LABELS.get(device_id, device_id.replace("_", " "))
+    return f"{label} turned {'on' if on else 'off'}."
 
 
 def stage_for_day(day):
