@@ -1,5 +1,7 @@
-# Watt The Hack simulation engine (scenario data ships inside this package).
-# Published on PyPI: https://pypi.org/project/watt-the-hack/
-# Pinned to a version so Docker re-pip-installs ONLY when this file changes. Bump the
-# version on each scenario release and redeploy to pull new scenarios.
-watt-the-hack==0.2.0
+# Watt The Hack simulation ENGINE CODE only. Published on PyPI:
+# https://pypi.org/project/watt-the-hack/
+# The sandbox reads scenarios from BASE_DIR/scenarios (views.py sets
+# SCENARIOS_DATA_DIR), NOT from this package — so scenario releases go via the
+# synced scenarios/ dir + redeploy. Bump this version only when the engine CODE
+# changes (keep it in lock-step with the admin base image's ENGINE_VERSION).
+watt-the-hack==0.2.4
