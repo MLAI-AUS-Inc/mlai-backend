@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 from generic_hackathons import smart_home_blocks as blocks
 from generic_hackathons import smart_home_firebase as shf
 from generic_hackathons import smart_home_policy as policy
+from generic_hackathons import smart_home_progression as progression
 from generic_hackathons.watt_views import (
     _class_id,
     _current_team,
@@ -57,14 +58,28 @@ class SmartHomeDeployView(APIView):
 
         # Path B-lite: prefer a structured `pipeline` (Inputs/Schedule/Brain/Actions/Outputs/Safety)
         # which the server compiles against live game state. Fall back to a flat `blocks` list.
+        # Stage-1 switchboard sends {switches: {bathroom: false, ...}} -> direct on/off.
+        # Otherwise a structured `pipeline` (preferred) or a flat `blocks` list.
+        switches = request.data.get("switches")
+        use_switches = isinstance(switches, dict)
+
         pipeline = request.data.get("pipeline")
-        use_pipeline = isinstance(pipeline, dict)
+        use_pipeline = (not use_switches) and isinstance(pipeline, dict)
         block_ids = []
-        if not use_pipeline:
+        if use_switches:
+            unknown_dev = sorted(
+                {str(d).strip() for d in switches if str(d).strip() not in progression.SWITCH_DEVICE_ROOM}
+            )
+            if unknown_dev:
+                return Response(
+                    {"error": f"Unknown switch devices: {', '.join(unknown_dev)}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif not use_pipeline:
             raw_blocks = request.data.get("blocks", [])
             if not isinstance(raw_blocks, list):
                 return Response(
-                    {"error": "Provide a pipeline object or a blocks list."},
+                    {"error": "Provide a switches map, a pipeline object, or a blocks list."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             block_ids = [str(b).strip() for b in raw_blocks if str(b).strip()]
@@ -116,7 +131,37 @@ class SmartHomeDeployView(APIView):
         decisions = []
         brain_label = None
         brain_effect = None
-        if use_pipeline:
+        if use_switches:
+            specs = []
+            for dev, on in switches.items():
+                room = progression.SWITCH_DEVICE_ROOM.get(str(dev).strip())
+                if room is None:
+                    continue
+                specs.append(
+                    {
+                        "action": "set_lights",
+                        "target_type": "lights",
+                        "target_id": room,
+                        "params": {"on": bool(on)},
+                    }
+                )
+                decisions.append(f"Turned the {room} light {'on' if on else 'off'}.")
+            if not specs:
+                return Response(
+                    {"error": "No valid switches to deploy."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif use_pipeline:
+            # Stage-gate: reject pipeline blocks the team hasn't unlocked yet at the current
+            # campaign day (the frontend hides them; this keeps a raw POST honest). Fail-open
+            # when the day is unknown so a missing observation never blocks a deploy.
+            day = observation.get("day") if isinstance(observation, dict) else None
+            locked = progression.locked_block_ids_in(pipeline, day)
+            if locked:
+                return Response(
+                    {"error": f"These blocks aren't unlocked yet (campaign day {day}): {', '.join(locked)}."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             compiled = policy.compile_policy(pipeline, observation)
             specs = compiled["commands"]
             decisions = compiled["decisions"]
