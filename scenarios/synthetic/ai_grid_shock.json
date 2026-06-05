@@ -894,7 +894,7 @@
   },
   "narrative": {
     "one_liner": "OpenAI-scale inference demand creates volatile datacentre load with delayed energy price response and intermittent GPU saturation events.",
-    "teaching_moment": "GPU inference demand is non-stationary and bursts in clustered waves. Energy prices respond with lag. Crucially, the baseline demand forecast becomes significantly biased during GPU saturation regimes. The optimal strategy requires anomaly detection to identify the regime shift in real-time, apply an error-correction model to debias the forecast, and optimise battery/FCAS dispatch under uncertainty."
+    "teaching_moment": "OpenAI-scale inference traffic doesn't follow a schedule. When GPU clusters saturate, demand jumps 60 MW in a single step — but the spot price takes several more steps to catch up. Controllers that wait for price to move will always be a step behind."
   },
   "events": [
     {

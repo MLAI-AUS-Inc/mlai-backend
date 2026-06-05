@@ -987,7 +987,7 @@
       "at_step": 264,
       "end_step": 274,
       "title": "Day 3 \u2014 Maximum Peak (120 MW)",
-      "description": "Demand hits does this sync  work?? the 120 MW grid import cap. Without battery or diesel, unmet demand triggers $10/MWh blackout penalties. Tariff peaks at $0.55/MWh.",
+      "description": "Demand hits the 120 MW grid import cap. Without battery or diesel, unmet demand triggers blackout penalties. Tariff peaks at $0.55/MWh.",
       "icon": "flame"
     }
   ],

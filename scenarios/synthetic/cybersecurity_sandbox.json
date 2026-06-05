@@ -910,7 +910,7 @@
       "at_step": 0,
       "end_step": 8,
       "title": "Shift brief \u2014 anomaly response protocol",
-      "description": "SOC operations: telemetry integrity is degraded this shift. You will receive anomaly notices naming a window and a channel. Some are GENUINE grid events (your meter and forecast will agree); some are SPOOFED sensor injections (your meter will read a spike the forecast does not corroborate); and at least once the FORECAST ITSELF may be compromised while the meter stays honest. For every anomaly notice you MUST acknowledge the named `anomaly_id` in agent_plan[\"anomaly_ack\"] for the duration of its window. Dispatch on the value you can corroborate \u2014 getting it wrong is penalised by the physics (over-export, unmet load, wasted cycles), not by us.",
+      "description": "SOC operations: telemetry integrity is degraded this shift. You will receive anomaly notices naming a window and a channel. Some are GENUINE grid events (your meter and forecast will agree); some are SPOOFED sensor injections (your meter will read a spike the forecast does not corroborate); and at least once the FORECAST ITSELF may be compromised while the meter stays honest. Some windows also blind your SOC and solar sensors at the same time \u2014 keep your own state-of-charge estimate from your dispatch, and read solar from the forecast, whenever a live meter is implausible. For every anomaly notice you MUST acknowledge the named `anomaly_id` in agent_plan[\"anomaly_ack\"] for the duration of its window. Dispatch on the value you can corroborate \u2014 getting it wrong is penalised by the physics (over-export, unmet load, wasted cycles), not by us.",
       "icon": "shield"
     },
     {
@@ -993,7 +993,7 @@
       "at_step": 120,
       "end_step": 146,
       "title": "Anomaly notice \u2014 DEMAND spike flagged (anom-d2)",
-      "description": "Grid security: reported demand is flagging a sharp spike over the interval [130, 146]. Treat the current reading as unverified until the forecast and recent trend confirm it. You MUST echo `anomaly_ack`: `anom-d2` in your agent_plan while this window is active.",
+      "description": "Grid security: reported demand is flagging a sharp spike over the interval [130, 146] \u2014 and this window the attacker is ALSO injecting your state-of-charge and solar telemetry (SOC reads near-empty; solar reads a phantom surplus). Trust none of the live meters here: corroborate demand against the forecast, hold your own integrated state-of-charge, and read solar from the forecast. Treat the current reading as unverified until the forecast and recent trend confirm it. You MUST echo `anomaly_ack`: `anom-d2` in your agent_plan while this window is active.",
       "icon": "alert-triangle"
     },
     {
@@ -1017,6 +1017,23 @@
       "type": "sensor_fdi",
       "channel": "demand",
       "bias": 135.0,
+      "at_step": 130,
+      "end_step": 146
+    },
+    {
+      "id": "fdi_soc_d2",
+      "type": "sensor_fdi",
+      "channel": "soc",
+      "bias": -0.9,
+      "noise_sigma": 0.02,
+      "at_step": 130,
+      "end_step": 146
+    },
+    {
+      "id": "fdi_solar_d2",
+      "type": "sensor_fdi",
+      "channel": "solar",
+      "bias": 250.0,
       "at_step": 130,
       "end_step": 146
     },
@@ -1078,12 +1095,12 @@
   ],
   "narrative": {
     "one_liner": "Telemetry is under attack. Some anomalies are real, some are spoofed sensor injections, and once the forecast itself lies. Classify each one and dispatch on the channel you can corroborate.",
-    "teaching_moment": "Don't trust any single channel blindly. A real attack shows up in BOTH the meter and the forecast (or the meter alone when the forecast is compromised); a spoof shows up in the meter ONLY. Corroborate the live reading against the forecast and recent realized history before you commit the battery."
+    "teaching_moment": "Don't trust any single channel blindly. A real attack shows up in BOTH the meter and the forecast (or the meter alone when the forecast is compromised); a spoof shows up in the meter ONLY. Attacks can also blind your SOC and solar sensors \u2014 track your own state-of-charge from your dispatch and trust the forecast for solar. Corroborate every live reading against the forecast and recent realized history before you commit the battery."
   },
   "scoring": {
     "baselines": {
-      "naive_cost": 2901846.62,
-      "optimal_cost": 1400000.0
+      "naive_cost": 3235812.0,
+      "optimal_cost": 1520000.0
     }
   }
 }
