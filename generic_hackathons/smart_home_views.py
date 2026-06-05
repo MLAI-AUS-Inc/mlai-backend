@@ -68,7 +68,7 @@ class SmartHomeDeployView(APIView):
         block_ids = []
         if use_switches:
             unknown_dev = sorted(
-                {str(d).strip() for d in switches if str(d).strip() not in progression.SWITCH_DEVICE_ROOM}
+                {str(d).strip() for d in switches if str(d).strip() not in progression.SWITCH_DEVICE_COMMANDS}
             )
             if unknown_dev:
                 return Response(
@@ -134,18 +134,11 @@ class SmartHomeDeployView(APIView):
         if use_switches:
             specs = []
             for dev, on in switches.items():
-                room = progression.SWITCH_DEVICE_ROOM.get(str(dev).strip())
-                if room is None:
+                cmd = progression.SWITCH_DEVICE_COMMANDS.get(str(dev).strip())
+                if cmd is None:
                     continue
-                specs.append(
-                    {
-                        "action": "set_lights",
-                        "target_type": "lights",
-                        "target_id": room,
-                        "params": {"on": bool(on)},
-                    }
-                )
-                decisions.append(f"Turned the {room} light {'on' if on else 'off'}.")
+                specs.append(dict(cmd["on" if bool(on) else "off"]))
+                decisions.append(progression.switch_decision(str(dev).strip(), bool(on)))
             if not specs:
                 return Response(
                     {"error": "No valid switches to deploy."},
