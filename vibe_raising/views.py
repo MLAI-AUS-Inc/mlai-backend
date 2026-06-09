@@ -2565,6 +2565,30 @@ class VibeRaisingEmailDraftStartView(APIView):
                 active_run=conflicting_run,
             ))
             return Response(payload, status=status.HTTP_200_OK)
+
+        if force_regenerate and existing_run is not None:
+            # "Run again": supersede the in-flight run so a brand-new run
+            # re-pulls the latest source data instead of resuming stale work.
+            try:
+                cancel_result = cancel_startup_update_run(
+                    run_id=existing_run.run_id,
+                    organization=organization,
+                    binding_id=binding.id,
+                    google_connection_id=google_connection.id if google_connection else None,
+                    cancelled_by_user_id=request.user.id,
+                )
+            except (ContentFactoryRun.DoesNotExist, PermissionError):
+                cancel_result = None
+            if cancel_result and cancel_result.get("cancel_applied"):
+                try:
+                    cancel_valley_run(existing_run.run_id)
+                except Exception:  # noqa: BLE001 - best-effort revoke of the superseded worker
+                    logger.warning(
+                        "Failed to revoke superseded valley run during forced regenerate",
+                        extra={"run_id": existing_run.run_id, "organization_id": organization.id},
+                    )
+            existing_run = None
+
         reusable_drafts_cover_input_sources = _monthly_update_drafts_cover_input_sources(
             organization,
             input_sources,
@@ -2615,6 +2639,7 @@ class VibeRaisingEmailDraftStartView(APIView):
                 target_month=target_month,
                 manual_document_ids=manual_document_ids,
                 manual_summary=manual_summary,
+                force_regenerate=force_regenerate,
             )
             created = True
             dispatch_result = _dispatch_run_to_valley(run)
