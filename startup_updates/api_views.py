@@ -3387,6 +3387,7 @@ class StartupUpdateDraftResultsView(APIView):
         organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
         _update_run_step(run, step_key="draft_generation")
 
+        replace_existing = bool((run.run_request or {}).get("force_regenerate"))
         backups = get_startup_update_run_cancel_backups(run)
         backups_changed = False
         saved = []
@@ -3416,6 +3417,7 @@ class StartupUpdateDraftResultsView(APIView):
                     evidence_metric_ids=evidence_metric_ids,
                     carry_forward_event_ids=item.get("carry_forward_event_ids", []),
                     groundedness_notes=item.get("groundedness_notes", ""),
+                    replace=replace_existing,
                 )
                 saved.append(_serialize_draft(draft))
 
