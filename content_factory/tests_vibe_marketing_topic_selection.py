@@ -3,7 +3,9 @@ from django.test import TestCase
 from content_factory.models import KeywordStatus, OrganizationContentConfig, ResearchedKeyword
 from content_factory.vibe_marketing_views import (
     _article_selection_conflicts,
+    _is_custom_topic_run,
     _resolve_topic_selection_candidate,
+    _topic_candidates_from_runs,
     _topic_selection_candidate_pool,
 )
 from organizations.models import Organization
@@ -123,3 +125,43 @@ class VibeMarketingTopicSelectionTest(TestCase):
 
         self.assertIn("target_keyword", conflicts)
         self.assertEqual(conflicts["target_keyword"]["resolved"], "how do ai detectors work")
+
+
+class CustomTopicResearchFallbackTest(TestCase):
+    """When a user runs custom-idea research and every result falls below the
+    dashboard quality bar, the single strongest candidate is still surfaced so the
+    idea always yields a result (instead of an empty list)."""
+
+    WEAK_CANDIDATES = [
+        {"keyword": "obscure idea a", "title": "Obscure Idea A", "difficulty": 90, "volume": 5, "opportunityScore": 10},
+        {"keyword": "obscure idea b", "title": "Obscure Idea B", "difficulty": 80, "volume": 10, "opportunityScore": 40},
+    ]
+
+    def _make_run(self, run_id, run_request):
+        return ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow="auto_discovery",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+            run_request=run_request,
+            result={"topic_candidates": list(self.WEAK_CANDIDATES)},
+        )
+
+    def test_is_custom_topic_run_detects_free_form_idea(self):
+        custom = self._make_run("run-custom", {"custom_topic_title": "obscure idea"})
+        island = self._make_run("run-island", {"content_island_slug": "ai-community", "content_island_name": "AI"})
+        daily = self._make_run("run-daily", {})
+        self.assertTrue(_is_custom_topic_run(custom))
+        self.assertFalse(_is_custom_topic_run(island))
+        self.assertFalse(_is_custom_topic_run(daily))
+
+    def test_custom_run_keeps_single_best_when_all_below_quality_bar(self):
+        run = self._make_run("run-custom-weak", {"custom_topic_title": "obscure idea"})
+        candidates = _topic_candidates_from_runs([run])
+        self.assertEqual(len(candidates), 1)
+        # Best by sort key: highest opportunityScore (40 > 10).
+        self.assertEqual(candidates[0]["keyword"], "obscure idea b")
+
+    def test_non_custom_run_still_drops_all_below_quality_bar(self):
+        run = self._make_run("run-island-weak", {"content_island_slug": "ai-community", "content_island_name": "AI"})
+        self.assertEqual(_topic_candidates_from_runs([run]), [])
