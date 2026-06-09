@@ -2607,6 +2607,7 @@ def create_startup_update_run(
     target_month: Optional[Union[str, date, datetime]] = None,
     manual_document_ids: Optional[list[str]] = None,
     manual_summary: Optional[str] = None,
+    force_regenerate: bool = False,
 ) -> ContentFactoryRun:
     now = timezone.now()
     windows = build_startup_update_target_windows(target_month, reference=now)
@@ -2651,6 +2652,11 @@ def create_startup_update_run(
             google_connection_id=google_connection_id,
             keep_run_id=existing.run_id,
         )
+        if force_regenerate and not (existing.run_request or {}).get("force_regenerate"):
+            existing_request = dict(existing.run_request or {})
+            existing_request["force_regenerate"] = True
+            existing.run_request = existing_request
+            existing.save(update_fields=["run_request", "updated_at"])
         return existing
 
     backfill_start = windows["narrative_start"]
@@ -2685,6 +2691,7 @@ def create_startup_update_run(
         "startup_context": startup_context,
     }
     run_request["input_sources"] = list(selected_input_sources)
+    run_request["force_regenerate"] = bool(force_regenerate)
     if MANUAL_DOCUMENTS_SOURCE in selected_source_set:
         run_request["manual_document_ids"] = _normalize_manual_document_id_list(manual_document_ids)
         run_request["manual_summary"] = str(manual_summary or "").strip()
@@ -4002,13 +4009,23 @@ def upsert_monthly_update_draft(
     evidence_metric_ids: Optional[list[int]] = None,
     carry_forward_event_ids: Optional[list[int]] = None,
     groundedness_notes: str = "",
+    replace: bool = False,
 ) -> MonthlyUpdateDraft:
     month_start = _month_start(month)
     existing_draft = MonthlyUpdateDraft.objects.filter(
         organization=organization,
         month=month_start,
     ).first()
-    if existing_draft is not None:
+    # On an explicit "Run again" regenerate we replace the previous run's draft
+    # outright instead of merging, so stale dot points and metrics don't linger.
+    # Writes that belong to the *same* run (e.g. investor + community drafts
+    # submitted together) are still merged so they don't clobber each other.
+    replace_existing_draft = (
+        replace
+        and existing_draft is not None
+        and (run is None or existing_draft.run_id != run.pk)
+    )
+    if existing_draft is not None and not replace_existing_draft:
         structured_memo, merge_stats = merge_monthly_update_structured_memo(
             existing_draft.structured_memo or {},
             structured_memo or {},
