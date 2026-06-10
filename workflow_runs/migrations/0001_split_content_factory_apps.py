@@ -9,6 +9,11 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        # The content_factory_run* tables were created by core.0030 before the
+        # app split; this adoption is state-only (database_operations=[]), so
+        # on FRESH databases later real-SQL migrations (0002 AddIndex, 0003
+        # AddField) need core.0030 ordered first. No-op on existing databases.
+        ("core", "0030_add_content_factory_runs"),
     ]
 
     operations = [
