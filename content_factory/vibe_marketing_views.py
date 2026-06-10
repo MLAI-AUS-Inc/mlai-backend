@@ -1863,6 +1863,20 @@ def _topic_candidate_passes_dashboard_quality(candidate):
     return difficulty <= 50 and (volume >= 50 or opportunity_score >= 500)
 
 
+def _is_custom_topic_run(run):
+    """True for a user-initiated custom-idea discovery run (free-form title/keyword),
+    as opposed to a content-island run or an automated daily-discovery run."""
+    request = getattr(run, "run_request", None) or {}
+    has_custom_idea = any(
+        str(request.get(key) or "").strip()
+        for key in ("custom_topic_title", "customTopicTitle", "custom_topic_keyword", "customTopicKeyword")
+    )
+    # _content_island_metadata_from_mapping always returns the pillar* keys (values
+    # are None when absent), so test the values rather than the dict's truthiness.
+    has_island = any(_content_island_metadata_from_mapping(request).values())
+    return has_custom_idea and not has_island
+
+
 def _apply_content_island_metadata(candidate, metadata):
     if not metadata:
         return candidate
@@ -1990,11 +2004,17 @@ def _topic_candidates_from_runs(
             for candidate in candidates:
                 candidate["sourceRunId"] = candidate.get("sourceRunId") or run.run_id
                 candidate.update(_apply_content_island_metadata(candidate, run_island_metadata))
-            candidates = [
+            quality_candidates = [
                 candidate
                 for candidate in candidates
                 if _topic_candidate_passes_dashboard_quality(candidate)
             ]
+            # Custom-topic research is an explicit, user-requested run: if every
+            # researched candidate falls below the dashboard quality bar, still
+            # surface the single strongest one so the idea always yields a result.
+            if not quality_candidates and _is_custom_topic_run(run):
+                quality_candidates = [min(candidates, key=_topic_candidate_sort_key)]
+            candidates = quality_candidates
         if candidates:
             for candidate in candidates:
                 island_key = _topic_candidate_island_key(candidate)
