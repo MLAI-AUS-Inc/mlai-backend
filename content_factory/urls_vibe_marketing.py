@@ -31,6 +31,7 @@ from .vibe_marketing_views import (
     VibeMarketingSettingsView,
     VibeMarketingTopicFeedbackRestoreView,
     VibeMarketingTopicFeedbackView,
+    VibeMarketingWrittenArticleDiscardView,
 )
 
 
@@ -73,6 +74,16 @@ urlpatterns = [
         "topic-feedback/<uuid:feedback_id>/restore/",
         VibeMarketingTopicFeedbackRestoreView.as_view(),
         name="vibe-marketing-topic-feedback-restore",
+    ),
+    path(
+        "written-articles/<uuid:article_id>/discard",
+        VibeMarketingWrittenArticleDiscardView.as_view(),
+        name="vibe-marketing-written-article-discard-no-slash",
+    ),
+    path(
+        "written-articles/<uuid:article_id>/discard/",
+        VibeMarketingWrittenArticleDiscardView.as_view(),
+        name="vibe-marketing-written-article-discard",
     ),
     path("lookups/locations", VibeMarketingLocationLookupView.as_view(), name="vibe-marketing-location-lookup-no-slash"),
     path("lookups/locations/", VibeMarketingLocationLookupView.as_view(), name="vibe-marketing-location-lookup"),

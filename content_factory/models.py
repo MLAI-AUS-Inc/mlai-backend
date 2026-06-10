@@ -855,6 +855,10 @@ class WrittenArticle(models.Model):
         related_name='articles'
     )
 
+    # run_id of the most recent *writing* run (never a publish child); powers
+    # the dashboard "Edit & republish" link back to the run review page.
+    source_run_id = models.CharField(max_length=100, blank=True, default="")
+
     # Timestamps
     published_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

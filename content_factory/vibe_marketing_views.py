@@ -1766,6 +1766,8 @@ def _serialize_written_article(article):
         "prNumber": article.pr_number,
         "publishStatus": article.publish_status,
         "liveUrl": article.live_url or "",
+        # NOT "sourceRunId": on draft payloads that name means "lineage root".
+        "runId": article.source_run_id or None,
         "writtenAt": article.published_at.isoformat() if article.published_at else article.created_at.isoformat(),
     }
 
@@ -2511,6 +2513,18 @@ def _content_package_from_run(run):
     }
 
 
+def _is_publish_child_run(run):
+    """True when the run is a publish child (same test as _latest_publish_child_run).
+
+    Publish children carry the PR evidence but their run page is not the
+    review/edit surface, so they must never become an article's source_run_id."""
+    if not run or run.workflow == "article_revision":
+        return False
+    if not _run_source_run_id(run):
+        return False
+    return _run_delivery_mode(run) in {"publish_code", "publish_webflow"}
+
+
 def _persist_article_memory_from_run(*, organization, run):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return None
@@ -2555,6 +2569,7 @@ def _persist_article_memory_from_run(*, organization, run):
             # publish_status tracks the real lifecycle.
             "published_at": timezone.now(),
             "publish_status": derived_status,
+            "source_run_id": "" if _is_publish_child_run(run) else run.run_id,
         },
     )
     if not created:
@@ -2575,6 +2590,11 @@ def _persist_article_memory_from_run(*, organization, run):
         if not article.published_at:
             article.published_at = timezone.now()
             update_fields.add("published_at")
+        # Keep the Edit link pointed at the latest writing/revision run; a
+        # publish child's run page is not the review surface.
+        if not _is_publish_child_run(run) and article.source_run_id != run.run_id:
+            article.source_run_id = run.run_id
+            update_fields.add("source_run_id")
         update_fields.update(advance_publish_status(article, derived_status, pr_number=pr_number))
         if update_fields:
             article.save(update_fields=sorted(update_fields))
@@ -10004,6 +10024,189 @@ class VibeMarketingTopicFeedbackRestoreView(APIView):
 
         restored = restore_topic_feedback(feedback)
         return Response({**serialize_topic_feedback(restored), "restored": True}, status=status.HTTP_200_OK)
+
+
+def _written_article_identity_keys_for_article(article):
+    """Identity keys for ONE article, mirroring _written_article_identity_keys."""
+    keys = {"slugs": set(), "keywords": set()}
+    slug = slugify(str(article.slug or article.title or ""))
+    title_slug = slugify(str(article.title or ""))
+    keyword = _normalize_keyword_memory(article.primary_keyword)
+    if slug:
+        keys["slugs"].add(slug)
+    if title_slug:
+        keys["slugs"].add(title_slug)
+    if keyword:
+        keys["keywords"].add(keyword)
+    return keys
+
+
+def _written_article_lineage_members(article, organization):
+    """Every non-cancelled article run belonging to the article's lineage(s).
+
+    Seeds are runs matching source_run_id or the article's identity keys
+    (slug, title-slug, normalized keyword); each seed expands through
+    _article_draft_group_members so revisions and publish children are
+    included. Multiple seeds cover regenerated topics with two lineages.
+    """
+    keys = _written_article_identity_keys_for_article(article)
+    candidates = list(
+        ContentFactoryRun.objects.filter(
+            domain=organization.domain,
+            workflow__in=ARTICLE_WORKFLOWS,
+        ).exclude(status=ContentFactoryRunStatus.CANCELLED)
+    )
+    seeds = [
+        run
+        for run in candidates
+        if (article.source_run_id and run.run_id == article.source_run_id)
+        or _article_draft_matches_written(run, keys)
+    ]
+    members = {}
+    for seed in seeds:
+        for member in _article_draft_group_members(seed, organization):
+            members[member.pk] = member
+    return list(members.values())
+
+
+class VibeMarketingWrittenArticleDiscardView(APIView):
+    def post(self, request, article_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        article = WrittenArticle.objects.filter(organization=context.organization, id=article_id).first()
+        if article is None:
+            # Also the double-click case: the first request deleted the row.
+            return Response({"detail": "Article not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Best-effort: pick up a merge/live transition that happened since the
+        # last bootstrap so the gate below sees fresh state.
+        try:
+            refresh_publish_statuses(context.organization, _get_config(context.organization), force=True)
+        except Exception:
+            logger.warning(
+                "article_discard_status_refresh_failed org=%s article=%s",
+                context.organization.pk,
+                article_id,
+                exc_info=True,
+            )
+        article.refresh_from_db()
+
+        members = _written_article_lineage_members(article, context.organization)
+
+        # Stale-status hardening: a row still marked "written" whose runs carry
+        # PR evidence means persistence never caught the promote step; advance
+        # the row before gating rather than discarding a PR'd article blind.
+        if article.publish_status == ArticlePublishStatus.WRITTEN:
+            changed = set()
+            for member in members:
+                if not _run_has_external_publish_evidence(member):
+                    continue
+                evidence = _publish_evidence_from_run(member, compact=True)
+                changed.update(
+                    advance_publish_status(
+                        article,
+                        derive_publish_status_from_evidence(evidence),
+                        pr_number=coerce_pr_number(evidence.get("prNumber")),
+                    )
+                )
+            if changed:
+                article.save(update_fields=sorted(changed))
+
+        if article.publish_status == ArticlePublishStatus.PR_OPEN:
+            return Response(
+                {"detail": "This article has an open GitHub pull request. Close the PR first, then discard."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if article.publish_status in {ArticlePublishStatus.MERGED, ArticlePublishStatus.LIVE}:
+            return Response(
+                {"detail": "This article is already merged or live on your site and can't be discarded."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Remote cancels are best-effort and happen outside the transaction;
+        # terminal runs legitimately refuse (409) and that must not block the
+        # local discard — unlike the drafts group-cancel, the publish_status
+        # gate above is the protection here.
+        remote_results = {}
+        actor_id = founder_actor_id_for_user(request.user)
+        for member in members:
+            remote_results[member.pk] = _call_content_factory_run_action(
+                run_id=member.run_id,
+                action="cancel",
+                payload={
+                    "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+                    "slack_user_id": actor_id,
+                    "reason": "article_discarded",
+                },
+                workflow=member.workflow,
+                timeout=(2, 8),
+                transport_errors_are_pending=True,
+            )
+
+        cancelled_run_ids = []
+        keyword_text = article.primary_keyword
+        slug = article.slug
+        normalized_keyword = _normalize_keyword_memory(article.primary_keyword)
+        with transaction.atomic():
+            for member in members:
+                _cancel_local_article_run(
+                    run=member,
+                    organization=context.organization,
+                    remote_data=remote_results.get(member.pk),
+                )
+                cancelled_run_ids.append(member.run_id)
+            # Reset keywords BEFORE the delete: written_article is SET_NULL, so
+            # the FK lookup only works while the row still exists.
+            ResearchedKeyword.objects.filter(
+                organization=context.organization,
+                written_article=article,
+            ).update(
+                status=KeywordStatus.PENDING,
+                written_article=None,
+                cooldown_until=None,
+                status_changed_at=timezone.now(),
+            )
+            if normalized_keyword and not (
+                WrittenArticle.objects.filter(
+                    organization=context.organization,
+                    primary_keyword__iexact=article.primary_keyword,
+                )
+                .exclude(pk=article.pk)
+                .exists()
+            ):
+                # Coverage memory also keys off bare WRITTEN keywords with no
+                # FK; free those too unless another article still covers them.
+                ResearchedKeyword.objects.filter(
+                    organization=context.organization,
+                    keyword_normalized=normalized_keyword,
+                    status=KeywordStatus.WRITTEN,
+                    written_article__isnull=True,
+                ).update(
+                    status=KeywordStatus.PENDING,
+                    cooldown_until=None,
+                    status_changed_at=timezone.now(),
+                )
+            article.delete()
+
+        logger.info(
+            "written_article_discarded org=%s article=%s slug=%s cancelled_runs=%s",
+            context.organization.pk,
+            article_id,
+            slug,
+            ",".join(cancelled_run_ids) or "none",
+        )
+        return Response(
+            {
+                "discarded": True,
+                "articleId": str(article_id),
+                "slug": slug,
+                "keyword": keyword_text,
+                "cancelledRunIds": cancelled_run_ids,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class VibeMarketingSettingsView(APIView):
