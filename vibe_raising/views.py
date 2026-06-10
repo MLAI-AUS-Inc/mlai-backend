@@ -330,6 +330,19 @@ def _serialize_binding_summary(binding):
     }
 
 
+def _run_failure_message(run) -> str:
+    fallback = "Draft generation failed. Please try again."
+    if run is None:
+        return fallback
+    error_text = str(run.error or "").strip()
+    if error_text:
+        return error_text
+    for step in run.steps.order_by("display_order", "id"):
+        if step.status == ContentFactoryStepStatus.FAILED and str(step.error or "").strip():
+            return str(step.error).strip()
+    return fallback
+
+
 def _serialize_run_summary(run):
     if not run:
         return None
@@ -1578,7 +1591,7 @@ def _build_status_payload(*, user, company, domain):
         ContentFactoryRunStatus.DENIED,
     }:
         state = "failed"
-        error = "Gmail processing failed. Please try again."
+        error = _run_failure_message(latest_run)
     elif draft_payload:
         state = "ready"
     elif latest_run and latest_run.status == ContentFactoryRunStatus.COMPLETED:
@@ -1711,7 +1724,7 @@ def _build_email_draft_payload(
         ContentFactoryRunStatus.DENIED,
     }:
         state = "failed"
-        error = "Gmail processing failed. Please try again."
+        error = _run_failure_message(latest_run)
     elif email_draft_payload:
         state = "completed"
     else:
