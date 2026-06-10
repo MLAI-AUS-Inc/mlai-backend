@@ -766,6 +766,19 @@ class TrendStatus(models.TextChoices):
     DECLINING = "declining", "Declining"
 
 
+class ArticlePublishStatus(models.TextChoices):
+    """Real publish lifecycle of a written article.
+
+    A completed writing run only means the content was packaged; the article
+    is not on the customer's site until its PR merges and the site deploys.
+    """
+    WRITTEN = "written", "Written"
+    PR_OPEN = "pr_open", "PR Open"
+    PR_CLOSED = "pr_closed", "PR Closed"
+    MERGED = "merged", "Merged"
+    LIVE = "live", "Live"
+
+
 class WrittenArticle(models.Model):
     """
     Links researched keywords to published articles.
@@ -787,6 +800,22 @@ class WrittenArticle(models.Model):
     # URLs
     article_url = models.URLField(blank=True, null=True)
     pr_url = models.URLField(blank=True, null=True)
+
+    # Publish lifecycle (see ArticlePublishStatus): written -> pr_open -> merged -> live.
+    publish_status = models.CharField(
+        max_length=20,
+        choices=ArticlePublishStatus.choices,
+        default=ArticlePublishStatus.WRITTEN,
+        db_index=True,
+    )
+    pr_number = models.IntegerField(null=True, blank=True)
+    pr_merged_at = models.DateTimeField(null=True, blank=True)
+    live_url = models.URLField(
+        blank=True, null=True,
+        help_text="Production URL confirmed against the customer site's sitemap",
+    )
+    live_checked_at = models.DateTimeField(null=True, blank=True)
+    live_verified_at = models.DateTimeField(null=True, blank=True)
 
     # Primary keyword (denormalized for quick access)
     primary_keyword = models.CharField(max_length=500)

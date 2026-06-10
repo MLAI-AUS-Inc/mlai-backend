@@ -402,8 +402,8 @@ class ResearchedKeywordAdmin(admin.ModelAdmin):
 @admin.register(WrittenArticle)
 class WrittenArticleAdmin(admin.ModelAdmin):
     """Admin for tracking written articles."""
-    list_display = ('title', 'organization_domain', 'slug', 'primary_keyword', 'published_at', 'created_at')
-    list_filter = ('organization', 'published_at', 'created_at')
+    list_display = ('title', 'organization_domain', 'slug', 'primary_keyword', 'publish_status', 'published_at', 'created_at')
+    list_filter = ('organization', 'publish_status', 'published_at', 'created_at')
     search_fields = ('title', 'slug', 'primary_keyword', 'organization__domain')
     list_select_related = ('organization', 'job')
     ordering = ('-created_at',)

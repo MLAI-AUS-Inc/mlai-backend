@@ -38,7 +38,14 @@ from content_factory.article_setup_reset import article_setup_reset_ignores_run,
 from content_factory.article_system import resolve_article_system
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
+from content_factory.article_publish_status import (
+    advance_publish_status,
+    coerce_pr_number,
+    derive_publish_status_from_evidence,
+    refresh_publish_statuses,
+)
 from content_factory.models import (
+    ArticlePublishStatus,
     ContentFactoryHealingPromotionState,
     ContentFactoryHealingRecord,
     AISaturation,
@@ -1756,6 +1763,9 @@ def _serialize_written_article(article):
         "keyword": article.primary_keyword,
         "articleUrl": article.article_url or "",
         "prUrl": article.pr_url or "",
+        "prNumber": article.pr_number,
+        "publishStatus": article.publish_status,
+        "liveUrl": article.live_url or "",
         "writtenAt": article.published_at.isoformat() if article.published_at else article.created_at.isoformat(),
     }
 
@@ -2527,18 +2537,47 @@ def _persist_article_memory_from_run(*, organization, run):
 
     slug = str(content_package.get("slug") or result.get("slug") or slugify(title) or run.run_id).strip()
     evidence = _publish_evidence_from_run(run)
-    article, _created = WrittenArticle.objects.update_or_create(
+    article_url = evidence.get("previewUrl") or result.get("article_url") or ""
+    pr_url = evidence.get("prUrl") or result.get("pr_url") or ""
+    pr_number = coerce_pr_number(evidence.get("prNumber"))
+    derived_status = derive_publish_status_from_evidence(evidence)
+    article, created = WrittenArticle.objects.get_or_create(
         organization=organization,
         slug=slug,
         defaults={
             "title": title,
             "category": str(result.get("category") or "featured"),
-            "article_url": evidence.get("previewUrl") or result.get("article_url") or "",
-            "pr_url": evidence.get("prUrl") or result.get("pr_url") or "",
+            "article_url": article_url,
+            "pr_url": pr_url,
+            "pr_number": pr_number,
             "primary_keyword": primary_keyword,
+            # When the article was packaged — NOT proof it reached the site;
+            # publish_status tracks the real lifecycle.
             "published_at": timezone.now(),
+            "publish_status": derived_status,
         },
     )
+    if not created:
+        update_fields = set()
+        category = str(result.get("category") or "").strip()
+        for field, value in (
+            ("title", title),
+            ("category", category),
+            ("article_url", article_url),
+            ("pr_url", pr_url),
+            ("primary_keyword", primary_keyword),
+        ):
+            # Only overwrite with real values so a later evidence-less run
+            # (e.g. a revision) can't wipe URLs we already captured.
+            if value and getattr(article, field) != value:
+                setattr(article, field, value)
+                update_fields.add(field)
+        if not article.published_at:
+            article.published_at = timezone.now()
+            update_fields.add("published_at")
+        update_fields.update(advance_publish_status(article, derived_status, pr_number=pr_number))
+        if update_fields:
+            article.save(update_fields=sorted(update_fields))
     keyword, _keyword_created = ResearchedKeyword.objects.get_or_create(
         organization=organization,
         keyword_normalized=_normalize_keyword_memory(primary_keyword),
@@ -2562,6 +2601,56 @@ def _persist_completed_article_memory_if_possible(run):
     if organization is None:
         return None
     return _persist_article_memory_from_run(organization=organization, run=run)
+
+
+def _apply_publish_child_evidence_to_article(organization, source_run, child_run):
+    """Publish child runs carry the PR evidence, but the WrittenArticle row was
+    created from the source writing run — copy the child's evidence across.
+
+    Best-effort: callers sit on run-polling paths, so never raise."""
+    try:
+        return _apply_publish_child_evidence_to_article_inner(organization, source_run, child_run)
+    except Exception:
+        logger.warning(
+            "apply_publish_child_evidence_failed run=%s",
+            getattr(child_run, "run_id", ""),
+            exc_info=True,
+        )
+        return None
+
+
+def _apply_publish_child_evidence_to_article_inner(organization, source_run, child_run):
+    if organization is None or not child_run or child_run.status != ContentFactoryRunStatus.COMPLETED:
+        return None
+    evidence = _publish_evidence_from_run(child_run)
+    derived_status = derive_publish_status_from_evidence(evidence)
+    pr_url = evidence.get("prUrl") or ""
+    if derived_status == ArticlePublishStatus.WRITTEN and not pr_url:
+        return None
+    slug = ""
+    for candidate in (child_run, source_run):
+        if not candidate:
+            continue
+        package = _content_package_from_run(candidate) or {}
+        result = candidate.result or {}
+        slug = str(package.get("slug") or result.get("slug") or "").strip()
+        if slug:
+            break
+    if not slug:
+        return None
+    article = WrittenArticle.objects.filter(organization=organization, slug=slug).first()
+    if article is None:
+        return None
+    update_fields = set()
+    if pr_url and article.pr_url != pr_url:
+        article.pr_url = pr_url
+        update_fields.add("pr_url")
+    update_fields.update(
+        advance_publish_status(article, derived_status, pr_number=coerce_pr_number(evidence.get("prNumber")))
+    )
+    if update_fields:
+        article.save(update_fields=sorted(update_fields))
+    return article
 
 
 def _component_manifest_from_run(run):
@@ -5800,6 +5889,7 @@ def _recover_publish_child_for_run(run, *, request, context):
             _attach_publish_child_to_run(run, child.run_id)
             if publish_source_run.pk != run.pk:
                 _attach_publish_child_to_run(publish_source_run, child.run_id)
+            _apply_publish_child_evidence_to_article(context.organization, publish_source_run, child)
             return child
         if _publish_handoff_fresh_for_known_child(run) or _publish_handoff_fresh_for_known_child(publish_source_run):
             return None
@@ -5823,6 +5913,7 @@ def _recover_publish_child_for_run(run, *, request, context):
                 _attach_publish_child_to_run(run, child.run_id)
                 if publish_source_run.pk != run.pk:
                     _attach_publish_child_to_run(publish_source_run, child.run_id)
+                _apply_publish_child_evidence_to_article(context.organization, publish_source_run, child)
                 return child
 
     if not _publish_handoff_pending_for_run(run) and not _publish_handoff_pending_for_run(publish_source_run):
@@ -5839,6 +5930,7 @@ def _recover_publish_child_for_run(run, *, request, context):
             _attach_publish_child_to_run(run, child.run_id)
             if publish_source_run.pk != run.pk:
                 _attach_publish_child_to_run(publish_source_run, child.run_id)
+            _apply_publish_child_evidence_to_article(context.organization, publish_source_run, child)
             return child
     return None
 
@@ -7747,6 +7839,17 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
     _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
     if setup_pr_refreshed:
         latest_runs = _latest_runs_for_org(context.organization)
+    if not compact:
+        # Sync written-article lifecycle (PR merged? live on the site?) so the
+        # dashboard badge reflects reality; internally throttled + bounded.
+        try:
+            refresh_publish_statuses(context.organization, config)
+        except Exception:
+            logger.warning(
+                "article_publish_status_refresh_failed org=%s",
+                getattr(context.organization, "pk", None),
+                exc_info=True,
+            )
     discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
