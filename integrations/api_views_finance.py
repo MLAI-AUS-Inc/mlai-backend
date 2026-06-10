@@ -29,7 +29,7 @@ from integrations.services.finance import (
 )
 from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
-from startup_updates.models import StartupMetricObservation
+from startup_updates.models import StartupMetricObservation, UserStartupBinding
 
 User = get_user_model()
 
@@ -53,7 +53,7 @@ class FinancialSyncView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        organization = _get_authorized_organization(request, request.data.get("domain"))
+        organization = _resolve_financial_sync_organization(request)
         connection_ids = list(request.data.get("connection_ids") or request.data.get("connectionIds") or [])
         try:
             run, created = create_financial_sync_run(
@@ -282,6 +282,43 @@ def _optional_authorized_organization(request, raw_domain) -> Organization | Non
     if not str(raw_domain or "").strip():
         return None
     return _get_authorized_organization(request, raw_domain)
+
+
+def _resolve_financial_sync_organization(request) -> Organization:
+    # The web client posts {providers} with no domain, so resolve the
+    # organization from the user like the other connector endpoints do.
+    raw_domain = request.data.get("domain")
+    if str(raw_domain or "").strip():
+        return _get_authorized_organization(request, raw_domain)
+
+    connection = (
+        ExternalServiceConnection.objects.select_related("organization")
+        .filter(
+            user=request.user,
+            organization__isnull=False,
+            provider__in=[
+                ExternalServiceProvider.XERO,
+                ExternalServiceProvider.STRIPE,
+                ExternalServiceProvider.BANK_FEED,
+            ],
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if connection is not None and connection.organization is not None:
+        return connection.organization
+
+    binding = (
+        UserStartupBinding.objects.select_related("organization")
+        .filter(user=request.user)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if binding is not None and binding.organization is not None:
+        return binding.organization
+
+    raise serializers.ValidationError({"domain": "domain is required."})
 
 
 def _get_authorized_organization(request, raw_domain) -> Organization:
