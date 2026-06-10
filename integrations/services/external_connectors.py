@@ -4483,7 +4483,6 @@ def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
         "total_cached_messages": total_cached,
         "warnings": warnings,
         "messages": messages,
-        **scope_status,
     }
 
 
