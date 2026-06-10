@@ -60,6 +60,12 @@ class ContentFactoryRun(models.Model):
     result = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True, default="")
     resume_available = models.BooleanField(default=False)
+    # emitted_at of the newest content-factory callback synced into this run.
+    # Callback sync paths skip mutation when an incoming event is older, so a
+    # late-arriving retry cannot overwrite newer run state. Null until a
+    # callback stamped with emitted_at arrives (older content-factory versions
+    # do not send the field).
+    last_event_emitted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

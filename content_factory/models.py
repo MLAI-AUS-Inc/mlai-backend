@@ -334,6 +334,32 @@ class ContentFactoryJob(models.Model):
         return f"{self.job_id} ({self.status}) - {self.domain}"
 
 
+class ContentFactoryCallbackEvent(models.Model):
+    """
+    Durable idempotency ledger for content-factory callback deliveries.
+
+    content-factory stamps each callback with a unique event_id and retries
+    failed deliveries from a durable outbox, so the same event can arrive more
+    than once. A row here means the event was already acknowledged with a 2xx
+    response; replays return 200 without reprocessing. This must be a DB table
+    rather than Django cache: production uses per-process LocMemCache, which
+    is invisible to other workers and lost on restart.
+    """
+
+    event_id = models.CharField(max_length=100, unique=True, db_index=True)
+    job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    event_type = models.CharField(max_length=100, blank=True, default="")
+    emitted_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'content_factory_callback_event'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.event_id} ({self.event_type}) - {self.job_id}"
+
+
 class ScheduledDiscoveryDispatchState(models.TextChoices):
     SCHEDULED = "scheduled", "Scheduled"
     QUEUED = "queued", "Queued"
