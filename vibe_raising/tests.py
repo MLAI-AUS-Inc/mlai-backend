@@ -29,6 +29,7 @@ from startup_updates.services import (
     SUPERSEDED_GMAIL_CONNECTION_ERROR,
     create_startup_update_run,
     resolve_or_create_profile,
+    upsert_monthly_update_draft,
 )
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
@@ -2015,6 +2016,87 @@ class VibeRaisingApiTests(TestCase):
             "revenue",
             [item.get("metric_key") for item in stored_draft.structured_memo["kpi_snapshot"]],
         )
+
+    def test_upsert_monthly_update_draft_replace_overwrites_prior_run_draft(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        prior_run = create_startup_update_run(organization=organization, binding=binding)
+        upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=prior_run,
+            structured_memo={
+                "highlights": ["Stale alpha", "Shared gamma"],
+                "asks": ["Old ask"],
+            },
+            model_name="prior-model",
+        )
+        prior_run.status = ContentFactoryRunStatus.COMPLETED
+        prior_run.save(update_fields=["status", "updated_at"])
+
+        fresh_run = create_startup_update_run(organization=organization, binding=binding)
+        self.assertNotEqual(fresh_run.run_id, prior_run.run_id)
+
+        # A forced regenerate (replace=True) from a *different* run overwrites the
+        # stale draft outright instead of merging, so old dot points do not linger.
+        replaced = upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=fresh_run,
+            structured_memo={"highlights": ["Fresh delta"]},
+            model_name="fresh-model",
+            replace=True,
+        )
+
+        self.assertEqual(replaced.run_id, fresh_run.pk)
+        self.assertEqual(replaced.structured_memo.get("highlights"), ["Fresh delta"])
+        self.assertNotIn("asks", replaced.structured_memo)
+        self.assertNotIn("Stale alpha", str(replaced.structured_memo))
+
+    def test_upsert_monthly_update_draft_without_replace_merges_prior_run_draft(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        google_connection = self._create_google_connection()
+        organization = Organization.objects.create(name="Beta Inc.", domain="beta.com")
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        prior_run = create_startup_update_run(organization=organization, binding=binding)
+        upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=prior_run,
+            structured_memo={"highlights": ["Stale alpha"]},
+            model_name="prior-model",
+        )
+        prior_run.status = ContentFactoryRunStatus.COMPLETED
+        prior_run.save(update_fields=["status", "updated_at"])
+
+        fresh_run = create_startup_update_run(organization=organization, binding=binding)
+        merged = upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=fresh_run,
+            structured_memo={"highlights": ["Fresh delta"]},
+            model_name="fresh-model",
+        )
+
+        # Default behaviour (no force regenerate) still merges, preserving prior points.
+        self.assertIn("Stale alpha", str(merged.structured_memo))
+        self.assertIn("Fresh delta", str(merged.structured_memo))
 
     def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
         self.client.force_authenticate(user=self.user)
