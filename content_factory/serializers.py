@@ -222,6 +222,7 @@ class WrittenArticleSerializer(serializers.ModelSerializer):
         model = WrittenArticle
         fields = [
             'id', 'title', 'slug', 'category', 'article_url', 'pr_url',
+            'publish_status', 'pr_number', 'pr_merged_at', 'live_url', 'live_verified_at',
             'primary_keyword', 'published_at', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']

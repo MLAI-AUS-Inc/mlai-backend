@@ -37,7 +37,9 @@ from content_factory.delivery import (
     render_content_preview_page,
     validate_content_factory_preview_signature,
 )
+from content_factory.article_publish_status import advance_publish_status
 from content_factory.models import (
+    ArticlePublishStatus,
     ComponentMapping,
     ContentFactoryHealingRecord,
     GeneratedComponent,
@@ -6883,6 +6885,13 @@ class SEOWrittenArticleCreateView(APIView):
             slug=serializer.validated_data['slug'],
             defaults=defaults,
         )
+
+        # A PR URL only proves a PR exists; merge/live state is confirmed later
+        # by the publish-status refresh. Never downgrade an existing status.
+        desired_status = ArticlePublishStatus.PR_OPEN if defaults.get('pr_url') else ArticlePublishStatus.WRITTEN
+        status_fields = advance_publish_status(article, desired_status)
+        if status_fields:
+            article.save(update_fields=sorted(set(status_fields)))
 
         # Update keyword status to written if it exists
         keyword_normalized = primary_keyword.lower().strip()
