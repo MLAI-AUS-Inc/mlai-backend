@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from datetime import date as calendar_date
+from datetime import date as calendar_date, datetime, timezone as datetime_timezone
 from typing import Any, Optional
 
 from django.conf import settings
@@ -1692,6 +1692,95 @@ def _article_system_setup_snapshot_is_current_retry(*, existing_run, data: dict,
     return _article_system_setup_current_retry_attempt(data, raw_payload, data.get("result"), raw_payload.get("result"))
 
 
+def _callback_event_emitted_at(data) -> Optional[datetime]:
+    """
+    Parse the emitted_at stamp content-factory adds to callback payloads.
+
+    Returns None when the field is absent (payloads from older content-factory
+    versions) or unparseable, so callers no-op gracefully.
+    """
+    from django.utils.dateparse import parse_datetime
+
+    raw = str((data or {}).get("emitted_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = parse_datetime(raw)
+    except ValueError:
+        return None
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, datetime_timezone.utc)
+    return parsed
+
+
+def _callback_event_is_stale(*, existing_run: Optional[ContentFactoryRun], emitted_at: Optional[datetime]) -> bool:
+    """
+    True when a callback was emitted before the run's last synced event.
+
+    content-factory retries deliveries from a durable outbox, so an old event
+    can arrive after a newer one; applying it would roll the run state back.
+    Events without emitted_at (or runs without a watermark yet) are never
+    considered stale.
+    """
+    if existing_run is None or emitted_at is None:
+        return False
+    last_synced = existing_run.last_event_emitted_at
+    return bool(last_synced and emitted_at < last_synced)
+
+
+def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitted_at: Optional[datetime]) -> bool:
+    """
+    Atomically claim a callback delivery by its event_id.
+
+    Returns True when this delivery is the first acknowledgement of the event
+    (caller should process it) and False when the event_id is already
+    recorded. The unique constraint makes the claim race-safe across workers.
+    Fails open on storage errors: reprocessing an event is recoverable,
+    silently dropping one is not.
+    """
+    from content_factory.models import ContentFactoryCallbackEvent
+
+    max_attempts = 3 if connection.vendor == "sqlite" else 1
+    for attempt in range(max_attempts):
+        try:
+            _, created = ContentFactoryCallbackEvent.objects.get_or_create(
+                event_id=event_id[:100],
+                defaults={
+                    "job_id": str(job_id or "")[:100],
+                    "event_type": str(event_type or "")[:100],
+                    "emitted_at": emitted_at,
+                },
+            )
+            return created
+        except OperationalError as exc:
+            if _is_retryable_sqlite_lock(exc) and attempt < max_attempts - 1:
+                time.sleep(0.15 * (attempt + 1))
+                continue
+            logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
+            return True
+    return True
+
+
+def _release_callback_event(event_id: str) -> None:
+    """
+    Drop a claimed event_id after processing failed.
+
+    The sender retries non-2xx deliveries; releasing the claim lets the retry
+    be reprocessed instead of being treated as a duplicate.
+    """
+    from content_factory.models import ContentFactoryCallbackEvent
+
+    try:
+        ContentFactoryCallbackEvent.objects.filter(event_id=event_id[:100]).delete()
+    except Exception as exc:
+        logger.warning("Failed to release callback event_id=%s after processing failure: %s", event_id, exc)
+
+
 def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status: str) -> Optional[ContentFactoryRun]:
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
@@ -1708,6 +1797,15 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     error_message = str(data.get("error") or data.get("error_message") or "").strip()
     error_code = str(data.get("error_code") or "").strip()
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    emitted_at = _callback_event_emitted_at(data)
+    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+        logger.info(
+            "Ignoring stale generation callback for run %s: emitted_at=%s predates last synced event %s",
+            run_id,
+            emitted_at.isoformat(),
+            existing_run.last_event_emitted_at.isoformat(),
+        )
+        return existing_run
     result = dict((existing_run.result if existing_run else None) or {})
     result.update(
         {
@@ -1750,6 +1848,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "result": result,
             "error": error_message,
             "resume_available": True,
+            "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         },
     )
 
@@ -1778,6 +1877,15 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
         return None
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    emitted_at = _callback_event_emitted_at(data)
+    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+        logger.info(
+            "Ignoring stale scan callback for run %s: emitted_at=%s predates last synced event %s",
+            run_id,
+            emitted_at.isoformat(),
+            existing_run.last_event_emitted_at.isoformat(),
+        )
+        return existing_run
     if existing_run and existing_run.status in {ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}:
         logger.info(
             "Ignoring scan callback for terminal local run: run_id=%s status=%s",
@@ -1884,6 +1992,7 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
             "result": result,
             "error": "" if run_status != ContentFactoryRunStatus.BLOCKED else result.get("scaffold_reason") or readiness.get("reason") or "",
             "resume_available": bool(existing_run.resume_available if existing_run else False),
+            "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         },
     )
     setup_run_id = str(result.get("setup_run_id") or "").strip()
@@ -2120,6 +2229,16 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         return None
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    emitted_at = _callback_event_emitted_at(data)
+    if _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
+        logger.info(
+            "Ignoring stale article_system_setup callback for run %s: event=%s emitted_at=%s predates last synced event %s",
+            run_id,
+            event_type,
+            emitted_at.isoformat(),
+            existing_run.last_event_emitted_at.isoformat(),
+        )
+        return existing_run
     setup_payload = sanitize_json_for_postgres(
         data.get("article_system_setup") if isinstance(data.get("article_system_setup"), dict) else {}
     )
@@ -2621,6 +2740,8 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             "result": result,
             "error": error,
             "resume_available": bool(result.get("retry_available") or (existing_run.resume_available if existing_run else False)),
+            # Datetime watermark; passes through sanitize_json_for_postgres untouched.
+            "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         }
     )
 
@@ -2831,94 +2952,129 @@ class ContentFactoryCallbackView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
-        from content_factory.models import ContentFactoryJob
-        
         data = request.data
         event_type = data.get('event_type') or data.get('event')
         job_id = data.get('job_id')
         domain = data.get('domain', '')
-        slack_user_id = data.get('slack_user_id')
 
         if not event_type:
             return Response(
                 {'error': 'event_type is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if not job_id:
             return Response(
                 {'error': 'job_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         logger.info(f"Content Factory callback received: event={event_type}, job_id={job_id}, domain={domain}")
-        
+
+        # content-factory stamps each delivery with a unique event_id and
+        # retries non-2xx responses from a durable outbox. Claim the event_id
+        # before processing so a replay of an already-acknowledged event
+        # returns 200 without reprocessing. Payloads from older
+        # content-factory versions have no event_id and skip the guard.
+        event_id = str(data.get('event_id') or '').strip()
+        if event_id and not _claim_callback_event(
+            event_id=event_id,
+            event_type=str(event_type),
+            job_id=str(job_id),
+            emitted_at=_callback_event_emitted_at(data),
+        ):
+            logger.info(
+                "Duplicate content-factory callback ignored: event=%s, job_id=%s, event_id=%s",
+                event_type,
+                job_id,
+                event_id,
+            )
+            return Response(
+                {
+                    'status': 'duplicate',
+                    'message': f'{event_type} callback already processed',
+                    'job_id': job_id,
+                    'event_id': event_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         try:
-            if event_type == 'topic_selection':
-                return self._handle_topic_selection(data)
-            elif event_type == 'article_complete':
-                return self._handle_article_complete(data)
-            elif event_type == 'error':
-                return self._handle_error(data)
-            elif event_type == 'auth_required':
-                return self._handle_auth_required(data)
-            elif event_type == 'scan_complete':
-                return self._handle_scan_complete(data)
-            elif event_type in {
-                'article_system_setup_progress',
-                'article_system_setup_preview_ready',
-                'article_system_setup_preview_fallback_ready',
-                'article_system_setup_revision_ready',
-                'article_system_setup_progress',
-                'article_system_setup_preview_failed',
-                'article_system_setup_completed',
-                'article_system_setup_pr_created',
-                'article_system_setup_manual_merge_required',
-            }:
-                _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)
-                return Response(
-                    {'status': 'received', 'message': f'{event_type} callback processed', 'job_id': job_id},
-                    status=status.HTTP_200_OK,
-                )
-            elif event_type == 'website_baseline_complete':
-                return self._handle_website_baseline_complete(data)
-            elif event_type == 'generation_failed':
-                return self._handle_generation_failed(data)
-            elif event_type == 'generation_blocked':
-                return self._handle_generation_blocked(data)
-            elif event_type == 'generation_pr_opened':
-                return self._handle_generation_pr_opened(data)
-            elif event_type == 'scaffold_complete':
-                return self._handle_scaffold_complete(data)
-            elif event_type == 'delivery_mode_required':
-                return self._handle_delivery_mode_required(data)
-            elif event_type == 'draft_pr_created':
-                return self._handle_draft_pr_created(data)
-            elif event_type == 'preview_ready':
-                return self._handle_preview_ready(data)
-            elif event_type == 'content_ready':
-                return self._handle_content_ready(data)
-            elif event_type == 'publish_bundle_ready':
-                return self._handle_publish_bundle_ready(data)
-            elif event_type == 'article_review_ready':
-                return self._handle_article_review_ready(data)
-            elif event_type == 'discovery_progress':
-                return self._handle_discovery_progress(data)
-            elif event_type == 'article_progress':
-                return self._handle_article_progress(data)
-            elif event_type == 'scan_progress':
-                return self._handle_scan_progress(data)
-            else:
-                logger.warning(f"Unknown event_type: {event_type}")
-                return Response(
-                    {'status': 'ignored', 'message': f'Unknown event_type: {event_type}'},
-                    status=status.HTTP_200_OK
-                )
+            response = self._dispatch_callback_event(data, event_type=event_type, job_id=job_id)
         except Exception as e:
             logger.exception(f"Error processing callback: {e}")
+            if event_id:
+                _release_callback_event(event_id)
             return Response(
                 {'error': 'Internal server error processing callback'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        if event_id and not (200 <= response.status_code < 300):
+            # Non-2xx tells the sender to retry; release the claim so the
+            # retry is reprocessed instead of deduped.
+            _release_callback_event(event_id)
+        return response
+
+    def _dispatch_callback_event(self, data, *, event_type, job_id):
+        if event_type == 'topic_selection':
+            return self._handle_topic_selection(data)
+        elif event_type == 'article_complete':
+            return self._handle_article_complete(data)
+        elif event_type == 'error':
+            return self._handle_error(data)
+        elif event_type == 'auth_required':
+            return self._handle_auth_required(data)
+        elif event_type == 'scan_complete':
+            return self._handle_scan_complete(data)
+        elif event_type in {
+            'article_system_setup_progress',
+            'article_system_setup_preview_ready',
+            'article_system_setup_preview_fallback_ready',
+            'article_system_setup_revision_ready',
+            'article_system_setup_progress',
+            'article_system_setup_preview_failed',
+            'article_system_setup_completed',
+            'article_system_setup_pr_created',
+            'article_system_setup_manual_merge_required',
+        }:
+            _sync_article_system_setup_callback_to_run(data=data, event_type=event_type)
+            return Response(
+                {'status': 'received', 'message': f'{event_type} callback processed', 'job_id': job_id},
+                status=status.HTTP_200_OK,
+            )
+        elif event_type == 'website_baseline_complete':
+            return self._handle_website_baseline_complete(data)
+        elif event_type == 'generation_failed':
+            return self._handle_generation_failed(data)
+        elif event_type == 'generation_blocked':
+            return self._handle_generation_blocked(data)
+        elif event_type == 'generation_pr_opened':
+            return self._handle_generation_pr_opened(data)
+        elif event_type == 'scaffold_complete':
+            return self._handle_scaffold_complete(data)
+        elif event_type == 'delivery_mode_required':
+            return self._handle_delivery_mode_required(data)
+        elif event_type == 'draft_pr_created':
+            return self._handle_draft_pr_created(data)
+        elif event_type == 'preview_ready':
+            return self._handle_preview_ready(data)
+        elif event_type == 'content_ready':
+            return self._handle_content_ready(data)
+        elif event_type == 'publish_bundle_ready':
+            return self._handle_publish_bundle_ready(data)
+        elif event_type == 'article_review_ready':
+            return self._handle_article_review_ready(data)
+        elif event_type == 'discovery_progress':
+            return self._handle_discovery_progress(data)
+        elif event_type == 'article_progress':
+            return self._handle_article_progress(data)
+        elif event_type == 'scan_progress':
+            return self._handle_scan_progress(data)
+        else:
+            logger.warning(f"Unknown event_type: {event_type}")
+            return Response(
+                {'status': 'ignored', 'message': f'Unknown event_type: {event_type}'},
+                status=status.HTTP_200_OK
             )
 
     def _update_content_factory_job(self, *, job_id, domain, slack_user_id, status_value, error_message=None):
