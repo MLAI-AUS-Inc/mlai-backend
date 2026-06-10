@@ -127,6 +127,7 @@ INSTALLED_APPS = [
     'startup_updates',
     'content_factory',
     'founder_tools',
+    'data_access',
     'core',
     'esafety',
     'generic_hackathons',
