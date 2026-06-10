@@ -2860,6 +2860,11 @@ def _live_preview_from_run(run):
         "renderMode": payload.get("renderMode") or payload.get("render_mode") or "",
         "renderConfidence": payload.get("renderConfidence") or payload.get("render_confidence") or "",
         "fallbackReason": payload.get("fallbackReason") or payload.get("fallback_reason") or "",
+        # Content-only fallback contract (docs/hosted-review-previews.md): the
+        # frontend renders previewBanner over the iframe so reviewers know they
+        # are looking at a degraded, content-only preview.
+        "previewQuality": payload.get("previewQuality") or payload.get("preview_quality") or "",
+        "previewBanner": payload.get("previewBanner") or payload.get("preview_banner") or "",
         "previewUnavailableReason": preview_unavailable_reason,
         "proof": proof,
         "fallbackPreviewUrl": payload.get("fallbackPreviewUrl") or payload.get("fallback_preview_url") or "",
