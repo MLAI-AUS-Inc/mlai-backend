@@ -75,6 +75,7 @@ from startup_updates.services import (
     resolve_or_create_profile,
     refresh_startup_update_run_source_context,
     set_startup_update_run_target_month,
+    startup_update_run_input_sources,
     startup_update_run_matches_target_month,
     sync_startup_profile_from_company,
 )
@@ -371,6 +372,7 @@ def _serialize_run_summary(run):
         "stepOrder": run.step_order or [],
         "stepStates": step_states,
         "targetMonth": target_month.isoformat() if target_month else None,
+        "inputSources": startup_update_run_input_sources(run),
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
     }
