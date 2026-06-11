@@ -1433,6 +1433,7 @@ class StartupUpdateClassificationBatchView(APIView):
                 organization=organization,
                 google_connection=google_connection,
                 relevance_label__in=[GmailRelevanceLabel.AMBIGUOUS, GmailRelevanceLabel.PENDING],
+                classified_at__isnull=True,
             ).order_by("-heuristic_score", "-internal_date"),
             run,
             "internal_date",
