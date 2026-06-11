@@ -1826,6 +1826,45 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             [self.message.gmail_message_id],
         )
 
+    def test_classification_batch_excludes_already_classified_ambiguous_messages(self):
+        # Ambiguous is a terminal label for the snippet-only classifier: once a
+        # message has been classified, re-serving it would loop the valley worker
+        # on the same batch forever. Ambiguous messages stay eligible downstream
+        # via EXTRACTABLE_RELEVANCE_LABELS instead.
+        with self._with_key():
+            results_response = self.client.post(
+                reverse("startup_updates_classification_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_message_id": self.message.gmail_message_id,
+                            "relevance_label": GmailRelevanceLabel.AMBIGUOUS,
+                            "relevance_score": 0.4,
+                            "relevance_reason": "Snippet alone is not enough to judge.",
+                            "needs_thread_context": True,
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(results_response.status_code, status.HTTP_200_OK)
+        self.message.refresh_from_db()
+        self.assertEqual(self.message.relevance_label, GmailRelevanceLabel.AMBIGUOUS)
+        self.assertIsNotNone(self.message.classified_at)
+
+        with self._with_key():
+            batch_response = self.client.get(
+                reverse("startup_updates_classification_batch", args=[self.run.run_id]),
+                {"limit": 10},
+                **self.headers,
+            )
+
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["count"], 0)
+        self.assertEqual(batch_response.data["messages"], [])
+
     def test_classification_batch_scopes_messages_to_run_connection(self):
         _other_user, other_connection = self._create_secondary_connection()
         GmailMessageArtifact.objects.create(
