@@ -527,6 +527,12 @@ STRIPE_SECRET_KEY = _env_first(
     "STRIPE_API_SECRET_KEY",
     "STRIPE_API_KEY",
 )
+# Dedicated secret key for the Vibe Raising Stripe Connect OAuth integration;
+# STRIPE_SECRET_KEY may be a restricted rk_ key reserved for Roo point purchases.
+STRIPE_VIBE_RAISING_KEY = _env_first(
+    "STRIPE_VIBE_RAISING_KEY",
+    "STRIPE_VIBE_RAISING_SECRET_KEY",
+)
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
     "STRIPE_OAUTH_REDIRECT_URI",

@@ -759,7 +759,7 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(sources["stripe"]["status"], "unavailable")
         self.assertIn("read_only", sources["stripe"]["warning"])
 
-    @override_settings(STRIPE_CONNECT_CLIENT_ID="", STRIPE_SECRET_KEY="")
+    @override_settings(STRIPE_CONNECT_CLIENT_ID="", STRIPE_SECRET_KEY="", STRIPE_VIBE_RAISING_KEY="")
     def test_stripe_status_is_unavailable_when_config_missing(self):
         response = self.api_client.get("/api/v1/integrations/sources/status")
 
@@ -768,9 +768,9 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(sources["stripe"]["status"], "unavailable")
         self.assertEqual(sources["stripe"]["selected"], False)
         self.assertIn("STRIPE_CONNECT_CLIENT_ID", sources["stripe"]["warning"])
-        self.assertIn("STRIPE_SECRET_KEY", sources["stripe"]["warning"])
+        self.assertIn("STRIPE_VIBE_RAISING_KEY", sources["stripe"]["warning"])
 
-    @override_settings(STRIPE_CONNECT_CLIENT_ID="", STRIPE_SECRET_KEY="")
+    @override_settings(STRIPE_CONNECT_CLIENT_ID="", STRIPE_SECRET_KEY="", STRIPE_VIBE_RAISING_KEY="")
     def test_stripe_connect_returns_actionable_config_error_when_missing(self):
         response = self.client.get(
             "/integrations/connect/stripe",
@@ -779,7 +779,7 @@ class ConnectorEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn(b"STRIPE_CONNECT_CLIENT_ID", response.content)
-        self.assertIn(b"STRIPE_SECRET_KEY", response.content)
+        self.assertIn(b"STRIPE_VIBE_RAISING_KEY", response.content)
         self.assertNotIn("connector_oauth_state", self.client.session)
 
     @override_settings(STRIPE_CONNECT_CLIENT_ID="ca_...", STRIPE_SECRET_KEY="sk_test_...")
@@ -797,6 +797,64 @@ class ConnectorEndpointTests(TestCase):
         sources = {source["key"]: source for source in status_response.data["sources"]}
         self.assertEqual(sources["stripe"]["status"], "unavailable")
         self.assertIn("valid Connect client ID", sources["stripe"]["warning"])
+
+    @override_settings(
+        STRIPE_SECRET_KEY="rk_live_roo_points_key",
+        STRIPE_VIBE_RAISING_KEY="sk_test_vibe_raising_key",
+    )
+    def test_stripe_connect_prefers_vibe_raising_key_over_restricted_key(self):
+        response = self.client.get(
+            "/integrations/connect/stripe",
+            {"next": "http://localhost:5173/vibe-raising/connect-data"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("https://connect.stripe.com/oauth/authorize"), response.url)
+
+    @override_settings(STRIPE_SECRET_KEY="rk_live_roo_points_key", STRIPE_VIBE_RAISING_KEY="")
+    def test_stripe_connect_rejects_restricted_key_without_vibe_raising_key(self):
+        response = self.client.get(
+            "/integrations/connect/stripe",
+            {"next": "http://localhost:5173/vibe-raising/connect-data"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"STRIPE_VIBE_RAISING_KEY", response.content)
+        self.assertNotIn("connector_oauth_state", self.client.session)
+
+    @override_settings(
+        STRIPE_SECRET_KEY="rk_live_roo_points_key",
+        STRIPE_VIBE_RAISING_KEY="sk_test_vibe_raising_key",
+    )
+    def test_stripe_callback_exchanges_code_with_vibe_raising_key(self):
+        session = self.client.session
+        session["connector_oauth_state"] = {
+            "stripe": {
+                "state": "stripe-state",
+                "next": "http://localhost:5173/vibe-raising/connect-data",
+            }
+        }
+        session.save()
+
+        with patch(
+            "integrations.services.external_connectors.requests.post",
+            return_value=_json_response(
+                {
+                    "access_token": "stripe-access",
+                    "refresh_token": "stripe-refresh",
+                    "scope": "read_only",
+                    "stripe_user_id": "acct_123",
+                    "livemode": False,
+                }
+            ),
+        ) as mock_post:
+            response = self.client.get(
+                "/integrations/callback/stripe",
+                {"state": "stripe-state", "code": "stripe-code"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_post.call_args.kwargs["auth"], ("sk_test_vibe_raising_key", ""))
 
     def test_stripe_callback_stores_encrypted_connection_and_redirects_to_next(self):
         session = self.client.session
