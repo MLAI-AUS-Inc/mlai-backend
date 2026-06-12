@@ -743,21 +743,36 @@ class ConnectorEndpointTests(TestCase):
             "https://mlai.au/vibe-raising/connect-data?next=/vibe-raising/create-update",
         )
 
-    @override_settings(STRIPE_OAUTH_SCOPES=["read_write"])
-    def test_stripe_connect_rejects_non_read_only_scope(self):
+    @override_settings(STRIPE_OAUTH_SCOPES=["full_access"])
+    def test_stripe_connect_rejects_unknown_scope(self):
         response = self.client.get(
             "/integrations/connect/stripe",
             {"next": "http://localhost:5173/vibe-raising/connect-data"},
         )
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn(b"read_only", response.content)
+        self.assertIn(b"read_only or read_write", response.content)
         self.assertNotIn("connector_oauth_state", self.client.session)
 
         status_response = self.api_client.get("/api/v1/integrations/sources/status")
         sources = {source["key"]: source for source in status_response.data["sources"]}
         self.assertEqual(sources["stripe"]["status"], "unavailable")
-        self.assertIn("read_only", sources["stripe"]["warning"])
+        self.assertIn("read_only or read_write", sources["stripe"]["warning"])
+
+    @override_settings(STRIPE_OAUTH_SCOPES=["read_write"])
+    def test_stripe_connect_allows_read_write_scope(self):
+        response = self.client.get(
+            "/integrations/connect/stripe",
+            {"next": "http://localhost:5173/vibe-raising/connect-data"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(response.url).query)
+        self.assertEqual(params["scope"], ["read_write"])
+
+        status_response = self.api_client.get("/api/v1/integrations/sources/status")
+        sources = {source["key"]: source for source in status_response.data["sources"]}
+        self.assertNotEqual(sources["stripe"]["status"], "unavailable")
 
     @override_settings(STRIPE_CONNECT_CLIENT_ID="", STRIPE_SECRET_KEY="", STRIPE_VIBE_RAISING_KEY="")
     def test_stripe_status_is_unavailable_when_config_missing(self):

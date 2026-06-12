@@ -247,6 +247,11 @@ def _as_scope_list(value: Any) -> list[str]:
     return []
 
 
+# Stripe only grants read_only OAuth connections to integrations registered as
+# Extensions; Platform-registered integrations must request read_write.
+STRIPE_ALLOWED_OAUTH_SCOPES = {"read_only", "read_write"}
+
+
 def _stripe_oauth_scope() -> str:
     return (_as_scope_list(getattr(settings, "STRIPE_OAUTH_SCOPES", [])) or ["read_only"])[0]
 
@@ -351,8 +356,8 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
                 "Stripe OAuth is not configured with a valid secret API key. "
                 "Set STRIPE_VIBE_RAISING_KEY to the real sk_test_ or sk_live_ value for the same Stripe mode."
             )
-        if _stripe_oauth_scope() != "read_only":
-            return "Stripe OAuth must be configured with read_only scope."
+        if _stripe_oauth_scope() not in STRIPE_ALLOWED_OAUTH_SCOPES:
+            return "Stripe OAuth must be configured with read_only or read_write scope."
         return None
 
     if provider == ExternalServiceProvider.XERO:
@@ -487,7 +492,7 @@ def is_provider_configured(provider: str) -> bool:
         return bool(
             getattr(settings, "STRIPE_CONNECT_CLIENT_ID", "")
             and _stripe_connect_secret_key()
-            and _stripe_oauth_scope() == "read_only"
+            and _stripe_oauth_scope() in STRIPE_ALLOWED_OAUTH_SCOPES
         )
     if provider == ExternalServiceProvider.XERO:
         return _provider_configuration_error(ExternalServiceProvider.XERO) is None
