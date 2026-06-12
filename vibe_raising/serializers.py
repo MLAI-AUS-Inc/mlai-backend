@@ -13,6 +13,41 @@ from startup_updates.metric_catalog import (
 VIBE_RAISING_UPDATE_METRIC_KEYS = STARTUP_UPDATE_METRIC_KEY_SET
 
 
+def _normalize_display_config_keys(values):
+    keys = []
+    for item in values if isinstance(values, (list, tuple)) else []:
+        metric_key = startup_update_metric_key(item)
+        if metric_key in VIBE_RAISING_UPDATE_METRIC_KEYS and metric_key not in keys:
+            keys.append(metric_key)
+    return keys
+
+
+def normalize_vibe_raising_display_config(raw):
+    """Normalize a metric display config to snake_case catalog keys.
+
+    Snippet keys are always a subset of full keys (missing ones are unioned
+    in). Returns None when the input isn't a dict, so callers can fall back
+    to defaults or preserve an existing config.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    snippet = _normalize_display_config_keys(
+        raw.get("snippetMetricKeys")
+        if raw.get("snippetMetricKeys") is not None
+        else raw.get("snippet_metric_keys")
+    )
+    full = _normalize_display_config_keys(
+        raw.get("fullMetricKeys")
+        if raw.get("fullMetricKeys") is not None
+        else raw.get("full_metric_keys")
+    )
+    for key in snippet:
+        if key not in full:
+            full.append(key)
+    return {"snippet_metric_keys": snippet, "full_metric_keys": full}
+
+
 def _blank_to_none(value):
     if value is None:
         return None
@@ -153,6 +188,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         "manualSummary": ("manual_summary",),
         "metricSuggestions": ("metric_suggestions",),
         "next30Days": ("next_30_days",),
+        "displayConfig": ("display_config",),
     }
 
     month = serializers.CharField()
@@ -185,6 +221,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
         required=False,
         default=list,
     )
+    displayConfig = serializers.DictField(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         month_lookup = {
@@ -252,4 +289,8 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
             )
 
         attrs["metricSuggestions"] = normalized_suggestions
+
+        attrs["displayConfig"] = normalize_vibe_raising_display_config(
+            attrs.get("displayConfig")
+        )
         return attrs
