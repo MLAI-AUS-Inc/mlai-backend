@@ -251,6 +251,14 @@ def _stripe_oauth_scope() -> str:
     return (_as_scope_list(getattr(settings, "STRIPE_OAUTH_SCOPES", [])) or ["read_only"])[0]
 
 
+def _stripe_connect_secret_key() -> str:
+    return str(
+        getattr(settings, "STRIPE_VIBE_RAISING_KEY", "")
+        or getattr(settings, "STRIPE_SECRET_KEY", "")
+        or ""
+    ).strip()
+
+
 def _xero_oauth_scope_list() -> list[str]:
     configured_scopes = _as_scope_list(getattr(settings, "XERO_OAUTH_SCOPES", []))
     expanded_scopes: list[str] = []
@@ -322,12 +330,12 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
 
     if provider == ExternalServiceProvider.STRIPE:
         client_id = str(getattr(settings, "STRIPE_CONNECT_CLIENT_ID", "") or "").strip()
-        secret_key = str(getattr(settings, "STRIPE_SECRET_KEY", "") or "").strip()
+        secret_key = _stripe_connect_secret_key()
         missing = []
         if not client_id:
             missing.append("STRIPE_CONNECT_CLIENT_ID")
         if not secret_key:
-            missing.append("STRIPE_SECRET_KEY")
+            missing.append("STRIPE_VIBE_RAISING_KEY")
         if missing:
             return (
                 f"{definition.label} OAuth is not configured. "
@@ -341,7 +349,7 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
         if not secret_key.startswith("sk_") or _looks_like_placeholder_secret(secret_key):
             return (
                 "Stripe OAuth is not configured with a valid secret API key. "
-                "Set STRIPE_SECRET_KEY to the real sk_test_ or sk_live_ value for the same Stripe mode."
+                "Set STRIPE_VIBE_RAISING_KEY to the real sk_test_ or sk_live_ value for the same Stripe mode."
             )
         if _stripe_oauth_scope() != "read_only":
             return "Stripe OAuth must be configured with read_only scope."
@@ -478,7 +486,7 @@ def is_provider_configured(provider: str) -> bool:
     if provider == ExternalServiceProvider.STRIPE:
         return bool(
             getattr(settings, "STRIPE_CONNECT_CLIENT_ID", "")
-            and getattr(settings, "STRIPE_SECRET_KEY", "")
+            and _stripe_connect_secret_key()
             and _stripe_oauth_scope() == "read_only"
         )
     if provider == ExternalServiceProvider.XERO:
@@ -813,7 +821,7 @@ def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[O
 def _exchange_stripe_code(code: str) -> dict[str, Any]:
     response = requests.post(
         "https://connect.stripe.com/oauth/token",
-        auth=(settings.STRIPE_SECRET_KEY, ""),
+        auth=(_stripe_connect_secret_key(), ""),
         data={"code": code, "grant_type": "authorization_code"},
         timeout=(3, 20),
     )

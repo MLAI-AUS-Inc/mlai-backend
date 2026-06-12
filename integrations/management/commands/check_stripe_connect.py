@@ -18,4 +18,9 @@ class Command(BaseCommand):
         self.stdout.write(f"Redirect URI: {settings.STRIPE_OAUTH_REDIRECT_URI}")
         self.stdout.write(f"Scopes: {', '.join(settings.STRIPE_OAUTH_SCOPES)}")
         self.stdout.write("Client ID: present")
-        self.stdout.write("Secret key: present")
+        key_source = (
+            "STRIPE_VIBE_RAISING_KEY"
+            if str(getattr(settings, "STRIPE_VIBE_RAISING_KEY", "") or "").strip()
+            else "STRIPE_SECRET_KEY"
+        )
+        self.stdout.write(f"Secret key: present (from {key_source})")
