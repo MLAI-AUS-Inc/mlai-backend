@@ -132,6 +132,7 @@ INSTALLED_APPS = [
     'esafety',
     'generic_hackathons',
     'vibe_raising',
+    'mlai_studio',
     'jobs',
     "rest_framework",
     "roo",
