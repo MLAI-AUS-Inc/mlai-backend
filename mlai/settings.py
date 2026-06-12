@@ -539,6 +539,7 @@ STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
     f"{DEFAULT_BACKEND_URL}/integrations/callback/stripe",
 )
 STRIPE_OAUTH_SCOPES = _env_list("STRIPE_OAUTH_SCOPES", ["read_only"])
+STRIPE_API_VERSION = os.environ.get("STRIPE_API_VERSION", "2026-02-25.clover")
 
 XERO_CLIENT_ID = os.environ.get("XERO_CLIENT_ID", "")
 XERO_CLIENT_SECRET = os.environ.get("XERO_CLIENT_SECRET", "")
