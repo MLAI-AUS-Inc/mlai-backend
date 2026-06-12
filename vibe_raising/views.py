@@ -83,6 +83,7 @@ from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import ensure_company_organization, set_active_company
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
+from .metric_history import build_metric_history
 from .serializers import (
     VibeRaisingActiveCompanySerializer,
     VibeRaisingCompanySerializer,
@@ -90,6 +91,7 @@ from .serializers import (
     VibeRaisingMonthlyUpdateUpsertSerializer,
     VibeRaisingProfileSerializer,
     VibeRaisingProfileUpsertSerializer,
+    normalize_vibe_raising_display_config,
 )
 
 
@@ -644,6 +646,35 @@ def _extract_metrics(structured_memo):
     return metrics
 
 
+DEFAULT_SNIPPET_METRIC_COUNT = 4
+
+
+def _extract_display_config(structured_memo):
+    """Resolve the snippet/full metric display config for an update.
+
+    Always returns a concrete camelCase config: legacy memos without one get
+    a default of all valued metrics on the full view and the first few (in
+    catalog order) on the snippet.
+    """
+    raw = (structured_memo or {}).get("display_config")
+    if not isinstance(raw, dict):
+        raw = (structured_memo or {}).get("displayConfig")
+    normalized = normalize_vibe_raising_display_config(raw)
+
+    if normalized is None:
+        valued_keys = set(_extract_metrics(structured_memo))
+        ordered = [key for key in MANUAL_METRIC_LABELS if key in valued_keys]
+        normalized = {
+            "snippet_metric_keys": ordered[:DEFAULT_SNIPPET_METRIC_COUNT],
+            "full_metric_keys": ordered,
+        }
+
+    return {
+        "snippetMetricKeys": normalized["snippet_metric_keys"],
+        "fullMetricKeys": normalized["full_metric_keys"],
+    }
+
+
 def _extract_metric_suggestions(structured_memo):
     suggestions = []
     raw_suggestions = (
@@ -721,6 +752,7 @@ def _serialize_draft_for_form(draft):
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
+        "displayConfig": _extract_display_config(structured_memo),
     }
 
 
@@ -792,6 +824,10 @@ def _build_manual_structured_memo(payload):
         "metric_suggestions": list(payload.get("metricSuggestions") or []),
     }
 
+    display_config = payload.get("displayConfig")
+    if display_config is not None:
+        memo["display_config"] = display_config
+
     summary = _optional_text(payload.get("summary"))
     manual_summary = _optional_text(payload.get("manualSummary"))
     source_url = _optional_text(payload.get("sourceUrl"))
@@ -833,8 +869,9 @@ def _build_manual_structured_memo(payload):
     return memo
 
 
-def _serialize_monthly_update(draft):
-    structured_memo = _structured_memo_with_xero_metrics(draft)
+def _serialize_monthly_update(draft, structured_memo=None):
+    if structured_memo is None:
+        structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     return {
         "id": draft.id,
@@ -865,6 +902,7 @@ def _serialize_monthly_update(draft):
         ]),
         "learnings": _structured_memo_section_text(structured_memo, "learnings"),
         "next30Days": _structured_memo_section_text(structured_memo, "next_30_days"),
+        "displayConfig": _extract_display_config(structured_memo),
     }
 
 
@@ -2211,18 +2249,28 @@ class VibeRaisingMonthlyUpdateView(APIView):
 
         domain = context["domain"]
         if not domain:
-            return Response({"updates": []}, status=status.HTTP_200_OK)
+            return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
         binding = get_default_binding_for_domain(user=request.user, domain=domain)
         organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
         if organization is None:
-            return Response({"updates": []}, status=status.HTTP_200_OK)
+            return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
-        updates = [
-            _serialize_monthly_update(draft)
+        draft_memo_pairs = [
+            (draft, _structured_memo_with_xero_metrics(draft))
             for draft in organization.monthly_update_drafts.order_by("-month", "-updated_at")
         ]
-        return Response({"updates": updates}, status=status.HTTP_200_OK)
+        updates = [
+            _serialize_monthly_update(draft, structured_memo=memo)
+            for draft, memo in draft_memo_pairs
+        ]
+        metric_history = build_metric_history(
+            [(draft.month, memo) for draft, memo in draft_memo_pairs]
+        )
+        return Response(
+            {"updates": updates, "metricHistory": metric_history},
+            status=status.HTTP_200_OK,
+        )
 
     def post(self, request):
         context, error_response = _get_founder_company_context_or_response(request.user)
@@ -2253,18 +2301,34 @@ class VibeRaisingMonthlyUpdateView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        structured_payload = {
-            **serializer.validated_data,
-            "manualDocuments": [
-                _serialize_manual_document_for_memo(document)
-                for document in manual_documents
-            ],
-        }
         month_bucket = date(
             serializer.validated_data["year"],
             serializer.validated_data["month_number"],
             1,
         )
+
+        display_config = serializer.validated_data.get("displayConfig")
+        if display_config is None:
+            # Saves that omit displayConfig (older clients, the frontend's
+            # minimal-body retry) must not wipe a previously stored config,
+            # since the manual memo fully replaces the existing one.
+            existing_draft = MonthlyUpdateDraft.objects.filter(
+                organization=organization,
+                month=month_bucket,
+            ).first()
+            if existing_draft:
+                display_config = normalize_vibe_raising_display_config(
+                    (existing_draft.structured_memo or {}).get("display_config")
+                )
+
+        structured_payload = {
+            **serializer.validated_data,
+            "displayConfig": display_config,
+            "manualDocuments": [
+                _serialize_manual_document_for_memo(document)
+                for document in manual_documents
+            ],
+        }
         draft, created = MonthlyUpdateDraft.objects.update_or_create(
             organization=organization,
             month=month_bucket,

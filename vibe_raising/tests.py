@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import resolve, reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -31,6 +31,7 @@ from startup_updates.services import (
     resolve_or_create_profile,
     upsert_monthly_update_draft,
 )
+from .metric_history import build_metric_history, parse_metric_number
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
 
@@ -850,6 +851,214 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.data["updates"][0]["learnings"], "Channel partnerships convert faster with founder-led kickoff")
         self.assertEqual(response.data["updates"][0]["next30Days"], "Close two fintech pilots")
         self.assertEqual(response.data["updates"][0]["metrics"]["revenue"], "42000")
+
+    def test_monthly_update_save_round_trips_display_config(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "March",
+                "year": 2026,
+                "highlights": "Closed two pilots",
+                "challenges": "",
+                "asks": "",
+                "learnings": "",
+                "next30Days": "",
+                "metrics": {"revenue": "50000", "activeUsers": "3420"},
+                "displayConfig": {
+                    "snippetMetricKeys": ["revenue", "bogusKey"],
+                    "fullMetricKeys": ["activeUsers"],
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
+        self.assertEqual(
+            draft.structured_memo["display_config"],
+            {
+                "snippet_metric_keys": ["revenue"],
+                "full_metric_keys": ["activeUsers", "revenue"],
+            },
+        )
+        self.assertEqual(
+            response.data["update"]["displayConfig"],
+            {
+                "snippetMetricKeys": ["revenue"],
+                "fullMetricKeys": ["activeUsers", "revenue"],
+            },
+        )
+
+    def test_monthly_update_post_preserves_display_config_when_omitted(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "kpi_snapshot": [
+                    {"metric_key": "revenue", "label": "Revenue", "value": "42000"},
+                ],
+                "display_config": {
+                    "snippet_metric_keys": ["revenue"],
+                    "full_metric_keys": ["revenue", "activeUsers"],
+                },
+            },
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "March",
+                "year": 2026,
+                "highlights": "Refreshed highlight",
+                "challenges": "",
+                "asks": "",
+                "learnings": "",
+                "next30Days": "",
+                "metrics": {"revenue": "50000", "activeUsers": "3420"},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        draft = MonthlyUpdateDraft.objects.get(organization=organization, month=date(2026, 3, 1))
+        self.assertEqual(
+            draft.structured_memo["display_config"],
+            {
+                "snippet_metric_keys": ["revenue"],
+                "full_metric_keys": ["revenue", "activeUsers"],
+            },
+        )
+        self.assertEqual(
+            response.data["update"]["displayConfig"],
+            {
+                "snippetMetricKeys": ["revenue"],
+                "fullMetricKeys": ["revenue", "activeUsers"],
+            },
+        )
+
+    def test_monthly_updates_get_returns_metric_history(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 1, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "kpi_snapshot": [
+                    {"metric_key": "revenue", "label": "Revenue", "value": "AUD 24,062.91"},
+                    {"metric_key": "churn", "label": "Churn", "value": "2%"},
+                    {"metric_key": "runway", "label": "Runway", "value": "18 months"},
+                    {"metric_key": "pilotCount", "label": "Pilots", "value": "MAP cohort"},
+                ],
+            },
+        )
+        # February intentionally missing -> gap in the series.
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "kpi_snapshot": [
+                    {"metric_key": "revenue", "label": "Revenue", "value": "AUD 13,684.16"},
+                ],
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/updates/")
+
+        self.assertEqual(response.status_code, 200)
+        history = response.data["metricHistory"]
+        self.assertEqual(
+            history["revenue"]["points"],
+            [
+                {"month": "2026-01-01", "value": 24062.91, "valueText": "AUD 24,062.91"},
+                {"month": "2026-03-01", "value": 13684.16, "valueText": "AUD 13,684.16"},
+            ],
+        )
+        self.assertEqual(history["revenue"]["label"], "Revenue")
+        self.assertEqual(history["churn"]["points"][0]["value"], 2.0)
+        self.assertEqual(history["runway"]["points"][0]["value"], 18.0)
+        self.assertNotIn("pilotCount", history)
+
+    def test_metric_history_uses_xero_value_number(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 4, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "kpi_snapshot": [
+                    {"metric_key": "activeUsers", "label": "Active Users", "value": "25"},
+                ],
+            },
+        )
+        StartupMetricObservation.objects.create(
+            organization=organization,
+            source_provider=ExternalServiceProvider.XERO,
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text="AUD 3800.00",
+            value_number=Decimal("3800.00"),
+            unit="AUD",
+            period_month=date(2026, 4, 1),
+            confidence=1.0,
+            source_metadata={"report_name": "ProfitAndLoss"},
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/updates/")
+
+        self.assertEqual(response.status_code, 200)
+        history = response.data["metricHistory"]
+        self.assertEqual(history["revenue"]["points"][0]["value"], 3800.0)
+        self.assertEqual(history["revenue"]["unit"], "AUD")
+        self.assertEqual(
+            history["revenue"]["points"][0]["valueText"],
+            response.data["updates"][0]["metrics"]["revenue"],
+        )
+
+    def test_display_config_defaults_for_legacy_updates(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            structured_memo={
+                "kpi_snapshot": [
+                    {"metric_key": "websiteVisitors", "label": "Website Visitors", "value": "1200"},
+                    {"metric_key": "revenue", "label": "Revenue", "value": "42000"},
+                    {"metric_key": "churn", "label": "Churn", "value": "2%"},
+                    {"metric_key": "mrr", "label": "MRR", "value": "10000"},
+                    {"metric_key": "runway", "label": "Runway", "value": "18 months"},
+                    {"metric_key": "cashCollected", "label": "Cash Collected", "value": "39000"},
+                ],
+            },
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/updates/")
+
+        self.assertEqual(response.status_code, 200)
+        config = response.data["updates"][0]["displayConfig"]
+        # Catalog order, full = all valued metrics, snippet = first four.
+        self.assertEqual(
+            config["fullMetricKeys"],
+            ["revenue", "mrr", "runway", "cashCollected", "churn", "websiteVisitors"],
+        )
+        self.assertEqual(
+            config["snippetMetricKeys"],
+            ["revenue", "mrr", "runway", "cashCollected"],
+        )
 
     def test_investor_gets_403_on_company_endpoints(self):
         self.client.force_authenticate(user=self.user)
@@ -2282,3 +2491,88 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(bootstrap_response.status_code, 403)
         self.assertEqual(run_response.status_code, 403)
         self.assertEqual(status_response.status_code, 403)
+
+
+class MetricHistoryUnitTests(SimpleTestCase):
+    def test_parse_metric_number_formats(self):
+        cases = [
+            ("AUD 13,684.16", 13684.16),
+            ("$50k", 50000.0),
+            ("$50K", 50000.0),
+            ("1.2m", 1200000.0),
+            ("$1.5b", 1500000000.0),
+            ("2%", 2.0),
+            ("18 months", 18.0),
+            ("18m", 18000000.0),
+            ("(5,000)", -5000.0),
+            ("-$4,200", -4200.0),
+            ("300+ matches", 300.0),
+            ("MAP cohort", None),
+            ("", None),
+            (None, None),
+        ]
+        for text, expected in cases:
+            self.assertEqual(parse_metric_number(None, text), expected, msg=repr(text))
+
+    def test_parse_metric_number_prefers_value_number(self):
+        self.assertEqual(parse_metric_number("13684.1600", "AUD 13,684.16"), 13684.16)
+        self.assertEqual(parse_metric_number(Decimal("42.5"), "ignored"), 42.5)
+        # Invalid value_number falls back to the display text.
+        self.assertEqual(parse_metric_number("not-a-number", "AUD 100"), 100.0)
+
+    def test_build_metric_history_orders_and_caps_months(self):
+        months = [date(2024 + index // 12, index % 12 + 1, 1) for index in range(26)]
+        pairs = [
+            (month, {"kpi_snapshot": [{"metric_key": "revenue", "value": str(100 + index)}]})
+            for index, month in enumerate(months)
+        ]
+        pairs.reverse()  # unsorted input: ensure ordering does not rely on caller
+
+        history = build_metric_history(pairs)
+
+        points = history["revenue"]["points"]
+        self.assertEqual(len(points), 24)
+        self.assertEqual(points[0]["month"], months[2].isoformat())
+        self.assertEqual(points[0]["value"], 102.0)
+        self.assertEqual(points[-1]["month"], months[25].isoformat())
+        self.assertEqual([point["month"] for point in points], sorted(point["month"] for point in points))
+
+    def test_build_metric_history_skips_junk_and_normalizes_keys(self):
+        history = build_metric_history(
+            [
+                (
+                    date(2026, 1, 1),
+                    {
+                        "kpi_snapshot": [
+                            {"label": "Monthly Recurring Revenue", "value": "$10k"},
+                            {"metric_key": "pilotCount", "value": "MAP cohort"},
+                            {"metric_key": "revenue", "value": "1000"},
+                            {"metric_key": "revenue", "value": "2000"},
+                        ]
+                    },
+                ),
+                (date(2026, 2, 1), {"kpi_snapshot": []}),
+                (date(2026, 3, 1), None),
+            ]
+        )
+
+        self.assertEqual(set(history), {"mrr", "revenue"})
+        self.assertEqual(history["mrr"]["label"], "MRR")
+        self.assertEqual(history["mrr"]["points"][0]["value"], 10000.0)
+        # Last writer wins within a month, mirroring _extract_metrics.
+        self.assertEqual(history["revenue"]["points"], [
+            {"month": "2026-01-01", "value": 2000.0, "valueText": "2000"},
+        ])
+
+    def test_build_metric_history_unit_from_first_item_with_unit(self):
+        history = build_metric_history(
+            [
+                (date(2026, 1, 1), {"kpi_snapshot": [{"metric_key": "revenue", "value": "100"}]}),
+                (
+                    date(2026, 2, 1),
+                    {"kpi_snapshot": [{"metric_key": "revenue", "value": "AUD 200", "unit": "AUD"}]},
+                ),
+            ]
+        )
+
+        self.assertEqual(history["revenue"]["unit"], "AUD")
