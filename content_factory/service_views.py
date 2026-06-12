@@ -3066,6 +3066,12 @@ class ContentFactoryCallbackView(APIView):
             return self._handle_publish_bundle_ready(data)
         elif event_type == 'article_review_ready':
             return self._handle_article_review_ready(data)
+        elif event_type in {
+            'article_review_preview_failed',
+            'article_review_preview_fallback_ready',
+            'article_review_preview_not_available',
+        }:
+            return self._handle_article_review_preview_event(data, event_type)
         elif event_type == 'discovery_progress':
             return self._handle_discovery_progress(data)
         elif event_type == 'article_progress':
@@ -5387,6 +5393,116 @@ class ContentFactoryCallbackView(APIView):
         return Response({
             'status': 'received',
             'message': 'Generation failed callback processed',
+            'job_id': job_id,
+        }, status=status.HTTP_200_OK)
+
+    def _handle_article_review_preview_event(self, data, event_type):
+        """Handle article review preview lifecycle events from content-factory.
+
+        Three events cover the hosted review preview after generation:
+        - article_review_preview_fallback_ready: the exact build failed but a
+          fallback render is reviewable; comments work, publish stays gated on
+          the exact preview (policy enforced by content-factory's approve API).
+        - article_review_preview_failed: no preview at all; the run is blocked
+          with a classified reason (failure kind, failing file, attribution).
+        - article_review_preview_not_available: the run cannot produce a
+          preview in its current state (e.g. content-only delivery).
+        """
+        from content_factory.models import ContentFactoryJob
+
+        job_id = data.get('job_id')
+        run_id = data.get('run_id') or job_id
+        domain = data.get('domain', '')
+        slack_user_id = data.get('slack_user_id', '')
+        error_message = str(data.get('error') or '').strip()
+        error_code = str(data.get('error_code') or '').strip()
+        fallback_preview_url = str(data.get('fallback_preview_url') or '').strip()
+        next_required_step = str(
+            data.get('next_required_step') or data.get('nextRequiredStep') or ''
+        ).strip()
+        title = str(data.get('title') or '').strip()
+        article_label = f' for "{title}"' if title else ''
+
+        if event_type == 'article_review_preview_fallback_ready':
+            job_status = 'needs_review'
+            summary_text = 'Fallback preview ready for review; publish requires the exact build.'
+            stored_error = ''
+        elif event_type == 'article_review_preview_not_available':
+            job_status = 'blocked'
+            summary_text = error_message or 'Article preview is not available for this run.'
+            stored_error = f"[{error_code}] {summary_text}" if error_code else summary_text
+        else:
+            job_status = 'blocked'
+            summary_text = error_message or 'Hosted article review preview failed.'
+            stored_error = f"[{error_code}] {summary_text}" if error_code else summary_text
+
+        job, _created = ContentFactoryJob.objects.update_or_create(
+            job_id=job_id,
+            defaults={
+                'domain': domain,
+                'slack_user_id': slack_user_id,
+                'status': job_status,
+                'error_message': stored_error,
+            },
+        )
+
+        try:
+            upsert_live_progress_card(
+                job,
+                data=data,
+                summary_text=summary_text,
+                failed=event_type != 'article_review_preview_fallback_ready',
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update live progress card for %s callback on %s: %s",
+                event_type,
+                job_id,
+                exc,
+            )
+
+        if event_type == 'article_review_preview_fallback_ready':
+            text = (
+                f":mag: *Fallback preview ready for review{article_label}* ({domain})\n"
+                "The exact site build is unavailable, so this preview uses a fallback render. "
+                "You can read and comment on the article now; approving and publishing require "
+                "the exact preview."
+            )
+            if fallback_preview_url:
+                text += f"\nPreview: {fallback_preview_url}"
+        elif event_type == 'article_review_preview_not_available':
+            text = f":no_entry_sign: *Article preview unavailable{article_label}* ({domain})\n{summary_text}"
+            if next_required_step:
+                text += f"\nNext step: `{next_required_step}`"
+        else:
+            text = (
+                f":warning: *Article preview failed{article_label}* ({domain})\n{summary_text}\n"
+                "Retry the preview from the run page, or regenerate the article if the failure "
+                "is in the generated bundle."
+            )
+
+        try:
+            self._send_job_message(job=job, data=data, slack_user_id=slack_user_id, text=text)
+        except Exception as exc:
+            logger.warning(
+                "Failed to send %s notification for %s: %s",
+                event_type,
+                job_id,
+                exc,
+            )
+
+        logger.info(
+            "Article review preview event for job %s run %s (%s): %s [%s]",
+            job_id,
+            run_id,
+            domain,
+            event_type,
+            error_code or 'no-code',
+        )
+
+        return Response({
+            'status': 'received',
+            'message': f'{event_type} callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
 
