@@ -442,11 +442,24 @@ CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS = int(
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
+# Customer.io App API key (already used for magic-link emails). When set, it is
+# the preferred transport for notification-channel emails; Resend is fallback.
+CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
+CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
 WHATSAPP_CLOUD_API_TOKEN = os.getenv('WHATSAPP_CLOUD_API_TOKEN', '')
 WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID', '')
 WHATSAPP_TEMPLATE_LANGUAGE = os.getenv('WHATSAPP_TEMPLATE_LANGUAGE', 'en_US')
 WHATSAPP_APP_SECRET = os.getenv('WHATSAPP_APP_SECRET', '')
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv('WHATSAPP_WEBHOOK_VERIFY_TOKEN', '')
+# Approved Meta authentication template used to deliver channel-verification OTPs.
+WHATSAPP_OTP_TEMPLATE_NAME = os.getenv('WHATSAPP_OTP_TEMPLATE_NAME', '')
+# Approved Meta utility template for the daily topic message (5 body params:
+# domain + 4 topic titles). Without it, topic sends fall back to plain text and
+# only deliver inside an open 24h service window.
+WHATSAPP_TOPIC_TEMPLATE_NAME = os.getenv('WHATSAPP_TOPIC_TEMPLATE_NAME', '')
+NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
+    os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
+)
 SCHEDULED_DISCOVERY_TIMEZONE = os.getenv('SCHEDULED_DISCOVERY_TIMEZONE', 'Australia/Melbourne')
 SCHEDULED_DISCOVERY_CHANNEL_NAME = os.getenv('SCHEDULED_DISCOVERY_CHANNEL_NAME', 'vibe-marketing')
 SCHEDULED_DISCOVERY_SLOT_MINUTES = int(os.getenv('SCHEDULED_DISCOVERY_SLOT_MINUTES', '15'))

@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
@@ -1361,6 +1361,42 @@ class ResearchAutomationActionView(APIView):
             logger.warning("Research automation action failed: %s", exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
+
+
+class NotificationChannelEmailVerifyView(APIView):
+    """Public signed magic-link endpoint that activates an email channel."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        from django.core import signing as django_signing
+        from integrations.services.notification_channels import (
+            ChannelActionError,
+            handle_email_verification_token,
+        )
+
+        token = str(request.query_params.get("token") or "").strip()
+        result = "invalid"
+        if token:
+            try:
+                handle_email_verification_token(token)
+                result = "verified"
+            except django_signing.SignatureExpired:
+                result = "expired"
+            except (django_signing.BadSignature, ChannelActionError):
+                result = "invalid"
+        frontend_base = ""
+        for setting_name in ("FOUNDER_TOOLS_URL", "VIBE_RAISING_URL", "DEFAULT_FRONTEND_URL"):
+            value = str(getattr(settings, setting_name, "") or "").strip()
+            if value:
+                frontend_base = value.rstrip("/")
+                break
+        if not frontend_base:
+            frontend_base = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+        return HttpResponseRedirect(
+            f"{frontend_base}/founder-tools/marketing/settings?emailChannel={result}"
+        )
 
 
 class ResearchAutomationWhatsAppWebhookView(APIView):

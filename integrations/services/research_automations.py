@@ -6,6 +6,7 @@ from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import IntegrityError, transaction
+from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
 from content_factory.models import (
@@ -115,9 +116,16 @@ def ensure_due_automation_runs(*, now: Optional[datetime] = None, limit: int = S
             "user",
             "notification_channel",
         )
+        .filter(status=ResearchAutomationStatus.ACTIVE)
+        # Deliveries fan out to every active org channel, so a run is due as
+        # long as any channel is consented — even if the primary opted out.
         .filter(
-            status=ResearchAutomationStatus.ACTIVE,
-            notification_channel__consent_state=NotificationConsentState.ACTIVE,
+            Exists(
+                NotificationChannel.objects.filter(
+                    organization_id=OuterRef("organization_id"),
+                    consent_state=NotificationConsentState.ACTIVE,
+                )
+            )
         )
         .order_by("created_at")[: max(1, limit)]
     )
@@ -164,8 +172,23 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         "notification_context": notification_context_for_run(run),
     }
+    slack_route_id = ""
     if channel.channel_type == NotificationChannelType.SLACK:
-        payload["slack_user_id"] = channel.route_id
+        slack_route_id = channel.route_id
+    else:
+        slack_channel = (
+            NotificationChannel.objects.filter(
+                organization=organization,
+                channel_type=NotificationChannelType.SLACK,
+                consent_state=NotificationConsentState.ACTIVE,
+            )
+            .order_by("created_at")
+            .first()
+        )
+        if slack_channel:
+            slack_route_id = slack_channel.route_id
+    if slack_route_id:
+        payload["slack_user_id"] = slack_route_id
     if channel.user and channel.user.email:
         payload["user_email"] = channel.user.email
         payload["recipient_user_id"] = str(channel.user_id)
