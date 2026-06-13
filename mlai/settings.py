@@ -582,6 +582,20 @@ GOOGLE_DRIVE_OAUTH_SCOPES = _env_list(
     ],
 )
 
+GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI = os.environ.get(
+    "GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/integrations/callback/google-analytics",
+)
+GOOGLE_ANALYTICS_OAUTH_SCOPES = _env_list(
+    "GOOGLE_ANALYTICS_OAUTH_SCOPES",
+    [
+        "https://www.googleapis.com/auth/analytics.readonly",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+    ],
+)
+
 SLACK_CLIENT_ID = _env_first("FT_SLACK_CLIENT_ID", "SLACK_CLIENT_ID")
 SLACK_CLIENT_SECRET = _env_first("FT_SLACK_CLIENT_SECRET", "SLACK_CLIENT_SECRET")
 SLACK_OAUTH_REDIRECT_URI = _env_first(

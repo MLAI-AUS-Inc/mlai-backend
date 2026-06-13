@@ -13,6 +13,7 @@ from integrations.services.external_connectors import (
     serialize_bank_feed_accounts,
     serialize_bank_feed_transactions,
     serialize_gmail_preview,
+    serialize_google_analytics_properties,
     serialize_linear_preview,
     serialize_linear_projects,
     serialize_slack_channels,
@@ -20,6 +21,7 @@ from integrations.services.external_connectors import (
     serialize_source_status,
     serialize_xero_invoices,
     serialize_xero_preview,
+    update_google_analytics_property_selections,
     update_linear_project_selections,
     update_slack_channel_selections,
 )
@@ -354,6 +356,59 @@ class LinearProjectSelectionView(APIView):
             project_ids = []
         try:
             payload = update_linear_project_selections(request.user, project_ids)
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class GoogleAnalyticsPropertyListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 200
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            payload = serialize_google_analytics_properties(
+                request.user,
+                cursor=request.query_params.get("cursor") or None,
+                limit=limit,
+            )
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class GoogleAnalyticsPropertySelectionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        raw_property_ids = (
+            request.data.get("propertyIds")
+            or request.data.get("property_ids")
+            or request.data.get("properties")
+            or []
+        )
+        if isinstance(raw_property_ids, str):
+            property_ids = [item.strip() for item in raw_property_ids.split(",") if item.strip()]
+        elif isinstance(raw_property_ids, (list, tuple)):
+            property_ids = [
+                str(
+                    item.get("propertyId") or item.get("property_id") or item.get("id")
+                    if isinstance(item, dict)
+                    else item
+                ).strip()
+                for item in raw_property_ids
+            ]
+            property_ids = [item for item in property_ids if item]
+        else:
+            property_ids = []
+        try:
+            payload = update_google_analytics_property_selections(request.user, property_ids)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_200_OK)

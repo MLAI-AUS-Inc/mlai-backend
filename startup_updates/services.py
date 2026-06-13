@@ -38,6 +38,7 @@ from startup_updates.models import (
     GmailMessageArtifact,
     GmailRelevanceLabel,
     GmailThreadArtifact,
+    GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
     LinearProjectArtifact,
     LinearProjectSelection,
@@ -234,6 +235,9 @@ RUN_STEP_ORDER = [
     "notion_backfill",
     "notion_relevance_classification",
     "notion_event_extraction",
+    "google_analytics_backfill",
+    "google_analytics_relevance_classification",
+    "google_analytics_event_extraction",
     "timeline_merge",
     "candidate_curation",
     "founder_review",
@@ -273,6 +277,15 @@ NOTION_STEP_KEYS = {
     "notion_backfill",
     "notion_relevance_classification",
     "notion_event_extraction",
+}
+GOOGLE_ANALYTICS_CLASSIFICATION_DOWNSTREAM_STEPS = {
+    "google_analytics_event_extraction",
+    *SOURCE_REPROCESS_STEPS,
+}
+GOOGLE_ANALYTICS_STEP_KEYS = {
+    "google_analytics_backfill",
+    "google_analytics_relevance_classification",
+    "google_analytics_event_extraction",
 }
 LINEAR_COMPACT_MAX_ISSUES = 35
 LINEAR_COMPACT_MAX_UPDATES = 8
@@ -329,6 +342,7 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.GOOGLE_DRIVE,
         ExternalServiceProvider.SLACK,
         ExternalServiceProvider.LINEAR,
+        ExternalServiceProvider.GOOGLE_ANALYTICS,
         MANUAL_DOCUMENTS_SOURCE,
     }
     if not input_sources:
@@ -429,6 +443,12 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
         steps.extend(["linear_backfill", "linear_relevance_classification", "linear_event_extraction"])
     if ExternalServiceProvider.NOTION in selected:
         steps.extend(["notion_backfill", "notion_relevance_classification", "notion_event_extraction"])
+    if ExternalServiceProvider.GOOGLE_ANALYTICS in selected:
+        steps.extend([
+            "google_analytics_backfill",
+            "google_analytics_relevance_classification",
+            "google_analytics_event_extraction",
+        ])
     steps.extend(["timeline_merge", "candidate_curation", "founder_review", "draft_generation", "groundedness_review"])
     return steps
 
@@ -449,6 +469,8 @@ def reconcile_startup_update_run_source_steps(
     linear_classification_was_added = "linear_relevance_classification" in added_steps
     notion_was_added = any(step in NOTION_STEP_KEYS for step in added_steps)
     notion_classification_was_added = "notion_relevance_classification" in added_steps
+    ga_was_added = any(step in GOOGLE_ANALYTICS_STEP_KEYS for step in added_steps)
+    ga_classification_was_added = "google_analytics_relevance_classification" in added_steps
 
     update_fields: list[str] = []
     if previous_step_order != desired_step_order:
@@ -475,6 +497,12 @@ def reconcile_startup_update_run_source_steps(
         update_fields.append("current_step")
     elif notion_classification_was_added and run.current_step in NOTION_CLASSIFICATION_DOWNSTREAM_STEPS:
         run.current_step = "notion_relevance_classification"
+        update_fields.append("current_step")
+    elif "google_analytics_backfill" in added_steps and run.current_step in SOURCE_REPROCESS_STEPS:
+        run.current_step = "google_analytics_backfill"
+        update_fields.append("current_step")
+    elif ga_classification_was_added and run.current_step in GOOGLE_ANALYTICS_CLASSIFICATION_DOWNSTREAM_STEPS:
+        run.current_step = "google_analytics_relevance_classification"
         update_fields.append("current_step")
 
     if update_fields:
@@ -541,6 +569,25 @@ def reconcile_startup_update_run_source_steps(
         reset_steps = set(SOURCE_REPROCESS_STEPS)
         if notion_classification_was_added:
             reset_steps.update(NOTION_CLASSIFICATION_DOWNSTREAM_STEPS)
+        downstream_steps = ContentFactoryRunStep.objects.filter(
+            run=run,
+            step_key__in=reset_steps,
+        )
+        ContentFactoryRunStepAttempt.objects.filter(step__in=downstream_steps).delete()
+        downstream_steps.update(
+            status=ContentFactoryStepStatus.PENDING,
+            attempts=0,
+            message="",
+            started_at=None,
+            completed_at=None,
+            error="",
+            artifacts=[],
+        )
+
+    if ga_was_added:
+        reset_steps = set(SOURCE_REPROCESS_STEPS)
+        if ga_classification_was_added:
+            reset_steps.update(GOOGLE_ANALYTICS_CLASSIFICATION_DOWNSTREAM_STEPS)
         downstream_steps = ContentFactoryRunStep.objects.filter(
             run=run,
             step_key__in=reset_steps,
@@ -1798,6 +1845,50 @@ def build_notion_run_context(*, organization: Organization) -> dict:
     }
 
 
+def build_google_analytics_run_context(*, organization: Organization) -> dict:
+    connection = (
+        ExternalServiceConnection.objects.filter(
+            organization=organization,
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+        )
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    selected_properties = []
+    if connection is not None:
+        selected_properties = [
+            {
+                "property_id": selection.property_id,
+                "property_display_name": selection.property_display_name,
+                "account_id": selection.account_id,
+                "account_display_name": selection.account_display_name,
+            }
+            for selection in GoogleAnalyticsPropertySelection.objects.filter(
+                connection=connection,
+                selected=True,
+            ).order_by("property_display_name", "property_id")
+        ]
+    property_ids = [item["property_id"] for item in selected_properties]
+    warnings = []
+    if connection is None:
+        warnings.append("Google Analytics was selected but no Google Analytics connection is available.")
+    elif not property_ids:
+        warnings.append("Google Analytics was selected but no property is selected.")
+    return {
+        "source": "google_analytics",
+        "purpose": "selected_web_product_analytics_context",
+        "warning": "Google Analytics is deterministic web/product analytics context and is not financial truth.",
+        "connection_id": connection.id if connection else None,
+        "account_label": connection.account_label if connection else "",
+        "selected_property_ids": property_ids,
+        "selected_property_count": len(property_ids),
+        "selected_properties": selected_properties,
+        "last_synced_at": connection.last_synced_at.isoformat() if connection and connection.last_synced_at else None,
+        "warnings": warnings,
+    }
+
+
 def build_external_context_for_sources(
     *,
     organization: Organization,
@@ -1839,6 +1930,8 @@ def build_external_context_for_sources(
         )
     if ExternalServiceProvider.NOTION in selected:
         context["notion"] = build_notion_run_context(organization=organization)
+    if ExternalServiceProvider.GOOGLE_ANALYTICS in selected:
+        context["google_analytics"] = build_google_analytics_run_context(organization=organization)
     if MANUAL_DOCUMENTS_SOURCE in selected:
         context[MANUAL_DOCUMENTS_SOURCE] = build_manual_documents_run_context(
             organization=organization,
@@ -2007,6 +2100,34 @@ def refresh_startup_update_run_source_context(
                 notion_connection.organization = organization
                 notion_connection.save(update_fields=["organization", "updated_at"])
             run_request["notion_connection_id"] = notion_connection.id
+    if ExternalServiceProvider.GOOGLE_ANALYTICS in set(selected_input_sources):
+        binding = (
+            UserStartupBinding.objects.select_related("user")
+            .filter(id=run_request.get("binding_id"), organization=organization)
+            .first()
+            or organization.user_startup_bindings.select_related("user").first()
+        )
+        ga_connection = (
+            latest_external_connection_for_startup(
+                user=binding.user,
+                organization=organization,
+                provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+            )
+            if binding is not None
+            else None
+        )
+        if ga_connection is not None:
+            if ga_connection.organization_id != organization.id:
+                ga_connection.organization = organization
+                ga_connection.save(update_fields=["organization", "updated_at"])
+            run_request["google_analytics_connection_id"] = ga_connection.id
+            run_request["google_analytics_property_ids"] = [
+                selection.property_id
+                for selection in GoogleAnalyticsPropertySelection.objects.filter(
+                    connection=ga_connection,
+                    selected=True,
+                ).order_by("property_display_name", "property_id")
+            ]
     external_context = build_external_context_for_sources(
         organization=organization,
         input_sources=selected_input_sources,
@@ -2706,6 +2827,26 @@ def create_startup_update_run(
                 notion_connection.organization = organization
                 notion_connection.save(update_fields=["organization", "updated_at"])
             run_request["notion_connection_id"] = notion_connection.id
+    selected_ga_property_ids = []
+    if ExternalServiceProvider.GOOGLE_ANALYTICS in selected_source_set:
+        ga_connection = latest_external_connection_for_startup(
+            user=binding.user,
+            organization=organization,
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+        )
+        if ga_connection is not None:
+            if ga_connection.organization_id != organization.id:
+                ga_connection.organization = organization
+                ga_connection.save(update_fields=["organization", "updated_at"])
+            run_request["google_analytics_connection_id"] = ga_connection.id
+            selected_ga_property_ids = [
+                selection.property_id
+                for selection in GoogleAnalyticsPropertySelection.objects.filter(
+                    connection=ga_connection,
+                    selected=True,
+                ).order_by("property_display_name", "property_id")
+            ]
+            run_request["google_analytics_property_ids"] = selected_ga_property_ids
     selected_slack_channels = []
     if ExternalServiceProvider.SLACK in selected_source_set:
         selected_slack_channels = [
@@ -2740,6 +2881,8 @@ def create_startup_update_run(
             external_context[ExternalServiceProvider.SLACK]["selected_channel_ids"] = selected_slack_channels
         if ExternalServiceProvider.LINEAR in external_context:
             external_context[ExternalServiceProvider.LINEAR]["selected_project_ids"] = selected_linear_projects
+        if ExternalServiceProvider.GOOGLE_ANALYTICS in external_context:
+            external_context[ExternalServiceProvider.GOOGLE_ANALYTICS]["selected_property_ids"] = selected_ga_property_ids
         run_request["external_context"] = external_context
 
     run = ContentFactoryRun.objects.create(

@@ -23,6 +23,8 @@ from startup_updates.serializers import (
     ExtractionResultsSerializer,
     LinearClassificationResultsSerializer,
     LinearExtractionResultsSerializer,
+    GoogleAnalyticsClassificationResultsSerializer,
+    GoogleAnalyticsExtractionResultsSerializer,
     NotionClassificationResultsSerializer,
     NotionExtractionResultsSerializer,
     SlackClassificationResultsSerializer,
@@ -114,6 +116,15 @@ from startup_updates.services import (
     upsert_monthly_update_draft,
 )
 from integrations.services.valley_harness import notify_valley_run_created
+from integrations.services.google_analytics import (
+    apply_classification_results as ga_apply_classification_results,
+    build_classification_batch as ga_build_classification_batch,
+    build_extraction_batch as ga_build_extraction_batch,
+    get_ga_run_store,
+    resolve_google_analytics_connection_for_run,
+    run_google_analytics_backfill,
+    save_ga_run_store,
+)
 from integrations.utils import normalize_domain
 
 User = get_user_model()
@@ -133,6 +144,9 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "notion_backfill": "Scanning selected Notion workspace",
     "notion_relevance_classification": "Filtering Notion workspace context",
     "notion_event_extraction": "Extracting Notion highlights",
+    "google_analytics_backfill": "Pulling Google Analytics reports",
+    "google_analytics_relevance_classification": "Filtering Google Analytics signal",
+    "google_analytics_event_extraction": "Extracting Google Analytics metrics",
     "timeline_merge": "Building timeline",
     "candidate_curation": "Choosing update-worthy candidates",
     "founder_review": "Preparing founder review",
@@ -3136,6 +3150,263 @@ class StartupUpdateNotionExtractionResultsView(APIView):
             extracted.add(chunk_id)
         store["extracted_chunk_ids"] = sorted(extracted)
         _save_notion_run_store(connection, run.run_id, store)
+        if backups_changed:
+            set_startup_update_run_cancel_backups(run, backups)
+            run.save(update_fields=["result", "updated_at"])
+        return Response(
+            {
+                "run": _serialize_run(run, request),
+                "event_count": event_count,
+                "metric_count": metric_count,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateGoogleAnalyticsBackfillView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="google_analytics_backfill")
+        try:
+            result = run_google_analytics_backfill(run)
+        except requests.RequestException as exc:
+            return Response(
+                {
+                    "error": "Google Analytics backfill failed while contacting Google Analytics.",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        reports_synced = int(result.get("reports_synced") or 0)
+        properties_synced = int(result.get("properties_synced") or 0)
+        metrics_synced = int(result.get("metrics_synced") or 0)
+        payload = {
+            "run": _serialize_run(run, request),
+            "provider": "google_analytics",
+            "status": result.get("status", "ok"),
+            "reports_synced": reports_synced,
+            "reportsSynced": reports_synced,
+            "properties_synced": properties_synced,
+            "propertiesSynced": properties_synced,
+            "metrics_synced": metrics_synced,
+            "metricsSynced": metrics_synced,
+            "properties": result.get("properties", []),
+            "has_more": bool(result.get("has_more")),
+            "warnings": result.get("warnings", []),
+        }
+        if result.get("source_unavailable"):
+            payload["source_unavailable"] = True
+            payload["sourceUnavailable"] = True
+            payload["code"] = result.get("code") or "google_analytics_source_unavailable"
+            payload["warning"] = result.get("warning") or "Google Analytics is unavailable for this run."
+        if result.get("retry_after_seconds") is not None:
+            payload["retry_after_seconds"] = result["retry_after_seconds"]
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class StartupUpdateGoogleAnalyticsClassificationBatchView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        limit = serializer.validated_data["limit"]
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="google_analytics_relevance_classification")
+        connection = resolve_google_analytics_connection_for_run(run)
+        if connection is None:
+            return Response(
+                {"run": _serialize_run(run, request), "count": 0, "reports": []},
+                status=status.HTTP_200_OK,
+            )
+        store = get_ga_run_store(connection, run.run_id)
+        reports = ga_build_classification_batch(store, limit)
+        return Response(
+            {"run": _serialize_run(run, request), "count": len(reports), "reports": reports},
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateGoogleAnalyticsClassificationResultsView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        serializer = GoogleAnalyticsClassificationResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="google_analytics_relevance_classification")
+        connection = resolve_google_analytics_connection_for_run(run)
+        if connection is None:
+            return Response(
+                {"run": _serialize_run(run, request), "updated_count": 0},
+                status=status.HTTP_200_OK,
+            )
+        store = get_ga_run_store(connection, run.run_id)
+        updated = ga_apply_classification_results(store, serializer.validated_data["results"])
+        save_ga_run_store(connection, run.run_id, store)
+        return Response(
+            {"run": _serialize_run(run, request), "updated_count": updated},
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateGoogleAnalyticsExtractionBatchView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, run_id: str):
+        serializer = StartupUpdateBatchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        limit = serializer.validated_data["limit"]
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="google_analytics_event_extraction")
+        connection = resolve_google_analytics_connection_for_run(run)
+        if connection is None:
+            return Response(
+                {"run": _serialize_run(run, request), "count": 0, "reports": []},
+                status=status.HTTP_200_OK,
+            )
+        store = get_ga_run_store(connection, run.run_id)
+        reports = ga_build_extraction_batch(
+            store,
+            limit,
+            extractable_labels={str(label) for label in EXTRACTABLE_RELEVANCE_LABELS},
+        )
+        return Response(
+            {"run": _serialize_run(run, request), "count": len(reports), "reports": reports},
+            status=status.HTTP_200_OK,
+        )
+
+
+class StartupUpdateGoogleAnalyticsExtractionResultsView(APIView):
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id: str):
+        serializer = GoogleAnalyticsExtractionResultsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        run = _get_run_or_404(run_id)
+        cancelled_response = _reject_if_run_cancelled(run)
+        if cancelled_response is not None:
+            return cancelled_response
+        organization, binding, google_connection, profile = _get_org_and_binding_for_run(run)
+        _update_run_step(run, step_key="google_analytics_event_extraction")
+        connection = resolve_google_analytics_connection_for_run(run)
+        if connection is None:
+            return Response(
+                {"run": _serialize_run(run, request), "event_count": 0, "metric_count": 0},
+                status=status.HTTP_200_OK,
+            )
+        store = get_ga_run_store(connection, run.run_id)
+        reports = store.get("reports") or {}
+        extracted = set(store.get("extracted_report_ids") or [])
+        backups = get_startup_update_run_cancel_backups(run)
+        backups_changed = False
+        event_count = 0
+        metric_count = 0
+        for item in serializer.validated_data["results"]:
+            ga_report_id = item["ga_report_id"]
+            bundle = reports.get(ga_report_id) or {}
+            property_id = str(bundle.get("property_id") or "")
+            if property_id:
+                source_record_ids = [f"google_analytics:property:{property_id}", ga_report_id]
+            else:
+                source_record_ids = [ga_report_id]
+            source_metadata = {
+                "source": "google_analytics_report_extraction",
+                "ga_report_id": ga_report_id,
+                "property_id": property_id,
+                "report_type": bundle.get("report_type", ""),
+            }
+            for event_data in item.get("events", []):
+                existing_event = StartupEvent.objects.filter(
+                    organization=organization,
+                    canonical_key=event_data["canonical_key"],
+                ).first()
+                if existing_event is not None:
+                    backups_changed = _backup_event_if_needed(run, existing_event, backups) or backups_changed
+                evidence_ids = event_data.get("evidence_message_ids", []) or source_record_ids
+                StartupEvent.objects.update_or_create(
+                    organization=organization,
+                    canonical_key=event_data["canonical_key"],
+                    defaults={
+                        "run": run,
+                        "event_type": event_data["event_type"],
+                        "title": event_data["title"],
+                        "summary": event_data.get("summary", ""),
+                        "event_date": event_data.get("event_date"),
+                        "month_bucket": event_data["month_bucket"],
+                        "date_precision": event_data.get("date_precision"),
+                        "sentiment": event_data.get("sentiment", ""),
+                        "investor_importance": event_data.get("investor_importance", 3),
+                        "quantitative_facts": event_data.get("quantitative_facts", []),
+                        "evidence_message_ids": evidence_ids,
+                        "evidence_attachment_ids": event_data.get("evidence_attachment_ids", []),
+                        "source_thread_ids": event_data.get("source_thread_ids", []) or source_record_ids,
+                        "confidence": event_data.get("confidence", 0.0),
+                        "status": event_data.get("status", "open"),
+                        "needs_review": bool(event_data.get("needs_review", False)),
+                        "merge_notes": event_data.get("merge_notes", ""),
+                    },
+                )
+                event_count += 1
+            for metric_data in item.get("metrics", []):
+                existing_metric = StartupMetricObservation.objects.filter(
+                    organization=organization,
+                    source_provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+                    metric_key=metric_data["metric_key"],
+                    period_month=metric_data["period_month"],
+                    value_text=metric_data["value_text"],
+                ).first()
+                if existing_metric is not None:
+                    backups_changed = _backup_metric_if_needed(run, existing_metric, backups) or backups_changed
+                evidence_ids = metric_data.get("evidence_message_ids", []) or source_record_ids
+                StartupMetricObservation.objects.update_or_create(
+                    organization=organization,
+                    source_thread=None,
+                    source_provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+                    metric_key=metric_data["metric_key"],
+                    period_month=metric_data["period_month"],
+                    value_text=metric_data["value_text"],
+                    defaults={
+                        "run": run,
+                        "metric_name": metric_data["metric_name"],
+                        "value_number": metric_data.get("value_number"),
+                        "unit": metric_data.get("unit", ""),
+                        "observed_at": metric_data.get("observed_at"),
+                        "confidence": metric_data.get("confidence", 0.0),
+                        "evidence_message_ids": evidence_ids,
+                        "evidence_attachment_ids": metric_data.get("evidence_attachment_ids", []),
+                        "source_record_ids": source_record_ids,
+                        "source_metadata": source_metadata,
+                        "summary": metric_data.get("summary", ""),
+                    },
+                )
+                metric_count += 1
+            extracted.add(ga_report_id)
+        store["extracted_report_ids"] = sorted(extracted)
+        save_ga_run_store(connection, run.run_id, store)
         if backups_changed:
             set_startup_update_run_cancel_backups(run, backups)
             run.save(update_fields=["result", "updated_at"])

@@ -25,6 +25,7 @@ from startup_updates.models import (
     GmailRelevanceLabel,
     GmailSyncCursor,
     GmailThreadArtifact,
+    GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
     LinearProjectArtifact,
     LinearProjectSelection,
@@ -202,8 +203,19 @@ class ConnectorEndpointTests(TestCase):
         sources = {source["key"]: source for source in response.data["sources"]}
         self.assertEqual(
             set(sources),
-            {"gmail", "stripe", "xero", "bank_feed", "notion", "google_drive", "slack", "linear"},
+            {
+                "gmail",
+                "stripe",
+                "xero",
+                "bank_feed",
+                "notion",
+                "google_drive",
+                "slack",
+                "linear",
+                "google_analytics",
+            },
         )
+        self.assertEqual(sources["google_analytics"]["status"], "not_connected")
         self.assertEqual(sources["gmail"]["status"], "connected")
         self.assertEqual(sources["gmail"]["accountLabel"], "founder@gmail.com")
         self.assertTrue(sources["gmail"]["hasGmailScope"])
@@ -668,6 +680,7 @@ class ConnectorEndpointTests(TestCase):
             "xero": ("https://login.xero.com/identity/connect/authorize", "xero"),
             "notion": ("https://api.notion.com/v1/oauth/authorize", "notion"),
             "google-drive": ("https://accounts.google.com/o/oauth2/v2/auth", "google_drive"),
+            "google-analytics": ("https://accounts.google.com/o/oauth2/v2/auth", "google_analytics"),
             "slack": ("https://slack.com/oauth/v2/authorize", "slack"),
             "linear": ("https://linear.app/oauth/authorize", "linear"),
         }
@@ -702,10 +715,102 @@ class ConnectorEndpointTests(TestCase):
                 self.assertEqual(params["client_id"], ["linear-client-id"])
                 self.assertEqual(params["redirect_uri"], ["http://localhost:8000/integrations/callback/linear"])
                 self.assertEqual(params["scope"], ["read"])
+            if slug == "google-analytics":
+                self.assertEqual(params["response_type"], ["code"])
+                self.assertEqual(
+                    params["redirect_uri"],
+                    ["http://localhost:8000/integrations/callback/google-analytics"],
+                )
+                self.assertIn("https://www.googleapis.com/auth/analytics.readonly", params["scope"][0])
+                self.assertEqual(params["access_type"], ["offline"])
             self.assertEqual(
                 session_state["next"],
                 "http://localhost:5173/vibe-raising/connect-data?next=/vibe-raising/create-update",
             )
+
+    def test_google_analytics_property_list_discovers_and_persists_selectable_properties(self):
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+            access_token="ga-access",
+            refresh_token="ga-refresh",
+            token_expires_at=timezone.now() + timedelta(hours=1),
+            external_account_id="founder@gmail.com",
+            account_label="founder@gmail.com",
+        )
+        admin_payload = {
+            "accountSummaries": [
+                {
+                    "account": "accounts/100",
+                    "displayName": "Acme Account",
+                    "propertySummaries": [
+                        {"property": "properties/123456789", "displayName": "Acme Marketing Site"},
+                        {"property": "properties/987654321", "displayName": "Acme App"},
+                    ],
+                }
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = admin_payload
+        mock_response.content = b"{}"
+        with patch(
+            "integrations.services.external_connectors.requests.get",
+            return_value=mock_response,
+        ) as mock_get:
+            response = self.api_client.get("/api/v1/integrations/google-analytics/properties")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(mock_get.called)
+        property_ids = {prop["propertyId"] for prop in response.data["properties"]}
+        self.assertEqual(property_ids, {"123456789", "987654321"})
+        self.assertEqual(
+            GoogleAnalyticsPropertySelection.objects.filter(connection=connection).count(),
+            2,
+        )
+        site = GoogleAnalyticsPropertySelection.objects.get(connection=connection, property_id="123456789")
+        self.assertEqual(site.property_display_name, "Acme Marketing Site")
+        self.assertEqual(site.account_id, "100")
+        self.assertFalse(site.selected)
+
+    def test_google_analytics_property_selection_marks_selected_and_surfaces_in_status(self):
+        connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+            access_token="ga-access",
+            refresh_token="ga-refresh",
+            token_expires_at=timezone.now() + timedelta(hours=1),
+            external_account_id="founder@gmail.com",
+            account_label="founder@gmail.com",
+        )
+        for property_id, name in (("123456789", "Acme Marketing Site"), ("987654321", "Acme App")):
+            GoogleAnalyticsPropertySelection.objects.create(
+                connection=connection,
+                user=self.user,
+                property_id=property_id,
+                property_display_name=name,
+            )
+
+        response = self.api_client.post(
+            "/api/v1/integrations/google-analytics/property-selections",
+            {"propertyIds": ["123456789"]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["selectedPropertyCount"], 1)
+        self.assertEqual(
+            [prop["propertyId"] for prop in response.data["selectedProperties"]],
+            ["123456789"],
+        )
+        self.assertTrue(GoogleAnalyticsPropertySelection.objects.get(property_id="123456789").selected)
+        self.assertFalse(GoogleAnalyticsPropertySelection.objects.get(property_id="987654321").selected)
+
+        status_response = self.api_client.get("/api/v1/integrations/sources/status")
+        sources = {source["key"]: source for source in status_response.data["sources"]}
+        self.assertEqual(sources["google_analytics"]["status"], "connected")
+        self.assertEqual(sources["google_analytics"]["selectedPropertyCount"], 1)
+        self.assertTrue(sources["google_analytics"]["selected"])
 
     @override_settings(
         XERO_OAUTH_SCOPES=[

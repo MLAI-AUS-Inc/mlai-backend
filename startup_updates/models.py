@@ -518,6 +518,53 @@ class LinearProjectSelection(models.Model):
         return f"{self.connection_id}:{self.project_name or self.linear_project_id}"
 
 
+class GoogleAnalyticsPropertySelection(models.Model):
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="google_analytics_property_selections",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="google_analytics_property_selections",
+    )
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="google_analytics_property_selections",
+        null=True,
+        blank=True,
+    )
+    property_id = models.CharField(max_length=64)
+    property_display_name = models.CharField(max_length=255, blank=True, default="")
+    account_id = models.CharField(max_length=64, blank=True, default="")
+    account_display_name = models.CharField(max_length=255, blank=True, default="")
+    selected = models.BooleanField(default=False, db_index=True)
+    sync_cursor = models.JSONField(default=dict, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_googleanalyticspropertyselection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "property_id"],
+                name="ga_prop_sel_conn_property_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "selected"], name="ga_prop_sel_user_selected_idx"),
+            models.Index(fields=["organization", "selected"], name="ga_prop_sel_org_selected_idx"),
+        ]
+        ordering = ["property_display_name", "property_id"]
+
+    def __str__(self):
+        return f"{self.connection_id}:{self.property_display_name or self.property_id}"
+
+
 class LinearProjectArtifact(models.Model):
     organization = models.ForeignKey(
         "organizations.Organization",

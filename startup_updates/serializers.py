@@ -124,6 +124,19 @@ class NotionClassificationResultsSerializer(serializers.Serializer):
     results = NotionClassificationResultItemSerializer(many=True)
 
 
+class GoogleAnalyticsClassificationResultItemSerializer(serializers.Serializer):
+    ga_report_id = serializers.CharField()
+    relevance_label = serializers.ChoiceField(choices=GmailRelevanceLabel.choices)
+    relevance_score = serializers.FloatField(required=False, default=0.0)
+    relevance_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    needs_extraction = serializers.BooleanField(required=False)
+    extraction_hints = serializers.DictField(required=False, default=dict)
+
+
+class GoogleAnalyticsClassificationResultsSerializer(serializers.Serializer):
+    results = GoogleAnalyticsClassificationResultItemSerializer(many=True)
+
+
 class AttachmentUpdateSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     extracted_text = serializers.CharField(required=False, allow_blank=True, default="")
@@ -233,6 +246,21 @@ class NotionExtractionResultItemSerializer(serializers.Serializer):
 
 class NotionExtractionResultsSerializer(serializers.Serializer):
     results = NotionExtractionResultItemSerializer(many=True)
+
+
+class GoogleAnalyticsExtractionResultItemSerializer(serializers.Serializer):
+    ga_report_id = serializers.CharField()
+    extraction_status = serializers.ChoiceField(
+        choices=ArtifactProcessingStatus.choices,
+        required=False,
+        default=ArtifactProcessingStatus.PROCESSED,
+    )
+    events = EventResultSerializer(many=True, required=False, default=list)
+    metrics = MetricResultSerializer(many=True, required=False, default=list)
+
+
+class GoogleAnalyticsExtractionResultsSerializer(serializers.Serializer):
+    results = GoogleAnalyticsExtractionResultItemSerializer(many=True)
 
 
 class CurationResultsSerializer(serializers.Serializer):
