@@ -38,6 +38,7 @@ class ExternalServiceProvider(models.TextChoices):
     GOOGLE_DRIVE = "google_drive", "Google Drive"
     SLACK = "slack", "Slack"
     LINEAR = "linear", "Linear"
+    GOOGLE_ANALYTICS = "google_analytics", "Google Analytics"
 
 
 class ExternalServiceConnectionStatus(models.TextChoices):

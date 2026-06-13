@@ -3,7 +3,7 @@ from decimal import Decimal
 from io import StringIO
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -39,6 +39,7 @@ from startup_updates.models import (
     GmailRelevanceLabel,
     GmailSyncCursor,
     GmailThreadArtifact,
+    GoogleAnalyticsPropertySelection,
     MonthlyUpdateDraft,
     MonthlyUpdateDraftStatus,
     SlackChannelSelection,
@@ -54,6 +55,10 @@ from integrations.services.gmail import (
     build_backfill_query,
     clean_email_text,
     default_backfill_window,
+)
+from integrations.services.google_analytics import (
+    GA_REPORT_SPECS,
+    period_bounds_for_run,
 )
 from startup_updates.services import (
     STARTUP_UPDATE_WORKFLOW,
@@ -2933,3 +2938,216 @@ class StartupUpdateServiceHelpersTest(TestCase):
         self.assertIn("workflow", profile.positive_keywords)
         self.assertIn("Manual founder notes.", profile.notes)
         self.assertIn("Legacy AI automates back-office operations.", profile.notes)
+
+
+def _ga_run_report_payload(body: dict) -> dict:
+    metric_names = [metric["name"] for metric in (body.get("metrics") or [])]
+    dimensions = [dimension["name"] for dimension in (body.get("dimensions") or [])]
+    metric_headers = [{"name": name} for name in metric_names]
+    totals = [{"metricValues": [{"value": str(1000 + index * 100)} for index in range(len(metric_names))]}]
+    rows = []
+    if dimensions:
+        for row_index in range(2):
+            rows.append(
+                {
+                    "dimensionValues": [{"value": f"value-{row_index}"}],
+                    "metricValues": [{"value": str(100 + row_index)} for _ in metric_names],
+                }
+            )
+    return {
+        "dimensionHeaders": [{"name": dimension} for dimension in dimensions],
+        "metricHeaders": metric_headers,
+        "rows": rows,
+        "totals": totals,
+        "rowCount": len(rows),
+    }
+
+
+class FakeGaResponse:
+    def __init__(self, payload: dict, *, status_code: int = 200, headers: Optional[dict] = None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.content = b"{}"
+
+    def raise_for_status(self):
+        if self.status_code >= 400 and self.status_code != 429:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+class GoogleAnalyticsServiceUnitTest(TestCase):
+    def test_period_bounds_uses_current_and_prior_month(self):
+        bounds = period_bounds_for_run({"current_month": "2026-03-01"})
+        self.assertEqual(bounds, ("2026-03-01", "2026-03-31", "2026-02-01", "2026-02-28"))
+
+    def test_report_specs_cover_expected_report_types(self):
+        report_types = {spec["report_type"] for spec in GA_REPORT_SPECS}
+        self.assertEqual(
+            report_types,
+            {"traffic_overview", "acquisition_channels", "top_pages", "key_events", "engagement"},
+        )
+
+
+class StartupUpdateGoogleAnalyticsPipelineViewTest(StartupUpdateApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.profile = StartupProfile.objects.create(
+            organization=self.organization,
+            company_aliases=["Acme"],
+            domain_aliases=["acme.com"],
+        )
+        self.binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_connection=self.google_connection,
+            is_default_for_gmail=True,
+        )
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+            user=self.user,
+            organization=self.organization,
+            access_token="ga-access",
+            refresh_token="ga-refresh",
+            token_expires_at=timezone.now() + timedelta(hours=1),
+            external_account_id="founder@gmail.com",
+            account_label="founder@gmail.com",
+        )
+        self.selection = GoogleAnalyticsPropertySelection.objects.create(
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            property_id="123456789",
+            property_display_name="Acme Marketing Site",
+            account_id="100",
+            selected=True,
+        )
+        self.run = create_startup_update_run(
+            organization=self.organization,
+            binding=self.binding,
+            input_sources=["gmail", "google_analytics"],
+        )
+
+    def _post(self, name, body=None):
+        return self.client.post(
+            reverse(name, args=[self.run.run_id]), body or {}, format="json", **self.headers
+        )
+
+    def _get(self, name, params=None):
+        return self.client.get(reverse(name, args=[self.run.run_id]), params or {}, **self.headers)
+
+    def test_run_request_pins_ga_connection_and_property_ids(self):
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.run_request["google_analytics_connection_id"], self.connection.id)
+        self.assertEqual(self.run.run_request["google_analytics_property_ids"], ["123456789"])
+        self.assertIn("google_analytics_backfill", self.run.step_order)
+        ga_context = self.run.run_request["external_context"]["google_analytics"]
+        self.assertEqual(ga_context["selected_property_ids"], ["123456789"])
+        self.assertIn("not financial truth", ga_context["warning"])
+
+    def test_full_google_analytics_pipeline_persists_events_and_metrics(self):
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            with patch(
+                "integrations.services.google_analytics.requests.post",
+                side_effect=lambda url, headers=None, json=None, timeout=None: FakeGaResponse(
+                    _ga_run_report_payload(json or {})
+                ),
+            ) as mock_post:
+                backfill = self._post("startup_updates_google_analytics_backfill")
+
+            self.assertEqual(backfill.status_code, status.HTTP_200_OK)
+            self.assertEqual(backfill.data["reports_synced"], len(GA_REPORT_SPECS))
+            self.assertEqual(backfill.data["properties_synced"], 1)
+            self.assertFalse(backfill.data["has_more"])
+            # 5 report specs x 2 date ranges (current + prior)
+            self.assertEqual(mock_post.call_count, len(GA_REPORT_SPECS) * 2)
+
+            classification_batch = self._get(
+                "startup_updates_google_analytics_classification_batch", {"limit": 40}
+            )
+            self.assertEqual(classification_batch.status_code, status.HTTP_200_OK)
+            self.assertEqual(classification_batch.data["count"], len(GA_REPORT_SPECS))
+            report_ids = [report["ga_report_id"] for report in classification_batch.data["reports"]]
+            self.assertTrue(all(rid.startswith("ga:property:123456789:") for rid in report_ids))
+
+            classification_results = self._post(
+                "startup_updates_google_analytics_classification_results",
+                {
+                    "results": [
+                        {
+                            "ga_report_id": report_id,
+                            "relevance_label": "update_worthy",
+                            "relevance_score": 0.9,
+                            "relevance_reason": "Material traffic movement.",
+                            "needs_extraction": True,
+                            "extraction_hints": {"important_metric_keys": ["sessions"], "extraction_hint": ""},
+                        }
+                        for report_id in report_ids
+                    ]
+                },
+            )
+            self.assertEqual(classification_results.status_code, status.HTTP_200_OK)
+            self.assertEqual(classification_results.data["updated_count"], len(GA_REPORT_SPECS))
+
+            extraction_batch = self._get(
+                "startup_updates_google_analytics_extraction_batch", {"limit": 40}
+            )
+            self.assertEqual(extraction_batch.status_code, status.HTTP_200_OK)
+            self.assertEqual(extraction_batch.data["count"], len(GA_REPORT_SPECS))
+
+            target_report_id = report_ids[0]
+            extraction_results = self._post(
+                "startup_updates_google_analytics_extraction_results",
+                {
+                    "results": [
+                        {
+                            "ga_report_id": target_report_id,
+                            "extraction_status": "processed",
+                            "events": [
+                                {
+                                    "canonical_key": "ga_sessions_tripled",
+                                    "event_type": "product_milestone",
+                                    "title": "Website sessions grew sharply",
+                                    "summary": "Google Analytics reported strong session growth.",
+                                    "month_bucket": "2026-03-01",
+                                    "evidence_message_ids": [f"ga:metric:{target_report_id}:sessions"],
+                                }
+                            ],
+                            "metrics": [
+                                {
+                                    "metric_key": "websiteVisitors",
+                                    "metric_name": "Website sessions",
+                                    "value_text": "8,400 sessions",
+                                    "value_number": "8400",
+                                    "period_month": "2026-03-01",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(extraction_results.status_code, status.HTTP_200_OK)
+        self.assertEqual(extraction_results.data["event_count"], 1)
+        self.assertEqual(extraction_results.data["metric_count"], 1)
+
+        event = StartupEvent.objects.get(organization=self.organization, canonical_key="ga_sessions_tripled")
+        self.assertEqual(event.event_type, "product_milestone")
+        self.assertIn(f"google_analytics:property:123456789", event.source_thread_ids)
+
+        metric = StartupMetricObservation.objects.get(
+            organization=self.organization,
+            source_provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+            metric_key="websiteVisitors",
+        )
+        self.assertEqual(metric.value_text, "8,400 sessions")
+        self.assertEqual(str(metric.value_number), "8400.0000")
+
+        # Re-running extraction-batch should now exclude the extracted report.
+        with self.settings(INTERNAL_API_KEY=self.api_key):
+            second_batch = self._get(
+                "startup_updates_google_analytics_extraction_batch", {"limit": 40}
+            )
+        self.assertEqual(second_batch.data["count"], len(GA_REPORT_SPECS) - 1)

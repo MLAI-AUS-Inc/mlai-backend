@@ -29,6 +29,7 @@ from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailMessageArtifact,
     GmailSyncCursor,
+    GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
     LinearProjectArtifact,
     LinearProjectSelection,
@@ -124,6 +125,12 @@ CONNECTOR_DEFINITIONS: dict[str, ConnectorDefinition] = {
         "Linear",
         ("context",),
     ),
+    ExternalServiceProvider.GOOGLE_ANALYTICS: ConnectorDefinition(
+        ExternalServiceProvider.GOOGLE_ANALYTICS,
+        "google-analytics",
+        "Google Analytics",
+        ("metrics",),
+    ),
 }
 
 PROVIDER_ALIASES = {
@@ -141,6 +148,10 @@ PROVIDER_ALIASES = {
     "drive": ExternalServiceProvider.GOOGLE_DRIVE,
     "slack": ExternalServiceProvider.SLACK,
     "linear": ExternalServiceProvider.LINEAR,
+    "google-analytics": ExternalServiceProvider.GOOGLE_ANALYTICS,
+    "google_analytics": ExternalServiceProvider.GOOGLE_ANALYTICS,
+    "ga4": ExternalServiceProvider.GOOGLE_ANALYTICS,
+    "ga": ExternalServiceProvider.GOOGLE_ANALYTICS,
 }
 
 EXTERNAL_PROVIDER_ORDER = (
@@ -151,6 +162,7 @@ EXTERNAL_PROVIDER_ORDER = (
     ExternalServiceProvider.GOOGLE_DRIVE,
     ExternalServiceProvider.SLACK,
     ExternalServiceProvider.LINEAR,
+    ExternalServiceProvider.GOOGLE_ANALYTICS,
 )
 
 
@@ -503,6 +515,8 @@ def is_provider_configured(provider: str) -> bool:
         return bool(getattr(settings, "NOTION_CLIENT_ID", "") and getattr(settings, "NOTION_CLIENT_SECRET", ""))
     if provider == ExternalServiceProvider.GOOGLE_DRIVE:
         return bool(getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") and getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", ""))
+    if provider == ExternalServiceProvider.GOOGLE_ANALYTICS:
+        return bool(getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") and getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", ""))
     if provider == ExternalServiceProvider.SLACK:
         return bool(getattr(settings, "SLACK_CLIENT_ID", "") and getattr(settings, "SLACK_CLIENT_SECRET", ""))
     if provider == ExternalServiceProvider.LINEAR:
@@ -684,6 +698,19 @@ def build_authorization_url(request, provider: str) -> str:
             "redirect_uri": settings.GOOGLE_DRIVE_OAUTH_REDIRECT_URI,
             "response_type": "code",
             "scope": " ".join(_as_scope_list(getattr(settings, "GOOGLE_DRIVE_OAUTH_SCOPES", []))),
+            "access_type": "offline",
+            "prompt": "consent",
+            "include_granted_scopes": "true",
+            "state": state,
+        }
+        return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+
+    if provider == ExternalServiceProvider.GOOGLE_ANALYTICS:
+        params = {
+            "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+            "redirect_uri": settings.GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI,
+            "response_type": "code",
+            "scope": " ".join(_as_scope_list(getattr(settings, "GOOGLE_ANALYTICS_OAUTH_SCOPES", []))),
             "access_type": "offline",
             "prompt": "consent",
             "include_granted_scopes": "true",
@@ -882,6 +909,25 @@ def _exchange_google_drive_code(code: str) -> dict[str, Any]:
             "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
             "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
             "redirect_uri": settings.GOOGLE_DRIVE_OAUTH_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if token_data.get("error"):
+        raise ConnectorOAuthError(token_data.get("error_description") or token_data.get("error"))
+    return token_data
+
+
+def _exchange_google_analytics_code(code: str) -> dict[str, Any]:
+    response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+            "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+            "redirect_uri": settings.GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI,
             "grant_type": "authorization_code",
         },
         timeout=(3, 20),
@@ -1109,6 +1155,26 @@ def _store_google_drive_connection(user, organization: Optional[Organization], t
     )
 
 
+def _store_google_analytics_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
+    access_token = str(token_data.get("access_token") or "")
+    userinfo = _fetch_google_userinfo(access_token) if access_token else {}
+    email = str(userinfo.get("email") or "").strip()
+    subject = str(userinfo.get("sub") or "").strip()
+    return _upsert_connection(
+        user=user,
+        provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+        organization=organization,
+        access_token=access_token,
+        refresh_token=str(token_data.get("refresh_token") or ""),
+        token_type=str(token_data.get("token_type") or "Bearer"),
+        token_expires_at=_expires_at(token_data),
+        scopes=_as_scope_list(token_data.get("scope")) or _as_scope_list(getattr(settings, "GOOGLE_ANALYTICS_OAUTH_SCOPES", [])),
+        external_account_id=email or subject,
+        account_label=email or "Google Analytics",
+        provider_metadata={"userinfo": userinfo},
+    )
+
+
 def _store_slack_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
     team = token_data.get("team") if isinstance(token_data.get("team"), dict) else {}
     authed_user = token_data.get("authed_user") if isinstance(token_data.get("authed_user"), dict) else {}
@@ -1259,6 +1325,8 @@ def complete_oauth_callback(request, provider: str) -> str:
             connection = _store_notion_connection(request.user, organization, _exchange_notion_code(code))
         elif provider == ExternalServiceProvider.GOOGLE_DRIVE:
             connection = _store_google_drive_connection(request.user, organization, _exchange_google_drive_code(code))
+        elif provider == ExternalServiceProvider.GOOGLE_ANALYTICS:
+            connection = _store_google_analytics_connection(request.user, organization, _exchange_google_analytics_code(code))
         elif provider == ExternalServiceProvider.SLACK:
             connection = _store_slack_connection(request.user, organization, _exchange_slack_code(code))
         elif provider == ExternalServiceProvider.LINEAR:
@@ -1815,6 +1883,71 @@ def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
 
     connection.access_token = access_token
     connection.refresh_token = refresh_token
+    connection.token_type = str(token_data.get("token_type") or "Bearer")
+    connection.token_expires_at = _expires_at(token_data)
+    connection.scopes = _as_scope_list(token_data.get("scope")) or connection.scopes
+    connection.status = ExternalServiceConnectionStatus.CONNECTED
+    connection.last_error = ""
+    connection.save(
+        update_fields=[
+            "access_token",
+            "refresh_token",
+            "token_type",
+            "token_expires_at",
+            "scopes",
+            "status",
+            "last_error",
+            "updated_at",
+        ]
+    )
+    return access_token
+
+
+def _google_analytics_required_token(connection: ExternalServiceConnection) -> str:
+    expires_at = connection.token_expires_at
+    if connection.access_token and (expires_at is None or expires_at > timezone.now() + timedelta(minutes=2)):
+        return connection.access_token
+    return _refresh_google_analytics_connection(connection)
+
+
+def _refresh_google_analytics_connection(connection: ExternalServiceConnection) -> str:
+    if not connection.refresh_token:
+        connection.status = ExternalServiceConnectionStatus.ERROR
+        connection.last_error = "Google Analytics connection needs to be reauthorised."
+        connection.save(update_fields=["status", "last_error", "updated_at"])
+        raise ConnectorOAuthError(connection.last_error)
+
+    response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+            "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": connection.refresh_token,
+        },
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if token_data.get("error"):
+        message = token_data.get("error_description") or token_data.get("error")
+        connection.status = ExternalServiceConnectionStatus.ERROR
+        connection.last_error = str(message or "Google Analytics token refresh failed.")
+        connection.save(update_fields=["status", "last_error", "updated_at"])
+        raise ConnectorOAuthError(connection.last_error)
+
+    access_token = str(token_data.get("access_token") or "").strip()
+    if not access_token:
+        connection.status = ExternalServiceConnectionStatus.ERROR
+        connection.last_error = "Google Analytics token refresh did not return an access token."
+        connection.save(update_fields=["status", "last_error", "updated_at"])
+        raise ConnectorOAuthError(connection.last_error)
+
+    # Google often omits a fresh refresh_token on refresh; preserve the existing one.
+    refresh_token = str(token_data.get("refresh_token") or "").strip()
+    connection.access_token = access_token
+    if refresh_token:
+        connection.refresh_token = refresh_token
     connection.token_type = str(token_data.get("token_type") or "Bearer")
     connection.token_expires_at = _expires_at(token_data)
     connection.scopes = _as_scope_list(token_data.get("scope")) or connection.scopes
@@ -4540,6 +4673,156 @@ def _serialize_google_source(user) -> dict[str, Any]:
     }
 
 
+GOOGLE_ANALYTICS_ADMIN_ACCOUNT_SUMMARIES_URL = "https://analyticsadmin.googleapis.com/v1beta/accountSummaries"
+
+
+def _latest_google_analytics_connection(user) -> Optional[ExternalServiceConnection]:
+    return (
+        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.GOOGLE_ANALYTICS)
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _normalize_ga_property_id(raw: str) -> str:
+    value = str(raw or "").strip()
+    if value.startswith("properties/"):
+        value = value[len("properties/") :]
+    return value.strip()
+
+
+def _serialize_google_analytics_property_selection(selection: GoogleAnalyticsPropertySelection) -> dict[str, Any]:
+    return {
+        "id": selection.id,
+        "propertyId": selection.property_id,
+        "property_id": selection.property_id,
+        "name": selection.property_display_name or selection.property_id,
+        "propertyDisplayName": selection.property_display_name,
+        "property_display_name": selection.property_display_name,
+        "accountId": selection.account_id,
+        "account_id": selection.account_id,
+        "accountDisplayName": selection.account_display_name,
+        "account_display_name": selection.account_display_name,
+        "selected": bool(selection.selected),
+        "lastSyncedAt": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+        "last_synced_at": selection.last_synced_at.isoformat() if selection.last_synced_at else None,
+    }
+
+
+def serialize_google_analytics_properties(user, *, cursor: Optional[str] = None, limit: int = 200) -> dict[str, Any]:
+    connection = _latest_google_analytics_connection(user)
+    if not connection:
+        return {
+            "accountLabel": None,
+            "account_label": None,
+            "properties": [],
+            "nextCursor": None,
+            "next_cursor": None,
+            "warnings": ["Google Analytics is not connected."],
+        }
+
+    limit = min(max(int(limit or 200), 1), 200)
+    access_token = _google_analytics_required_token(connection)
+    params: dict[str, Any] = {"pageSize": limit}
+    if cursor:
+        params["pageToken"] = cursor
+    response = requests.get(
+        GOOGLE_ANALYTICS_ADMIN_ACCOUNT_SUMMARIES_URL,
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        params=params,
+        timeout=(3, 30),
+    )
+    response.raise_for_status()
+    payload = response.json() if response.content else {}
+    account_summaries = [item for item in (payload.get("accountSummaries") or []) if isinstance(item, dict)]
+    property_rows = []
+    with transaction.atomic():
+        for account in account_summaries:
+            account_id = _normalize_ga_property_id(account.get("account") or "").replace("accounts/", "")
+            account_name = str(account.get("displayName") or "").strip()
+            for prop in account.get("propertySummaries") or []:
+                if not isinstance(prop, dict):
+                    continue
+                property_id = _normalize_ga_property_id(prop.get("property") or "")
+                if not property_id:
+                    continue
+                defaults = {
+                    "user": connection.user,
+                    "organization": connection.organization,
+                    "property_display_name": str(prop.get("displayName") or property_id).strip(),
+                    "account_id": account_id,
+                    "account_display_name": account_name,
+                    "raw_payload": prop,
+                }
+                selection, _created = GoogleAnalyticsPropertySelection.objects.update_or_create(
+                    connection=connection,
+                    property_id=property_id,
+                    defaults=defaults,
+                )
+                property_rows.append(selection)
+
+    next_cursor = str(payload.get("nextPageToken") or "").strip()
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "properties": [_serialize_google_analytics_property_selection(selection) for selection in property_rows],
+        "nextCursor": next_cursor or None,
+        "next_cursor": next_cursor or None,
+        "warnings": [],
+    }
+
+
+def _selected_google_analytics_properties(connection: ExternalServiceConnection):
+    return GoogleAnalyticsPropertySelection.objects.filter(
+        connection=connection,
+        selected=True,
+    ).order_by("property_display_name", "property_id")
+
+
+def update_google_analytics_property_selections(user, property_ids: Iterable[str]) -> dict[str, Any]:
+    connection = _latest_google_analytics_connection(user)
+    if not connection:
+        raise ConnectorConfigurationError("Google Analytics is not connected.")
+    selected_ids = {
+        _normalize_ga_property_id(property_id)
+        for property_id in property_ids or []
+        if _normalize_ga_property_id(property_id)
+    }
+    with transaction.atomic():
+        GoogleAnalyticsPropertySelection.objects.filter(connection=connection).update(selected=False)
+        for property_id in sorted(selected_ids):
+            selection, created = GoogleAnalyticsPropertySelection.objects.get_or_create(
+                connection=connection,
+                property_id=property_id,
+                defaults={
+                    "user": connection.user,
+                    "organization": connection.organization,
+                    "property_display_name": property_id,
+                    "selected": True,
+                },
+            )
+            if not created:
+                selection.selected = True
+                selection.user = connection.user
+                selection.organization = connection.organization
+                selection.save(update_fields=["selected", "user", "organization", "updated_at"])
+        if selected_ids:
+            GoogleAnalyticsPropertySelection.objects.filter(
+                connection=connection,
+                property_id__in=selected_ids,
+            ).update(selected=True)
+    selected = list(_selected_google_analytics_properties(connection))
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "selectedProperties": [_serialize_google_analytics_property_selection(selection) for selection in selected],
+        "selected_properties": [_serialize_google_analytics_property_selection(selection) for selection in selected],
+        "selectedPropertyCount": len(selected),
+        "selected_property_count": len(selected),
+    }
+
+
 def _serialize_external_source(user, provider: str) -> dict[str, Any]:
     definition = CONNECTOR_DEFINITIONS[provider]
     connection = (
@@ -4575,6 +4858,14 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         ).count()
         if status_value in {"connected", "syncing"} and selected_project_count == 0:
             warning = warning or "Select Linear projects before using Linear in a monthly update."
+    selected_property_count = 0
+    if provider == ExternalServiceProvider.GOOGLE_ANALYTICS and connection:
+        selected_property_count = GoogleAnalyticsPropertySelection.objects.filter(
+            connection=connection,
+            selected=True,
+        ).count()
+        if status_value in {"connected", "syncing"} and selected_property_count == 0:
+            warning = warning or "Select a Google Analytics property before using Google Analytics in a monthly update."
 
     payload = {
         "key": provider,
@@ -4586,6 +4877,8 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
             if provider == ExternalServiceProvider.SLACK
             else selected_project_count > 0
             if provider == ExternalServiceProvider.LINEAR
+            else selected_property_count > 0
+            if provider == ExternalServiceProvider.GOOGLE_ANALYTICS
             else status_value in {"connected", "syncing"}
         ),
         "status": status_value,
@@ -4603,6 +4896,8 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         "selected_channel_count": selected_channel_count,
         "selectedProjectCount": selected_project_count,
         "selected_project_count": selected_project_count,
+        "selectedPropertyCount": selected_property_count,
+        "selected_property_count": selected_property_count,
     }
     if provider == ExternalServiceProvider.XERO:
         has_report_scope = xero_has_report_scope(connection.scopes if connection else [])

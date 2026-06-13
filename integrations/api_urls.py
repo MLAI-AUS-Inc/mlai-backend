@@ -120,6 +120,16 @@ urlpatterns = [
         name='linear_preview',
     ),
     path(
+        'google-analytics/properties',
+        api_views_connectors.GoogleAnalyticsPropertyListView.as_view(),
+        name='google_analytics_properties',
+    ),
+    path(
+        'google-analytics/property-selections',
+        api_views_connectors.GoogleAnalyticsPropertySelectionView.as_view(),
+        name='google_analytics_property_selections',
+    ),
+    path(
         'linear/meeting-context',
         api_views_connectors.LinearMeetingContextView.as_view(),
         name='linear_meeting_context',
@@ -162,6 +172,11 @@ urlpatterns = [
     path('startup-updates/runs/<str:run_id>/notion/classification-results', startup_update_api_views.StartupUpdateNotionClassificationResultsView.as_view(), name='startup_updates_notion_classification_results'),
     path('startup-updates/runs/<str:run_id>/notion/extraction-batch', startup_update_api_views.StartupUpdateNotionExtractionBatchView.as_view(), name='startup_updates_notion_extraction_batch'),
     path('startup-updates/runs/<str:run_id>/notion/extraction-results', startup_update_api_views.StartupUpdateNotionExtractionResultsView.as_view(), name='startup_updates_notion_extraction_results'),
+    path('startup-updates/runs/<str:run_id>/google-analytics/backfill', startup_update_api_views.StartupUpdateGoogleAnalyticsBackfillView.as_view(), name='startup_updates_google_analytics_backfill'),
+    path('startup-updates/runs/<str:run_id>/google-analytics/classification-batch', startup_update_api_views.StartupUpdateGoogleAnalyticsClassificationBatchView.as_view(), name='startup_updates_google_analytics_classification_batch'),
+    path('startup-updates/runs/<str:run_id>/google-analytics/classification-results', startup_update_api_views.StartupUpdateGoogleAnalyticsClassificationResultsView.as_view(), name='startup_updates_google_analytics_classification_results'),
+    path('startup-updates/runs/<str:run_id>/google-analytics/extraction-batch', startup_update_api_views.StartupUpdateGoogleAnalyticsExtractionBatchView.as_view(), name='startup_updates_google_analytics_extraction_batch'),
+    path('startup-updates/runs/<str:run_id>/google-analytics/extraction-results', startup_update_api_views.StartupUpdateGoogleAnalyticsExtractionResultsView.as_view(), name='startup_updates_google_analytics_extraction_results'),
     path('startup-updates/runs/<str:run_id>/timeline', startup_update_api_views.StartupUpdateTimelineView.as_view(), name='startup_updates_timeline'),
     path('startup-updates/runs/<str:run_id>/curation-context', startup_update_api_views.StartupUpdateCurationContextView.as_view(), name='startup_updates_curation_context'),
     path('startup-updates/runs/<str:run_id>/curation-results', startup_update_api_views.StartupUpdateCurationResultsView.as_view(), name='startup_updates_curation_results'),

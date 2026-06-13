@@ -18,6 +18,7 @@ from startup_updates.models import (
     GmailMessageArtifact,
     GmailSyncCursor,
     GmailThreadArtifact,
+    GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
     LinearProjectArtifact,
     LinearProjectSelection,
@@ -62,6 +63,8 @@ DELETED_COUNT_KEYS = (
     "linearProjectUpdates",
     "linearProjectSelections",
     "notionRunStores",
+    "googleAnalyticsRunStores",
+    "googleAnalyticsPropertySelections",
     "externalConnectionCursors",
     "startupRunsScrubbed",
     "startupEvents",
@@ -431,6 +434,51 @@ def _delete_notion_run_stores(*, organization_ids: list[int], run_ids: list[str]
     return counts
 
 
+def _delete_google_analytics_artifacts(*, organization_ids: list[int]) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    counts["googleAnalyticsPropertySelections"] = _delete_count(
+        GoogleAnalyticsPropertySelection.objects.filter(organization_id__in=organization_ids)
+    )
+    return counts
+
+
+def _delete_google_analytics_run_stores(*, organization_ids: list[int], run_ids: list[str] | None = None) -> dict[str, int]:
+    counts = _zero_deleted_counts()
+    queryset = ExternalServiceConnection.objects.filter(
+        organization_id__in=organization_ids,
+        provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
+    )
+    run_id_set = set(run_ids or [])
+    for connection in queryset:
+        cursor = dict(connection.sync_cursor or {})
+        run_stores = cursor.get("startup_update_runs")
+        if not isinstance(run_stores, dict) or not run_stores:
+            continue
+
+        if run_id_set:
+            deleted_count = 0
+            next_run_stores = dict(run_stores)
+            for run_id in run_id_set:
+                if run_id in next_run_stores:
+                    deleted_count += 1
+                    next_run_stores.pop(run_id, None)
+        else:
+            deleted_count = len(run_stores)
+            next_run_stores = {}
+
+        if deleted_count <= 0:
+            continue
+        if next_run_stores:
+            cursor["startup_update_runs"] = next_run_stores
+        else:
+            cursor.pop("startup_update_runs", None)
+        connection.sync_cursor = cursor
+        connection.last_synced_at = None
+        connection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
+        counts["googleAnalyticsRunStores"] += deleted_count
+    return counts
+
+
 def _delete_gmail_derived_outputs(
     *,
     organization_ids: list[int],
@@ -659,6 +707,11 @@ def delete_startup_data_for_organization(
                 ),
             )
             _add_counts(deleted, _delete_notion_run_stores(organization_ids=organization_ids, run_ids=run_ids))
+            _add_counts(deleted, _delete_google_analytics_artifacts(organization_ids=organization_ids))
+            _add_counts(
+                deleted,
+                _delete_google_analytics_run_stores(organization_ids=organization_ids, run_ids=run_ids),
+            )
             _add_counts(
                 deleted,
                 _delete_gmail_derived_outputs(
