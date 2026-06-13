@@ -44,6 +44,7 @@ jobs:
         XERO_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/xero
         NOTION_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/notion
         GOOGLE_DRIVE_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google-drive
+        GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/google-analytics
         FT_SLACK_OAUTH_REDIRECT_URI: https://api.mlai.au/integrations/callback/slack
         CONTENT_FACTORY_URL: http://10.126.0.4:8000
         VALLEY_HARNESS_URL: http://10.126.0.6:8080
