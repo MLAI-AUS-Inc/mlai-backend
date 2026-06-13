@@ -492,6 +492,11 @@ class NotificationChannel(models.Model):
     provider_metadata = models.JSONField(default=dict, blank=True)
     verified_at = models.DateTimeField(blank=True, null=True)
     opted_out_at = models.DateTimeField(blank=True, null=True)
+    verification_code_hash = models.CharField(max_length=128, blank=True, default="")
+    verification_expires_at = models.DateTimeField(blank=True, null=True)
+    verification_attempts = models.PositiveSmallIntegerField(default=0)
+    verification_last_sent_at = models.DateTimeField(blank=True, null=True)
+    verification_send_count = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

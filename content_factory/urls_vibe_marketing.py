@@ -1,5 +1,12 @@
 from django.urls import path
 
+from .notification_channel_views import (
+    VibeMarketingNotificationChannelDetailView,
+    VibeMarketingNotificationChannelResendView,
+    VibeMarketingNotificationChannelVerifyView,
+    VibeMarketingNotificationChannelsView,
+    VibeMarketingResearchAutomationView,
+)
 from .vibe_marketing_views import (
     VibeMarketingAutofillView,
     VibeMarketingArticleView,
@@ -113,4 +120,14 @@ urlpatterns = [
     path("runs/<str:run_id>/<str:action>/", VibeMarketingRunControlView.as_view(), name="vibe-marketing-run-control"),
     path("daily/replay", VibeMarketingDailyReplayView.as_view(), name="vibe-marketing-daily-replay-no-slash"),
     path("daily/replay/", VibeMarketingDailyReplayView.as_view(), name="vibe-marketing-daily-replay"),
+    path("notifications/channels", VibeMarketingNotificationChannelsView.as_view(), name="vibe-marketing-notification-channels-no-slash"),
+    path("notifications/channels/", VibeMarketingNotificationChannelsView.as_view(), name="vibe-marketing-notification-channels"),
+    path("notifications/channels/<uuid:channel_id>/verify", VibeMarketingNotificationChannelVerifyView.as_view(), name="vibe-marketing-notification-channel-verify-no-slash"),
+    path("notifications/channels/<uuid:channel_id>/verify/", VibeMarketingNotificationChannelVerifyView.as_view(), name="vibe-marketing-notification-channel-verify"),
+    path("notifications/channels/<uuid:channel_id>/resend", VibeMarketingNotificationChannelResendView.as_view(), name="vibe-marketing-notification-channel-resend-no-slash"),
+    path("notifications/channels/<uuid:channel_id>/resend/", VibeMarketingNotificationChannelResendView.as_view(), name="vibe-marketing-notification-channel-resend"),
+    path("notifications/channels/<uuid:channel_id>", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail-no-slash"),
+    path("notifications/channels/<uuid:channel_id>/", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail"),
+    path("notifications/automation", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation-no-slash"),
+    path("notifications/automation/", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation"),
 ]

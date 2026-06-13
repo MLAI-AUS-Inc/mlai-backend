@@ -238,12 +238,32 @@ def _upsert_inferred_owner(config: OrganizationContentConfig, owner: Optional[st
 
 
 def _eligible_daily_discovery_targets() -> tuple[List[DailyDiscoveryTarget], Dict[str, int]]:
+    from content_factory.models import ResearchAutomation, ResearchAutomationStatus
+
     owner_maps = _build_owner_maps()
     configs = list(
         OrganizationContentConfig.objects.select_related("organization")
         .filter(daily_discovery_enabled=True)
         .order_by("daily_discovery_priority", "organization__domain")
     )
+
+    # Orgs with an active channel-backed automation are served by the research
+    # automation scheduler; including them here would double-send each morning.
+    gated_org_ids = set(
+        ResearchAutomation.objects.filter(
+            status=ResearchAutomationStatus.ACTIVE,
+            organization_id__in=[config.organization_id for config in configs],
+        ).values_list("organization_id", flat=True)
+    )
+    skipped_active_automation = 0
+    if gated_org_ids:
+        retained = []
+        for config in configs:
+            if config.organization_id in gated_org_ids:
+                skipped_active_automation += 1
+            else:
+                retained.append(config)
+        configs = retained
 
     max_targets = get_daily_discovery_max_targets()
     overflow = max(0, len(configs) - max_targets)
@@ -285,6 +305,7 @@ def _eligible_daily_discovery_targets() -> tuple[List[DailyDiscoveryTarget], Dic
     return targets, {
         "skipped_missing_owner": skipped_missing_owner,
         "skipped_missing_prereqs": skipped_missing_prereqs,
+        "skipped_active_automation": skipped_active_automation,
         "overflow": overflow,
     }
 

@@ -63,6 +63,45 @@ class SlackService:
             return None
 
     @classmethod
+    def lookup_user_by_email(cls, email: str) -> Optional[Dict[str, Any]]:
+        """
+        Find a workspace user by email via users.lookupByEmail.
+
+        Requires the users:read.email bot scope.
+
+        Returns:
+            Same dict shape as get_user_profile, or None if not found,
+            the scope is missing, or an API error occurs.
+        """
+        normalized = str(email or "").strip()
+        if not normalized:
+            return None
+        client = cls.get_client()
+        try:
+            response = client.users_lookupByEmail(email=normalized)
+            if response['ok']:
+                user = response['user']
+                profile = user.get('profile', {})
+                return {
+                    'slack_id': user['id'],
+                    'real_name': user.get('real_name') or profile.get('real_name'),
+                    'display_name': profile.get('display_name') or user.get('name'),
+                    'name': user.get('name'),
+                    'email': profile.get('email'),
+                    'image_url': profile.get('image_512') or profile.get('image_192'),
+                    'is_bot': user.get('is_bot', False),
+                    'tz': user.get('tz'),
+                }
+            logger.error(f"Slack API error looking up user by email: {response.get('error')}")
+            return None
+        except SlackApiError as e:
+            logger.warning(f"Slack API exception looking up user by email: {e.response['error']}")
+            return None
+        except Exception as e:
+            logger.error(f"Exception looking up Slack user by email: {str(e)}")
+            return None
+
+    @classmethod
     def open_dm_channel(cls, slack_user_id: str) -> Optional[str]:
         """Open or resolve a DM channel for the given Slack user."""
         client = cls.get_client()

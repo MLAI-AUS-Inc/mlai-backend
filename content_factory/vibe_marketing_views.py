@@ -7633,6 +7633,20 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         and (publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     )
     delivery_mode = _effective_article_delivery_mode(config, github_ready=github_ready, article_ready=article_ready)
+    from integrations.services.notification_channels import (
+        list_org_channels,
+        serialize_automation,
+        serialize_channel,
+    )
+    from content_factory.models import NotificationConsentState, ResearchAutomation, ResearchAutomationStatus
+
+    org_channels = list_org_channels(organization)
+    automation = (
+        ResearchAutomation.objects.filter(organization=organization).order_by("created_at").first()
+    )
+    has_active_channel = any(
+        channel.consent_state == NotificationConsentState.ACTIVE for channel in org_channels
+    )
     daily_prerequisites_ready = (
         domain_ok
         and context_ok
@@ -7640,10 +7654,11 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         and baseline_ready
         and scan_ready
         and (article_ready or setup_pr_merged)
-        and bool(config.connected_slack_user_id)
+        and (bool(config.connected_slack_user_id) or has_active_channel)
         and (delivery_mode != "publish_code" or github_ready)
     )
-    daily_ready = daily_prerequisites_ready and bool(config.daily_discovery_enabled)
+    automation_active = bool(automation and automation.status == ResearchAutomationStatus.ACTIVE)
+    daily_ready = daily_prerequisites_ready and (bool(config.daily_discovery_enabled) or automation_active)
     return {
         "account": {"passed": True},
         "websiteProfile": {
@@ -7692,7 +7707,15 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         "dailyAutomation": {
             "passed": daily_ready,
             "ready": daily_prerequisites_ready,
-            "enabled": bool(config.daily_discovery_enabled),
+            "enabled": bool(config.daily_discovery_enabled) or automation_active,
+            "channels": [
+                serialize_channel(
+                    channel,
+                    primary_channel_id=automation.notification_channel_id if automation else None,
+                )
+                for channel in org_channels
+            ],
+            "automation": serialize_automation(automation),
         },
     }
 
@@ -7755,12 +7778,16 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     feedback = TopicFeedback.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
     articles = WrittenArticle.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("created_at"))
     baseline_updated = WebsiteBaselineSnapshot.objects.filter(organization=organization).aggregate(m=Max("updated_at"))["m"]
+    from content_factory.models import NotificationChannel as _NotificationChannel
+
+    channels = _NotificationChannel.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
     parts = (
         getattr(config, "updated_at", None),
         runs["c"], runs["m"],
         keywords["c"], keywords["m"],
         feedback["c"], feedback["m"],
         articles["c"], articles["m"],
+        channels["c"], channels["m"],
         baseline_updated,
         # Already-loaded identity fields (no extra query) so company/profile edits —
         # including the endpoints that mutate then return bootstrap in the same
@@ -10287,6 +10314,25 @@ class VibeMarketingSettingsView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         config.save()
+        if daily_enabled_submitted:
+            # Keep the channel-backed automation in lock-step with the legacy
+            # boolean so the two daily schedulers never disagree.
+            from content_factory.models import ResearchAutomation, ResearchAutomationStatus
+            from integrations.services.notification_channels import ensure_research_automation_for_org
+
+            if config.daily_discovery_enabled:
+                ensure_research_automation_for_org(
+                    organization=organization,
+                    user=request.user,
+                    timezone_name=config.default_timezone or "",
+                    enabled=True,
+                    config=config,
+                )
+            else:
+                ResearchAutomation.objects.filter(
+                    organization=organization,
+                    status=ResearchAutomationStatus.ACTIVE,
+                ).update(status=ResearchAutomationStatus.PAUSED)
         apply_shared_startup_details(user=request.user, company=company, data=request.data)
 
         refreshed_context = get_founder_company_context(request.user, company_id=company.id)
@@ -12311,6 +12357,11 @@ class VibeMarketingRunControlView(APIView):
             return Response(_serialize_run(restarted_run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "enable-daily-automation":
+            from integrations.services.notification_channels import (
+                ensure_research_automation_for_org,
+                serialize_channel,
+            )
+
             config = _get_config(context.organization)
             _assign_config_actor(config, request.user)
             if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
@@ -12328,9 +12379,26 @@ class VibeMarketingRunControlView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             config.save(update_fields=["daily_discovery_enabled", "default_timezone", "updated_at"])
+            automation, automation_channels = ensure_research_automation_for_org(
+                organization=context.organization,
+                user=request.user,
+                timezone_name=config.default_timezone or "Australia/Melbourne",
+                enabled=True,
+                config=config,
+            )
             result = run.result or {}
             result["daily_automation_enabled_at"] = timezone.now().isoformat()
             result["daily_automation_timezone"] = config.default_timezone
+            if automation is not None:
+                result["daily_automation_id"] = str(automation.id)
+                result["daily_automation_channels"] = [
+                    serialize_channel(channel, primary_channel_id=automation.notification_channel_id)
+                    for channel in automation_channels
+                ]
+            else:
+                # No verified channel and Slack couldn't be auto-linked; the
+                # legacy shared daily queue keeps serving this org.
+                result["daily_automation_channel_warning"] = "no_verified_channels"
             run.result = result
             run.save(update_fields=["result", "updated_at"])
             return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
