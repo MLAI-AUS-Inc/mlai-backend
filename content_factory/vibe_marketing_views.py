@@ -279,7 +279,7 @@ WORKFLOW_STEP_DEFS = [
         "phase": "Publish",
         "href": "/founder-tools/marketing/create?step=reviewPublish",
         "check": "publish",
-        "summary": "Promote the package into a PR, preview URL, or CMS publish flow.",
+        "summary": "Create the publish PR; checks run and it merges to main automatically.",
     },
     {
         "id": "automation",
@@ -4342,6 +4342,26 @@ def _annotate_publish_child_state(run, *, context=None):
         "publish_handoff_status": _publish_child_handoff_status(child, recoverable=recoverable),
         "publish_handoff_pending": False,
     }
+    if child.pk != run.pk:
+        # Mirror the child's PR/merge evidence so the article page reflects
+        # publish progress without redirecting to the child run. previewUrl
+        # gets a dedicated key: "preview_url" means review-preview on article
+        # runs and must not be overwritten.
+        child_evidence = _publish_evidence_from_run(child, compact=True)
+        child_result = _run_mapping(child.result)
+        for key, value in (
+            ("pr_url", child_evidence.get("prUrl")),
+            ("pr_number", child_evidence.get("prNumber")),
+            ("merge_status", child_evidence.get("mergeStatus")),
+            ("checks_status", child_evidence.get("checksStatus")),
+            ("merge_blocked_reason", child_result.get("merge_blocked_reason")),
+            ("publish_auto_merge_state", child_result.get("publish_auto_merge_state")),
+            ("publish_child_preview_url", child_evidence.get("previewUrl")),
+        ):
+            if value not in (None, "", {}, []):
+                updates[key] = value
+    if _publish_auto_merge_enabled(child, run):
+        updates["publish_auto_merge"] = True
     changed = False
     for key, value in updates.items():
         if result.get(key) != value:
@@ -4859,13 +4879,20 @@ def _refresh_pending_article_system_setup_pr_status(*, context, config=None, lat
     return run, True
 
 
-def _merge_publish_pr_for_run(*, run, context):
+def _check_and_merge_publish_pr(*, run, context):
+    """Check the publish PR's checks and merge it when they pass.
+
+    Shared by the manual merge action and the poll-driven auto-merge. Writes
+    checks/merge evidence onto run.result as a side effect and returns
+    {"outcome": "merged" | "already_merged" | "pending" | "no_repo" | "no_pr"
+    | "error", "detail": str, "checks": dict}.
+    """
     repo = run.github_repo or _get_config(context.organization).github_repo
     if not repo:
-        return None, Response({"detail": "No GitHub repository is configured for this publish run."}, status=status.HTTP_400_BAD_REQUEST)
+        return {"outcome": "no_repo", "detail": "No GitHub repository is configured for this publish run.", "checks": {}}
     pr_number = _pull_request_number_from_run(run)
     if not pr_number:
-        return None, Response({"detail": "No publish pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
+        return {"outcome": "no_pr", "detail": "No publish pull request was found for this run.", "checks": {}}
     try:
         token, token_source = _github_token_for_repo_operation(
             domain=context.organization.domain,
@@ -4880,23 +4907,26 @@ def _merge_publish_pr_for_run(*, run, context):
         )
         pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
         if pull.get("merged"):
-            result = run.result or {}
+            result = dict(run.result or {})
             result["merge_status"] = "merged"
             result["checks_status"] = "merged"
+            result.pop("merge_blocked_reason", None)
+            result.pop("publish_auto_merge_state", None)
             run.result = result
             run.save(update_fields=["result", "updated_at"])
-            return run, None
+            return {"outcome": "already_merged", "detail": "Pull request is already merged.", "checks": checks}
         if not checks.get("ready"):
-            result = run.result or {}
+            result = dict(run.result or {})
             result["merge_status"] = str(checks.get("state") or "blocked")
             result["checks_status"] = str(checks.get("state") or "blocked")
             result["merge_blocked_reason"] = checks.get("message")
             run.result = result
             run.save(update_fields=["result", "updated_at"])
-            return None, Response(
-                {"detail": checks.get("message") or "Publish PR checks are not ready.", "checks": checks},
-                status=status.HTTP_409_CONFLICT,
-            )
+            return {
+                "outcome": "pending",
+                "detail": checks.get("message") or "Publish PR checks are not ready.",
+                "checks": checks,
+            }
         merge_payload = {
             "commit_title": f"Publish Content Factory article from {run.run_id}",
             "merge_method": "squash",
@@ -4909,16 +4939,35 @@ def _merge_publish_pr_for_run(*, run, context):
             expected=(200, 201),
         )
     except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
-        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return {"outcome": "error", "detail": str(exc), "checks": {}}
 
-    result = run.result or {}
+    result = dict(run.result or {})
     result["merge_status"] = "merged"
     result["checks_status"] = "success"
     result["merged_at"] = timezone.now().isoformat()
     result["merge_response"] = merged
+    result.pop("merge_blocked_reason", None)
+    result.pop("publish_auto_merge_state", None)
     run.result = result
     run.status = ContentFactoryRunStatus.COMPLETED
     run.save(update_fields=["status", "result", "updated_at"])
+    return {"outcome": "merged", "detail": "Pull request merged.", "checks": checks}
+
+
+def _merge_publish_pr_for_run(*, run, context):
+    outcome = _check_and_merge_publish_pr(run=run, context=context)
+    kind = outcome.get("outcome")
+    if kind == "no_repo":
+        return None, Response({"detail": outcome.get("detail")}, status=status.HTTP_400_BAD_REQUEST)
+    if kind == "no_pr":
+        return None, Response({"detail": outcome.get("detail")}, status=status.HTTP_409_CONFLICT)
+    if kind == "pending":
+        return None, Response(
+            {"detail": outcome.get("detail") or "Publish PR checks are not ready.", "checks": outcome.get("checks") or {}},
+            status=status.HTTP_409_CONFLICT,
+        )
+    if kind == "error":
+        return None, Response({"detail": outcome.get("detail")}, status=status.HTTP_409_CONFLICT)
     return run, None
 
 
@@ -5474,6 +5523,36 @@ def _run_mapping(value):
 
 PUBLISH_HANDOFF_STALE_AFTER = timedelta(seconds=60)
 
+# Keys written locally by the Django-side publish/merge orchestration. Content
+# Factory never learns about merges (they happen here with the GitHub App
+# token), so a remote status sync must not wipe them from article runs.
+PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
+    "pr_url",
+    "pr_number",
+    "merge_status",
+    "checks_status",
+    "merge_blocked_reason",
+    "merged_at",
+    "merge_response",
+    "publish_auto_merge",
+    "publish_auto_merge_state",
+    "publish_auto_merge_started_at",
+    "publish_auto_merge_last_error",
+    "publish_child_run_id",
+    "promoted_publish_job_id",
+    "publish_child_preview_url",
+)
+
+# How long the per-poll publish-child remote refresh is suppressed between
+# attempts, and how often the auto-merge may hit the GitHub API.
+PUBLISH_CHILD_POLL_REFRESH_SECONDS = 10
+PUBLISH_AUTO_MERGE_THROTTLE_SECONDS = 30
+# Give up waiting on checks after this long and ask the user to look at the PR.
+PUBLISH_AUTO_MERGE_TIMEOUT = timedelta(minutes=30)
+# Checks states from _github_pull_checks_state that auto-merge cannot recover
+# from by waiting (failed checks, closed PR, failing commit statuses).
+PUBLISH_AUTO_MERGE_TERMINAL_CHECK_STATES = {"failed", "failure", "error", "closed"}
+
 
 def _deterministic_publish_child_run_id(source_run_id):
     source_run_id = str(source_run_id or "").strip()
@@ -5638,7 +5717,68 @@ def _publish_child_run_id_for_run(run):
     ).strip()
 
 
-def _mark_publish_handoff_pending(*, run, remote_run=None, action="promote-bundle", remote_data=None):
+def _truthy_flag(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _payload_requests_auto_merge(payload):
+    payload = _run_mapping(payload)
+    return any(_truthy_flag(payload.get(key)) for key in ("auto_merge", "autoMerge", "publish_auto_merge"))
+
+
+def _publish_auto_merge_enabled(*runs):
+    """True when any of the runs carries the auto-merge opt-in.
+
+    run_request is the durable home (remote status syncs replace result);
+    result is checked too because annotations mirror the flag there."""
+    for run in runs:
+        if not run:
+            continue
+        for mapping in (_run_mapping(run.run_request), _run_mapping(run.result)):
+            if any(_truthy_flag(mapping.get(key)) for key in ("publish_auto_merge", "auto_merge", "autoMerge")):
+                return True
+    return False
+
+
+def _record_publish_auto_merge_flag(run):
+    """Persist the auto-merge opt-in on run_request (durable) and result (serialized)."""
+    if not run:
+        return run
+    update_fields = []
+    run_request = dict(run.run_request or {})
+    if not _truthy_flag(run_request.get("publish_auto_merge")):
+        run_request["publish_auto_merge"] = True
+        run.run_request = run_request
+        update_fields.append("run_request")
+    result = dict(run.result or {})
+    if not _truthy_flag(result.get("publish_auto_merge")):
+        result["publish_auto_merge"] = True
+        run.result = result
+        update_fields.append("result")
+    if update_fields:
+        run.save(update_fields=update_fields + ["updated_at"])
+    return run
+
+
+def _reset_publish_auto_merge_block(run):
+    """Clear a blocked auto-merge so a manual merge retry starts fresh."""
+    if not run:
+        return run
+    result = dict(run.result or {})
+    changed = False
+    for key in ("publish_auto_merge_state", "publish_auto_merge_started_at", "publish_auto_merge_last_error"):
+        if result.get(key):
+            result.pop(key, None)
+            changed = True
+    if changed:
+        run.result = result
+        run.save(update_fields=["result", "updated_at"])
+    return run
+
+
+def _mark_publish_handoff_pending(*, run, remote_run=None, action="promote-bundle", remote_data=None, auto_merge=False):
     timestamp = timezone.now().isoformat()
     updated = []
     for candidate in (run, remote_run):
@@ -5652,10 +5792,19 @@ def _mark_publish_handoff_pending(*, run, remote_run=None, action="promote-bundl
         result["publish_handoff_last_attempt_at"] = timestamp
         result["publish_handoff_stale"] = False
         result["promote_bundle_requested_at"] = timestamp
+        if auto_merge:
+            result["publish_auto_merge"] = True
         if remote_data is not None:
             result["latest_control_response"] = remote_data
         candidate.result = result
-        candidate.save(update_fields=["result", "updated_at"])
+        update_fields = ["result", "updated_at"]
+        if auto_merge:
+            run_request = dict(candidate.run_request or {})
+            if not _truthy_flag(run_request.get("publish_auto_merge")):
+                run_request["publish_auto_merge"] = True
+                candidate.run_request = run_request
+                update_fields.append("run_request")
+        candidate.save(update_fields=update_fields)
         updated.append(candidate)
     return timestamp
 
@@ -5856,6 +6005,7 @@ def _sync_publish_child_from_control_response(
     if publish_run is None:
         return None
 
+    auto_merge = _payload_requests_auto_merge(payload) or _publish_auto_merge_enabled(run, remote_run)
     publish_result = dict(publish_run.result or {})
     publish_result["source_run_id"] = remote_run.run_id
     publish_result["sourceRunId"] = remote_run.run_id
@@ -5864,6 +6014,8 @@ def _sync_publish_child_from_control_response(
         publish_result["reviewSourceRunId"] = review_source_run_id
     publish_run.result = publish_result
     publish_run.save(update_fields=["result", "updated_at"])
+    if auto_merge:
+        publish_run = _record_publish_auto_merge_flag(publish_run)
 
     timestamp = timezone.now().isoformat()
     child_recoverable = _publish_child_run_recoverable(publish_run)
@@ -5884,8 +6036,16 @@ def _sync_publish_child_from_control_response(
         result["publish_child_recoverable"] = child_recoverable
         result["publish_child_wait_reason"] = child_wait_reason
         result["publish_handoff_status"] = child_handoff_status
+        if auto_merge:
+            result["publish_auto_merge"] = True
         candidate.result = result
         update_fields = ["result", "updated_at"]
+        if auto_merge:
+            candidate_request = dict(candidate.run_request or {})
+            if not _truthy_flag(candidate_request.get("publish_auto_merge")):
+                candidate_request["publish_auto_merge"] = True
+                candidate.run_request = candidate_request
+                update_fields.append("run_request")
         if mark_source_approved:
             candidate.approval_state = ContentFactoryApprovalState.APPROVED
             if candidate.status in {
@@ -5958,6 +6118,104 @@ def _recover_publish_child_for_run(run, *, request, context):
             _apply_publish_child_evidence_to_article(context.organization, publish_source_run, child)
             return child
     return None
+
+
+def _maybe_auto_merge_publish_child(*, child, viewed_run, context):
+    """Attempt the requested auto-merge for a publish run that has a PR.
+
+    Throttled via the cache so concurrent tabs and fast polls don't hammer the
+    GitHub API. A blocked state (failed checks, closed PR, or timeout) halts
+    automatic attempts until the manual merge action clears it."""
+    if not child or child.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    child_result = _run_mapping(child.result)
+    if str(child_result.get("merge_status") or "").strip().lower() == "merged":
+        return None
+    if str(child_result.get("publish_auto_merge_state") or "").strip().lower() == "blocked":
+        return None
+    if not _pull_request_number_from_run(child):
+        return None
+    source_run = _publish_source_run_for_child(child, context)
+    if not _publish_auto_merge_enabled(child, viewed_run if viewed_run is not None and viewed_run.pk != child.pk else None, source_run):
+        return None
+    if not cache.add(f"vibe-marketing:auto-merge:{child.run_id}", 1, PUBLISH_AUTO_MERGE_THROTTLE_SECONDS):
+        return None
+
+    now = timezone.now()
+    result = dict(child.result or {})
+    started_at = _parse_handoff_timestamp(result.get("publish_auto_merge_started_at"))
+    if started_at is None:
+        result["publish_auto_merge_started_at"] = now.isoformat()
+        child.result = result
+        child.save(update_fields=["result", "updated_at"])
+    elif now - started_at >= PUBLISH_AUTO_MERGE_TIMEOUT:
+        result["publish_auto_merge_state"] = "blocked"
+        if not result.get("merge_blocked_reason"):
+            result["merge_blocked_reason"] = (
+                result.get("publish_auto_merge_last_error")
+                or "GitHub checks did not finish in time. Open the PR to investigate, then retry the merge."
+            )
+        child.result = result
+        child.save(update_fields=["result", "updated_at"])
+        return None
+
+    outcome = _check_and_merge_publish_pr(run=child, context=context)
+    kind = outcome.get("outcome")
+    if kind in {"merged", "already_merged"}:
+        logger.info("vibe_marketing_auto_merge_succeeded run_id=%s outcome=%s", child.run_id, kind)
+        return child
+    result = dict(child.result or {})
+    if kind == "pending":
+        state = str((outcome.get("checks") or {}).get("state") or "").strip().lower()
+        if state in PUBLISH_AUTO_MERGE_TERMINAL_CHECK_STATES:
+            result["publish_auto_merge_state"] = "blocked"
+        else:
+            result["publish_auto_merge_state"] = "waiting_checks"
+    elif kind == "error":
+        # Likely transient (GitHub/network); keep waiting and let the timeout
+        # above turn a persistent failure into a blocked state.
+        result["publish_auto_merge_state"] = "waiting_checks"
+        result["publish_auto_merge_last_error"] = str(outcome.get("detail") or "Automatic merge failed.")
+    else:
+        return None
+    child.result = result
+    child.save(update_fields=["result", "updated_at"])
+    return child
+
+
+def _advance_publish_child_for_poll(run, *, request, context):
+    """Per-poll progression for the publish flow on the run status endpoint.
+
+    Content Factory never writes child progress back onto the source run, so
+    each poll refreshes the attached publish child from remote (throttled),
+    attempts the requested auto-merge, and mirrors evidence onto the
+    WrittenArticle row. Best-effort: never raises on a poll path."""
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    try:
+        child = _publish_child_for_run_state(run, context=context)
+        if child is None:
+            return None
+        if child.pk != run.pk and cache.add(
+            f"vibe-marketing:publish-child-refresh:{child.run_id}",
+            1,
+            PUBLISH_CHILD_POLL_REFRESH_SECONDS,
+        ):
+            # The viewed run was already synced from remote by the caller;
+            # only a distinct attached child needs its own refresh.
+            child = _refresh_publish_child_remote_state(child, context=context)
+        _maybe_auto_merge_publish_child(child=child, viewed_run=run, context=context)
+        child = ContentFactoryRun.objects.prefetch_related("steps").get(pk=child.pk)
+        source_run = run if child.pk != run.pk else (_publish_source_run_for_child(run, context) or run)
+        _apply_publish_child_evidence_to_article(context.organization, source_run, child)
+        return child
+    except Exception:
+        logger.warning(
+            "advance_publish_child_for_poll_failed run_id=%s",
+            getattr(run, "run_id", ""),
+            exc_info=True,
+        )
+        return None
 
 
 def _accepted_revision_source_run(run):
@@ -6968,7 +7226,11 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             "Open published evidence",
             href=publish_evidence.get("previewUrl") or publish_evidence.get("prUrl") or _run_url(publish_evidence_run),
         )
-        summary_by_id["publish"] = "PR or preview evidence is ready."
+        summary_by_id["publish"] = (
+            "PR merged to main."
+            if str(publish_evidence.get("mergeStatus") or "").strip().lower() == "merged"
+            else "PR or preview evidence is ready."
+        )
     elif publish_running:
         status_by_id["publish"] = "running"
         href_by_id["publish"] = _run_url(publish_child_run or article_run)
@@ -6998,8 +7260,8 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         status_by_id["publish"] = "ready"
         href_by_id["publish"] = _run_url(article_run)
         run_by_id["publish"] = article_run.run_id
-        action_by_id["publish"] = _workflow_step_action("Publish to website", href=_run_url(article_run), intent="promote-bundle")
-        summary_by_id["publish"] = "Promote the content package into a publish run."
+        action_by_id["publish"] = _workflow_step_action("Publish article", href=_run_url(article_run), intent="promote-bundle")
+        summary_by_id["publish"] = "Create the publish PR; it merges to main once checks pass."
     elif content_package_ready:
         status_by_id["publish"] = "blocked"
         href_by_id["publish"] = "/founder-tools/marketing/settings"
@@ -7113,24 +7375,36 @@ COMPACT_RUN_RESULT_KEYS = {
     "blockingCode",
     "blocking_reason",
     "blockingReason",
+    "checks_status",
+    "checksStatus",
     "detected_candidates",
     "delivery_mode",
     "deliveryMode",
     "draft_pr_url",
+    "merge_blocked_reason",
+    "merge_status",
+    "mergeStatus",
     "path",
     "matched_article_surface",
     "pending_article_system_setup",
     "preview_url",
     "previewUrl",
+    "pr_number",
+    "prNumber",
     "pr_url",
     "prUrl",
     "promote_bundle_requested_at",
     "promoted_publish_job_id",
+    "publish_auto_merge",
+    "publish_auto_merge_state",
+    "publish_child_preview_url",
     "publish_child_recoverable",
     "publish_child_run_id",
     "publish_child_status",
     "publish_child_wait_reason",
     "publish_handoff_pending",
+    "publish_handoff_stale",
+    "publish_handoff_status",
     "pull_request_url",
     "requested_action",
     "resolved_delivery_mode",
@@ -9118,6 +9392,13 @@ def _sync_local_run_from_remote(run, remote_data):
         run.error = ""
     if result:
         result = _merge_preserved_live_preview(run.result or {}, result)
+        if run.workflow in ARTICLE_WORKFLOWS:
+            # Merge evidence is written locally (Content Factory never merges
+            # PRs), so keep it when the remote result doesn't carry it.
+            local_result = run.result if isinstance(run.result, dict) else {}
+            for key in PUBLISH_MERGE_EVIDENCE_RESULT_KEYS:
+                if result.get(key) in (None, "", {}, []) and local_result.get(key) not in (None, "", {}, []):
+                    result[key] = local_result[key]
         if run.workflow in SCAN_WORKFLOWS:
             local_result = run.result if isinstance(run.result, dict) else {}
             run_request = run.run_request if isinstance(run.run_request, dict) else {}
@@ -11566,6 +11847,8 @@ class VibeMarketingRunView(APIView):
         if run.workflow in ARTICLE_WORKFLOWS:
             run = _ensure_article_live_preview(run)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+            if _advance_publish_child_for_poll(run, request=request, context=context) is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
         if run.workflow == "article_system_setup":
@@ -12285,6 +12568,13 @@ class VibeMarketingRunControlView(APIView):
         payload = dict(request.data or {})
         payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
         payload.setdefault("slack_user_id", founder_actor_id_for_user(request.user))
+        auto_merge_requested = bool(
+            action in {"promote-bundle", "publish-pr", "approve"}
+            and run.workflow in ARTICLE_WORKFLOWS
+            and _payload_requests_auto_merge(payload)
+        )
+        if auto_merge_requested:
+            payload["auto_merge"] = True
 
         if action == "cancel":
             if run.workflow in SCAN_WORKFLOWS:
@@ -12404,9 +12694,24 @@ class VibeMarketingRunControlView(APIView):
             return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
         if action == "merge-publish-pr":
-            merged_run, merge_error = _merge_publish_pr_for_run(run=run, context=context)
+            # The PR lives on the publish child run; resolve it so the action
+            # works from the article page too. Manual retries clear a blocked
+            # auto-merge so the next attempt starts fresh.
+            merge_target = _publish_child_for_run_state(run, context=context) or run
+            _reset_publish_auto_merge_block(merge_target)
+            merged_run, merge_error = _merge_publish_pr_for_run(run=merge_target, context=context)
             if merge_error:
+                if merge_target.pk != run.pk:
+                    _annotate_publish_child_state(
+                        ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk),
+                        context=context,
+                    )
                 return merge_error
+            if merge_target.pk != run.pk:
+                _apply_publish_child_evidence_to_article(context.organization, run, merged_run or merge_target)
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+                run = _annotate_publish_child_state(run, context=context)
+                return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
             return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
 
         if action == "refresh-setup-pr-status":
@@ -12440,6 +12745,9 @@ class VibeMarketingRunControlView(APIView):
             if existing_publish_run is not None:
                 existing_publish_run = _refresh_publish_child_remote_state(existing_publish_run, context=context)
                 if not _publish_child_run_recoverable(existing_publish_run):
+                    if auto_merge_requested:
+                        _record_publish_auto_merge_flag(existing_publish_run)
+                        _record_publish_auto_merge_flag(run)
                     return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             known_child_run_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(remote_run)
             if known_child_run_id:
@@ -12447,6 +12755,9 @@ class VibeMarketingRunControlView(APIView):
                 if recovered_publish_run is not None and _run_belongs_to_context(recovered_publish_run, context):
                     recovered_publish_run = _refresh_publish_child_remote_state(recovered_publish_run, context=context)
                     if not _publish_child_run_recoverable(recovered_publish_run):
+                        if auto_merge_requested:
+                            _record_publish_auto_merge_flag(recovered_publish_run)
+                            _record_publish_auto_merge_flag(run)
                         return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             pending_runs = [
                 candidate
@@ -12457,7 +12768,7 @@ class VibeMarketingRunControlView(APIView):
                 for candidate in pending_runs:
                     _annotate_publish_handoff_staleness(candidate)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-            _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action)
+            _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
         if action == "revise":
             gate_response, gate_balance = _require_roo_points_for_ai_agent(
                 request.user,
@@ -12529,7 +12840,13 @@ class VibeMarketingRunControlView(APIView):
             if publish_run is not None:
                 return Response(_serialize_run(publish_run, context=context), status=status.HTTP_202_ACCEPTED)
             if _content_factory_action_transport_pending(remote_data):
-                _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, remote_data=remote_data)
+                _mark_publish_handoff_pending(
+                    run=run,
+                    remote_run=remote_run,
+                    action=action,
+                    remote_data=remote_data,
+                    auto_merge=auto_merge_requested,
+                )
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 
         if action == "approve" and run.workflow in ARTICLE_WORKFLOWS:

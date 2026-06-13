@@ -4,12 +4,13 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from integrations import http_client
-from content_factory.models import GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment, WrittenArticle
+from content_factory.models import ArticlePublishStatus, GeneratedComponent, KeywordStatus, OrganizationContentConfig, ResearchedKeyword, VibeMarketingComponentComment, WrittenArticle
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
@@ -3824,3 +3825,403 @@ class VibeMarketingComponentCommentTests(TestCase):
         config.refresh_from_db()
         self.assertTrue(config.daily_discovery_enabled)
         self.assertEqual(config.default_timezone, "Australia/Melbourne")
+
+
+class VibeMarketingPublishFlowTests(TestCase):
+    """One-button publish flow: poll-driven child refresh, evidence mirroring, auto-merge."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="founder-publish@example.com",
+            password="password",
+            role="participant",
+        )
+        self.profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        self.company = VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=self.organization,
+            name="MLAI",
+            domain="mlai.au",
+            registered=True,
+        )
+        self.profile.active_company = self.company
+        self.profile.save(update_fields=["active_company", "updated_at"])
+        OrganizationContentConfig.objects.create(organization=self.organization, github_repo="MLAI-AUS-Inc/mlai-au")
+        self.run = ContentFactoryRun.objects.create(
+            run_id="article-run-publish",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={"status": "completed"},
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _create_publish_child(self, *, status=ContentFactoryRunStatus.QUEUED, result=None, auto_merge=False, run_id="article-publish-child"):
+        run_request = {
+            "source_run_id": self.run.run_id,
+            "delivery_mode": "publish_code",
+            "delivery_mode_confirmed": True,
+        }
+        if auto_merge:
+            run_request["publish_auto_merge"] = True
+        child = ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=status,
+            run_request=run_request,
+            result={"source_run_id": self.run.run_id, **(result or {})},
+        )
+        article_result = dict(self.run.result or {})
+        article_result["publish_child_run_id"] = child.run_id
+        article_result["promoted_publish_job_id"] = child.run_id
+        self.run.result = article_result
+        self.run.save(update_fields=["result", "updated_at"])
+        return child
+
+    def _create_written_article(self, slug="ai-adoption-guide"):
+        return WrittenArticle.objects.create(
+            organization=self.organization,
+            title="AI adoption guide",
+            slug=slug,
+            category="guides",
+            primary_keyword="ai adoption",
+        )
+
+    def test_article_status_poll_refreshes_running_publish_child_from_remote(self):
+        child = self._create_publish_child()
+        article_row = self._create_written_article()
+        remote_by_run_id = {
+            child.run_id: {
+                "run_id": child.run_id,
+                "status": "completed",
+                "current_step": "finalize",
+                "result": {
+                    "status": "completed",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77",
+                    "pr_number": 77,
+                    "slug": "ai-adoption-guide",
+                },
+            },
+        }
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_status",
+            side_effect=lambda run_id, workflow="": remote_by_run_id.get(run_id, {}),
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        child.refresh_from_db()
+        self.assertEqual(child.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(child.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_child_status"], ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(self.run.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+        self.assertEqual(response.data["prUrl"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+        article_row.refresh_from_db()
+        self.assertEqual(article_row.publish_status, ArticlePublishStatus.PR_OPEN)
+        self.assertEqual(article_row.pr_url, "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
+
+    def test_article_status_poll_marks_lost_publish_child_recoverable(self):
+        child = self._create_publish_child()
+        status_calls = []
+
+        def fake_status(run_id, workflow=""):
+            status_calls.append(run_id)
+            if run_id == child.run_id:
+                return {
+                    "status": ContentFactoryRunStatus.BLOCKED,
+                    "error": f"Content Factory run {child.run_id} was not found.",
+                    "diagnostics": {"content_factory_status_code": 404},
+                }
+            return {}
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", side_effect=fake_status):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["publishChildRecoverable"])
+        self.run.refresh_from_db()
+        self.assertTrue(self.run.result["publish_child_recoverable"])
+        child_status_calls = status_calls.count(child.run_id)
+        self.assertEqual(child_status_calls, 1)
+
+        cache.clear()
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", side_effect=fake_status):
+            second = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(status_calls.count(child.run_id), child_status_calls)
+
+    def test_article_status_poll_auto_merges_when_checks_pass(self):
+        child = self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/88",
+                "pr_number": 88,
+                "slug": "ai-adoption-guide",
+            },
+            auto_merge=True,
+        )
+        article_row = self._create_written_article()
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": True, "state": "success", "message": "Checks are passing."},
+                ),
+            ),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"merged": True, "sha": "abc123"}) as merge_mock,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        merge_mock.assert_called_once()
+        child.refresh_from_db()
+        self.assertEqual(child.result["merge_status"], "merged")
+        self.assertEqual(child.status, ContentFactoryRunStatus.COMPLETED)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["merge_status"], "merged")
+        article_row.refresh_from_db()
+        self.assertEqual(article_row.publish_status, ArticlePublishStatus.MERGED)
+
+    def test_auto_merge_waits_and_throttles_on_pending_checks(self):
+        self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/89",
+                "pr_number": 89,
+            },
+            auto_merge=True,
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
+                ),
+            ) as checks_mock,
+            patch("content_factory.vibe_marketing_views._github_api_request") as merge_mock,
+        ):
+            first = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+            second = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        merge_mock.assert_not_called()
+        self.assertEqual(checks_mock.call_count, 1)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["checks_status"], "pending")
+        self.assertEqual(self.run.result["publish_auto_merge_state"], "waiting_checks")
+
+    def test_auto_merge_blocks_on_failed_checks_without_retry_storm(self):
+        child = self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/90",
+                "pr_number": 90,
+            },
+            auto_merge=True,
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": False, "state": "failed", "message": "One or more GitHub Actions checks failed."},
+                ),
+            ) as checks_mock,
+        ):
+            first = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+            cache.clear()
+            second = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(checks_mock.call_count, 1)
+        child.refresh_from_db()
+        self.assertEqual(child.result["publish_auto_merge_state"], "blocked")
+        self.assertEqual(child.result["merge_blocked_reason"], "One or more GitHub Actions checks failed.")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_auto_merge_state"], "blocked")
+        self.assertEqual(self.run.result["merge_blocked_reason"], "One or more GitHub Actions checks failed.")
+
+    def test_auto_merge_skipped_without_flag(self):
+        self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/91",
+                "pr_number": 91,
+            },
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._github_pull_checks_state") as checks_mock,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        checks_mock.assert_not_called()
+        self.assertEqual(response.data["prUrl"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/91")
+
+    def test_publish_child_preview_url_propagates_without_pr(self):
+        self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "preview_url": "https://mlai.au/articles/ai-adoption-guide",
+                "slug": "ai-adoption-guide",
+            },
+            auto_merge=True,
+        )
+
+        with (
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}),
+            patch("content_factory.vibe_marketing_views._github_pull_checks_state") as checks_mock,
+        ):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        checks_mock.assert_not_called()
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["publish_child_preview_url"], "https://mlai.au/articles/ai-adoption-guide")
+
+    def test_merge_publish_pr_action_merges_child_from_article_page(self):
+        child = self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/92",
+                "pr_number": 92,
+                "slug": "ai-adoption-guide",
+                "publish_auto_merge_state": "blocked",
+                "merge_blocked_reason": "One or more GitHub Actions checks failed.",
+            },
+        )
+        article_row = self._create_written_article()
+
+        with (
+            patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
+            patch(
+                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                return_value=(
+                    {"state": "open", "merged": False},
+                    {"ready": True, "state": "success", "message": "Checks are passing."},
+                ),
+            ),
+            patch("content_factory.vibe_marketing_views._github_api_request", return_value={"merged": True, "sha": "abc123"}),
+        ):
+            response = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/merge-publish-pr", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["runId"], self.run.run_id)
+        child.refresh_from_db()
+        self.assertEqual(child.result["merge_status"], "merged")
+        self.assertNotIn("merge_blocked_reason", child.result)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["merge_status"], "merged")
+        article_row.refresh_from_db()
+        self.assertEqual(article_row.publish_status, ArticlePublishStatus.MERGED)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_promote_bundle_records_auto_merge_flag(self):
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "status": "completed",
+            "delivery_mode": "content_only",
+            "componentManifest": {"components": [{"id": "title", "type": "title", "label": "Title"}]},
+            "delivery_package": {"title": "AI adoption guide", "article_markdown": "article.md"},
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(
+                status_code=202,
+                payload={"run_id": "article-publish-child-flag", "status": "queued", "publish_child_status": "queued"},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle",
+                {"autoMerge": True},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["runId"], "article-publish-child-flag")
+        child = ContentFactoryRun.objects.get(run_id="article-publish-child-flag")
+        self.assertTrue(child.result["publish_auto_merge"])
+        self.assertTrue(child.run_request["publish_auto_merge"])
+        self.run.refresh_from_db()
+        self.assertTrue(self.run.result["publish_auto_merge"])
+        self.assertTrue(self.run.run_request["publish_auto_merge"])
+
+    def test_sync_local_run_from_remote_preserves_merge_evidence(self):
+        child = self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/93",
+                "pr_number": 93,
+                "merge_status": "merged",
+                "checks_status": "success",
+                "publish_auto_merge": True,
+            },
+        )
+        remote_data = {
+            "run_id": child.run_id,
+            "status": "completed",
+            "current_step": "finalize",
+            "result": {"status": "completed", "preview_url": "https://mlai.au/articles/ai-adoption-guide"},
+        }
+
+        synced = _sync_local_run_from_remote(child, remote_data)
+
+        self.assertEqual(synced.result["merge_status"], "merged")
+        self.assertEqual(synced.result["checks_status"], "success")
+        self.assertEqual(synced.result["pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/93")
+        self.assertTrue(synced.result["publish_auto_merge"])
+        self.assertEqual(synced.result["preview_url"], "https://mlai.au/articles/ai-adoption-guide")
+
+    def test_status_view_compact_includes_merge_keys(self):
+        self._create_publish_child(
+            status=ContentFactoryRunStatus.COMPLETED,
+            result={
+                "status": "completed",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/94",
+                "pr_number": 94,
+                "merge_status": "merged",
+                "checks_status": "success",
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        result = response.data["result"]
+        self.assertEqual(result["merge_status"], "merged")
+        self.assertEqual(result["checks_status"], "success")
+        self.assertEqual(result["pr_number"], 94)
