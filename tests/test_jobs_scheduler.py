@@ -56,18 +56,45 @@ class JobsSchedulerTests(TestCase):
 
     @patch("core.management.commands.run_scheduled_discovery.run_daily_jobs_scheduler")
     @patch("core.management.commands.run_scheduled_discovery.run_daily_discovery_scheduler")
-    def test_management_command_runs_jobs_even_if_discovery_fails(self, mock_discovery, mock_jobs):
+    @patch("core.management.commands.run_scheduled_discovery.run_research_automation_scheduler")
+    def test_management_command_runs_jobs_even_if_discovery_fails(
+        self, mock_research, mock_discovery, mock_jobs
+    ):
         mock_discovery.side_effect = RuntimeError("discovery boom")
         mock_jobs.return_value = {"status": "skipped", "reason": "before_schedule_window"}
+        mock_research.return_value = {"status": "ok", "queued": 0}
         stdout = io.StringIO()
 
         with self.assertRaises(CommandError):
             call_command("run_scheduled_discovery", stdout=stdout)
 
+        # Discovery failing must not stop the jobs or research-automation runners.
         mock_jobs.assert_called_once()
+        mock_research.assert_called_once()
         output = stdout.getvalue()
         self.assertIn('"daily_discovery": {"error": "discovery boom", "status": "failed"}', output)
         self.assertIn('"jobs": {"reason": "before_schedule_window", "status": "skipped"}', output)
+        self.assertIn('"research_automations": {"queued": 0, "status": "ok"}', output)
+
+    @patch("core.management.commands.run_scheduled_discovery.run_daily_jobs_scheduler")
+    @patch("core.management.commands.run_scheduled_discovery.run_daily_discovery_scheduler")
+    @patch("core.management.commands.run_scheduled_discovery.run_research_automation_scheduler")
+    def test_management_command_ticks_research_automation_scheduler(
+        self, mock_research, mock_discovery, mock_jobs
+    ):
+        # The production scheduler container loops this command every 60s, so it
+        # is the only thing that fires the daily research-topic email at 8am.
+        mock_discovery.return_value = {"status": "ok"}
+        mock_jobs.return_value = {"status": "skipped", "reason": "before_schedule_window"}
+        mock_research.return_value = {"status": "ok", "ensured": 2, "queued": 2}
+        stdout = io.StringIO()
+
+        call_command("run_scheduled_discovery", stdout=stdout)
+
+        mock_research.assert_called_once_with()
+        output = stdout.getvalue()
+        self.assertIn('"research_automations"', output)
+        self.assertIn('"queued": 2', output)
 
     def test_slack_payload_is_capped_to_seven_jobs(self):
         run = JobRun.objects.create(run_date="2026-05-04", run_id="2026-05-04-slack-test")

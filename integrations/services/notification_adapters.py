@@ -240,6 +240,50 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
     )
 
 
+def _recipient_first_name(run: AutomationRun) -> str:
+    user = run.automation.user or run.automation.notification_channel.user
+    if user is None:
+        return ""
+    return str(getattr(user, "first_name", "") or "").strip()
+
+
+def _topic_email_message_data(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> dict[str, Any]:
+    """message_data for the Customer.io daily-topics transactional template.
+
+    Field names match docs/customerio-daily-topics-email.html. Each topic's
+    confirm_url is the signed one-click approve action (same endpoint Slack and
+    the plain-HTML email use), so the template needs no signing logic.
+    """
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    topics: list[dict[str, Any]] = []
+    for index, option in enumerate(_topic_options(data)):
+        topics.append(
+            {
+                "rank": index + 1,
+                "keyword": _option_keyword(option),
+                "display_title": str(option.get("display_title") or _option_title(option)),
+                "volume_display": str(option.get("volume_display") or ""),
+                "difficulty": option.get("difficulty"),
+                "opportunity_index": option.get("opportunity_index"),
+                "tier_label": str(option.get("tier_label") or ""),
+                "ai_volume_display": str(option.get("ai_volume_display") or ""),
+                "why_recommended": str(option.get("why_recommended") or option.get("explanation") or ""),
+                "recommended": bool(option.get("recommended")),
+                "confirm_url": build_action_url(run, "approve_topic", option_index=index),
+            }
+        )
+    return {
+        "first_name": _recipient_first_name(run),
+        "domain": domain,
+        "topics": topics,
+        "unsubscribe_url": _unsubscribe_url(run, channel),
+    }
+
+
 def _whatsapp_topic_components(run: AutomationRun, data: dict[str, Any]) -> list[dict[str, Any]]:
     """Body parameters for the approved daily-topics utility template.
 
@@ -346,20 +390,29 @@ def _send_email_via_customerio(
     subject: str,
     text: str,
     html_body: Optional[str],
+    message_data: Optional[dict[str, Any]] = None,
+    transactional_message_id: str = "",
 ) -> tuple[bool, str, dict]:
     client = _customerio_client()
     if client is None:
         return False, "", {"error": "CUSTOMERIO_API_KEY is not configured"}
     to_email = str(channel.route_id or "").strip()
-    request_body = {
+    request_body: dict[str, Any] = {
         "to": to_email,
         # Customer.io requires a person identifier; route by user id when the
         # channel is user-linked (matches core/email_utils magic-link sends).
         "identifiers": {"id": str(channel.user_id)} if channel.user_id else {"email": to_email},
-        "subject": subject,
-        "body": html_body or html.escape(text).replace("\n", "<br>"),
-        "body_plain": text,
     }
+    if transactional_message_id and message_data is not None:
+        # Render through a Customer.io transactional template (Liquid + message_data).
+        # Subject/body live in the template, so we send neither here.
+        request_body["transactional_message_id"] = str(transactional_message_id)
+        request_body["message_data"] = message_data
+    else:
+        # Inline raw body (no template configured): subject/body shipped directly.
+        request_body["subject"] = subject
+        request_body["body"] = html_body or html.escape(text).replace("\n", "<br>")
+        request_body["body_plain"] = text
     from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or "").strip()
     if from_email:
         request_body["from"] = from_email
@@ -418,9 +471,18 @@ def _send_email(
     text: str,
     html_body: Optional[str],
     idempotency_key: str,
+    message_data: Optional[dict[str, Any]] = None,
+    transactional_message_id: str = "",
 ) -> tuple[bool, str, dict]:
     if str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
-        return _send_email_via_customerio(channel, subject=subject, text=text, html_body=html_body)
+        return _send_email_via_customerio(
+            channel,
+            subject=subject,
+            text=text,
+            html_body=html_body,
+            message_data=message_data,
+            transactional_message_id=transactional_message_id,
+        )
     if str(getattr(settings, "RESEND_API_KEY", "") or "").strip():
         return _send_email_via_resend(
             channel,
@@ -516,6 +578,8 @@ def _send_channel_delivery(
     blocks: Optional[list] = None,
     html_body: Optional[str] = None,
     whatsapp_components: Optional[list] = None,
+    email_message_data: Optional[dict[str, Any]] = None,
+    email_transactional_message_id: str = "",
 ) -> NotificationDelivery:
     if channel.consent_state != NotificationConsentState.ACTIVE:
         return record_delivery_status(
@@ -534,6 +598,8 @@ def _send_channel_delivery(
                 text=text,
                 html_body=html_body,
                 idempotency_key=delivery.idempotency_key,
+                message_data=email_message_data,
+                transactional_message_id=email_transactional_message_id,
             )
         elif channel.channel_type == NotificationChannelType.WHATSAPP:
             template_name = str(channel.provider_metadata.get(f"{event_type}_template") or "").strip()
@@ -632,8 +698,14 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
             "text": _plain_topic_message(run, data, channel),
             "subject": f"Article topics for {run.automation.organization.domain}",
             "blocks": _topic_slack_blocks(run, data, channel),
+            # Raw-HTML fallback used when no Customer.io template id is configured
+            # (or when email goes via Resend).
             "html_body": _topic_email_html(run, data, channel),
             "whatsapp_components": _whatsapp_topic_components(run, data),
+            "email_message_data": _topic_email_message_data(run, data, channel),
+            "email_transactional_message_id": str(
+                getattr(settings, "CUSTOMERIO_TOPIC_TEMPLATE_ID", "") or ""
+            ).strip(),
         },
     )
 
