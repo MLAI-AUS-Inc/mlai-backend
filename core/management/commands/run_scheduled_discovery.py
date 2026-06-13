@@ -8,6 +8,7 @@ from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
 )
+from integrations.services.research_automations import run_research_automation_scheduler
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ class Command(BaseCommand):
         for name, runner in (
             ("daily_discovery", run_daily_discovery_scheduler),
             ("jobs", run_daily_jobs_scheduler),
+            # Drives the daily research-topic email/Slack/WhatsApp send (8am slot).
+            # Idempotent per run, so it is safe to tick every scheduler loop.
+            ("research_automations", run_research_automation_scheduler),
         ):
             try:
                 results[name] = runner()

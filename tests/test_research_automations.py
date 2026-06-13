@@ -478,6 +478,44 @@ class FanOutDeliveryTests(TestCase):
         # Resend was never used for the email channel; only WhatsApp hit http_client.
         self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
+    @override_settings(CUSTOMERIO_API_KEY="cio-key", CUSTOMERIO_TOPIC_TEMPLATE_ID="tmpl-77")
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch("integrations.services.notification_adapters._customerio_client")
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_topic_email_renders_through_customerio_template(self, mock_post, mock_cio, mock_dm):
+        from unittest.mock import MagicMock
+
+        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        client = MagicMock()
+        client.send_email.return_value = {"delivery_id": "dl-template"}
+        mock_cio.return_value = client
+        self.email.user = self.user
+        self.email.save(update_fields=["user"])
+
+        deliveries = send_topic_selection(self.callback_data)
+
+        email_delivery = next(d for d in deliveries if d.channel_id == self.email.id)
+        self.assertEqual(email_delivery.status, NotificationDeliveryStatus.SENT)
+        self.assertEqual(email_delivery.provider_message_id, "dl-template")
+
+        request_body = client.send_email.call_args.args[0]
+        # Template branch: render through Customer.io, not a raw HTML body.
+        self.assertEqual(request_body["transactional_message_id"], "tmpl-77")
+        self.assertNotIn("body", request_body)
+        self.assertNotIn("subject", request_body)
+        self.assertEqual(request_body["to"], "writer@example.com")
+        self.assertEqual(request_body["identifiers"], {"id": str(self.user.id)})
+
+        message_data = request_body["message_data"]
+        self.assertEqual(message_data["domain"], "fanout.example.com")
+        topics = message_data["topics"]
+        self.assertEqual(len(topics), 2)
+        self.assertEqual(topics[0]["display_title"], "Topic One")
+        self.assertEqual(topics[0]["rank"], 1)
+        # Each topic carries its own signed one-click approve URL.
+        self.assertIn("token=", topics[0]["confirm_url"])
+        self.assertNotEqual(topics[0]["confirm_url"], topics[1]["confirm_url"])
+
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_opted_out_channel_is_skipped(self, mock_post, mock_dm):

@@ -446,6 +446,10 @@ RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>'
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
 CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
+# Transactional message id of the "Vibe Marketing Daily Reminder" template in
+# Customer.io. When set, the daily topic_selection email renders through that
+# template (Liquid loop over message_data.topics) instead of a raw HTML body.
+CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '')
 WHATSAPP_CLOUD_API_TOKEN = os.getenv('WHATSAPP_CLOUD_API_TOKEN', '')
 WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID', '')
 WHATSAPP_TEMPLATE_LANGUAGE = os.getenv('WHATSAPP_TEMPLATE_LANGUAGE', 'en_US')
