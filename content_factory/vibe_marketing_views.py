@@ -2258,22 +2258,25 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
         .prefetch_related("steps")
         .order_by("-updated_at")[:scan_limit]
     )
-    # A component revision is a separate run that records its IMMEDIATE parent as
-    # source_run_id. Dedup by the resolved lineage ROOT so an article and all its
-    # edits collapse into a single card (naive one-level dedup fragments chained
-    # revisions into multiple cards). Runs are ordered newest-first, so the first
-    # member kept per lineage is the most-recently-updated representative.
+    # Collapse every attempt at a topic into one card. Edits, failed publishes,
+    # restarts (which deliberately start a fresh run with no source_run_id) and
+    # independent regenerations of the same keyword are one job, keyed by the topic
+    # job key (normalized keyword; lineage root only as a fallback for keyword-less
+    # runs). Runs are ordered newest-first, so the first attempt kept per job is
+    # the most-recently-updated representative.
     source_map = {run.run_id: _run_source_run_id(run) for run in runs}
+    keyword_by_root = _article_draft_keyword_by_root(runs, source_map)
     for run in runs:
         draft = _serialize_article_draft(run, written_keys=written_keys)
         if not draft:
             continue
-        root_run_id = _resolve_article_root_run_id(run.run_id, source_map)
-        if root_run_id in seen:
+        job_key = _article_draft_job_key(run, source_map, keyword_by_root)
+        if job_key in seen:
             continue
-        seen.add(root_run_id)
-        # Carry the resolved lineage root as the card's sourceRunId (stable key);
-        # leave it null when the representative IS the root article.
+        seen.add(job_key)
+        # Carry the resolved lineage root as the card's sourceRunId (informational
+        # lineage pointer, no longer the dedup key); null when this IS the root.
+        root_run_id = _resolve_article_root_run_id(run.run_id, source_map)
         draft["sourceRunId"] = root_run_id if root_run_id != run.run_id else None
         drafts.append(draft)
         if len(drafts) >= limit:
@@ -5611,29 +5614,69 @@ def _resolve_article_root_run_id(run_id, source_map, *, visited=None):
         current = source
 
 
-def _article_draft_group_members(run, organization):
-    """Return every non-cancelled article run in the same revision lineage as ``run``.
+def _article_draft_keyword_by_root(runs, source_map):
+    """Map each lineage root -> its normalized keyword (newest non-empty wins).
 
-    The dashboard draft list collapses a whole revision lineage (root article +
-    all its edits) into one card keyed by the resolved lineage root. Deleting that
-    card must cancel the whole lineage; otherwise cancelling only the
-    representative run just promotes another member back into the card.
+    Lets keyword-less lineage members (e.g. publish-child runs that carry a
+    source_run_id but no keyword of their own) inherit the topic keyword of their
+    root so they group with the article rather than splitting into their own card.
+    Callers pass ``runs`` newest-first so the most recent keyword wins per root.
+    """
+    keyword_by_root = {}
+    for run in runs:
+        _, keyword = _article_draft_title_keyword(run)
+        normalized = _normalize_keyword_memory(keyword)
+        if not normalized:
+            continue
+        root = _resolve_article_root_run_id(run.run_id, source_map)
+        keyword_by_root.setdefault(root, normalized)
+    return keyword_by_root
+
+
+def _article_draft_job_key(run, source_map, keyword_by_root):
+    """Stable identity for the topic-level job a run belongs to.
+
+    Every edit / failed publish / restart / independent regeneration of the same
+    topic shares this key, so the dashboard collapses them into one card and
+    deleting it cancels them all. Prefers the normalized keyword (the topic
+    identity, matching the ResearchedKeyword unique key); falls back to the
+    lineage root only when no run in the lineage has any keyword/title at all (so
+    such runs stay isolated, as they did under pure lineage dedup).
+    """
+    root = _resolve_article_root_run_id(run.run_id, source_map)
+    _, keyword = _article_draft_title_keyword(run)
+    normalized = _normalize_keyword_memory(keyword) or keyword_by_root.get(root, "")
+    if normalized:
+        return f"kw:{normalized}"
+    return f"root:{root}"
+
+
+def _article_draft_group_members(run, organization):
+    """Return every non-cancelled article run belonging to ``run``'s topic job.
+
+    The dashboard draft list collapses every attempt at a topic (edits, failed
+    publishes, restarts, independent regenerations) into one card keyed by the
+    topic job key. Deleting that card must cancel the whole job; otherwise
+    cancelling only the representative run just promotes another attempt back into
+    the card.
     """
     members = list(
         ContentFactoryRun.objects.filter(
             domain=organization.domain,
             workflow__in=ARTICLE_WORKFLOWS,
-        ).exclude(status=ContentFactoryRunStatus.CANCELLED)
+        ).exclude(status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
     )
     source_map = {member.run_id: _run_source_run_id(member) for member in members}
     # The clicked run may not be in the fetched set; make sure it is resolvable.
     if run.run_id not in source_map:
         source_map[run.run_id] = _run_source_run_id(run)
-    target_root = _resolve_article_root_run_id(run.run_id, source_map)
+    scope = members if any(member.pk == run.pk for member in members) else members + [run]
+    keyword_by_root = _article_draft_keyword_by_root(scope, source_map)
+    target_key = _article_draft_job_key(run, source_map, keyword_by_root)
     group = [
         member
         for member in members
-        if _resolve_article_root_run_id(member.run_id, source_map) == target_root
+        if _article_draft_job_key(member, source_map, keyword_by_root) == target_key
     ]
     if all(member.pk != run.pk for member in group):
         group.append(run)

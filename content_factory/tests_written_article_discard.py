@@ -16,6 +16,7 @@ from content_factory.models import (
 )
 from content_factory.topic_coverage import build_topic_coverage_memory
 from content_factory.vibe_marketing_views import (
+    _article_draft_group_members,
     _bootstrap_state_fingerprint,
     _keyword_is_available_for_topic_picker,
     _persist_article_memory_from_run,
@@ -376,3 +377,121 @@ class BackfillMigrationTest(TestCase):
         self.migration.backfill_source_run_ids(apps, None)
         article.refresh_from_db()
         self.assertEqual(article.source_run_id, "")
+
+
+class DraftTopicDedupTest(TestCase):
+    """Every edit / failed publish / restart / regeneration of a topic is one job."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+
+    def _run(
+        self,
+        run_id,
+        *,
+        status=ContentFactoryRunStatus.COMPLETED,
+        result=None,
+        run_request=None,
+        workflow="article_generation",
+        updated_at=None,
+    ):
+        run = ContentFactoryRun.objects.create(
+            run_id=run_id,
+            workflow=workflow,
+            domain="mlai.au",
+            status=status,
+            result=result if result is not None else {},
+            run_request=run_request if run_request is not None else {},
+        )
+        if updated_at is not None:
+            # auto_now clobbers an assignment made via save(); .update() bypasses it.
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=updated_at)
+            run.refresh_from_db()
+        return run
+
+    def test_same_keyword_attempts_collapse_to_one_card(self):
+        now = timezone.now()
+        # Oldest: a failed first attempt.
+        self._run(
+            "run-old",
+            status=ContentFactoryRunStatus.FAILED,
+            result=_delivery_result("ai-detectors", "how do ai detectors work", "how do ai detectors work"),
+            updated_at=now - timedelta(days=2),
+        )
+        # Middle: a blocked restart that carries NO source_run_id back to run-old.
+        self._run(
+            "run-mid",
+            status=ContentFactoryRunStatus.BLOCKED,
+            result=_delivery_result(
+                "ai-detectors-2",
+                "How Do AI Detectors Work, and When Should You Trust Them?",
+                "how do ai detectors work",
+            ),
+            updated_at=now - timedelta(days=1),
+        )
+        # Newest: a completed draft ready for review (different title, same keyword).
+        self._run(
+            "run-new",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result=_delivery_result(
+                "ai-detectors-3",
+                "How Do AI Detectors Work and How Much Can You Trust Them?",
+                "how do ai detectors work",
+            ),
+            updated_at=now,
+        )
+
+        drafts = _recent_article_drafts(self.organization)
+
+        self.assertEqual(len(drafts), 1)
+        # The most-recent attempt represents the collapsed job.
+        self.assertEqual(drafts[0]["runId"], "run-new")
+        self.assertEqual(drafts[0]["stageLabel"], "Ready for review")
+
+    def test_distinct_keywords_stay_separate(self):
+        now = timezone.now()
+        self._run("run-a", result=_delivery_result("topic-a", "Topic A", "topic a"), updated_at=now)
+        self._run(
+            "run-b",
+            result=_delivery_result("topic-b", "Topic B", "topic b"),
+            updated_at=now - timedelta(minutes=1),
+        )
+
+        drafts = _recent_article_drafts(self.organization)
+
+        self.assertSetEqual({d["runId"] for d in drafts}, {"run-a", "run-b"})
+
+    def test_group_members_spans_restart_without_lineage(self):
+        # A failed attempt and a restart with NO source_run_id linking them.
+        self._run(
+            "run-failed",
+            status=ContentFactoryRunStatus.FAILED,
+            result=_delivery_result("cofounder", "How to find a technical cofounder", "technical cofounder"),
+        )
+        restarted = self._run(
+            "run-restarted",
+            status=ContentFactoryRunStatus.RUNNING,
+            run_request={"target_keyword": "technical cofounder", "topic": "How to find a technical cofounder"},
+        )
+
+        members = _article_draft_group_members(restarted, self.organization)
+
+        # Deleting the card must cancel BOTH attempts, not just the clicked one.
+        self.assertSetEqual({m.run_id for m in members}, {"run-failed", "run-restarted"})
+
+    def test_publish_child_groups_under_parent_keyword(self):
+        # Publish child shares lineage via source_run_id but carries no keyword of its own.
+        self._run(
+            "run-parent",
+            status=ContentFactoryRunStatus.COMPLETED,
+            result=_delivery_result("ai-detectors", "How Do AI Detectors Work", "how do ai detectors work"),
+        )
+        child = self._run(
+            "run-publish-child",
+            status=ContentFactoryRunStatus.RUNNING,
+            result={"source_run_id": "run-parent"},
+        )
+
+        members = _article_draft_group_members(child, self.organization)
+
+        self.assertSetEqual({m.run_id for m in members}, {"run-parent", "run-publish-child"})
