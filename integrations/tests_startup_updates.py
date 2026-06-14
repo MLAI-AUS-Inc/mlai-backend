@@ -2527,6 +2527,49 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_extraction_results_truncate_over_long_text_fields(self):
+        """LLM free text can exceed DB varchar widths; the shared serializers
+        truncate to the column width so persistence doesn't 500 on a DataError."""
+        month_bucket = timezone.now().date().replace(day=1)
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_extraction_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_thread_id": self.thread.gmail_thread_id,
+                            "extraction_status": ArtifactProcessingStatus.PROCESSED,
+                            "attachment_updates": [],
+                            "events": [
+                                {
+                                    "canonical_key": "evt-long-title",
+                                    "event_type": "customer_win",
+                                    "title": "T" * 300,
+                                    "month_bucket": month_bucket.isoformat(),
+                                }
+                            ],
+                            "metrics": [
+                                {
+                                    "metric_key": "arr",
+                                    "metric_name": "M" * 300,
+                                    "value_text": "V" * 300,
+                                    "period_month": month_bucket.isoformat(),
+                                }
+                            ],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event = StartupEvent.objects.get(organization=self.organization, canonical_key="evt-long-title")
+        self.assertEqual(len(event.title), 255)
+        metric = StartupMetricObservation.objects.get(organization=self.organization, metric_key="arr")
+        self.assertEqual(len(metric.metric_name), 255)
+        self.assertEqual(len(metric.value_text), 255)
+
     def test_run_context_prefers_pinned_google_connection_over_binding_connection(self):
         _other_user, other_connection = self._create_secondary_connection()
         self.binding.google_connection = other_connection
