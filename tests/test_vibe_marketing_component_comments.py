@@ -2205,6 +2205,49 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertNotEqual(steps["publish"]["status"], "complete")
 
+    def test_workflow_progress_review_step_links_to_article_preview(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.github_repo = "MLAI-AUS-Inc/mlai-au"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = config.updated_at
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "github_repo",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.run.run_request = {"delivery_mode": "content_only"}
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "delivery_mode": "content_only",
+            "promote_bundle_url": f"/api/runs/{self.run.run_id}/promote-bundle",
+            "delivery_package": {
+                "title": "Australian Founders and What the Term Means Today",
+                "target_keyword": "australian founders",
+                "article_markdown": "steps/package_content_delivery/attempt-01/artifacts/article.md",
+            },
+        }
+        self.run.save(update_fields=["run_request", "acceptance_summary", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        # The review step (and its action) deep-links to the article preview so the
+        # user can reopen it at any point in the flow.
+        self.assertIn("articleStep=review", steps["review"]["primaryAction"]["href"])
+
     def test_workflow_progress_keeps_research_ready_when_only_stored_candidates_exist(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "encrypted-token"

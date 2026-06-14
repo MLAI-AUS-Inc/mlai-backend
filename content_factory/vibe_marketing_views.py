@@ -7225,10 +7225,12 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
     if content_package_ready or (article_run and article_run.component_comments.exists()):
         run_by_id["review"] = article_run.run_id
-        href_by_id["review"] = _run_url(article_run)
+        # ?articleStep=review lets the wizard "review" card reopen the article
+        # preview even after the run has advanced to publish.
+        href_by_id["review"] = _run_url(article_run) + "?articleStep=review"
     if content_package_ready:
         status_by_id["review"] = "complete" if not review_surface_ready or review_is_finished else "ready"
-        action_by_id["review"] = _workflow_step_action("Open live preview", href=_run_url(article_run))
+        action_by_id["review"] = _workflow_step_action("Open live preview", href=_run_url(article_run) + "?articleStep=review")
     elif article_run and article_run.status in RUNNING_RUN_STATUSES:
         status_by_id["review"] = "locked"
 
