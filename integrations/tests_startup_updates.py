@@ -2457,6 +2457,76 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(self.thread.extraction_status, ArtifactProcessingStatus.PROCESSED)
         self.assertEqual(other_thread.extraction_status, ArtifactProcessingStatus.PENDING)
 
+    def test_extraction_results_round_over_precise_metric_value_number(self):
+        """An LLM may emit value_number with >4 decimal places; the shared
+        MetricResultSerializer should round to 4 places instead of 400-ing the
+        whole extraction batch."""
+        month_bucket = timezone.now().date().replace(day=1)
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_extraction_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_thread_id": self.thread.gmail_thread_id,
+                            "extraction_status": ArtifactProcessingStatus.PROCESSED,
+                            "attachment_updates": [],
+                            "events": [],
+                            "metrics": [
+                                {
+                                    "metric_key": "gross_margin",
+                                    "metric_name": "Gross margin",
+                                    "value_text": "1/3",
+                                    "value_number": "0.33333333",
+                                    "unit": "ratio",
+                                    "period_month": month_bucket.isoformat(),
+                                }
+                            ],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        metric = StartupMetricObservation.objects.get(
+            organization=self.organization, metric_key="gross_margin"
+        )
+        self.assertEqual(metric.value_number, Decimal("0.3333"))
+
+    def test_extraction_results_still_reject_value_number_over_max_digits(self):
+        """Rounding to 4dp must not bypass the max_digits guard."""
+        month_bucket = timezone.now().date().replace(day=1)
+        with self._with_key():
+            response = self.client.post(
+                reverse("startup_updates_extraction_results", args=[self.run.run_id]),
+                {
+                    "results": [
+                        {
+                            "gmail_thread_id": self.thread.gmail_thread_id,
+                            "extraction_status": ArtifactProcessingStatus.PROCESSED,
+                            "attachment_updates": [],
+                            "events": [],
+                            "metrics": [
+                                {
+                                    "metric_key": "too_big",
+                                    "metric_name": "Too big",
+                                    "value_text": "huge",
+                                    "value_number": "1234567890123456789.5",
+                                    "unit": "",
+                                    "period_month": month_bucket.isoformat(),
+                                }
+                            ],
+                        }
+                    ]
+                },
+                format="json",
+                **self.headers,
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_run_context_prefers_pinned_google_connection_over_binding_connection(self):
         _other_user, other_connection = self._create_secondary_connection()
         self.binding.google_connection = other_connection

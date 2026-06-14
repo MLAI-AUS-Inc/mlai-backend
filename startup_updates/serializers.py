@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
 from rest_framework import serializers
 
 from startup_updates.models import (
@@ -8,6 +10,30 @@ from startup_updates.models import (
     StartupEventDatePrecision,
     StartupEventType,
 )
+
+
+class RoundingDecimalField(serializers.DecimalField):
+    """A DecimalField that rounds over-precise input down to ``decimal_places``
+    instead of rejecting it with a 400.
+
+    LLM-extracted metric values routinely arrive with more precision than we
+    store (e.g. ``0.33333333``). Rounding to the stored precision is the intended
+    behaviour rather than failing the whole extraction batch. DRF rejects in
+    ``validate_precision`` before it would quantize, so we round there first.
+    """
+
+    def validate_precision(self, value):
+        if self.decimal_places is not None:
+            try:
+                value = value.quantize(
+                    Decimal(1).scaleb(-self.decimal_places),
+                    rounding=ROUND_HALF_UP,
+                )
+            except InvalidOperation:
+                # Magnitude too large to quantize into the decimal context; let
+                # the parent raise the normal max_digits validation error (400).
+                pass
+        return super().validate_precision(value)
 
 
 class StartupProfileUpsertSerializer(serializers.Serializer):
@@ -176,7 +202,7 @@ class MetricResultSerializer(serializers.Serializer):
     metric_key = serializers.CharField()
     metric_name = serializers.CharField()
     value_text = serializers.CharField()
-    value_number = serializers.DecimalField(required=False, allow_null=True, max_digits=20, decimal_places=4)
+    value_number = RoundingDecimalField(required=False, allow_null=True, max_digits=20, decimal_places=4)
     unit = serializers.CharField(required=False, allow_blank=True, default="")
     observed_at = serializers.DateTimeField(required=False, allow_null=True)
     period_month = serializers.DateField()
