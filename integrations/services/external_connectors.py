@@ -28,6 +28,7 @@ from integrations.models import (
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailMessageArtifact,
+    GmailRelevanceLabel,
     GmailSyncCursor,
     GoogleAnalyticsPropertySelection,
     LinearIssueArtifact,
