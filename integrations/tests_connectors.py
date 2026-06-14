@@ -2203,3 +2203,56 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertIn("invoiceRevenue", keys)
         self.assertNotIn("revenue", keys)
+
+
+class LinearProjectArtifactUpsertTests(TestCase):
+    """Regression coverage for `_upsert_linear_project_artifact`.
+
+    The function referenced `GmailRelevanceLabel.PENDING` without the module
+    importing `GmailRelevanceLabel`, so re-syncing an existing project whose
+    payload had changed (the `content_changed` branch) raised
+    `NameError: name 'GmailRelevanceLabel' is not defined` and 500'd
+    `linear/backfill`. This branch had no test coverage.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(email="linear-founder@example.com", role="participant")
+        self.organization = Organization.objects.create(name="Acme", domain="acme.example")
+        self.connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-token",
+            account_label="Acme Linear",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+
+    def test_upsert_resets_relevance_when_existing_project_payload_changed(self):
+        from integrations.services.external_connectors import _upsert_linear_project_artifact
+        from startup_updates.models import ArtifactProcessingStatus
+
+        existing = LinearProjectArtifact.objects.create(
+            organization=self.organization,
+            connection=self.connection,
+            linear_project_id="proj-1",
+            name="Launch",
+            description="Launch project context.",
+            raw_payload={"id": "proj-1"},
+        )
+        # Prove the changed branch RESETS prior classification, not just that it
+        # avoids the NameError.
+        existing.relevance_label = GmailRelevanceLabel.RELEVANT
+        existing.extraction_status = ArtifactProcessingStatus.PROCESSED
+        existing.save(update_fields=["relevance_label", "extraction_status"])
+
+        # Differing payload -> content_changed=True -> the previously-crashing path.
+        artifact = _upsert_linear_project_artifact(
+            connection=self.connection,
+            project={"id": "proj-1", "name": "Launch v2"},
+        )
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact.pk, existing.pk)
+        artifact.refresh_from_db()
+        self.assertEqual(artifact.relevance_label, GmailRelevanceLabel.PENDING)
+        self.assertEqual(artifact.extraction_status, ArtifactProcessingStatus.HYDRATED)
