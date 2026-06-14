@@ -24,6 +24,8 @@ STARTUP_UPDATE_METRIC_LABELS: dict[str, str] = {
     "experimentsRun": "Experiments Run",
     "pilotCount": "Pilots",
     "qualifiedPipeline": "Qualified Pipeline",
+    "eventsRun": "Events Run",
+    "eventRegistrations": "Event Registrations",
 }
 
 STARTUP_UPDATE_METRIC_KEYS: tuple[str, ...] = tuple(STARTUP_UPDATE_METRIC_LABELS)
@@ -84,6 +86,14 @@ _METRIC_ALIASES = {
     "pipeline": "qualifiedPipeline",
     "pipeline usd": "qualifiedPipeline",
     "pipeline_usd": "qualifiedPipeline",
+    "events run": "eventsRun",
+    "events": "eventsRun",
+    "events held": "eventsRun",
+    "event count": "eventsRun",
+    "event registrations": "eventRegistrations",
+    "registrations": "eventRegistrations",
+    "event signups": "eventRegistrations",
+    "event attendees": "eventRegistrations",
 }
 
 

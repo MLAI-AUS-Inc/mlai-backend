@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from core.permissions import HasRooApiKey
 from integrations.services.external_connectors import (
     ConnectorConfigurationError,
+    connect_luma_connection,
     disconnect_external_connection,
     mark_sources_sync_requested,
     serialize_bank_feed_accounts,
@@ -126,6 +127,25 @@ class ConnectorSourceConnectionDetailView(APIView):
         if not deleted:
             return Response({"detail": "Connection not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response({"status": "disconnected"}, status=status.HTTP_200_OK)
+
+
+class LumaConnectView(APIView):
+    """Link a founder's own Luma account via a pasted API key (Luma has no OAuth)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        api_key = str(request.data.get("apiKey") or request.data.get("api_key") or "").strip()
+        if not api_key:
+            return Response(
+                {"detail": "A Luma API key is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            connect_luma_connection(request.user, api_key)
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serialize_source_status(request.user), status=status.HTTP_200_OK)
 
 
 class FinancialSourcesStatusView(APIView):
