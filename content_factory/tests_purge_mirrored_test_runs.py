@@ -32,7 +32,7 @@ class PurgeMirroredTestRunsCommandTest(TestCase):
         call_command("purge_mirrored_test_runs", stdout=out)
         output = out.getvalue()
         self.assertIn("run-publish-materialized-bundle-1", output)
-        self.assertIn("PR_EVIDENCE", output)
+        self.assertIn("pr=https://github.com/x/y/pull/17", output)
         self.assertIn("DRY RUN", output)
         self.assertTrue(
             ContentFactoryRun.objects.filter(run_id="run-publish-materialized-bundle-1").exists()
@@ -73,3 +73,63 @@ class PurgeMirroredTestRunsCommandTest(TestCase):
         with self.assertRaises(CommandError):
             call_command("purge_mirrored_test_runs", "--run-id-prefix", "", "--apply")
         self.assertTrue(ContentFactoryRun.objects.filter(run_id="run-a").exists())
+
+    def test_keyword_selection_clears_whole_topic_group(self):
+        # Real (uuid / publish-) run ids the 'run-' prefix never matches, with
+        # stale closed-PR evidence — exactly the stuck-draft case.
+        self._run(
+            "3b627eba-0000-4000-8000-000000000000",
+            status=ContentFactoryRunStatus.FAILED,
+            result={
+                "delivery_package": {"target_keyword": "what is the future of artificial intelligence"},
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/442",
+            },
+        )
+        # A second attempt at the same topic must go too (whole group clears).
+        self._run(
+            "publish-deadbeef",
+            status=ContentFactoryRunStatus.RUNNING,
+            result={"delivery_package": {"target_keyword": "what is the future of artificial intelligence"}},
+        )
+        # A different topic must be left alone.
+        self._run(
+            "11111111-0000-4000-8000-000000000000",
+            result={"delivery_package": {"target_keyword": "builders club"}},
+        )
+
+        out = StringIO()
+        call_command(
+            "purge_mirrored_test_runs",
+            "--keyword",
+            "what is the future of artificial intelligence",
+            "--domain",
+            "mlai.au",
+            "--apply",
+            stdout=out,
+        )
+
+        self.assertFalse(
+            ContentFactoryRun.objects.filter(run_id="3b627eba-0000-4000-8000-000000000000").exists()
+        )
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="publish-deadbeef").exists())
+        self.assertTrue(
+            ContentFactoryRun.objects.filter(run_id="11111111-0000-4000-8000-000000000000").exists()
+        )
+
+    def test_keyword_dry_run_shows_pr_url(self):
+        self._run(
+            "3b627eba-0000-4000-8000-000000000000",
+            status=ContentFactoryRunStatus.FAILED,
+            result={
+                "delivery_package": {"target_keyword": "builders club"},
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/430",
+            },
+        )
+        out = StringIO()
+        call_command("purge_mirrored_test_runs", "--keyword", "builders club", stdout=out)
+        output = out.getvalue()
+        self.assertIn("pr=https://github.com/MLAI-AUS-Inc/mlai-au/pull/430", output)
+        self.assertIn("DRY RUN", output)
+        self.assertTrue(
+            ContentFactoryRun.objects.filter(run_id="3b627eba-0000-4000-8000-000000000000").exists()
+        )
