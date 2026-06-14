@@ -213,6 +213,7 @@ class ConnectorEndpointTests(TestCase):
                 "slack",
                 "linear",
                 "google_analytics",
+                "luma",
             },
         )
         self.assertEqual(sources["google_analytics"]["status"], "not_connected")

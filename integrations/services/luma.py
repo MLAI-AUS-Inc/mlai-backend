@@ -190,6 +190,66 @@ class LumaAttendeeReportService:
 
         return events[:count]
 
+    def collect_ended_event_registrations(
+        self,
+        *,
+        approval_status: str = "approved",
+        now: Optional[datetime] = None,
+        timezone_name: str = MELBOURNE_TIMEZONE,
+    ) -> List[Dict[str, Any]]:
+        """Return every ended event with its registration (approved-guest) count.
+
+        Paginates the full calendar so callers can build a complete monthly
+        history in one pass. Makes one get-guests call per event, so cost scales
+        with the number of past events — acceptable for on-demand syncs.
+        """
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+
+        now_utc = _local_now_utc(now, timezone_name)
+        results: List[Dict[str, Any]] = []
+        cursor = None
+        while True:
+            params: Dict[str, Any] = {
+                "before": _isoformat_z(now_utc),
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "desc",
+                "status": "approved",
+            }
+            if cursor:
+                params["pagination_cursor"] = cursor
+
+            page = self._get("/v1/calendar/list-events", params=params)
+            for event in page.get("entries", []):
+                start_at = _parse_datetime(event.get("start_at"))
+                if not start_at:
+                    continue
+                end_at = _parse_datetime(event.get("end_at"))
+                if end_at and end_at > now_utc:
+                    # Scheduled / in-progress event — not yet "run".
+                    continue
+
+                guests = self.list_guests(
+                    event_id=str(event.get("id") or ""),
+                    approval_status=approval_status,
+                )
+                results.append(
+                    {
+                        "event": event,
+                        "start_at": start_at,
+                        "registration_count": len(guests),
+                    }
+                )
+
+            if not page.get("has_more"):
+                break
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+
+        return results
+
     def list_guests(self, *, event_id: str, approval_status: str = "approved") -> List[Dict[str, Any]]:
         params = {
             "event_id": event_id,

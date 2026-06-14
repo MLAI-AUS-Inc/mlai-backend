@@ -41,6 +41,11 @@ from startup_updates.models import (
     StartupMetricObservation,
 )
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
+from integrations.services.luma import (
+    LumaAPIError,
+    LumaAttendeeReportService,
+    LumaConfigurationError,
+)
 from integrations.services.gmail_scopes import (
     GMAIL_RECONNECT_WARNING,
     gmail_scope_status_payload,
@@ -132,6 +137,12 @@ CONNECTOR_DEFINITIONS: dict[str, ConnectorDefinition] = {
         "Google Analytics",
         ("metrics",),
     ),
+    ExternalServiceProvider.LUMA: ConnectorDefinition(
+        ExternalServiceProvider.LUMA,
+        "luma",
+        "Luma",
+        ("metrics",),
+    ),
 }
 
 PROVIDER_ALIASES = {
@@ -153,6 +164,8 @@ PROVIDER_ALIASES = {
     "google_analytics": ExternalServiceProvider.GOOGLE_ANALYTICS,
     "ga4": ExternalServiceProvider.GOOGLE_ANALYTICS,
     "ga": ExternalServiceProvider.GOOGLE_ANALYTICS,
+    "luma": ExternalServiceProvider.LUMA,
+    "lu.ma": ExternalServiceProvider.LUMA,
 }
 
 EXTERNAL_PROVIDER_ORDER = (
@@ -164,6 +177,7 @@ EXTERNAL_PROVIDER_ORDER = (
     ExternalServiceProvider.SLACK,
     ExternalServiceProvider.LINEAR,
     ExternalServiceProvider.GOOGLE_ANALYTICS,
+    ExternalServiceProvider.LUMA,
 )
 
 
@@ -345,6 +359,11 @@ def _looks_like_placeholder_secret(value: str) -> bool:
 def _provider_configuration_error(provider: str) -> Optional[str]:
     provider = normalize_provider(provider)
     definition = CONNECTOR_DEFINITIONS[provider]
+
+    if provider == ExternalServiceProvider.LUMA:
+        # Luma is connected per-founder with their own API key, so there is no
+        # backend-level OAuth/config to validate — it is always available.
+        return None
 
     if provider == ExternalServiceProvider.STRIPE:
         client_id = str(getattr(settings, "STRIPE_CONNECT_CLIENT_ID", "") or "").strip()
@@ -1077,6 +1096,49 @@ def _upsert_connection(
     connection.last_error = ""
     connection.save()
     return connection
+
+
+def connect_luma_connection(user, api_key: str) -> ExternalServiceConnection:
+    """Validate a founder-supplied Luma API key and persist it as a connection.
+
+    Luma's public API is API-key based (no OAuth), so founders paste their own
+    key. We verify it with a cheap authenticated call before storing it
+    encrypted, then attach it to the founder's organization.
+    """
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise ConnectorConfigurationError("A Luma API key is required.")
+
+    service = LumaAttendeeReportService(api_key=api_key)
+    try:
+        # Cheapest authenticated call that exercises the key.
+        service.get_recent_ended_events(count=1)
+    except LumaConfigurationError as exc:
+        raise ConnectorConfigurationError(str(exc)) from exc
+    except LumaAPIError as exc:
+        if exc.status_code in (401, 403):
+            raise ConnectorConfigurationError(
+                "Luma rejected this API key. Double-check it in your Luma settings and try again."
+            ) from exc
+        raise ConnectorConfigurationError(
+            "Could not verify the Luma API key right now. Please try again."
+        ) from exc
+
+    organization = resolve_connector_organization(user)
+    external_account_id = str(getattr(user, "email", "") or user.id)
+    return _upsert_connection(
+        user=user,
+        provider=ExternalServiceProvider.LUMA,
+        organization=organization,
+        access_token=api_key,
+        refresh_token="",
+        token_type="api_key",
+        token_expires_at=None,
+        scopes=[],
+        external_account_id=external_account_id,
+        account_label="Luma",
+        provider_metadata={},
+    )
 
 
 def _store_stripe_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
@@ -5047,6 +5109,31 @@ def mark_sources_sync_requested(user, providers: Optional[list[str]] = None, *, 
                 )
                 connection.status = ExternalServiceConnectionStatus.ERROR
                 connection.last_error = str(exc) or "Linear sync failed."
+                connection.save(update_fields=["status", "last_error", "updated_at"])
+                updated.append(
+                    {
+                        "connectionId": connection.id,
+                        "connection_id": connection.id,
+                        "provider": connection.provider,
+                        "status": "error",
+                        "error": connection.last_error,
+                    }
+                )
+            continue
+
+        if connection.provider == ExternalServiceProvider.LUMA:
+            # Imported lazily to keep the Luma connector self-contained.
+            from integrations.services.luma_sync import sync_luma_connection
+
+            try:
+                updated.append(sync_luma_connection(connection))
+            except (LumaConfigurationError, LumaAPIError, requests.RequestException) as exc:
+                logger.exception(
+                    "Luma sync failed",
+                    extra={"connection_id": connection.id, "user_id": user.id},
+                )
+                connection.status = ExternalServiceConnectionStatus.ERROR
+                connection.last_error = str(exc) or "Luma sync failed."
                 connection.save(update_fields=["status", "last_error", "updated_at"])
                 updated.append(
                     {
