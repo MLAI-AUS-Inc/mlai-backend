@@ -3,7 +3,7 @@ from typing import Any, Optional, Tuple
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import OperationalError
+from django.db import OperationalError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_datetime
 from django.urls import reverse
@@ -1618,6 +1618,7 @@ class StartupUpdateExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = ExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -2097,6 +2098,7 @@ class StartupUpdateSlackExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = SlackExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -2535,6 +2537,7 @@ class StartupUpdateLinearExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = LinearExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -3056,6 +3059,7 @@ class StartupUpdateNotionExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = NotionExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -3303,6 +3307,7 @@ class StartupUpdateGoogleAnalyticsExtractionResultsView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
         serializer = GoogleAnalyticsExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

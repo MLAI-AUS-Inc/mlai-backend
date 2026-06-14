@@ -36,6 +36,23 @@ class RoundingDecimalField(serializers.DecimalField):
         return super().validate_precision(value)
 
 
+class TruncatingCharField(serializers.CharField):
+    """CharField that truncates over-long input to ``truncate_length`` instead
+    of rejecting it. LLM-extracted free text can exceed the DB column width
+    (varchar(N)); truncating keeps the record rather than 500-ing the whole
+    extraction batch on a DataError at INSERT time."""
+
+    def __init__(self, *args, truncate_length: int, **kwargs):
+        self.truncate_length = truncate_length
+        super().__init__(*args, **kwargs)
+
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data)
+        if isinstance(value, str) and len(value) > self.truncate_length:
+            value = value[: self.truncate_length]
+        return value
+
+
 class StartupProfileUpsertSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
     domain = serializers.CharField()
@@ -175,9 +192,9 @@ class AttachmentUpdateSerializer(serializers.Serializer):
 
 
 class EventResultSerializer(serializers.Serializer):
-    canonical_key = serializers.CharField()
+    canonical_key = TruncatingCharField(truncate_length=255)
     event_type = serializers.ChoiceField(choices=StartupEventType.choices)
-    title = serializers.CharField()
+    title = TruncatingCharField(truncate_length=255)
     summary = serializers.CharField(required=False, allow_blank=True, default="")
     event_date = serializers.DateField(required=False, allow_null=True)
     month_bucket = serializers.DateField()
@@ -186,24 +203,24 @@ class EventResultSerializer(serializers.Serializer):
         required=False,
         default=StartupEventDatePrecision.DAY,
     )
-    sentiment = serializers.CharField(required=False, allow_blank=True, default="")
+    sentiment = TruncatingCharField(truncate_length=20, required=False, allow_blank=True, default="")
     investor_importance = serializers.IntegerField(required=False, default=3, min_value=1, max_value=5)
     quantitative_facts = serializers.ListField(child=serializers.DictField(), required=False, default=list)
     evidence_message_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     evidence_attachment_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     source_thread_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     confidence = serializers.FloatField(required=False, default=0.0)
-    status = serializers.CharField(required=False, allow_blank=True, default="open")
+    status = TruncatingCharField(truncate_length=20, required=False, allow_blank=True, default="open")
     needs_review = serializers.BooleanField(required=False, default=False)
     merge_notes = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class MetricResultSerializer(serializers.Serializer):
-    metric_key = serializers.CharField()
-    metric_name = serializers.CharField()
-    value_text = serializers.CharField()
+    metric_key = TruncatingCharField(truncate_length=100)
+    metric_name = TruncatingCharField(truncate_length=255)
+    value_text = TruncatingCharField(truncate_length=255)
     value_number = RoundingDecimalField(required=False, allow_null=True, max_digits=20, decimal_places=4)
-    unit = serializers.CharField(required=False, allow_blank=True, default="")
+    unit = TruncatingCharField(truncate_length=50, required=False, allow_blank=True, default="")
     observed_at = serializers.DateTimeField(required=False, allow_null=True)
     period_month = serializers.DateField()
     confidence = serializers.FloatField(required=False, default=0.0)
