@@ -331,6 +331,19 @@ XERO_DRAFT_METRIC_LABELS = {
     "recurringInvoiceCount": "Recurring Invoice Count",
 }
 
+LUMA_DRAFT_METRIC_KEYS = (
+    "eventsRun",
+    "eventRegistrations",
+    "eventAttendees",
+    "eventCheckInRate",
+)
+LUMA_DRAFT_METRIC_LABELS = {
+    "eventsRun": "Events Run",
+    "eventRegistrations": "Event Registrations",
+    "eventAttendees": "Checked-in Attendees",
+    "eventCheckInRate": "Check-in Rate",
+}
+
 
 def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -> list[str]:
     allowed = {
@@ -343,6 +356,7 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.SLACK,
         ExternalServiceProvider.LINEAR,
         ExternalServiceProvider.GOOGLE_ANALYTICS,
+        ExternalServiceProvider.LUMA,
         MANUAL_DOCUMENTS_SOURCE,
     }
     if not input_sources:
@@ -4013,42 +4027,54 @@ def _unique_id_list(*values: Optional[list[int]]) -> list[int]:
     return merged
 
 
-def _draft_item_from_xero_metric(metric: StartupMetricObservation) -> dict[str, Any]:
+def _draft_item_from_metric(
+    metric: StartupMetricObservation,
+    *,
+    source_provider: str,
+    labels: dict[str, str],
+    merge_basis: str,
+) -> dict[str, Any]:
     value_number = str(metric.value_number) if metric.value_number is not None else None
     return {
         "metric_key": metric.metric_key,
         "key": metric.metric_key,
-        "label": XERO_DRAFT_METRIC_LABELS.get(metric.metric_key) or metric.metric_name,
+        "label": labels.get(metric.metric_key) or metric.metric_name,
         "value": metric.value_text,
         "value_text": metric.value_text,
         "value_number": value_number,
         "unit": metric.unit,
-        "source_provider": ExternalServiceProvider.XERO,
+        "source_provider": source_provider,
         "source_metric_id": metric.id,
         "source_record_ids": metric.source_record_ids or [],
         "source_metadata": {
             **(metric.source_metadata or {}),
-            "draft_merge_basis": "xero_backed_metric_observation",
+            "draft_merge_basis": merge_basis,
         },
         "summary": metric.summary,
     }
 
 
-def merge_xero_metrics_into_structured_memo(
+def _merge_provider_metrics_into_structured_memo(
     *,
     organization: Organization,
     month: date,
     structured_memo: dict,
+    source_provider: str,
+    metric_keys: tuple[str, ...],
+    labels: dict[str, str],
+    merge_basis: str,
+    multi_unit_note_template: str,
     evidence_metric_ids: Optional[list[int]] = None,
 ) -> tuple[dict, list[int]]:
+    """Merge a connector's metric observations for ``month`` into the memo's kpi_snapshot."""
     month_start = _month_start(month)
     memo = dict(structured_memo or {})
     metrics = list(
         StartupMetricObservation.objects.filter(
             organization=organization,
-            source_provider=ExternalServiceProvider.XERO,
+            source_provider=source_provider,
             period_month=month_start,
-            metric_key__in=XERO_DRAFT_METRIC_KEYS,
+            metric_key__in=metric_keys,
         )
         .order_by("metric_key", "unit", "-observed_at", "-updated_at", "-id")
     )
@@ -4059,28 +4085,78 @@ def merge_xero_metrics_into_structured_memo(
     for metric in metrics:
         by_key.setdefault(metric.metric_key, []).append(metric)
 
-    xero_items: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     merged_metric_ids: list[int] = []
     source_notes = list(memo.get("source_notes") or []) if isinstance(memo.get("source_notes"), list) else []
-    for key in XERO_DRAFT_METRIC_KEYS:
+    for key in metric_keys:
         key_metrics = by_key.get(key) or []
         if not key_metrics:
             continue
         units = {metric.unit for metric in key_metrics}
         if len(key_metrics) > 1 and len(units) > 1:
-            note = f"Xero provided multiple currencies for {XERO_DRAFT_METRIC_LABELS.get(key, key)}; review source records before using a combined value."
+            note = multi_unit_note_template.format(label=labels.get(key, key))
             if note not in source_notes:
                 source_notes.append(note)
             continue
         metric = key_metrics[0]
-        xero_items.append(_draft_item_from_xero_metric(metric))
+        items.append(
+            _draft_item_from_metric(
+                metric, source_provider=source_provider, labels=labels, merge_basis=merge_basis
+            )
+        )
         merged_metric_ids.append(metric.id)
 
-    if xero_items:
-        memo["kpi_snapshot"] = _merge_kpi_snapshot(memo.get("kpi_snapshot"), xero_items)
+    if items:
+        memo["kpi_snapshot"] = _merge_kpi_snapshot(memo.get("kpi_snapshot"), items)
     if source_notes:
         memo["source_notes"] = source_notes
     return memo, _unique_id_list(evidence_metric_ids, merged_metric_ids)
+
+
+def merge_xero_metrics_into_structured_memo(
+    *,
+    organization: Organization,
+    month: date,
+    structured_memo: dict,
+    evidence_metric_ids: Optional[list[int]] = None,
+) -> tuple[dict, list[int]]:
+    return _merge_provider_metrics_into_structured_memo(
+        organization=organization,
+        month=month,
+        structured_memo=structured_memo,
+        source_provider=ExternalServiceProvider.XERO,
+        metric_keys=XERO_DRAFT_METRIC_KEYS,
+        labels=XERO_DRAFT_METRIC_LABELS,
+        merge_basis="xero_backed_metric_observation",
+        multi_unit_note_template=(
+            "Xero provided multiple currencies for {label}; "
+            "review source records before using a combined value."
+        ),
+        evidence_metric_ids=evidence_metric_ids,
+    )
+
+
+def merge_luma_metrics_into_structured_memo(
+    *,
+    organization: Organization,
+    month: date,
+    structured_memo: dict,
+    evidence_metric_ids: Optional[list[int]] = None,
+) -> tuple[dict, list[int]]:
+    return _merge_provider_metrics_into_structured_memo(
+        organization=organization,
+        month=month,
+        structured_memo=structured_memo,
+        source_provider=ExternalServiceProvider.LUMA,
+        metric_keys=LUMA_DRAFT_METRIC_KEYS,
+        labels=LUMA_DRAFT_METRIC_LABELS,
+        merge_basis="luma_backed_metric_observation",
+        multi_unit_note_template=(
+            "Luma provided multiple values for {label}; "
+            "review source records before using a combined value."
+        ),
+        evidence_metric_ids=evidence_metric_ids,
+    )
 
 
 def _merge_groundedness_notes(existing_notes: str, incoming_notes: str, stats: dict[str, int]) -> str:

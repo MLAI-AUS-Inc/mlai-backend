@@ -24,6 +24,10 @@ from integrations.services.luma_sync import (
 )
 from integrations.tests_luma import FakeSession
 from startup_updates.models import LumaEventSelection, StartupMetricObservation
+from startup_updates.services import (
+    merge_luma_metrics_into_structured_memo,
+    normalize_startup_update_input_sources,
+)
 
 User = get_user_model()
 
@@ -492,3 +496,49 @@ class LumaSelectionEndpointTests(TestCase):
             ),
             {"eventsRun"},
         )
+
+
+class LumaDraftMergeTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(name="Acme", domain="acme.com")
+
+    def _metric(self, metric_key, value, *, unit="", month=date(2026, 3, 1)):
+        return StartupMetricObservation.objects.create(
+            organization=self.org,
+            metric_key=metric_key,
+            metric_name=metric_key,
+            value_text=str(value),
+            value_number=Decimal(str(value)),
+            unit=unit,
+            period_month=month,
+            source_provider="luma",
+        )
+
+    def test_merge_injects_luma_metrics_into_kpi_snapshot(self):
+        self._metric("eventsRun", 3)
+        self._metric("eventCheckInRate", "75.0", unit="%")
+
+        memo, ids = merge_luma_metrics_into_structured_memo(
+            organization=self.org, month=date(2026, 3, 1), structured_memo={}
+        )
+
+        snapshot = {item["metric_key"]: item for item in memo["kpi_snapshot"]}
+        self.assertEqual(set(snapshot), {"eventsRun", "eventCheckInRate"})
+        self.assertEqual(snapshot["eventsRun"]["source_provider"], "luma")
+        self.assertEqual(snapshot["eventsRun"]["label"], "Events Run")
+        self.assertEqual(snapshot["eventCheckInRate"]["unit"], "%")
+        self.assertTrue(ids)
+
+    def test_merge_preserves_existing_snapshot_and_is_noop_without_luma(self):
+        existing = {"kpi_snapshot": [{"metric_key": "mrr", "value": "$1"}]}
+        memo, ids = merge_luma_metrics_into_structured_memo(
+            organization=self.org, month=date(2026, 3, 1), structured_memo=existing
+        )
+        self.assertEqual(memo["kpi_snapshot"], [{"metric_key": "mrr", "value": "$1"}])
+        self.assertEqual(ids, [])
+
+    def test_luma_survives_input_source_allow_lists(self):
+        from vibe_raising.views import VIBE_RAISING_INPUT_SOURCE_KEYS
+
+        self.assertIn("luma", VIBE_RAISING_INPUT_SOURCE_KEYS)
+        self.assertIn("luma", normalize_startup_update_input_sources(["gmail", "luma"]))
