@@ -37,7 +37,12 @@ from integrations.models import GoogleConnection, UserIntegration
 from organizations.models import Organization
 from roo.models import PointsAccount
 from startup_updates.models import StartupProfile
-from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
+from workflow_runs.models import (
+    ContentFactoryRun,
+    ContentFactoryRunStep,
+    ContentFactoryRunStatus,
+    ContentFactoryStepStatus,
+)
 
 
 User = get_user_model()
@@ -936,7 +941,7 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.result["autofill"]["profileFields"]["targetAudience"], "Startup founders and operators.")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
-    def test_autofill_run_polling_marks_worker_timeout_as_blocked(self):
+    def test_autofill_run_polling_marks_stale_worker_timeout_as_blocked(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -947,6 +952,12 @@ class VibeMarketingAutofillTests(TestCase):
             status=ContentFactoryRunStatus.RUNNING,
             current_step="research_public_web",
         )
+        # The worker has gone silent: no run/step progress for longer than the
+        # block window, so a transient status-poll failure is now allowed to
+        # surface the run as (retryable) blocked.
+        stale = timezone.now() - timedelta(minutes=20)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=stale, updated_at=stale)
+        run.refresh_from_db()
 
         with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=http_client.RequestException("connect timeout")):
             response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
@@ -962,6 +973,67 @@ class VibeMarketingAutofillTests(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.error, response.data["errors"][0])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_run_polling_keeps_recent_run_running_on_transient_status_poll_failure(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="autofill-transient-recent-1",
+            workflow="startup_autofill",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="research_public_web",
+        )
+
+        # A single transient status-poll failure on a just-dispatched run must
+        # not terminate it: the worker is still progressing, so the run stays
+        # running and the frontend keeps polling instead of giving up.
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=http_client.RequestException("connect timeout")):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.RUNNING)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.error, "")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_autofill_run_polling_keeps_progressing_run_running_on_transient_status_poll_failure(self):
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        run = ContentFactoryRun.objects.create(
+            run_id="autofill-transient-progress-1",
+            workflow="startup_autofill",
+            domain="acme.com",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="research_public_web",
+        )
+        # The run record itself is old, but the worker mirrored fresh step
+        # progress into our DB moments ago, which proves it is still alive. A
+        # transient status-poll failure must not block an actively-stepping run.
+        stale = timezone.now() - timedelta(minutes=30)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=stale, updated_at=stale)
+        ContentFactoryRunStep.objects.create(
+            run=run,
+            step_key="research_public_web",
+            status=ContentFactoryStepStatus.RUNNING,
+            started_at=timezone.now() - timedelta(seconds=30),
+        )
+        run.refresh_from_db()
+
+        with patch("content_factory.vibe_marketing_views.http_client.get", side_effect=http_client.RequestException("connect timeout")):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{run.run_id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.RUNNING)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.error, "")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_run_detail_retries_remote_step_sync_on_transient_sqlite_lock(self):

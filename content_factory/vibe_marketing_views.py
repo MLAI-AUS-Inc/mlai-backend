@@ -8809,6 +8809,69 @@ def _block_startup_autofill_on_status_poll_unavailable(run, remote_data):
     return run
 
 
+# A transient status-poll outage (a network blip or a brief content-factory 5xx)
+# must not terminate a startup_autofill run the worker is still driving. The
+# content-factory worker mirrors step progress straight into this service
+# (PUT /api/content-factory/runs/{id}); that snapshot sync skips no-op writes, so
+# a fresh run/step timestamp is reliable proof the run is still advancing even
+# while content-factory's status endpoint is momentarily unreachable. We only
+# fall through to blocking once the worker has been silent past this window,
+# which sits above the frontend's 10-minute "status unavailable" notice so the
+# soft, keep-polling warning always surfaces before any hard, terminal block.
+STARTUP_AUTOFILL_STATUS_POLL_BLOCK_AFTER = timedelta(minutes=15)
+
+
+def _startup_autofill_latest_progress_at(run):
+    """Most recent moment the worker reported progress for ``run``.
+
+    Combines the run's last genuine update (``_sync_content_factory_run_snapshot``
+    skips no-op saves, so ``updated_at`` only advances on real change) with the
+    freshest per-step start/finish timestamp, falling back to when the run was
+    created so a just-dispatched run still counts as fresh.
+    """
+    candidates = [run.updated_at, run.created_at]
+    for step in run.steps.all():
+        candidates.append(step.started_at)
+        candidates.append(step.completed_at)
+    stamps = [stamp for stamp in candidates if stamp is not None]
+    return max(stamps) if stamps else None
+
+
+def _startup_autofill_run_recently_progressed(run, *, now=None):
+    """True while the worker is still mirroring progress for ``run``.
+
+    Used to decide whether a transient status-poll failure should be allowed to
+    terminate the run: an actively-progressing run must never be blocked by a
+    single unreachable status poll.
+    """
+    latest = _startup_autofill_latest_progress_at(run)
+    if latest is None:
+        return False
+    now = now or timezone.now()
+    return (now - latest) <= STARTUP_AUTOFILL_STATUS_POLL_BLOCK_AFTER
+
+
+def _resolve_startup_autofill_status_poll_unavailable(run, remote_data):
+    """Decide how a transient status-poll outage affects a startup_autofill run.
+
+    While the worker is still mirroring progress we keep the in-flight running
+    state so the frontend keeps polling; only a worker that has gone silent past
+    ``STARTUP_AUTOFILL_STATUS_POLL_BLOCK_AFTER`` falls through to a blocked run.
+    """
+    if not run or run.workflow != "startup_autofill":
+        return run
+    if _startup_autofill_run_recently_progressed(run):
+        logger.info(
+            "content_factory_status_poll_unavailable_kept_running run_id=%s workflow=%s status=%s last_progress_at=%s",
+            run.run_id,
+            run.workflow,
+            run.status,
+            _startup_autofill_latest_progress_at(run),
+        )
+        return run
+    return _block_startup_autofill_on_status_poll_unavailable(run, remote_data)
+
+
 def _parse_remote_datetime(value):
     if not value:
         return None
@@ -11861,7 +11924,7 @@ class VibeMarketingRunView(APIView):
             )
         if _is_status_poll_unavailable_payload(remote_data):
             if run.workflow == "startup_autofill":
-                run = _block_startup_autofill_on_status_poll_unavailable(run, remote_data)
+                run = _resolve_startup_autofill_status_poll_unavailable(run, remote_data)
             else:
                 run = _heal_stale_status_poll_timeout(run)
             logger.warning(
