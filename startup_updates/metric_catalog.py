@@ -26,10 +26,20 @@ STARTUP_UPDATE_METRIC_LABELS: dict[str, str] = {
     "qualifiedPipeline": "Qualified Pipeline",
     "eventsRun": "Events Run",
     "eventRegistrations": "Event Registrations",
+    "eventAttendees": "Checked-in Attendees",
+    "eventCheckInRate": "Check-in Rate",
 }
 
 STARTUP_UPDATE_METRIC_KEYS: tuple[str, ...] = tuple(STARTUP_UPDATE_METRIC_LABELS)
 STARTUP_UPDATE_METRIC_KEY_SET = frozenset(STARTUP_UPDATE_METRIC_KEYS)
+
+# Metrics a founder can choose to track from their connected Luma calendar.
+LUMA_METRIC_KEYS: tuple[str, ...] = (
+    "eventsRun",
+    "eventRegistrations",
+    "eventAttendees",
+    "eventCheckInRate",
+)
 
 _METRIC_ALIASES = {
     "revenue": "revenue",
@@ -93,7 +103,16 @@ _METRIC_ALIASES = {
     "event registrations": "eventRegistrations",
     "registrations": "eventRegistrations",
     "event signups": "eventRegistrations",
-    "event attendees": "eventRegistrations",
+    "checked in attendees": "eventAttendees",
+    "checked-in attendees": "eventAttendees",
+    "event attendees": "eventAttendees",
+    "attendees": "eventAttendees",
+    "checked in": "eventAttendees",
+    "check-in rate": "eventCheckInRate",
+    "check in rate": "eventCheckInRate",
+    "checkin rate": "eventCheckInRate",
+    "show up rate": "eventCheckInRate",
+    "show-up rate": "eventCheckInRate",
 }
 
 

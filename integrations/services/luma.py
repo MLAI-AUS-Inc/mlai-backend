@@ -190,22 +190,30 @@ class LumaAttendeeReportService:
 
         return events[:count]
 
-    def collect_ended_event_registrations(
+    def collect_ended_event_attendance(
         self,
         *,
         approval_status: str = "approved",
+        event_ids: Optional[Iterable[str]] = None,
         now: Optional[datetime] = None,
         timezone_name: str = MELBOURNE_TIMEZONE,
     ) -> List[Dict[str, Any]]:
-        """Return every ended event with its registration (approved-guest) count.
+        """Return every ended event with its registration and checked-in counts.
 
         Paginates the full calendar so callers can build a complete monthly
         history in one pass. Makes one get-guests call per event, so cost scales
-        with the number of past events — acceptable for on-demand syncs.
+        with the number of past events — acceptable for on-demand syncs. When
+        ``event_ids`` is provided, only those events are counted (guests are not
+        fetched for the rest).
         """
         if not self.api_key:
             raise LumaConfigurationError("Luma API key is not configured for this connection.")
 
+        wanted = (
+            {str(eid).strip() for eid in event_ids if str(eid).strip()}
+            if event_ids is not None
+            else None
+        )
         now_utc = _local_now_utc(now, timezone_name)
         results: List[Dict[str, Any]] = []
         cursor = None
@@ -222,6 +230,7 @@ class LumaAttendeeReportService:
 
             page = self._get("/v1/calendar/list-events", params=params)
             for event in page.get("entries", []):
+                event_id = str(event.get("id") or "").strip()
                 start_at = _parse_datetime(event.get("start_at"))
                 if not start_at:
                     continue
@@ -229,16 +238,17 @@ class LumaAttendeeReportService:
                 if end_at and end_at > now_utc:
                     # Scheduled / in-progress event — not yet "run".
                     continue
+                if wanted is not None and event_id not in wanted:
+                    continue
 
-                guests = self.list_guests(
-                    event_id=str(event.get("id") or ""),
-                    approval_status=approval_status,
-                )
+                guests = self.list_guests(event_id=event_id, approval_status=approval_status)
+                checked_in_count = sum(1 for guest in guests if _guest_checked_in(guest))
                 results.append(
                     {
                         "event": event,
                         "start_at": start_at,
                         "registration_count": len(guests),
+                        "checked_in_count": checked_in_count,
                     }
                 )
 
@@ -249,6 +259,46 @@ class LumaAttendeeReportService:
                 break
 
         return results
+
+    def list_ended_events(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        timezone_name: str = MELBOURNE_TIMEZONE,
+        cursor: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Return one page of ended events (no per-event guest fetch) for pickers."""
+        if not self.api_key:
+            raise LumaConfigurationError("Luma API key is not configured for this connection.")
+
+        now_utc = _local_now_utc(now, timezone_name)
+        params: Dict[str, Any] = {
+            "before": _isoformat_z(now_utc),
+            "pagination_limit": max(1, min(int(limit or 50), 100)),
+            "sort_column": "start_at",
+            "sort_direction": "desc",
+            "status": "approved",
+        }
+        if cursor:
+            params["pagination_cursor"] = cursor
+
+        page = self._get("/v1/calendar/list-events", params=params)
+        events: List[Dict[str, Any]] = []
+        for event in page.get("entries", []):
+            start_at = _parse_datetime(event.get("start_at"))
+            if not start_at:
+                continue
+            end_at = _parse_datetime(event.get("end_at"))
+            if end_at and end_at > now_utc:
+                continue
+            events.append(event)
+
+        return {
+            "events": events,
+            "has_more": bool(page.get("has_more")),
+            "next_cursor": page.get("next_cursor") or None,
+        }
 
     def list_guests(self, *, event_id: str, approval_status: str = "approved") -> List[Dict[str, Any]]:
         params = {

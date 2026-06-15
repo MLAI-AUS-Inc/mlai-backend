@@ -17,6 +17,7 @@ from integrations.services.external_connectors import (
     serialize_google_analytics_properties,
     serialize_linear_preview,
     serialize_linear_projects,
+    serialize_luma_events,
     serialize_slack_channels,
     serialize_slack_preview,
     serialize_source_status,
@@ -24,6 +25,7 @@ from integrations.services.external_connectors import (
     serialize_xero_preview,
     update_google_analytics_property_selections,
     update_linear_project_selections,
+    update_luma_selections,
     update_slack_channel_selections,
 )
 from integrations.services.linear_meeting_actions import (
@@ -101,6 +103,28 @@ def _requested_providers(request):
     return []
 
 
+def _string_list(raw, *object_keys):
+    """Coerce a comma string / list of strings / list of {key} objects into a clean str list."""
+    if isinstance(raw, str):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if isinstance(raw, (list, tuple)):
+        result = []
+        for item in raw:
+            if isinstance(item, dict):
+                value = ""
+                for key in object_keys:
+                    candidate = str(item.get(key) or "").strip()
+                    if candidate:
+                        value = candidate
+                        break
+            else:
+                value = str(item or "").strip()
+            if value:
+                result.append(value)
+        return result
+    return []
+
+
 class ConnectorSourcesStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -146,6 +170,57 @@ class LumaConnectView(APIView):
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serialize_source_status(request.user), status=status.HTTP_200_OK)
+
+
+class LumaEventListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get("limit") or 50
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            payload = serialize_luma_events(
+                request.user,
+                cursor=request.query_params.get("cursor") or None,
+                limit=limit,
+            )
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except DatabaseError:
+            return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LumaSelectionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        event_ids = _string_list(
+            request.data.get("eventIds")
+            or request.data.get("event_ids")
+            or request.data.get("events")
+            or [],
+            "eventId",
+            "event_id",
+            "id",
+        )
+        metric_keys = _string_list(
+            request.data.get("metrics")
+            or request.data.get("metricKeys")
+            or request.data.get("metric_keys")
+            or [],
+            "key",
+            "metricKey",
+            "metric_key",
+        )
+        try:
+            payload = update_luma_selections(request.user, event_ids, metric_keys)
+        except ConnectorConfigurationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class FinancialSourcesStatusView(APIView):

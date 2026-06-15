@@ -36,6 +36,8 @@ urlpatterns = [
         name='connector_source_connection_detail',
     ),
     path('luma/connect', api_views_connectors.LumaConnectView.as_view(), name='luma_connect'),
+    path('luma/events', api_views_connectors.LumaEventListView.as_view(), name='luma_events'),
+    path('luma/selections', api_views_connectors.LumaSelectionView.as_view(), name='luma_selections'),
     path('financial/status', api_views_finance.FinancialStatusView.as_view(), name='financial_sources_status'),
     path('financial/sync', api_views_finance.FinancialSyncView.as_view(), name='financial_sources_sync'),
     path(

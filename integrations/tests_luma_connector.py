@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,7 +23,7 @@ from integrations.services.luma_sync import (
     sync_luma_connection,
 )
 from integrations.tests_luma import FakeSession
-from startup_updates.models import StartupMetricObservation
+from startup_updates.models import LumaEventSelection, StartupMetricObservation
 
 User = get_user_model()
 
@@ -58,18 +58,27 @@ class CollectEndedEventRegistrationsTests(TestCase):
                     "has_more": False,
                 }
             if path == "/v1/event/get-guests":
-                counts = {"p1": 2, "p2": 3}
-                event_id = params.get("event_id")
-                return {"entries": [{"guest": {"id": f"{event_id}-{i}"}} for i in range(counts.get(event_id, 0))], "has_more": False}
+                rosters = {
+                    # 2 registered, 1 checked in.
+                    "p1": [
+                        {"guest": {"id": "p1-0", "checked_in_at": "2026-03-15T05:00:00Z"}},
+                        {"guest": {"id": "p1-1"}},
+                    ],
+                    # 3 registered, none checked in.
+                    "p2": [{"guest": {"id": f"p2-{i}"}} for i in range(3)],
+                }
+                return {"entries": rosters.get(params.get("event_id"), []), "has_more": False}
             raise AssertionError(path)
 
         now = datetime(2026, 5, 1, 12, 0, tzinfo=MELB)
-        results = self._service(handler).collect_ended_event_registrations(now=now)
+        results = self._service(handler).collect_ended_event_attendance(now=now)
 
         by_id = {item["event"]["id"]: item for item in results}
         self.assertEqual(set(by_id), {"p1", "p2"})  # future excluded
         self.assertEqual(by_id["p1"]["registration_count"], 2)
+        self.assertEqual(by_id["p1"]["checked_in_count"], 1)
         self.assertEqual(by_id["p2"]["registration_count"], 3)
+        self.assertEqual(by_id["p2"]["checked_in_count"], 0)
 
     def test_paginates_full_calendar(self):
         def handler(path, params):
@@ -86,9 +95,51 @@ class CollectEndedEventRegistrationsTests(TestCase):
             raise AssertionError(path)
 
         now = datetime(2026, 5, 1, 12, 0, tzinfo=MELB)
-        results = self._service(handler).collect_ended_event_registrations(now=now)
+        results = self._service(handler).collect_ended_event_attendance(now=now)
 
         self.assertEqual({item["event"]["id"] for item in results}, {"p1", "p2"})
+
+    def test_event_ids_filter_limits_guest_fetch(self):
+        guest_calls: list[str] = []
+
+        def handler(path, params):
+            if path == "/v1/calendar/list-events":
+                return {
+                    "entries": [
+                        _event("p1", start_at="2026-03-10T03:00:00Z", end_at="2026-03-10T05:00:00Z"),
+                        _event("p2", start_at="2026-03-12T03:00:00Z", end_at="2026-03-12T05:00:00Z"),
+                    ],
+                    "has_more": False,
+                }
+            if path == "/v1/event/get-guests":
+                guest_calls.append(params.get("event_id"))
+                return {"entries": [{"guest": {"id": "g"}}], "has_more": False}
+            raise AssertionError(path)
+
+        now = datetime(2026, 5, 1, 12, 0, tzinfo=MELB)
+        results = self._service(handler).collect_ended_event_attendance(now=now, event_ids=["p1"])
+
+        self.assertEqual({item["event"]["id"] for item in results}, {"p1"})
+        self.assertEqual(guest_calls, ["p1"])  # no guest fetch for the unselected event
+
+    def test_list_ended_events_returns_page(self):
+        def handler(path, params):
+            self.assertEqual(path, "/v1/calendar/list-events")
+            return {
+                "entries": [
+                    _event("future", start_at="2026-06-01T03:00:00Z", end_at="2026-06-01T05:00:00Z"),
+                    _event("p1", start_at="2026-03-10T03:00:00Z", end_at="2026-03-10T05:00:00Z"),
+                ],
+                "has_more": True,
+                "next_cursor": "next",
+            }
+
+        now = datetime(2026, 5, 1, 12, 0, tzinfo=MELB)
+        page = self._service(handler).list_ended_events(now=now, limit=10)
+
+        self.assertEqual([e["id"] for e in page["events"]], ["p1"])  # future excluded, no guest fetch
+        self.assertEqual(page["next_cursor"], "next")
+        self.assertTrue(page["has_more"])
 
 
 class PublishLumaEventMetricsTests(TestCase):
@@ -138,14 +189,45 @@ class PublishLumaEventMetricsTests(TestCase):
         ]
         publish_luma_event_metrics(organization=self.org, events=events)
 
-        # Still exactly 2 metrics per month (no duplicate rows).
+        # All four metrics per month, upserted (no duplicate rows): 2 months x 4.
         self.assertEqual(
             StartupMetricObservation.objects.filter(organization=self.org, source_provider=LUMA_METRIC_SOURCE).count(),
-            4,
+            8,
         )
         march = date(2026, 3, 1)
         self.assertEqual(self._metric("eventsRun", march).value_number, Decimal("3"))
         self.assertEqual(self._metric("eventRegistrations", march).value_number, Decimal("22"))
+
+    def test_computes_attendees_and_check_in_rate(self):
+        from datetime import date
+
+        events = [
+            {"event": {"id": "m1", "name": "March A"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 10, "checked_in_count": 4},
+            {"event": {"id": "m2", "name": "March B"}, "start_at": datetime(2026, 3, 20, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 10, "checked_in_count": 5},
+        ]
+        publish_luma_event_metrics(organization=self.org, events=events)
+
+        march = date(2026, 3, 1)
+        self.assertEqual(self._metric("eventAttendees", march).value_number, Decimal("9"))
+        rate = self._metric("eventCheckInRate", march)
+        self.assertEqual(rate.value_number, Decimal("45.0"))  # 9 / 20 * 100
+        self.assertEqual(rate.unit, "%")
+
+    def test_selected_metrics_only_writes_chosen(self):
+        publish_luma_event_metrics(
+            organization=self.org,
+            events=self._events(),
+            selected_metrics=["eventsRun"],
+        )
+        self.assertEqual(
+            StartupMetricObservation.objects.filter(organization=self.org, source_provider=LUMA_METRIC_SOURCE).count(),
+            2,  # eventsRun for two months only
+        )
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(
+                organization=self.org, source_provider=LUMA_METRIC_SOURCE, metric_key="eventRegistrations"
+            ).exists()
+        )
 
 
 class SyncLumaConnectionTests(TestCase):
@@ -167,8 +249,8 @@ class SyncLumaConnectionTests(TestCase):
     @patch("integrations.services.luma_sync.LumaAttendeeReportService")
     def test_sync_writes_metrics_and_updates_connection(self, mock_service_cls):
         mock_service_cls.return_value = SimpleNamespace(
-            collect_ended_event_registrations=lambda **kwargs: [
-                {"event": {"id": "m1", "name": "March"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 12},
+            collect_ended_event_attendance=lambda **kwargs: [
+                {"event": {"id": "m1", "name": "March"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 12, "checked_in_count": 9},
             ]
         )
         connection = self._connection(self.org)
@@ -253,9 +335,9 @@ class LumaConnectEndpointTests(TestCase):
             status=ExternalServiceConnectionStatus.CONNECTED,
         )
         mock_service_cls.return_value = SimpleNamespace(
-            collect_ended_event_registrations=lambda **kwargs: [
-                {"event": {"id": "m1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 4},
-                {"event": {"id": "a1"}, "start_at": datetime(2026, 4, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 9},
+            collect_ended_event_attendance=lambda **kwargs: [
+                {"event": {"id": "m1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 4, "checked_in_count": 2},
+                {"event": {"id": "a1"}, "start_at": datetime(2026, 4, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 9, "checked_in_count": 3},
             ]
         )
 
@@ -283,3 +365,130 @@ class LumaConnectEndpointTests(TestCase):
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.DISCONNECTED)
         self.assertEqual(connection.access_token, "")
+
+
+class LumaSelectionEndpointTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="founder@example.com", role="participant")
+        self.org = Organization.objects.create(name="Acme", domain="acme.com")
+        self.connection = ExternalServiceConnection.objects.create(
+            user=self.user,
+            provider=ExternalServiceProvider.LUMA,
+            organization=self.org,
+            access_token="luma-secret",
+            account_label="Luma",
+            external_account_id="founder@example.com",
+            status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(self.user)
+
+    @patch("integrations.services.external_connectors.LumaAttendeeReportService")
+    def test_events_list_upserts_selections_and_returns_metrics(self, mock_service_cls):
+        mock_service_cls.return_value = SimpleNamespace(
+            list_ended_events=lambda **kwargs: {
+                "events": [
+                    {"id": "e1", "name": "Event 1", "url": "https://luma.test/e1", "start_at": "2026-03-10T03:00:00Z"},
+                    {"id": "e2", "name": "Event 2", "start_at": "2026-04-10T03:00:00Z"},
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            }
+        )
+
+        response = self.api_client.get("/api/v1/integrations/luma/events")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({event["eventId"] for event in response.data["events"]}, {"e1", "e2"})
+        self.assertEqual(
+            {metric["key"] for metric in response.data["availableMetrics"]},
+            {"eventsRun", "eventRegistrations", "eventAttendees", "eventCheckInRate"},
+        )
+        self.assertEqual(LumaEventSelection.objects.filter(connection=self.connection).count(), 2)
+
+    def test_save_selections_persists_events_and_metrics(self):
+        for event_id in ("e1", "e2", "e3"):
+            LumaEventSelection.objects.create(
+                connection=self.connection, user=self.user, organization=self.org,
+                event_id=event_id, event_name=event_id,
+            )
+
+        response = self.api_client.post(
+            "/api/v1/integrations/luma/selections",
+            {"eventIds": ["e1", "e3"], "metrics": ["eventsRun", "eventAttendees"]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["selectedEventCount"], 2)
+        self.assertEqual(
+            set(
+                LumaEventSelection.objects.filter(connection=self.connection, selected=True)
+                .values_list("event_id", flat=True)
+            ),
+            {"e1", "e3"},
+        )
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.provider_metadata["selected_metrics"], ["eventsRun", "eventAttendees"])
+        status_resp = self.api_client.get("/api/v1/integrations/sources/status")
+        sources = {source["key"]: source for source in status_resp.data["sources"]}
+        self.assertEqual(sources["luma"]["selectedEventCount"], 2)
+        self.assertEqual(sources["luma"]["status"], "connected")
+
+    @patch("integrations.services.luma_sync.LumaAttendeeReportService")
+    def test_sync_respects_selected_events_and_metrics(self, mock_service_cls):
+        LumaEventSelection.objects.create(
+            connection=self.connection, user=self.user, organization=self.org,
+            event_id="e1", event_name="E1", selected=True,
+        )
+        self.connection.provider_metadata = {"selected_metrics": ["eventsRun"]}
+        self.connection.save(update_fields=["provider_metadata"])
+
+        captured = {}
+
+        def _collect(**kwargs):
+            captured["event_ids"] = kwargs.get("event_ids")
+            return [
+                {"event": {"id": "e1", "name": "E1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 5, "checked_in_count": 2},
+            ]
+
+        mock_service_cls.return_value = SimpleNamespace(collect_ended_event_attendance=_collect)
+
+        sync_luma_connection(self.connection)
+
+        self.assertEqual(set(captured["event_ids"]), {"e1"})  # only the selected event is fetched
+        keys = set(
+            StartupMetricObservation.objects.filter(organization=self.org, source_provider="luma")
+            .values_list("metric_key", flat=True)
+        )
+        self.assertEqual(keys, {"eventsRun"})  # only the selected metric is written
+
+    @patch("integrations.services.luma_sync.LumaAttendeeReportService")
+    def test_sync_removes_stale_metrics(self, mock_service_cls):
+        StartupMetricObservation.objects.create(
+            organization=self.org, metric_key="eventRegistrations", metric_name="Event Registrations",
+            value_text="99", value_number=Decimal("99"), period_month=date(2026, 1, 1),
+            source_provider="luma",
+        )
+        self.connection.provider_metadata = {"selected_metrics": ["eventsRun"]}
+        self.connection.save(update_fields=["provider_metadata"])
+        mock_service_cls.return_value = SimpleNamespace(
+            collect_ended_event_attendance=lambda **kwargs: [
+                {"event": {"id": "e1"}, "start_at": datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")), "registration_count": 5, "checked_in_count": 2},
+            ]
+        )
+
+        sync_luma_connection(self.connection)
+
+        self.assertFalse(
+            StartupMetricObservation.objects.filter(
+                organization=self.org, source_provider="luma", period_month=date(2026, 1, 1)
+            ).exists()
+        )
+        self.assertEqual(
+            set(
+                StartupMetricObservation.objects.filter(organization=self.org, source_provider="luma")
+                .values_list("metric_key", flat=True)
+            ),
+            {"eventsRun"},
+        )

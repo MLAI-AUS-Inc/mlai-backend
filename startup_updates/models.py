@@ -565,6 +565,52 @@ class GoogleAnalyticsPropertySelection(models.Model):
         return f"{self.connection_id}:{self.property_display_name or self.property_id}"
 
 
+class LumaEventSelection(models.Model):
+    connection = models.ForeignKey(
+        "integrations.ExternalServiceConnection",
+        on_delete=models.CASCADE,
+        related_name="luma_event_selections",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="luma_event_selections",
+    )
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="luma_event_selections",
+        null=True,
+        blank=True,
+    )
+    event_id = models.CharField(max_length=128)
+    event_name = models.CharField(max_length=255, blank=True, default="")
+    event_url = models.CharField(max_length=512, blank=True, default="")
+    start_at = models.DateTimeField(null=True, blank=True)
+    selected = models.BooleanField(default=False, db_index=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_lumaeventselection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["connection", "event_id"],
+                name="luma_event_sel_conn_event_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "selected"], name="luma_event_sel_user_sel_idx"),
+            models.Index(fields=["organization", "selected"], name="luma_event_sel_org_sel_idx"),
+        ]
+        ordering = ["-start_at", "event_name", "event_id"]
+
+    def __str__(self):
+        return f"{self.connection_id}:{self.event_name or self.event_id}"
+
+
 class LinearProjectArtifact(models.Model):
     organization = models.ForeignKey(
         "organizations.Organization",

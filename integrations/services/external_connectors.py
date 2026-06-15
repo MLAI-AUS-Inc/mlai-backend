@@ -35,11 +35,13 @@ from startup_updates.models import (
     LinearProjectArtifact,
     LinearProjectSelection,
     LinearProjectUpdateArtifact,
+    LumaEventSelection,
     SlackChannelSelection,
     SlackMessageArtifact,
     SlackThreadArtifact,
     StartupMetricObservation,
 )
+from startup_updates.metric_catalog import LUMA_METRIC_KEYS, startup_update_metric_label
 from integrations.services.gmail import build_gmail_service, get_message_metadata, list_message_page
 from integrations.services.luma import (
     LumaAPIError,
@@ -4886,6 +4888,172 @@ def update_google_analytics_property_selections(user, property_ids: Iterable[str
     }
 
 
+def _latest_luma_connection(user) -> Optional[ExternalServiceConnection]:
+    return (
+        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.LUMA)
+        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+def _serialize_luma_event_selection(selection: LumaEventSelection) -> dict[str, Any]:
+    return {
+        "id": selection.id,
+        "eventId": selection.event_id,
+        "event_id": selection.event_id,
+        "name": selection.event_name or selection.event_id,
+        "eventName": selection.event_name,
+        "event_name": selection.event_name,
+        "eventUrl": selection.event_url,
+        "event_url": selection.event_url,
+        "startAt": selection.start_at.isoformat() if selection.start_at else None,
+        "start_at": selection.start_at.isoformat() if selection.start_at else None,
+        "selected": bool(selection.selected),
+    }
+
+
+def _luma_available_metrics() -> list[dict[str, str]]:
+    return [{"key": key, "label": startup_update_metric_label(key)} for key in LUMA_METRIC_KEYS]
+
+
+def _selected_luma_metric_keys(connection: ExternalServiceConnection) -> list[str]:
+    raw = (connection.provider_metadata or {}).get("selected_metrics")
+    if isinstance(raw, list):
+        chosen = {str(item) for item in raw}
+        keys = [key for key in LUMA_METRIC_KEYS if key in chosen]
+        if keys:
+            return keys
+    return list(LUMA_METRIC_KEYS)
+
+
+def _selected_luma_events(connection: ExternalServiceConnection):
+    return LumaEventSelection.objects.filter(
+        connection=connection,
+        selected=True,
+    ).order_by("-start_at", "event_name", "event_id")
+
+
+def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+    connection = _latest_luma_connection(user)
+    available_metrics = _luma_available_metrics()
+    if not connection:
+        return {
+            "accountLabel": None,
+            "account_label": None,
+            "events": [],
+            "nextCursor": None,
+            "next_cursor": None,
+            "selectedMetrics": [],
+            "selected_metrics": [],
+            "availableMetrics": available_metrics,
+            "available_metrics": available_metrics,
+            "warnings": ["Luma is not connected."],
+        }
+    if not connection.access_token:
+        selected_metrics = _selected_luma_metric_keys(connection)
+        return {
+            "accountLabel": connection.account_label or connection.external_account_id,
+            "account_label": connection.account_label or connection.external_account_id,
+            "events": [],
+            "nextCursor": None,
+            "next_cursor": None,
+            "selectedMetrics": selected_metrics,
+            "selected_metrics": selected_metrics,
+            "availableMetrics": available_metrics,
+            "available_metrics": available_metrics,
+            "warnings": ["Reconnect Luma to refresh the event list."],
+        }
+
+    limit = min(max(int(limit or 50), 1), 100)
+    service = LumaAttendeeReportService(api_key=connection.access_token)
+    page = service.list_ended_events(cursor=cursor, limit=limit)
+    event_rows = []
+    with transaction.atomic():
+        for event in page.get("events", []):
+            event_id = str(event.get("id") or "").strip()
+            if not event_id:
+                continue
+            defaults = {
+                "user": connection.user,
+                "organization": connection.organization,
+                "event_name": str(event.get("name") or event_id).strip()[:255],
+                "event_url": str(event.get("url") or "").strip()[:512],
+                "start_at": parse_datetime(str(event.get("start_at") or "")) or None,
+                "raw_payload": event,
+            }
+            selection, _created = LumaEventSelection.objects.update_or_create(
+                connection=connection,
+                event_id=event_id,
+                defaults=defaults,
+            )
+            event_rows.append(selection)
+
+    next_cursor = str(page.get("next_cursor") or "").strip()
+    selected_metrics = _selected_luma_metric_keys(connection)
+    return {
+        "accountLabel": connection.account_label or connection.external_account_id,
+        "account_label": connection.account_label or connection.external_account_id,
+        "events": [_serialize_luma_event_selection(selection) for selection in event_rows],
+        "nextCursor": next_cursor or None,
+        "next_cursor": next_cursor or None,
+        "selectedMetrics": selected_metrics,
+        "selected_metrics": selected_metrics,
+        "availableMetrics": available_metrics,
+        "available_metrics": available_metrics,
+        "warnings": [],
+    }
+
+
+def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable[str]) -> dict[str, Any]:
+    connection = _latest_luma_connection(user)
+    if not connection:
+        raise ConnectorConfigurationError("Luma is not connected.")
+    selected_ids = {str(event_id).strip() for event_id in (event_ids or []) if str(event_id).strip()}
+    chosen = {str(metric_key) for metric_key in (metric_keys or [])}
+    selected_metric_keys = [key for key in LUMA_METRIC_KEYS if key in chosen]
+    with transaction.atomic():
+        LumaEventSelection.objects.filter(connection=connection).update(selected=False)
+        for event_id in sorted(selected_ids):
+            selection, created = LumaEventSelection.objects.get_or_create(
+                connection=connection,
+                event_id=event_id,
+                defaults={
+                    "user": connection.user,
+                    "organization": connection.organization,
+                    "event_name": event_id,
+                    "selected": True,
+                },
+            )
+            if not created:
+                selection.selected = True
+                selection.user = connection.user
+                selection.organization = connection.organization
+                selection.save(update_fields=["selected", "user", "organization", "updated_at"])
+        if selected_ids:
+            LumaEventSelection.objects.filter(
+                connection=connection,
+                event_id__in=selected_ids,
+            ).update(selected=True)
+        metadata = dict(connection.provider_metadata or {})
+        metadata["selected_metrics"] = selected_metric_keys
+        connection.provider_metadata = metadata
+        connection.save(update_fields=["provider_metadata", "updated_at"])
+
+    selected = list(_selected_luma_events(connection))
+    resolved_metrics = selected_metric_keys or list(LUMA_METRIC_KEYS)
+    return {
+        "selectedEvents": [_serialize_luma_event_selection(selection) for selection in selected],
+        "selected_events": [_serialize_luma_event_selection(selection) for selection in selected],
+        "selectedEventCount": len(selected),
+        "selected_event_count": len(selected),
+        "selectedMetrics": resolved_metrics,
+        "selected_metrics": resolved_metrics,
+        "availableMetrics": _luma_available_metrics(),
+        "available_metrics": _luma_available_metrics(),
+    }
+
+
 def _serialize_external_source(user, provider: str) -> dict[str, Any]:
     definition = CONNECTOR_DEFINITIONS[provider]
     connection = (
@@ -4929,6 +5097,12 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         ).count()
         if status_value in {"connected", "syncing"} and selected_property_count == 0:
             warning = warning or "Select a Google Analytics property before using Google Analytics in a monthly update."
+    selected_event_count = 0
+    if provider == ExternalServiceProvider.LUMA and connection:
+        selected_event_count = LumaEventSelection.objects.filter(
+            connection=connection,
+            selected=True,
+        ).count()
 
     payload = {
         "key": provider,
@@ -4961,6 +5135,8 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
         "selected_project_count": selected_project_count,
         "selectedPropertyCount": selected_property_count,
         "selected_property_count": selected_property_count,
+        "selectedEventCount": selected_event_count,
+        "selected_event_count": selected_event_count,
     }
     if provider == ExternalServiceProvider.XERO:
         has_report_scope = xero_has_report_scope(connection.scopes if connection else [])
