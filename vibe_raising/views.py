@@ -66,6 +66,7 @@ from startup_updates.services import (
     get_startup_update_run_target_month,
     gmail_required_for_sources,
     build_startup_update_target_windows,
+    merge_luma_metrics_into_structured_memo,
     merge_xero_metrics_into_structured_memo,
     merge_source_warnings,
     normalize_startup_update_input_sources,
@@ -157,6 +158,7 @@ VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "google_drive",
     "slack",
     "linear",
+    "luma",
     MANUAL_DOCUMENTS_SOURCE,
 }
 XERO_DRAFT_SYNC_STALE_AFTER = timedelta(minutes=15)
@@ -711,15 +713,23 @@ def _structured_memo_manual_documents(structured_memo):
 
 
 def _structured_memo_with_xero_metrics(draft):
+    # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
     if not getattr(draft, "organization_id", None):
         return structured_memo
 
-    merged_memo, _evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+    evidence_metric_ids = getattr(draft, "evidence_metric_ids", []) or []
+    merged_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
         organization=draft.organization,
         month=draft.month,
         structured_memo=structured_memo,
-        evidence_metric_ids=getattr(draft, "evidence_metric_ids", []) or [],
+        evidence_metric_ids=evidence_metric_ids,
+    )
+    merged_memo, _evidence_metric_ids = merge_luma_metrics_into_structured_memo(
+        organization=draft.organization,
+        month=draft.month,
+        structured_memo=merged_memo,
+        evidence_metric_ids=evidence_metric_ids,
     )
     return merged_memo
 

@@ -104,6 +104,7 @@ from startup_updates.services import (
     get_startup_update_run_target_month,
     gmail_required_for_sources,
     latest_external_connection_for_startup,
+    merge_luma_metrics_into_structured_memo,
     merge_xero_metrics_into_structured_memo,
     normalize_startup_update_input_sources,
     parse_startup_update_target_month,
@@ -656,15 +657,23 @@ def _structured_memo_section_text(structured_memo, key: str) -> str:
 
 
 def _structured_memo_with_xero_metrics(draft) -> dict:
+    # Merges connector-backed metrics (Xero + Luma) into the draft's kpi_snapshot.
     structured_memo = draft.structured_memo or {}
     if not getattr(draft, "organization_id", None):
         return structured_memo
 
-    merged_memo, _evidence_metric_ids = merge_xero_metrics_into_structured_memo(
+    evidence_metric_ids = getattr(draft, "evidence_metric_ids", []) or []
+    merged_memo, evidence_metric_ids = merge_xero_metrics_into_structured_memo(
         organization=draft.organization,
         month=draft.month,
         structured_memo=structured_memo,
-        evidence_metric_ids=getattr(draft, "evidence_metric_ids", []) or [],
+        evidence_metric_ids=evidence_metric_ids,
+    )
+    merged_memo, _evidence_metric_ids = merge_luma_metrics_into_structured_memo(
+        organization=draft.organization,
+        month=draft.month,
+        structured_memo=merged_memo,
+        evidence_metric_ids=evidence_metric_ids,
     )
     return merged_memo
 
@@ -3681,6 +3690,12 @@ class StartupUpdateDraftResultsView(APIView):
                     month=item["month"],
                     structured_memo=item["structured_memo"],
                     evidence_metric_ids=item.get("evidence_metric_ids", []),
+                )
+                structured_memo, evidence_metric_ids = merge_luma_metrics_into_structured_memo(
+                    organization=organization,
+                    month=item["month"],
+                    structured_memo=structured_memo,
+                    evidence_metric_ids=evidence_metric_ids,
                 )
                 draft = upsert_monthly_update_draft(
                     organization=organization,
