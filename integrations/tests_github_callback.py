@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from content_factory.models import OrganizationContentConfig
@@ -16,6 +17,13 @@ def _json_response(payload):
     return response
 
 
+def _redirect_target(response):
+    """Split a callback redirect into (urlsplit parts, flattened query dict)."""
+    parts = urlsplit(response["Location"])
+    query = {key: values[0] for key, values in parse_qs(parts.query).items()}
+    return parts, query
+
+
 class GitHubCallbackTests(TestCase):
     def setUp(self):
         self.client = Client()
@@ -29,8 +37,11 @@ class GitHubCallbackTests(TestCase):
         repos: list[dict],
         github_login: str = "octocat",
         store_state: bool = True,
+        return_url=None,
     ):
-        oauth_state = build_github_oauth_state(domain=domain, slack_user_id=slack_user_id)
+        oauth_state = build_github_oauth_state(
+            domain=domain, slack_user_id=slack_user_id, return_url=return_url
+        )
         if store_state:
             store_github_oauth_state(oauth_state)
 
@@ -82,7 +93,12 @@ class GitHubCallbackTests(TestCase):
             repos=[{"full_name": "owner/mlai-au"}],
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "connected")
+        self.assertEqual(query.get("domain"), "mlai.au")
+        self.assertEqual(query.get("repo"), "owner/mlai-au")
+
         config = OrganizationContentConfig.objects.get(organization__domain="mlai.au")
         self.assertEqual(config.connected_slack_user_id, "U123")
         self.assertEqual(config.github_repo, "owner/mlai-au")
@@ -103,7 +119,11 @@ class GitHubCallbackTests(TestCase):
             store_state=False,
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "connected")
+        self.assertEqual(query.get("repo"), "owner/worker-safe")
+
         config = OrganizationContentConfig.objects.get(organization__domain="worker-safe.com")
         self.assertEqual(config.connected_slack_user_id, "U123")
         self.assertEqual(config.github_repo, "owner/worker-safe")
@@ -127,7 +147,11 @@ class GitHubCallbackTests(TestCase):
             github_login="sam-two",
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "connected")
+        self.assertEqual(query.get("repo"), "owner/domain-two")
+
         configs = {
             config.organization.domain: config
             for config in OrganizationContentConfig.objects.order_by("organization__domain")
@@ -153,8 +177,10 @@ class GitHubCallbackTests(TestCase):
             ],
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"exactly one repository", response.content)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "multiple_repos")
+        self.assertNotIn("repo", query)
 
         config = OrganizationContentConfig.objects.get(organization__domain="ambiguous.com")
         self.assertEqual(config.connected_slack_user_id, "U123")
@@ -180,8 +206,10 @@ class GitHubCallbackTests(TestCase):
             ],
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Linked repository: <strong>owner/repo-two</strong>", response.content)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "connected")
+        self.assertEqual(query.get("repo"), "owner/repo-two")
 
         config = OrganizationContentConfig.objects.get(organization__domain="preselected.com")
         self.assertEqual(config.github_repo, "owner/repo-two")
@@ -207,8 +235,9 @@ class GitHubCallbackTests(TestCase):
             ],
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Multiple repositories are selected", response.content)
+        self.assertEqual(response.status_code, 302)
+        _parts, query = _redirect_target(response)
+        self.assertEqual(query.get("github"), "multiple_repos")
 
         config = OrganizationContentConfig.objects.get(organization__domain="needs-selection.com")
         self.assertEqual(config.github_repo, "owner/not-selected")
@@ -216,3 +245,48 @@ class GitHubCallbackTests(TestCase):
         self.assertEqual(config.github_installation_id, "inst-5")
         mock_trigger_scan.assert_not_called()
         mock_send_dm.assert_called_once()
+
+    @override_settings(
+        CORS_ALLOWED_ORIGINS=["https://app.mlai.au", "https://mlai.au"],
+        CONTENT_FACTORY_FRONTEND_URL="https://mlai.au",
+        DEFAULT_FRONTEND_URL="https://mlai.au",
+    )
+    def test_callback_redirects_to_trusted_return_url(self):
+        response, _scan, _dm = self._callback(
+            domain="mlai.au",
+            slack_user_id="U123",
+            installation_id="inst-return",
+            repos=[{"full_name": "owner/mlai-au"}],
+            return_url="https://app.mlai.au/founder/settings?tab=integrations",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        parts, query = _redirect_target(response)
+        self.assertEqual(parts.scheme, "https")
+        self.assertEqual(parts.netloc, "app.mlai.au")
+        self.assertEqual(parts.path, "/founder/settings")
+        # The page's own query params survive alongside the install status fields.
+        self.assertEqual(query.get("tab"), "integrations")
+        self.assertEqual(query.get("github"), "connected")
+        self.assertEqual(query.get("repo"), "owner/mlai-au")
+
+    @override_settings(
+        CORS_ALLOWED_ORIGINS=["https://app.mlai.au", "https://mlai.au"],
+        CONTENT_FACTORY_FRONTEND_URL="https://mlai.au",
+        DEFAULT_FRONTEND_URL="https://mlai.au",
+    )
+    def test_callback_ignores_untrusted_return_url(self):
+        response, _scan, _dm = self._callback(
+            domain="mlai.au",
+            slack_user_id="U123",
+            installation_id="inst-evil",
+            repos=[{"full_name": "owner/mlai-au"}],
+            return_url="https://evil.example.com/phish",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        parts, query = _redirect_target(response)
+        # Untrusted origin is dropped — we fall back to the configured app home.
+        self.assertEqual(parts.netloc, "mlai.au")
+        self.assertNotIn("evil.example.com", response["Location"])
+        self.assertEqual(query.get("github"), "connected")

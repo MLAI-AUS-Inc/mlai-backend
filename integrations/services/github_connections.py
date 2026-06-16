@@ -3,6 +3,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
+from django.conf import settings
 from django.core import signing
 from django.core.cache import cache
 
@@ -22,6 +23,7 @@ class GitHubOAuthState:
     domain: Optional[str]
     job_id: Optional[str]
     is_org_oauth: bool
+    return_url: Optional[str] = None
 
 
 def _cache_key(nonce: str) -> str:
@@ -35,6 +37,7 @@ def _serialize_oauth_state(
     domain: Optional[str],
     job_id: Optional[str],
     is_org_oauth: bool,
+    return_url: Optional[str] = None,
 ) -> str:
     return signing.dumps(
         {
@@ -43,6 +46,7 @@ def _serialize_oauth_state(
             "domain": domain,
             "job_id": job_id,
             "type": "org" if is_org_oauth else "user",
+            "return_url": return_url,
         },
         salt=GITHUB_OAUTH_STATE_SALT,
         compress=True,
@@ -57,6 +61,7 @@ def _build_state(
     domain: Optional[str],
     job_id: Optional[str],
     is_org_oauth: bool,
+    return_url: Optional[str] = None,
 ) -> GitHubOAuthState:
     return GitHubOAuthState(
         raw=raw,
@@ -65,6 +70,7 @@ def _build_state(
         domain=domain,
         job_id=job_id,
         is_org_oauth=is_org_oauth,
+        return_url=return_url,
     )
 
 
@@ -73,9 +79,11 @@ def build_github_oauth_state(
     domain: Optional[str] = None,
     slack_user_id: str = "",
     job_id: Optional[str] = None,
+    return_url: Optional[str] = None,
 ) -> GitHubOAuthState:
     normalized_domain = normalize_domain(domain or "") or None
     normalized_slack_user_id = (slack_user_id or "").strip()
+    normalized_return_url = (return_url or "").strip() or None
     nonce = secrets.token_urlsafe(16)
     is_org_oauth = bool(normalized_domain)
     normalized_job_id = None if is_org_oauth else (job_id or None)
@@ -85,6 +93,7 @@ def build_github_oauth_state(
         domain=normalized_domain,
         job_id=normalized_job_id,
         is_org_oauth=is_org_oauth,
+        return_url=normalized_return_url,
     )
     return _build_state(
         raw=raw,
@@ -93,6 +102,7 @@ def build_github_oauth_state(
         domain=normalized_domain,
         job_id=normalized_job_id,
         is_org_oauth=is_org_oauth,
+        return_url=normalized_return_url,
     )
 
 def _parse_signed_github_oauth_state(raw_state: str) -> GitHubOAuthState:
@@ -112,6 +122,7 @@ def _parse_signed_github_oauth_state(raw_state: str) -> GitHubOAuthState:
     normalized_domain = normalize_domain(payload.get("domain") or "") or None
     slack_user_id = (payload.get("slack_user_id") or "").strip() or None
     job_id = (payload.get("job_id") or "").strip() or None
+    return_url = (payload.get("return_url") or "").strip() or None
     is_org_oauth = state_type == "org"
     if is_org_oauth:
         job_id = None
@@ -125,6 +136,7 @@ def _parse_signed_github_oauth_state(raw_state: str) -> GitHubOAuthState:
         domain=normalized_domain,
         job_id=job_id,
         is_org_oauth=is_org_oauth,
+        return_url=return_url,
     )
 
 
@@ -213,10 +225,96 @@ def build_github_installation_url(raw_state: str) -> str:
     return install_url + "?" + urllib.parse.urlencode({"state": raw_state})
 
 
-def build_github_oauth_url(domain: str, slack_user_id: str = "", request=None) -> str:
-    state = build_github_oauth_state(domain=domain, slack_user_id=slack_user_id)
+def build_github_oauth_url(
+    domain: str,
+    slack_user_id: str = "",
+    request=None,
+    return_url: Optional[str] = None,
+) -> str:
+    state = build_github_oauth_state(
+        domain=domain,
+        slack_user_id=slack_user_id,
+        return_url=return_url,
+    )
     store_github_oauth_state(state, request=request)
     return build_github_installation_url(state.raw)
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """Return the ``scheme://host[:port]`` origin of ``url`` if it is http(s)."""
+    try:
+        parts = urllib.parse.urlsplit((url or "").strip())
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _allowed_frontend_origins() -> set:
+    """Origins we are willing to redirect a browser back to after install.
+
+    Sourced from the same allowlist the API already trusts (CORS) plus the
+    configured frontend URLs, so adding a new frontend host only needs the
+    existing env vars — there is no second list to keep in sync.
+    """
+    origins = set()
+    for origin in getattr(settings, "CORS_ALLOWED_ORIGINS", None) or []:
+        normalized = _origin_of(origin)
+        if normalized:
+            origins.add(normalized)
+    for candidate in (
+        getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", ""),
+        getattr(settings, "DEFAULT_FRONTEND_URL", ""),
+    ):
+        normalized = _origin_of(candidate)
+        if normalized:
+            origins.add(normalized)
+    return origins
+
+
+def is_allowed_return_url(url: Optional[str]) -> bool:
+    """True only for absolute http(s) URLs whose origin we explicitly trust.
+
+    Guards against open-redirect abuse: the ``return_url`` round-trips through
+    GitHub as part of ``state``, so it must be re-validated on the way back in.
+    """
+    origin = _origin_of(url or "")
+    if not origin:
+        return False
+    return origin in _allowed_frontend_origins()
+
+
+def default_frontend_url() -> str:
+    return (
+        getattr(settings, "CONTENT_FACTORY_FRONTEND_URL", "")
+        or getattr(settings, "DEFAULT_FRONTEND_URL", "")
+        or "https://mlai.au"
+    )
+
+
+def build_post_install_redirect_url(return_url: Optional[str], **params) -> str:
+    """Resolve where to send the browser after a GitHub install completes.
+
+    Uses ``return_url`` when it points at a trusted frontend origin (so the user
+    lands exactly where they left off), otherwise falls back to the configured
+    app home. Status fields (e.g. ``github=connected``) are merged into the
+    query string without clobbering any params the caller already included.
+    """
+    base = return_url if is_allowed_return_url(return_url) else default_frontend_url()
+    parts = urllib.parse.urlsplit(base)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    for key, value in params.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        query[key] = text
+    new_query = urllib.parse.urlencode(query)
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+    )
 
 
 def _actor_id_filter_values(slack_user_id) -> list[str]:

@@ -451,7 +451,8 @@ class ContentFactoryAppGitHubConnectView(APIView):
             config.connected_slack_user_id = actor_id
             config.save(update_fields=["connected_slack_user_id", "updated_at"])
 
-        auth_url = build_github_oauth_url(normalized_domain, actor_id)
+        return_url = str((request.data or {}).get("return_url") or "").strip() or None
+        auth_url = build_github_oauth_url(normalized_domain, actor_id, return_url=return_url)
         return Response(
             {
                 "status": "auth_started",
