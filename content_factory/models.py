@@ -70,6 +70,14 @@ class OrganizationContentConfig(models.Model):
         null=True,
         help_text="Preferred publish target identifier for direct preview runs",
     )
+    auto_publish = models.BooleanField(
+        default=False,
+        help_text="When true, generated article PRs auto-merge once automated build/preview verification passes (no human review).",
+    )
+    requires_review = models.BooleanField(
+        default=False,
+        help_text="Force human review: open the publish PR but never auto-merge, even when auto_publish is true. Overrides auto_publish.",
+    )
     scan_summary = models.TextField(blank=True, null=True)
     tech_stack = models.JSONField(default=dict, blank=True)
     installed_packages = models.JSONField(

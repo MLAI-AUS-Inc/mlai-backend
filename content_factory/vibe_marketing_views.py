@@ -5771,6 +5771,27 @@ def _payload_requests_auto_merge(payload):
     return any(_truthy_flag(payload.get(key)) for key in ("auto_merge", "autoMerge", "publish_auto_merge"))
 
 
+def _org_config_enables_auto_publish(context):
+    """True when the org opted into automatic publishing for all runs.
+
+    Mirrors the per-run auto-merge opt-in at the org level: when
+    OrganizationContentConfig.auto_publish is set, generated article PRs auto-merge
+    once automated build/preview verification passes. ``requires_review`` is an
+    explicit override that forces human review (PR only) and therefore wins over
+    ``auto_publish``.
+    """
+    organization = getattr(context, "organization", None)
+    if organization is None:
+        return False
+    try:
+        config = _get_config(organization)
+    except Exception:
+        return False
+    if config is None or getattr(config, "requires_review", False):
+        return False
+    return bool(getattr(config, "auto_publish", False))
+
+
 def _publish_auto_merge_enabled(*runs):
     """True when any of the runs carries the auto-merge opt-in.
 
@@ -6048,7 +6069,11 @@ def _sync_publish_child_from_control_response(
     if publish_run is None:
         return None
 
-    auto_merge = _payload_requests_auto_merge(payload) or _publish_auto_merge_enabled(run, remote_run)
+    auto_merge = (
+        _payload_requests_auto_merge(payload)
+        or _publish_auto_merge_enabled(run, remote_run)
+        or _org_config_enables_auto_publish(context)
+    )
     publish_result = dict(publish_run.result or {})
     publish_result["source_run_id"] = remote_run.run_id
     publish_result["sourceRunId"] = remote_run.run_id
