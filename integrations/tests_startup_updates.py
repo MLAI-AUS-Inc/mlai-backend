@@ -2779,7 +2779,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.assertEqual(draft_results.status_code, status.HTTP_200_OK)
         self.assertEqual(
             draft_results.data["draft"]["highlights"],
-            "Converted pilot to annual deal\nProduct / GTM / Team / Fundraising: Hiring one engineer",
+            "Converted pilot to annual deal\nHiring one engineer",
         )
         self.assertEqual(draft_results.data["draft"]["learnings"], "Paid pilots convert faster when buyer scope is narrow")
         self.assertEqual(draft_results.data["draft"]["next30Days"], "Close two more pilots")

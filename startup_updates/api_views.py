@@ -590,6 +590,16 @@ def _join_named_sections(structured_memo, sections) -> str:
     return "\n".join(lines)
 
 
+# Sections merged into the single "What moved the business forward?" field. Labels are
+# intentionally blank so points render without a category prefix and read as one
+# continuous, founder-voiced list rather than a categorized report.
+_HIGHLIGHT_SECTIONS = [
+    ("", "financial_performance"),
+    ("", "highlights"),
+    ("", "operations"),
+]
+
+
 def _metric_key_from_label(label) -> Optional[str]:
     return startup_update_metric_key(label)
 
@@ -684,11 +694,7 @@ def _serialize_draft_for_editor(draft) -> dict:
     return {
         "month": month_value.strftime("%B"),
         "year": month_value.year,
-        "highlights": _join_named_sections(structured_memo, [
-            ("Financial performance", "financial_performance"),
-            ("", "highlights"),
-            ("Product / GTM / Team / Fundraising", "operations"),
-        ]),
+        "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
@@ -710,11 +716,7 @@ def _serialize_email_draft_month(draft) -> dict:
         "year": month_value.year,
         "metrics": _extract_form_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
-        "highlights": _join_named_sections(structured_memo, [
-            ("Financial performance", "financial_performance"),
-            ("", "highlights"),
-            ("Product / GTM / Team / Fundraising", "operations"),
-        ]),
+        "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
