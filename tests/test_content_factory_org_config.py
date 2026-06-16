@@ -83,6 +83,53 @@ class ContentFactoryOrgConfigTests(TestCase):
             publish_targets[0]["target_id"],
         )
 
+    def test_org_config_round_trips_component_reuse_fields(self):
+        """Component-reuse fields must survive PUT->GET so content-factory's SHA
+        short-circuit and reuse decision stop regenerating components every scan."""
+        setup_cache = {
+            "schema_version": 1,
+            "managed_files": ["app/components/articles/ArticleLayout.tsx"],
+            "component_inventory": [
+                {"name": "ArticleLayout", "path": "app/components/articles/ArticleLayout.tsx"}
+            ],
+            "context_fingerprint": "abc123",
+        }
+        specs = {"ArticleLayout": "# spec"}
+        head_sha = "deadbeef" * 5  # 40 chars
+
+        put_response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "article_template": "TEMPLATE",
+                "repo_head_sha": head_sha,
+                "scan_request_fingerprint": "fingerprint-xyz",
+                "article_system_setup_cache": setup_cache,
+                "framework_component_specs": specs,
+            },
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.scan_request_fingerprint, "fingerprint-xyz")
+        self.assertEqual(self.config.article_system_setup_cache, setup_cache)
+        self.assertEqual(self.config.framework_component_specs, specs)
+        self.assertEqual(self.config.last_scanned_sha, head_sha)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        data = get_response.data
+        self.assertEqual(data["repo_head_sha"], head_sha)
+        self.assertEqual(data["commit_sha"], head_sha)
+        self.assertEqual(data["scan_request_fingerprint"], "fingerprint-xyz")
+        self.assertEqual(data["article_system_setup_cache"], setup_cache)
+        self.assertEqual(data["framework_component_specs"], specs)
+        self.assertTrue(data["scan_completed_at"])  # set from last_scanned_at on PUT
+
     def test_org_config_round_trips_registry_driven_publish_target_metadata(self):
         publish_targets = [
             {
