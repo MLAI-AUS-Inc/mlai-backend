@@ -609,6 +609,16 @@ def _join_named_sections(structured_memo, sections):
     return "\n".join(lines)
 
 
+# Sections merged into the single "What moved the business forward?" field. Labels are
+# intentionally blank so points render without a category prefix and read as one
+# continuous, founder-voiced list rather than a categorized report.
+_HIGHLIGHT_SECTIONS = [
+    ("", "financial_performance"),
+    ("", "highlights"),
+    ("", "operations"),
+]
+
+
 def _normalize_metric_value(value):
     if value is None:
         return None
@@ -749,11 +759,7 @@ def _serialize_draft_for_form(draft):
         "videoOriginalFilename": _structured_memo_text(video_metadata, "original_filename", "originalFilename"),
         "videoStoragePath": _structured_memo_text(video_metadata, "storage_path", "storagePath"),
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
-        "highlights": _join_named_sections(structured_memo, [
-            ("Financial performance", "financial_performance"),
-            ("", "highlights"),
-            ("Product / GTM / Team / Fundraising", "operations"),
-        ]),
+        "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
@@ -901,11 +907,7 @@ def _serialize_monthly_update(draft, structured_memo=None):
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
-        "highlights": _join_named_sections(structured_memo, [
-            ("Financial performance", "financial_performance"),
-            ("", "highlights"),
-            ("Product / GTM / Team / Fundraising", "operations"),
-        ]),
+        "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
@@ -928,11 +930,7 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
-                "highlights": _join_named_sections(structured_memo, [
-                    ("Financial performance", "financial_performance"),
-                    ("", "highlights"),
-                    ("Product / GTM / Team / Fundraising", "operations"),
-                ]),
+                "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
                     ("", "asks"),
@@ -969,11 +967,7 @@ def _serialize_email_draft_month(draft):
         "videoFileSizeBytes": video_metadata.get("file_size_bytes"),
         "metrics": _extract_metrics(structured_memo),
         "metricSuggestions": _extract_metric_suggestions(structured_memo),
-        "highlights": _join_named_sections(structured_memo, [
-            ("Financial performance", "financial_performance"),
-            ("", "highlights"),
-            ("Product / GTM / Team / Fundraising", "operations"),
-        ]),
+        "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
             ("", "asks"),
