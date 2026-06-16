@@ -352,6 +352,19 @@ class ContentFactoryOrgConfigView(APIView):
             'publish_targets': config.publish_targets if config else [],
             'default_publish_target_id': config.default_publish_target_id if config else None,
             'article_system': resolve_article_system(config),
+            # Component-reuse round-trip: feed content-factory's _hydrate_existing_artifacts so
+            # the scanner's SHA short-circuit (_maybe_reuse_unchanged_scan) and component reuse
+            # decision (_build_article_artifact_reuse_decision) can skip regenerating article
+            # components. Lightweight by design: the setup cache carries the inventory
+            # (names/paths/fingerprint), not the full component code (which lives in the repo).
+            'repo_head_sha': (config.last_scanned_sha if config else None),
+            'commit_sha': (config.last_scanned_sha if config else None),
+            'scan_completed_at': (
+                config.last_scanned_at.isoformat() if config and config.last_scanned_at else None
+            ),
+            'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
+            'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
+            'framework_component_specs': (config.framework_component_specs if config else {}),
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -489,8 +502,14 @@ class ContentFactoryOrgConfigView(APIView):
             'registry_path',
             'publish_targets',
             'default_publish_target_id',
+            # Component-reuse round-trip: persist so an unchanged re-scan can short-circuit
+            # and _build_article_artifact_reuse_decision can reuse components instead of
+            # regenerating all ~29 on every scan.
+            'scan_request_fingerprint',
+            'article_system_setup_cache',
+            'framework_component_specs',
         ]
-        
+
         for field in target_fields:
             if field in data:
                 defaults[field] = data[field]

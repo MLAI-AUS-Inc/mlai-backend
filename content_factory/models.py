@@ -110,6 +110,18 @@ class OrganizationContentConfig(models.Model):
     )
     last_scanned_sha = models.CharField(max_length=40, blank=True, null=True)
     last_scanned_at = models.DateTimeField(blank=True, null=True)
+    scan_request_fingerprint = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text="Fingerprint of the scan request shape; with last_scanned_sha lets an unchanged re-scan short-circuit instead of re-running.",
+    )
+    article_system_setup_cache = models.JSONField(
+        default=dict, blank=True,
+        help_text="Self-contained component-reuse cache (inventory, managed files, context fingerprint) from the last scan.",
+    )
+    framework_component_specs = models.JSONField(
+        default=dict, blank=True,
+        help_text="Framework-adapted component spec docs from the last scan, reused to skip regeneration.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
