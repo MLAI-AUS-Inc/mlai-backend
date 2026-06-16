@@ -41,14 +41,19 @@ AUTH_RECONNECT_TEXT = (
 )
 
 
-def build_github_auth_url(slack_user_id: str, domain: str = None, request=None) -> str:
+def build_github_auth_url(slack_user_id: str, domain: str = None, request=None, return_url: str = None) -> str:
     """
     Build the same GitHub auth URL returned by GET /api/v1/integrations/github/auth-url.
+
+    ``return_url`` (when supplied) is carried through the OAuth ``state`` so the
+    install callback can send the browser back to the exact page it started from.
     """
     normalized_domain = normalize_domain(domain) if domain else ''
 
     if normalized_domain:
-        return build_github_oauth_url(normalized_domain, slack_user_id, request=request)
+        return build_github_oauth_url(
+            normalized_domain, slack_user_id, request=request, return_url=return_url
+        )
 
     connect_path = reverse('github_connect')
     if request is not None:
@@ -63,7 +68,10 @@ def build_github_auth_url(slack_user_id: str, domain: str = None, request=None) 
         else:
             base_connect_url = connect_path
 
-    return f"{base_connect_url}?{urllib.parse.urlencode({'slack_user_id': slack_user_id})}"
+    connect_params = {'slack_user_id': slack_user_id}
+    if return_url:
+        connect_params['return_url'] = return_url
+    return f"{base_connect_url}?{urllib.parse.urlencode(connect_params)}"
 
 
 def is_github_auth_scan_error_message(message: str) -> bool:

@@ -10946,8 +10946,11 @@ class VibeMarketingGitHubConnectView(APIView):
             if existing_connection:
                 return Response(existing_connection, status=status.HTTP_200_OK)
 
+        return_url = str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None
         try:
-            auth_url = build_github_auth_url(actor_id, domain=context.organization.domain, request=request)
+            auth_url = build_github_auth_url(
+                actor_id, domain=context.organization.domain, request=request, return_url=return_url
+            )
         except Exception as exc:
             logger.exception(
                 "vibe_marketing_github_auth_url_failed domain=%s actor_id=%s",

@@ -120,6 +120,7 @@ class GithubTokenIdentityView(APIView):
             request.query_params.get("include_repo_freshness"),
             default=True,
         )
+        requested_return_url = request.query_params.get('return_url')
 
         integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
         owned_configs = list(get_owned_org_configs(slack_user_id))
@@ -193,7 +194,7 @@ class GithubTokenIdentityView(APIView):
                 "needs_github_auth": bool(connection_details.get("needs_github_auth")),
                 "connection_state": connection_state,
                 "credential_source": connection_details.get("credential_source") or "none",
-                "oauth_url": build_github_oauth_url(requested_domain, slack_user_id),
+                "oauth_url": build_github_oauth_url(requested_domain, slack_user_id, return_url=requested_return_url),
             }
             resolved_domain_repo = str(connection_details.get("github_repo") or "").strip()
             if resolved_domain_repo:
@@ -261,7 +262,7 @@ class GithubTokenIdentityView(APIView):
                     except ArticleGenerationError:
                         resolved_repo = None
                         resolved_token = None
-                        auth_url = build_github_oauth_url(active_domain, slack_user_id)
+                        auth_url = build_github_oauth_url(active_domain, slack_user_id, return_url=requested_return_url)
                 elif integration and integration.github_access_token and is_token_expired(integration):
                     if integration.github_refresh_token:
                         try:
@@ -302,7 +303,7 @@ class GithubTokenIdentityView(APIView):
                 if access_revoked:
                     try:
                         from integrations.services.github import build_github_auth_url
-                        auth_url = build_github_auth_url(slack_user_id, domain=active_domain, request=request)
+                        auth_url = build_github_auth_url(slack_user_id, domain=active_domain, request=request, return_url=requested_return_url)
                     except Exception as url_err:
                         logger.error(f"Failed to build auth url: {url_err}")
             except Exception as e:
@@ -498,7 +499,7 @@ class GithubAuthUrlView(APIView):
             return Response({"error": "slack_user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         from integrations.services.github import build_github_auth_url
-        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request)
+        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request, return_url=request.query_params.get('return_url'))
 
         return Response({
             "auth_url": auth_url,
@@ -575,7 +576,7 @@ class GithubReauthUrlView(APIView):
             )
 
         from integrations.services.github import build_github_auth_url
-        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request)
+        auth_url = build_github_auth_url(slack_user_id, domain=domain, request=request, return_url=request.query_params.get('return_url'))
 
         return Response({
             "reauth_url": auth_url,
@@ -600,6 +601,7 @@ class GithubScanView(APIView):
         slack_channel_id = request.data.get('slack_channel_id')
         slack_thread_ts = request.data.get('slack_thread_ts')
         domain = request.data.get('domain') or request.query_params.get('domain')
+        return_url = str(request.data.get('return_url') or request.query_params.get('return_url') or '').strip() or None
 
         logger.info(f"Scan request received: slack_user_id={slack_user_id}, domain={domain}, data_keys={list(request.data.keys())}")
 
@@ -639,7 +641,7 @@ class GithubScanView(APIView):
                     logger.info(f"Found UserIntegration for {slack_user_id}: has_token={bool(integration.github_access_token)}, has_repo={bool(integration.github_repo)}, repo={integration.github_repo}")
                 else:
                     logger.info(f"No UserIntegration found for {slack_user_id}")
-                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id)
+                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id, return_url=return_url)
                     return Response({
                         "error": "Integration not found",
                         "needs_github_auth": True,
@@ -674,7 +676,7 @@ class GithubScanView(APIView):
                 elif integration and integration.github_access_token and not integration.github_repo:
                     # User has connected GitHub but hasn't selected a repo yet
                     logger.warning(f"User {slack_user_id} has GitHub token but no repo set - cannot bootstrap domain {normalized_domain}")
-                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id)
+                    oauth_url = build_github_oauth_url(normalized_domain, slack_user_id, return_url=return_url)
                     return Response({
                         "error": f"Please complete GitHub setup for {normalized_domain}. You need to select a repository.",
                         "needs_github_auth": True,
@@ -706,7 +708,7 @@ class GithubScanView(APIView):
                 has_credentials = True
 
         if not has_credentials:
-            oauth_url = build_github_oauth_url(normalized_domain or '', slack_user_id)
+            oauth_url = build_github_oauth_url(normalized_domain or '', slack_user_id, return_url=return_url)
             return Response({
                 "error": f"No GitHub credentials found for domain '{normalized_domain or 'unknown'}'. Please connect GitHub first.",
                 "needs_github_auth": True,

@@ -13,6 +13,7 @@ from .models import GoogleConnection, UserIntegration
 from integrations.services.github_connections import (
     build_github_installation_url,
     build_github_oauth_state,
+    build_post_install_redirect_url,
     store_github_oauth_state,
     validate_github_oauth_state,
 )
@@ -355,14 +356,19 @@ def github_connect(request):
     """
     slack_user_id = request.GET.get('slack_user_id')
     domain = request.GET.get('domain')
+    return_url = request.GET.get('return_url')
     if not slack_user_id:
         return HttpResponseBadRequest("Missing slack_user_id")
 
     if domain:
-        oauth_state = build_github_oauth_state(domain=domain, slack_user_id=slack_user_id)
+        oauth_state = build_github_oauth_state(
+            domain=domain, slack_user_id=slack_user_id, return_url=return_url
+        )
     else:
         job_id = request.GET.get('job_id', '')
-        oauth_state = build_github_oauth_state(slack_user_id=slack_user_id, job_id=job_id)
+        oauth_state = build_github_oauth_state(
+            slack_user_id=slack_user_id, job_id=job_id, return_url=return_url
+        )
 
     store_github_oauth_state(oauth_state, request=request)
     return redirect(build_github_installation_url(oauth_state.raw))
@@ -465,8 +471,7 @@ def github_callback(request):
     repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
     selected_repo = repo_names[0] if len(repo_names) == 1 else None
 
-    retry_message = ""
-    domain_display = ""
+    retried = False
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
         # Store credentials in OrganizationContentConfig for the domain
@@ -511,7 +516,6 @@ def github_callback(request):
             repo_to_store,
             github_login,
         )
-        domain_display = f"<p>Domain: <strong>{normalized_domain}</strong></p>"
 
         # Also update UserIntegration if slack_user_id provided.
         # IMPORTANT: For org-level OAuth, tokens belong on OrganizationContentConfig (per-domain).
@@ -600,39 +604,33 @@ def github_callback(request):
                 if job.request_meta:
                     # Re-trigger the generation with original request
                     trigger_article_generation(slack_user_id, job.request_meta)
-                    retry_message = "<p>🔄 <strong>Successfully retried your article generation!</strong> You'll get a notification in Slack shortly.</p>"
+                    retried = True
                 else:
                     logger.warning(f"Could not retry job {job_id}: No request_meta found")
             except Exception as e:
                 logger.error(f"Failed to auto-retry job {job_id}: {e}")
-                retry_message = f"<p style='color:orange'>⚠️ Could not auto-retry: {e}</p>"
 
-    # Build success message
+    # Send the user back to the mlai.au page they started from. The origin URL
+    # rides along in the signed `state` (GitHub returns it untouched) and is
+    # re-validated against our trusted origins inside build_post_install_redirect_url;
+    # when absent or untrusted we fall back to the configured app home. The
+    # `github` status param lets the frontend surface the right toast/next step.
     if selected_repo:
-        repo_list_html = f"<p>Linked repository: <strong>{selected_repo}</strong></p>"
+        connection_status = "connected"
     elif len(repos) > 1:
-        repo_names_html = ", ".join(repo_names)
-        repo_list_html = (
-            "<p style='color: orange;'>⚠️ Multiple repositories are selected for this installation.</p>"
-            "<p>Roo requires exactly one repository per domain binding. Update the GitHub App installation "
-            "and reconnect after narrowing it to a single repository.</p>"
-            f"<p style='color: #666; font-size: 0.9em;'>Currently selected: {repo_names_html}</p>"
-        )
+        connection_status = "multiple_repos"
     else:
-        repo_list_html = "<p style='color: orange;'>⚠️ No repositories were selected. Please reinstall the app and select at least one repository.</p>"
+        connection_status = "no_repo"
 
-    return HttpResponse(f"""
-    <html>
-    <body style="font-family: sans-serif; text-align: center; padding-top: 50px; max-width: 600px; margin: 0 auto;">
-        <h1 style="color: green;">✅ GitHub App Installed!</h1>
-        <p>Connected as <strong>{github_login}</strong></p>
-        {domain_display}
-        {repo_list_html}
-        {retry_message}
-        <p>You can now close this window and return to Slack.</p>
-    </body>
-    </html>
-    """)
+    return redirect(
+        build_post_install_redirect_url(
+            oauth_state.return_url,
+            github=connection_status,
+            domain=normalized_domain,
+            repo=selected_repo,
+            retried="1" if retried else None,
+        )
+    )
 
 
 def github_select_repo(request):
