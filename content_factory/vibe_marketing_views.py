@@ -294,6 +294,11 @@ WORKFLOW_STEP_IDS = [step["id"] for step in WORKFLOW_STEP_DEFS]
 RUNNING_RUN_STATUSES = {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}
 FAILED_RUN_STATUSES = {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.CANCELLED, ContentFactoryRunStatus.DENIED}
 STARTUP_AUTOFILL_ACTIVE_REUSE_WINDOW = timedelta(minutes=30)
+# When a user re-scans within this window of the last completed scan, force a full scan
+# (bypass content-factory's unchanged-HEAD reuse short-circuit). A quick reuse doesn't
+# refresh the scaffold plan, which otherwise leaves the wizard stuck on "the repository
+# scaffold plan has drifted since approval. Re-run the repository scan before scaffolding."
+ARTICLE_SCAN_RAPID_RESCAN_WINDOW = timedelta(minutes=10)
 SCAN_LOCAL_AUTHORITATIVE_STATUSES = FAILED_RUN_STATUSES | {
     ContentFactoryRunStatus.COMPLETED,
     ContentFactoryRunStatus.AWAITING_CONFIRMATION,
@@ -11116,6 +11121,20 @@ class VibeMarketingGitHubReposView(APIView):
         )
 
 
+def _scan_should_force_refresh(config, request_data) -> bool:
+    """Whether a repo scan should bypass content-factory's unchanged-HEAD reuse.
+
+    True when the caller asks explicitly (forceRefresh/force_refresh), or when the
+    user re-scans within ARTICLE_SCAN_RAPID_RESCAN_WINDOW of the last completed scan:
+    a quick reuse doesn't refresh the scaffold plan, which leaves the wizard stuck on
+    the "plan has drifted, re-run the scan" guard.
+    """
+    if _bool_from_request(_request_value(request_data, "forceRefresh", "force_refresh", default=False)):
+        return True
+    last_scanned_at = getattr(config, "last_scanned_at", None)
+    return bool(last_scanned_at and (timezone.now() - last_scanned_at) <= ARTICLE_SCAN_RAPID_RESCAN_WINDOW)
+
+
 class VibeMarketingScanView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -11160,6 +11179,7 @@ class VibeMarketingScanView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         scaffold_if_missing = scan_purpose == "setup"
+        force_refresh = _scan_should_force_refresh(config, request.data)
         payload = {
             "domain": context.organization.domain,
             "github_repo": config.github_repo,
@@ -11170,6 +11190,7 @@ class VibeMarketingScanView(APIView):
             "generate_components": True,
             "article_surface_mode": article_surface_mode,
             "scan_purpose": scan_purpose,
+            "force_refresh": force_refresh,
         }
         _mark_roo_points_gate_authorized(
             payload,
