@@ -34,9 +34,49 @@ def article_setup_reset_at(config):
     )
 
 
+def article_setup_reset_excluded_run_ids(config) -> set[str]:
+    """Run ids tombstoned by the most recent reset.
+
+    The timestamp watermark (``article_setup_reset_at``) is fragile: a run's
+    ``updated_at`` can move past it, and a routine re-scan can drop the marker
+    entirely. Recording the exact run ids that existed at reset time makes the
+    reset survive both — those runs stay ignored regardless of timestamps.
+    """
+    raw = getattr(config, "article_system", None)
+    article_system = raw if isinstance(raw, dict) else {}
+    reset = article_system.get("article_setup_reset")
+    reset = reset if isinstance(reset, dict) else {}
+    ids = reset.get("excludedRunIds") or reset.get("excluded_run_ids") or []
+    if not isinstance(ids, (list, tuple, set)):
+        return set()
+    return {str(run_id).strip() for run_id in ids if str(run_id or "").strip()}
+
+
+ARTICLE_SETUP_RESET_KEYS = ("article_setup_reset", "article_setup_reset_at", "articleSetupResetAt")
+
+
+def carry_reset_markers(source, target):
+    """Copy the reset watermark + tombstone keys from ``source`` onto ``target``.
+
+    article_system gets re-normalized whenever a scan persists org config, which
+    drops these keys and silently un-resets the articles setup. Call this when
+    re-writing article_system to keep an existing reset intact.
+    """
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return target
+    for key in ARTICLE_SETUP_RESET_KEYS:
+        if key in source and key not in target:
+            target[key] = source[key]
+    return target
+
+
 def article_setup_reset_ignores_run(config, run) -> bool:
     if not run or getattr(run, "workflow", "") != "article_system_setup":
         return False
+    # Tombstoned by run id: durable against updated_at changes and marker loss.
+    run_id = str(getattr(run, "run_id", "") or "").strip()
+    if run_id and run_id in article_setup_reset_excluded_run_ids(config):
+        return True
     reset_at = article_setup_reset_at(config)
     if reset_at is None:
         return False
@@ -48,11 +88,38 @@ def article_setup_reset_ignores_run(config, run) -> bool:
     return run_timestamp <= reset_at
 
 
+def _existing_article_system_setup_run_ids(config) -> list[str]:
+    """Every article_system_setup run id for this org at reset time."""
+    organization = getattr(config, "organization", None)
+    domain = str(getattr(organization, "domain", "") or "").strip()
+    if not domain:
+        return []
+    try:
+        from workflow_runs.models import ContentFactoryRun
+    except Exception:
+        return []
+    try:
+        run_ids = (
+            ContentFactoryRun.objects.filter(domain__iexact=domain, workflow="article_system_setup")
+            .values_list("run_id", flat=True)
+        )
+    except Exception:
+        return []
+    seen: list[str] = []
+    for run_id in run_ids:
+        normalized = str(run_id or "").strip()
+        if normalized and normalized not in seen:
+            seen.append(normalized)
+    return seen
+
+
 def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
     reset_at = timezone.now()
     reset_at_iso = reset_at.isoformat()
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
     scan_state = raw_article_system.get("scan") if isinstance(raw_article_system.get("scan"), dict) else {}
+    excluded_run_ids = _existing_article_system_setup_run_ids(config)
+    repo_value = str(github_repo or getattr(config, "github_repo", "") or "").strip()
 
     next_article_system = default_article_system()
     if scan_state:
@@ -62,8 +129,10 @@ def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
     next_article_system["article_setup_reset"] = {
         "resetAt": reset_at_iso,
         "reset_at": reset_at_iso,
-        "githubRepo": str(github_repo or getattr(config, "github_repo", "") or "").strip(),
-        "github_repo": str(github_repo or getattr(config, "github_repo", "") or "").strip(),
+        "githubRepo": repo_value,
+        "github_repo": repo_value,
+        "excludedRunIds": excluded_run_ids,
+        "excluded_run_ids": excluded_run_ids,
     }
 
     update_fields = []
@@ -105,6 +174,8 @@ def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
         "cleared_fields": cleared_fields,
         "resetAt": reset_at_iso,
         "reset_at": reset_at_iso,
-        "githubRepo": str(github_repo or getattr(config, "github_repo", "") or "").strip(),
-        "github_repo": str(github_repo or getattr(config, "github_repo", "") or "").strip(),
+        "excludedRunIds": excluded_run_ids,
+        "excluded_run_ids": excluded_run_ids,
+        "githubRepo": repo_value,
+        "github_repo": repo_value,
     }

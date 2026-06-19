@@ -6904,6 +6904,17 @@ def _article_system_is_published(config, article_system: dict) -> bool:
 
 
 def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dict:
+    # Honor an article-setup reset here too. `_article_setup_state_for_config`
+    # already filters reset-ignored runs, but `_profile_checks` (the bootstrap
+    # "scaffold" check) calls this gate with UNFILTERED runs — without this, stale
+    # pre-reset article_system_setup runs resurface and pin the wizard to
+    # "needs attention" after a reset.
+    if config is not None:
+        latest_runs = [
+            candidate
+            for candidate in (latest_runs or [])
+            if not article_setup_reset_ignores_run(config, candidate)
+        ]
     pending = _pending_article_system_setup_from_config(config)
     pending_setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
     pending_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip().lower()

@@ -25,6 +25,7 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
+from content_factory.article_setup_reset import carry_reset_markers
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -1954,6 +1955,13 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     scaffold_status = str(data.get("scaffold_status") or "").strip()
     readiness = data.get("article_system_readiness") if isinstance(data.get("article_system_readiness"), dict) else {}
     readiness_status = str(readiness.get("status") or "").strip()
+    # An audit-only inventory scan never proposes a scaffold, so a `manual_blocked`
+    # readiness there only means "no articles route exists yet / one can't be
+    # auto-derived" — expected at this stage, not a failure. Block on readiness only
+    # when the scan actually attempted setup. (`scaffold_status == "manual_blocked"`
+    # is the explicit hint-unmatched block and always applies.)
+    scan_purpose = str(data.get("scan_purpose") or "").strip().lower()
+    audit_only_scan = scan_purpose == "inventory" or scaffold_status == "not_needed"
     if approval_required:
         run_status = ContentFactoryRunStatus.AWAITING_CONFIRMATION
         approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
@@ -1962,7 +1970,7 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
         run_status = ContentFactoryRunStatus.RUNNING
         approval_state = ContentFactoryApprovalState.APPROVED
         result_status = "article_system_setup_queued"
-    elif scaffold_status == "manual_blocked" or readiness_status == "manual_blocked":
+    elif scaffold_status == "manual_blocked" or (readiness_status == "manual_blocked" and not audit_only_scan):
         run_status = ContentFactoryRunStatus.BLOCKED
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         result_status = "manual_blocked"
@@ -4952,6 +4960,11 @@ class ContentFactoryCallbackView(APIView):
                         **dict(raw_article_system.get('scan') or {}),
                         **scan_state,
                     }
+                # Preserve the article-setup reset watermark + tombstone across a routine
+                # re-scan. normalize/merge_article_system drops these keys, so without this
+                # a scan silently un-resets the articles setup and stale failed setup runs
+                # resurface in the wizard.
+                carry_reset_markers(raw_article_system, merged_article_system)
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
