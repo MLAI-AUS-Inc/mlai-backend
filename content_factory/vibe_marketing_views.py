@@ -35,7 +35,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from content_factory.article_setup_reset import article_setup_reset_ignores_run, reset_article_setup_config
-from content_factory.article_system import resolve_article_system
+from content_factory.article_system import article_system_ready, resolve_article_system
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
@@ -382,12 +382,7 @@ def _article_repo_is_review_capable(config, *, github_ready=None, article_ready=
         github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     if article_ready is None:
         article_system = resolve_article_system(config)
-        article_ready = article_system.get("state") in {
-            "ready",
-            "detected",
-            "registry_driven_seo_ready",
-            "article_system_ready",
-        } or bool(config.publish_targets)
+        article_ready = article_system_ready(article_system) or bool(config.publish_targets)
     return bool(github_ready and article_ready)
 
 
@@ -8149,11 +8144,11 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     if generation_ready:
         setup_gate["setupBlocked"] = False
         setup_gate["generationReady"] = True
-    article_system_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
+    article_system_setup_ready = bool((setup_gate.get("published") or generation_ready) and not setup_gate.get("setupBlocked"))
     setup_pr_merged = bool(setup_gate.get("setupMerged"))
     missing_featured_components = _missing_mlai_featured_components(organization=organization, config=config)
     component_catalog_ready = not missing_featured_components
-    article_ready = article_system_ready and component_catalog_ready
+    article_ready = article_system_setup_ready and component_catalog_ready
     scan_ready = bool(config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
     discovery_run = _latest_run_matching(latest_runs, DISCOVERY_WORKFLOWS)
     article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
