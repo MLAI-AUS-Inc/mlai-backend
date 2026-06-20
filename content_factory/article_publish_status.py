@@ -40,7 +40,16 @@ REFRESH_INTERVAL = timedelta(minutes=10)
 SITEMAP_CACHE_SECONDS = 300
 SITEMAP_FAILURE_CACHE_SECONDS = 60
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+?)/pull/(\d+)")
-_PR_STATES_WORTH_CHECKING = {ArticlePublishStatus.WRITTEN, ArticlePublishStatus.PR_OPEN}
+# PR states we still poll: the pre-merge states, plus merged articles not yet
+# confirmed on origin's default branch — so we can capture the merge commit and
+# set on_main_verified_at, the authoritative "it's really on main" fact.
+_PR_STATES_WORTH_CHECKING = {
+    ArticlePublishStatus.WRITTEN,
+    ArticlePublishStatus.PR_OPEN,
+    ArticlePublishStatus.MERGED,
+}
+# Branch names treated as origin's source-of-truth default branch.
+DEFAULT_BRANCH_NAMES = {"main", "master"}
 
 
 def publish_status_rank(value) -> int:
@@ -53,6 +62,20 @@ def coerce_pr_number(value):
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def article_bucket(article) -> str:
+    """Which dashboard bucket a written article belongs to.
+
+    A WrittenArticle has finished authoring, so it is never a "draft": it is
+    "published" once its content is confirmed on origin's default branch (the
+    source of truth), otherwise still "publishing". The weaker sitemap-based LIVE
+    status is honoured as published for back-compat until on-main verification
+    backfills it.
+    """
+    if article.on_main_verified_at or article.publish_status == ArticlePublishStatus.LIVE:
+        return "published"
+    return "publishing"
 
 
 def derive_publish_status_from_evidence(evidence) -> str:
@@ -102,6 +125,56 @@ def advance_publish_status(article, new_status, *, pr_number=None, pr_merged_at=
     return changed
 
 
+def _apply_on_main_evidence(article, pr_state, now):
+    """Record the authoritative on-main facts from a PR's GitHub state.
+
+    A PR shown as merged into origin's default branch means its merge commit —
+    and therefore the article's files — are on main. That is the source of truth
+    the dashboard's "published" bucket gates on. Captures the merge commit even
+    for non-default-branch merges (useful evidence) but only sets
+    on_main_verified_at for a default-branch merge. Never downgrades.
+
+    When pr_state carries an explicit "default_branch" (e.g. from a GitHub
+    webhook, which names the repo's real default) it is authoritative; otherwise
+    we fall back to the common default-branch names.
+    """
+    changed = set()
+    merge_commit_sha = str(pr_state.get("merge_commit_sha") or "").strip()
+    if merge_commit_sha and article.merge_commit_sha != merge_commit_sha:
+        article.merge_commit_sha = merge_commit_sha
+        changed.add("merge_commit_sha")
+    base_ref = str(pr_state.get("base_ref") or "").strip().lower()
+    default_branch = str(pr_state.get("default_branch") or "").strip().lower()
+    on_default_branch = base_ref == default_branch if default_branch else base_ref in DEFAULT_BRANCH_NAMES
+    merged_into_main = pr_state.get("status") == ArticlePublishStatus.MERGED and on_default_branch
+    if merged_into_main and not article.on_main_verified_at:
+        article.on_main_verified_at = now
+        article.on_main_commit_sha = merge_commit_sha
+        changed.update({"on_main_verified_at", "on_main_commit_sha"})
+    return changed
+
+
+def apply_pull_request_state(article, pr_state, *, now=None):
+    """Apply a PR's GitHub state (from the poller or a webhook) to an article.
+
+    Advances the publish status and records the authoritative on-main facts when
+    the PR merged into the default branch. pr_state keys: status, number,
+    merged_at, merge_commit_sha, base_ref, and optionally default_branch. Mutates
+    the instance; returns the set of changed field names (callers save).
+    """
+    now = now or timezone.now()
+    changed = set(
+        advance_publish_status(
+            article,
+            pr_state["status"],
+            pr_number=pr_state.get("number"),
+            pr_merged_at=pr_state.get("merged_at"),
+        )
+    )
+    changed.update(_apply_on_main_evidence(article, pr_state, now))
+    return changed
+
+
 def refresh_publish_statuses(organization, config=None, *, limit=6, force=False):
     """Best-effort refresh of the organization's non-live articles.
 
@@ -133,17 +206,17 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False)
         live_url = _match_live_url(article, site_urls)
         if live_url:
             changed.update(advance_publish_status(article, ArticlePublishStatus.LIVE, live_url=live_url))
-        elif article.pr_url and article.publish_status in _PR_STATES_WORTH_CHECKING:
+        # Poll the PR even when the sitemap already matched: on-main verification
+        # is the authoritative published signal and we want the merge commit on
+        # record. Skipped once on_main_verified_at is set (terminal).
+        if (
+            article.pr_url
+            and not article.on_main_verified_at
+            and article.publish_status in _PR_STATES_WORTH_CHECKING
+        ):
             pr_state = _github_pr_state(article.pr_url, config)
             if pr_state:
-                changed.update(
-                    advance_publish_status(
-                        article,
-                        pr_state["status"],
-                        pr_number=pr_state.get("number"),
-                        pr_merged_at=pr_state.get("merged_at"),
-                    )
-                )
+                changed.update(apply_pull_request_state(article, pr_state, now=now))
         article.save(update_fields=sorted(changed))
         refreshed.append(article)
     return refreshed
@@ -230,10 +303,13 @@ def _github_pr_state(pr_url, config):
         status = ArticlePublishStatus.PR_CLOSED
     else:
         status = ArticlePublishStatus.PR_OPEN
+    base = payload.get("base") if isinstance(payload.get("base"), dict) else {}
     return {
         "status": status,
         "number": number,
         "merged_at": parse_datetime(merged_at_raw) if merged_at_raw else None,
+        "merge_commit_sha": str(payload.get("merge_commit_sha") or "").strip(),
+        "base_ref": str(base.get("ref") or "").strip(),
     }
 
 

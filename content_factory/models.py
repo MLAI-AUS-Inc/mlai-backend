@@ -861,6 +861,21 @@ class WrittenArticle(models.Model):
     )
     pr_number = models.IntegerField(null=True, blank=True)
     pr_merged_at = models.DateTimeField(null=True, blank=True)
+    # The merge commit the PR landed on origin's default branch — the anchor for
+    # proving "this content is really in the code on main".
+    merge_commit_sha = models.CharField(max_length=64, blank=True, default="")
+
+    # Source-of-truth facts. An article counts as "published" only once its
+    # content is confirmed present on origin's default branch (main). This is set
+    # by the reconciler when the PR is observed merged into main (see
+    # article_publish_status.refresh_publish_statuses) and never downgrades; it is
+    # independent of the weaker sitemap-based `live_*` signal below.
+    on_main_verified_at = models.DateTimeField(null=True, blank=True)
+    on_main_commit_sha = models.CharField(max_length=64, blank=True, default="")
+    # Repo path of the article's content/registry file, captured from publish
+    # evidence; lets the reconciler verify the file literally exists on main.
+    content_path = models.CharField(max_length=500, blank=True, default="")
+
     live_url = models.URLField(
         blank=True, null=True,
         help_text="Production URL confirmed against the customer site's sitemap",
