@@ -3599,7 +3599,7 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(pending["status"], "pr_created")
         self.assertEqual(pending["pr_number"], 44)
 
-    def test_merge_setup_pr_refuses_pending_checks(self):
+    def test_merge_setup_pr_publishes_via_auto_merge_when_direct_merge_blocked(self):
         setup_run = ContentFactoryRun.objects.create(
             run_id="setup-merge-pending",
             workflow="article_system_setup",
@@ -3624,20 +3624,23 @@ class VibeMarketingComponentCommentTests(TestCase):
         with (
             patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
             patch(
-                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False},
-                    {"ready": False, "state": "pending", "message": "GitHub Actions checks are still running."},
+                    {"state": "open", "merged": False, "head": {"sha": "s"}, "node_id": "PR_x"},
+                    {"ready": True, "state": "unknown", "message": "Checks visibility unavailable; relying on GitHub merge enforcement."},
                 ),
             ),
+            patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("At least 1 approving review is required.")),
+            patch("content_factory.vibe_marketing_views._enable_native_auto_merge", return_value={"status": "enabled", "message": "ok"}),
         ):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("GitHub Actions checks are still running", response.data["detail"])
+        # An unmergeable direct merge no longer refuses — it publishes via GitHub native
+        # auto-merge (mirrors article publish), so the run goes to "publishing".
+        self.assertEqual(response.status_code, 200)
         setup_run.refresh_from_db()
-        self.assertEqual(setup_run.result["merge_status"], "pending")
-        self.assertEqual(setup_run.result["article_system_setup"]["merge_status"], "pending")
+        self.assertEqual(setup_run.result["merge_status"], "publishing")
+        self.assertTrue(setup_run.result["article_system_setup"]["native_auto_merge_enabled"])
 
     def test_merge_setup_pr_records_manual_merge_required_when_github_blocks_api_merge(self):
         config = self._prepare_articles_setup_gate(status="pr_created")
@@ -3667,13 +3670,17 @@ class VibeMarketingComponentCommentTests(TestCase):
         with (
             patch("content_factory.vibe_marketing_views._github_token_for_repo_operation", return_value=("github-token", "test")),
             patch(
-                "content_factory.vibe_marketing_views._github_pull_checks_state",
+                "content_factory.vibe_marketing_views._github_pull_checks_state_lenient",
                 return_value=(
-                    {"state": "open", "merged": False},
+                    {"state": "open", "merged": False, "head": {"sha": "s"}},
                     {"ready": True, "state": "success", "message": "Checks are passing."},
                 ),
             ),
             patch("content_factory.vibe_marketing_views._github_api_request", side_effect=ValueError("Merge blocked by branch protection.")),
+            patch(
+                "content_factory.vibe_marketing_views._enable_native_auto_merge",
+                return_value={"status": "unavailable", "message": "Auto-merge is not allowed for this repository"},
+            ),
         ):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/merge-setup-pr", {}, format="json")
 
