@@ -6958,7 +6958,15 @@ def _setup_metadata_from_run(run) -> dict:
     if not run:
         return {}
     result = _run_mapping(run.result)
+    nested = _run_mapping(result.get("result"))
     setup = _article_system_setup_payload_from_run(run)
+    result_hint = _run_mapping(
+        result.get("article_surface_hint")
+        or result.get("articleSurfaceHint")
+        or nested.get("article_surface_hint")
+        or nested.get("articleSurfaceHint")
+    )
+    setup_hint = _run_mapping(setup.get("article_surface_hint") or setup.get("articleSurfaceHint"))
     run_status_value = str(getattr(run, "status", "") or "").strip()
     if run.workflow == "article_system_setup" and run_status_value in RUNNING_RUN_STATUSES:
         status_value = run_status_value
@@ -6975,6 +6983,14 @@ def _setup_metadata_from_run(run) -> dict:
         or _setup_value(setup, "setup_run_id", "setupRunId")
         or (run.run_id if run.workflow == "article_system_setup" else "")
     ).strip()
+    route_path = str(
+        _setup_value(result, "routePath", "route_path", "path", "publicPath", "public_path", "listingPath", "listing_path")
+        or _setup_value(setup, "routePath", "route_path", "path", "publicPath", "public_path", "listingPath", "listing_path")
+        or _setup_value(nested, "routePath", "route_path", "path", "publicPath", "public_path", "listingPath", "listing_path")
+        or _setup_value(result_hint, "route_path", "routePath", "path", "public_url", "publicUrl", "listing_url", "listingUrl", "url")
+        or _setup_value(setup_hint, "route_path", "routePath", "path", "public_url", "publicUrl", "listing_url", "listingUrl", "url")
+        or ""
+    ).strip()
     rescan_run_id = str(
         _setup_value(result, "rescan_run_id", "rescanRunId")
         or _setup_value(setup, "rescan_run_id", "rescanRunId")
@@ -6983,6 +6999,8 @@ def _setup_metadata_from_run(run) -> dict:
     return {
         "setupRunId": setup_run_id,
         "setupStatus": status_value,
+        "routePath": route_path,
+        "route_path": route_path,
         "rescanRunId": rescan_run_id,
         "mergeStatus": str(
             _setup_value(result, "merge_status", "mergeStatus")
