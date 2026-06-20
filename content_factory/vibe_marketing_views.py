@@ -6529,7 +6529,13 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         (run if run and run.workflow == "article_system_setup" else None)
         or _article_setup_state_run_from_latest(explicit_runs, pending_setup_run_id)
         or _latest_article_system_setup_run(latest_runs, setup_run_id=pending_setup_run_id)
-        or _latest_persisted_run_for_article_setup(config, {"article_system_setup"}, run_id=pending_setup_run_id)
+        # DB lookup by id only — never fall back to "latest setup run for the org" with an
+        # empty id, which resurfaces stray/abandoned runs as a phantom saved setup.
+        or (
+            _latest_persisted_run_for_article_setup(config, {"article_system_setup"}, run_id=pending_setup_run_id)
+            if pending_setup_run_id
+            else None
+        )
     )
     if _article_system_setup_run_is_dispatch_blocked(setup_run):
         setup_run = None
@@ -6870,19 +6876,23 @@ def _setup_metadata_from_run(run) -> dict:
 
 
 def _latest_article_system_setup_run(latest_runs, *, setup_run_id: str = ""):
+    """Resolve the *pinned* article_system_setup run by id (within latest_runs).
+
+    Returns the id-matched run, or None. It deliberately does NOT fall back to
+    "the latest article_system_setup run for the org" when no id is given (or the
+    id isn't found): that resurfaced stray/abandoned setup runs (e.g. an old
+    preview_failed run) as a phantom saved setup whenever nothing was pinned —
+    the recurring "articles/blogs setup is saved" / scaffold-needs-attention state.
+    A genuine in-progress setup always pins its run id in pending_article_system_setup,
+    so the legit case still resolves by id.
+    """
     setup_run_id = str(setup_run_id or "").strip()
-    if setup_run_id:
-        matched = next((run for run in latest_runs or [] if run.run_id == setup_run_id), None)
-        if matched and not _article_system_setup_run_is_dispatch_blocked(matched):
-            return matched
-    return next(
-        (
-            run
-            for run in latest_runs or []
-            if run.workflow == "article_system_setup" and not _article_system_setup_run_is_dispatch_blocked(run)
-        ),
-        None,
-    )
+    if not setup_run_id:
+        return None
+    matched = next((run for run in latest_runs or [] if run.run_id == setup_run_id), None)
+    if matched and not _article_system_setup_run_is_dispatch_blocked(matched):
+        return matched
+    return None
 
 
 def _verification_scan_for_setup(latest_runs, *, rescan_run_id: str = ""):
