@@ -4826,15 +4826,83 @@ def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_me
     return run
 
 
-def _merge_setup_pr_for_run(*, run, context):
+def _apply_setup_auto_merge_pending(*, run, config, reason=""):
+    """Mark a setup run as 'publishing' while GitHub native auto-merge waits for required
+    checks/reviews. Non-terminal and not blocked, so the single Publish card keeps polling
+    and _refresh_pending_article_system_setup_pr_status finalizes once GitHub merges."""
+    status_value = "publishing"
+    reason = str(reason or "Publishing to production. GitHub will merge automatically once required checks pass.").strip()
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    for target in (result, setup):
+        target["status"] = status_value
+        target["setup_status"] = status_value
+        target["setupStatus"] = status_value
+        target["merge_status"] = status_value
+        target["mergeStatus"] = status_value
+        target["checks_status"] = "pending"
+        target["checksStatus"] = "pending"
+        target["merge_blocked_reason"] = reason
+        target["mergeBlockedReason"] = reason
+        target["current_step"] = status_value
+        target["currentStep"] = status_value
+        target["native_auto_merge_enabled"] = True
+    setup.setdefault("setup_run_id", run.run_id)
+    setup.setdefault("setupRunId", run.run_id)
+    result["article_system_setup"] = setup
+    run.result = sanitize_json_for_postgres(result)
+    run.current_step = status_value
+    run.save(update_fields=["current_step", "result", "updated_at"])
+    if config is not None:
+        article_system = dict(config.article_system or {})
+        pending = dict(article_system.get("pending_article_system_setup") or {})
+        pending.update(
+            {
+                "status": status_value,
+                "setupStatus": status_value,
+                "setup_status": status_value,
+                "mergeStatus": status_value,
+                "merge_status": status_value,
+                "checksStatus": "pending",
+                "checks_status": "pending",
+                "mergeBlockedReason": reason,
+                "merge_blocked_reason": reason,
+                "currentStep": status_value,
+                "current_step": status_value,
+                "nativeAutoMergeEnabled": True,
+                "native_auto_merge_enabled": True,
+                "setupRunId": run.run_id,
+                "setup_run_id": run.run_id,
+                "updatedAt": timezone.now().isoformat(),
+            }
+        )
+        pending["updated_at"] = pending["updatedAt"]
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = sanitize_json_for_postgres(article_system)
+        config.save(update_fields=["article_system", "updated_at"])
+    return run
+
+
+SETUP_MERGE_TERMINAL_CHECK_STATES = {"failed", "failure", "error", "closed"}
+
+
+def _attempt_setup_publish_merge(*, run, context):
+    """Publish the setup PR to production the way article generation does: tolerate the
+    checks:read permission gap, try a direct squash merge (works on an unprotected main),
+    then fall back to GitHub native auto-merge (GitHub merges when required checks/reviews
+    pass). Shared by the manual Publish action and the hands-off auto-publish hook.
+
+    Returns {"outcome": "merged"|"auto_merge_pending"|"checks_failed"|"manual_required"
+    |"no_repo"|"no_pr"|"error", "detail": str, "checks": dict, "run": run}."""
     if run.workflow != "article_system_setup":
-        return None, Response({"detail": "This action is only available for article system setup runs."}, status=status.HTTP_400_BAD_REQUEST)
-    repo = run.github_repo or _get_config(context.organization).github_repo
+        return {"outcome": "error", "detail": "This action is only available for article system setup runs.", "checks": {}, "run": run}
+    config = _get_config(context.organization)
+    repo = run.github_repo or (config.github_repo if config else "")
     if not repo:
-        return None, Response({"detail": "No GitHub repository is configured for this setup run."}, status=status.HTTP_400_BAD_REQUEST)
+        return {"outcome": "no_repo", "detail": "No GitHub repository is configured for this setup run.", "checks": {}, "run": run}
     pr_number = _pull_request_number_from_run(run)
     if not pr_number:
-        return None, Response({"detail": "No setup pull request was found for this run."}, status=status.HTTP_409_CONFLICT)
+        return {"outcome": "no_pr", "detail": "No setup pull request was found for this run.", "checks": {}, "run": run}
     try:
         token, token_source = _github_token_for_repo_operation(
             domain=context.organization.domain,
@@ -4843,41 +4911,34 @@ def _merge_setup_pr_for_run(*, run, context):
         )
         logger.info(
             "vibe_marketing_setup_merge_token_source run_id=%s repo=%s token_source=%s",
-            run.run_id,
-            repo,
-            token_source,
+            run.run_id, repo, token_source,
         )
-        pull, checks = _github_pull_checks_state(repo=repo, pr_number=pr_number, token=token)
-        if pull.get("merged"):
-            return _apply_setup_merge_result(run=run, context=context, checks_status="merged"), None
-        if not checks.get("ready"):
-            result = dict(run.result or {})
-            setup = dict(result.get("article_system_setup") or {})
-            checks_state = str(checks.get("state") or "blocked")
-            result["merge_status"] = checks_state
-            result["mergeStatus"] = checks_state
-            result["checks_status"] = checks_state
-            result["checksStatus"] = checks_state
-            result["merge_blocked_reason"] = checks.get("message")
-            setup["merge_status"] = checks_state
-            setup["mergeStatus"] = checks_state
-            setup["checks_status"] = checks_state
-            setup["checksStatus"] = checks_state
-            setup["merge_blocked_reason"] = checks.get("message")
-            result["article_system_setup"] = setup
-            run.result = result
-            run.save(update_fields=["result", "updated_at"])
-            return None, Response(
-                {"detail": checks.get("message") or "Setup PR checks are not ready.", "checks": checks},
-                status=status.HTTP_409_CONFLICT,
-            )
+        # Lenient: a checks/statuses-read 403 must NOT surface as the banner.
+        pull, checks = _github_pull_checks_state_lenient(repo=repo, pr_number=pr_number, token=token)
     except (ArticleGenerationError, TokenRefreshError, ValueError, http_client.RequestException) as exc:
-        return None, Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return {"outcome": "error", "detail": str(exc), "checks": {}, "run": run}
 
+    if pull.get("merged"):
+        return {
+            "outcome": "merged",
+            "detail": "Pull request is already merged.",
+            "checks": checks,
+            "run": _apply_setup_merge_result(run=run, context=context, checks_status="merged"),
+        }
+
+    # Genuinely failed checks (visible) → don't merge; surface it.
+    if str(checks.get("state") or "").lower() in SETUP_MERGE_TERMINAL_CHECK_STATES:
+        reason = checks.get("message") or "GitHub checks did not pass."
+        _mark_setup_merge_blocked(run=run, config=config, reason=reason, status_value="checks_failed")
+        return {"outcome": "checks_failed", "detail": reason, "checks": checks, "run": run}
+
+    # 1) Direct squash merge — works on an unprotected main or when the App is a ruleset
+    #    bypass actor. pull_requests:write (which the token has) is enough here.
     merge_payload = {
         "commit_title": f"Merge Content Factory articles setup from {run.run_id}",
         "merge_method": "squash",
     }
+    merge_error = ""
     try:
         merged = _github_api_request(
             "PUT",
@@ -4886,18 +4947,88 @@ def _merge_setup_pr_for_run(*, run, context):
             body=merge_payload,
             expected=(200, 201),
         )
+        return {
+            "outcome": "merged",
+            "detail": "Published to production.",
+            "checks": checks,
+            "run": _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged),
+        }
     except (ValueError, http_client.RequestException) as exc:
-        config = _get_config(context.organization)
-        _mark_setup_merge_blocked(run=run, config=config, reason=str(exc), status_value="manual_merge_required")
-        return None, Response(
-            {
-                "detail": f"{exc} Merge the setup PR in GitHub, then refresh merge status.",
-                "checks": {"state": "manual_merge_required", "ready": False, "message": str(exc)},
-            },
-            status=status.HTTP_409_CONFLICT,
-        )
+        merge_error = str(exc)
+        logger.info("vibe_marketing_setup_direct_merge_failed run_id=%s repo=%s detail=%s", run.run_id, repo, merge_error)
 
-    return _apply_setup_merge_result(run=run, context=context, checks_status="success", merge_response=merged), None
+    # 2) Direct merge failed (protected main / required reviews) → GitHub native auto-merge.
+    auto = _enable_native_auto_merge(repo=repo, pr_number=pr_number, token=token)
+    if auto.get("status") == "already_merged":
+        return {
+            "outcome": "merged",
+            "detail": "Pull request is already merged.",
+            "checks": checks,
+            "run": _apply_setup_merge_result(run=run, context=context, checks_status="merged"),
+        }
+    if auto.get("status") == "enabled":
+        reason = "Publishing to production. GitHub will merge automatically once required checks pass."
+        run = _apply_setup_auto_merge_pending(run=run, config=config, reason=reason)
+        return {"outcome": "auto_merge_pending", "detail": reason, "checks": checks, "run": run}
+
+    # 3) Neither worked → manual.
+    detail = merge_error or auto.get("message") or "GitHub did not allow this PR to be merged from Content Factory."
+    _mark_setup_merge_blocked(run=run, config=config, reason=detail, status_value="manual_merge_required")
+    return {
+        "outcome": "manual_required",
+        "detail": detail,
+        "checks": {"state": "manual_merge_required", "ready": False, "message": detail},
+        "run": run,
+    }
+
+
+def _merge_setup_pr_for_run(*, run, context):
+    """Manual 'Publish' action wrapper around _attempt_setup_publish_merge. Returns
+    (run, None) when merged or publishing (native auto-merge enabled), else
+    (None, error Response)."""
+    outcome = _attempt_setup_publish_merge(run=run, context=context)
+    kind = outcome.get("outcome")
+    if kind in ("merged", "auto_merge_pending"):
+        return outcome.get("run") or run, None
+    if kind == "no_repo":
+        return None, Response({"detail": outcome.get("detail")}, status=status.HTTP_400_BAD_REQUEST)
+    detail = outcome.get("detail") or "Setup PR could not be published."
+    if kind == "manual_required":
+        detail = f"{detail} Merge the setup PR in GitHub, then refresh merge status."
+    return None, Response(
+        {"detail": detail, "checks": outcome.get("checks") or {}},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _setup_pending_status_allows_auto_publish(run):
+    """Only auto-publish a freshly-created setup PR that hasn't already been merged,
+    queued for native auto-merge, or marked blocked — so the poll-driven hook fires once."""
+    setup = _run_mapping((getattr(run, "result", None) or {}).get("article_system_setup")) if run else {}
+    if setup.get("native_auto_merge_enabled"):
+        return False
+    status_value = str(setup.get("setupStatus") or setup.get("setup_status") or setup.get("status") or "").strip().lower()
+    merge_value = str(setup.get("mergeStatus") or setup.get("merge_status") or "").strip().lower()
+    if merge_value in {"merged", "publishing", "manual_merge_required", "checks_failed"}:
+        return False
+    return status_value in {"", "pr_created", "setup_pr_created", "not_merged"}
+
+
+def _maybe_auto_publish_setup(*, run, context):
+    """Hands-off auto-publish: when the org opted into auto_publish, publish the setup PR
+    to production (direct merge or native auto-merge) without a manual click. Best-effort;
+    never raises into the caller (a status poll)."""
+    if run is None or getattr(run, "workflow", "") != "article_system_setup":
+        return
+    if not _org_config_enables_auto_publish(context):
+        return
+    if not _setup_pending_status_allows_auto_publish(run):
+        return
+    try:
+        outcome = _attempt_setup_publish_merge(run=run, context=context)
+        logger.info("vibe_marketing_setup_auto_publish run_id=%s outcome=%s", run.run_id, outcome.get("outcome"))
+    except Exception as exc:
+        logger.warning("vibe_marketing_setup_auto_publish_failed run_id=%s error=%s", run.run_id, exc)
 
 def _github_api_request(method, path, *, token, body=None, expected=(200,)):
     url = f"https://api.github.com{path}"
@@ -4946,6 +5077,124 @@ def _github_pull_checks_state(*, repo, pr_number, token):
     if failed_runs:
         return pull, {"state": "failed", "ready": False, "message": "One or more GitHub Actions checks failed."}
     return pull, {"state": "success", "ready": True, "message": "Checks are passing."}
+
+
+def _is_github_permission_error(exc) -> bool:
+    """A GitHub read 403'd purely because the installation token lacks a fine-grained
+    permission. The merge token is scoped to contents+pull_requests, so the checks/
+    statuses reads in _github_pull_checks_state raise this; it is NOT an auth failure."""
+    return "resource not accessible by integration" in str(exc or "").lower()
+
+
+def _github_pull_checks_state_lenient(*, repo, pr_number, token):
+    """Like _github_pull_checks_state but never hard-fails on the checks/statuses
+    permission gap. When those reads are forbidden we return an 'unknown' state with
+    ready=True so callers proceed to merge — GitHub still enforces required checks and
+    branch protection on the merge itself."""
+    pull = _github_api_request("GET", f"/repos/{repo}/pulls/{pr_number}", token=token)
+    if pull.get("merged"):
+        return pull, {"state": "merged", "ready": False, "message": "Pull request is already merged."}
+    if pull.get("state") != "open":
+        return pull, {"state": "closed", "ready": False, "message": "Pull request is not open."}
+    head_sha = ((pull.get("head") or {}).get("sha") or "").strip()
+    if not head_sha:
+        return pull, {"state": "unknown", "ready": True, "message": "Pull request head SHA is unavailable; relying on GitHub merge enforcement."}
+    try:
+        combined = _github_api_request("GET", f"/repos/{repo}/commits/{head_sha}/status", token=token)
+        check_runs = _github_api_request("GET", f"/repos/{repo}/commits/{head_sha}/check-runs", token=token)
+    except (ValueError, http_client.RequestException) as exc:
+        if _is_github_permission_error(exc):
+            logger.info(
+                "vibe_marketing_setup_checks_read_forbidden repo=%s pr_number=%s detail=%s",
+                repo, pr_number, exc,
+            )
+            return pull, {"state": "unknown", "ready": True, "message": "Checks visibility unavailable; relying on GitHub merge enforcement."}
+        raise
+    status_count = int(combined.get("total_count") or 0)
+    status_state = str(combined.get("state") or "").lower()
+    runs = check_runs.get("check_runs") if isinstance(check_runs.get("check_runs"), list) else []
+    incomplete_runs = [item for item in runs if item.get("status") != "completed"]
+    failed_runs = [
+        item
+        for item in runs
+        if item.get("status") == "completed"
+        and item.get("conclusion") not in {"success", "neutral", "skipped"}
+    ]
+    if status_count and status_state not in {"success", ""}:
+        return pull, {"state": status_state or "pending", "ready": False, "message": "Commit status checks have not passed."}
+    if failed_runs:
+        return pull, {"state": "failed", "ready": False, "message": "One or more GitHub Actions checks failed."}
+    if incomplete_runs:
+        return pull, {"state": "pending", "ready": False, "message": "GitHub Actions checks are still running."}
+    return pull, {"state": "success", "ready": True, "message": "Checks are passing."}
+
+
+def _github_graphql_request(*, query, variables, token):
+    """Minimal GitHub GraphQL POST. _github_api_request is REST-only, so native
+    auto-merge (enablePullRequestAutoMerge) needs this sibling. Returns parsed 'data';
+    raises ValueError on transport error or a GraphQL 'errors' payload."""
+    response = http_client.request(
+        "POST",
+        "https://api.github.com/graphql",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"query": query, "variables": variables},
+        timeout=(3, 20),
+    )
+    try:
+        payload = response.json() if response.content else {}
+    except Exception:
+        payload = {}
+    if response.status_code != 200:
+        detail = payload.get("message") if isinstance(payload, dict) else ""
+        raise ValueError(detail or f"GitHub GraphQL returned {response.status_code}.")
+    errors = payload.get("errors") or []
+    if errors:
+        raise ValueError(" | ".join(str(item.get("message") or item) for item in errors))
+    return payload.get("data") or {}
+
+
+_ENABLE_AUTO_MERGE_MUTATION = (
+    "mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {"
+    " enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod})"
+    " { pullRequest { id number } } }"
+)
+
+
+def _enable_native_auto_merge(*, repo, pr_number, token, merge_method="SQUASH"):
+    """Best-effort GitHub native auto-merge. Never raises. Returns
+    {"status": "enabled"|"unavailable"|"already_merged", "message": str}.
+
+    Needs only pull_requests:read (node id) + pull_requests:write (mutation) — both of
+    which the minted token has. We deliberately do NOT try to flip the repo 'Allow
+    auto-merge' setting (needs administration:write the token lacks); if the repo
+    disallows auto-merge GitHub errors here and we report 'unavailable'."""
+    try:
+        pull = _github_api_request("GET", f"/repos/{repo}/pulls/{pr_number}", token=token)
+    except (ValueError, http_client.RequestException) as exc:
+        return {"status": "unavailable", "message": str(exc)}
+    if pull.get("merged"):
+        return {"status": "already_merged", "message": "Pull request is already merged."}
+    node_id = str(pull.get("node_id") or "").strip()
+    if not node_id:
+        return {"status": "unavailable", "message": "Pull request node id is unavailable."}
+    try:
+        _github_graphql_request(
+            query=_ENABLE_AUTO_MERGE_MUTATION,
+            variables={"pullRequestId": node_id, "mergeMethod": (merge_method or "SQUASH").upper()},
+            token=token,
+        )
+    except (ValueError, http_client.RequestException) as exc:
+        logger.info(
+            "vibe_marketing_setup_native_auto_merge_unavailable repo=%s pr_number=%s detail=%s",
+            repo, pr_number, exc,
+        )
+        return {"status": "unavailable", "message": str(exc)}
+    logger.info("vibe_marketing_setup_native_auto_merge_enabled repo=%s pr_number=%s", repo, pr_number)
+    return {"status": "enabled", "message": "Native auto-merge enabled."}
 
 
 def _pull_request_number_from_values(*values):
@@ -5028,6 +5277,10 @@ def _refresh_pending_article_system_setup_pr_status(*, context, config=None, lat
         return run, False
 
     if not pull.get("merged"):
+        # Hands-off auto-publish: for orgs that opted into auto_publish, publish the
+        # freshly-created setup PR without a manual click (fires once, best-effort).
+        if setup_run is not None:
+            _maybe_auto_publish_setup(run=setup_run, context=context)
         return run, False
 
     if setup_run is not None:
