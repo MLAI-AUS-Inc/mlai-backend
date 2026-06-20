@@ -669,6 +669,10 @@ GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
     "GITHUB_OAUTH_REDIRECT_URI",
     "http://localhost:8000/integrations/callback/github",
 )
+# Shared secret for verifying GitHub webhook deliveries (X-Hub-Signature-256).
+# When unset, the webhook endpoint rejects every request, so publish state only
+# advances via the best-effort poller.
+GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
 # Points System Configuration
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]

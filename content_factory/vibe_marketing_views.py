@@ -40,6 +40,7 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
     advance_publish_status,
+    article_bucket,
     coerce_pr_number,
     derive_publish_status_from_evidence,
     refresh_publish_statuses,
@@ -1760,7 +1761,7 @@ def _normalize_keyword_memory(value) -> str:
     return normalize_topic_feedback_keyword(value)
 
 
-def _serialize_written_article(article):
+def _serialize_written_article(article, *, publish_attempt=None):
     return {
         "id": str(article.id),
         "title": article.title,
@@ -1771,6 +1772,19 @@ def _serialize_written_article(article):
         "prNumber": article.pr_number,
         "publishStatus": article.publish_status,
         "liveUrl": article.live_url or "",
+        # Authoritative publish facts (Phase 0). `bucket` is "publishing" until the
+        # content is confirmed on origin's default branch, then "published" — the
+        # gate the dashboard's recent/live list should use. `onMain` is the proven
+        # source-of-truth fact, independent of the weaker sitemap `liveUrl`.
+        "bucket": article_bucket(article),
+        "onMain": bool(article.on_main_verified_at),
+        "onMainAt": article.on_main_verified_at.isoformat() if article.on_main_verified_at else None,
+        "mergeCommitSha": article.merge_commit_sha or "",
+        # Latest publish-attempt state for in-flight articles — surfaces stuck /
+        # failed / awaiting-approval / in-progress publishes that the publishStatus
+        # pill can't express (the article stays "written" while its publish child
+        # run is the one in trouble). None when there is nothing to flag.
+        "publishAttempt": publish_attempt,
         # NOT "sourceRunId": on draft payloads that name means "lineage root".
         "runId": article.source_run_id or None,
         "writtenAt": article.published_at.isoformat() if article.published_at else article.created_at.isoformat(),
@@ -2074,10 +2088,90 @@ def _topic_candidates_from_runs(
 
 
 def _recent_written_topics(organization, *, limit=8):
+    articles = list(
+        WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
+    )
+    # Only in-flight (publishing) articles can have a stuck/failed publish worth
+    # surfacing; published ones are done, so skip the run lookups for them.
+    publishing = [article for article in articles if article_bucket(article) != "published"]
+    attempts = _article_publish_attempts(publishing)
     return [
-        _serialize_written_article(article)
-        for article in WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
+        _serialize_written_article(article, publish_attempt=attempts.get(article.id))
+        for article in articles
     ]
+
+
+def _article_publish_attempt(child_run):
+    """Read-only classification of an article's latest publish-child run.
+
+    Only flags states the publishStatus pill cannot express — in-flight,
+    awaiting-approval, stalled or failed publishes — and returns None when there
+    is nothing to surface (no child run, or the child already produced PR/merge
+    evidence the article's status reflects). Pure: never triggers recovery,
+    network or writes (unlike the run page's _annotate_publish_child_state).
+    """
+    if child_run is None:
+        return None
+    if _publish_child_missing_remote(child_run):
+        return {"state": "failed", "reason": _publish_child_wait_reason(child_run), "recoverable": True}
+    if _publish_child_run_recoverable(child_run):
+        return {"state": "stuck", "reason": _publish_child_wait_reason(child_run), "recoverable": True}
+    if _publish_child_has_real_approval_gate(child_run):
+        return {"state": "needs_approval", "reason": "Waiting for your approval to publish.", "recoverable": False}
+    if child_run.status in {
+        ContentFactoryRunStatus.FAILED,
+        ContentFactoryRunStatus.BLOCKED,
+        ContentFactoryRunStatus.DENIED,
+    }:
+        return {"state": "failed", "reason": "The publish run failed before opening a PR.", "recoverable": True}
+    if child_run.status in RUNNING_RUN_STATUSES:
+        return {"state": "in_progress", "reason": "Publishing…", "recoverable": False}
+    # Completed: if it opened a PR / merged, the article's publishStatus already
+    # reflects it — nothing to overlay. Otherwise it finished without publishing.
+    evidence = _publish_evidence_from_run(child_run, compact=True)
+    if evidence.get("prUrl") or str(evidence.get("mergeStatus") or "").strip().lower() == "merged":
+        return None
+    return {"state": "failed", "reason": "Publish finished without opening a PR.", "recoverable": True}
+
+
+def _article_publish_attempts(articles):
+    """Map WrittenArticle.id -> publish-attempt dict for the given articles.
+
+    Batched to avoid N+1: one query for the source writing runs (to read any
+    explicitly-stored child id), one for the publish-child runs. The child id is
+    otherwise derived deterministically from source_run_id, so a missing source
+    run is fine. Read-only.
+    """
+    source_ids = {article.source_run_id for article in articles if article.source_run_id}
+    if not source_ids:
+        return {}
+    source_runs = {run.run_id: run for run in ContentFactoryRun.objects.filter(run_id__in=source_ids)}
+    child_id_by_article = {}
+    child_ids = set()
+    for article in articles:
+        if not article.source_run_id:
+            continue
+        source_run = source_runs.get(article.source_run_id)
+        child_id = (
+            _publish_child_run_id_for_run(source_run)
+            if source_run is not None
+            else ""
+        ) or _deterministic_publish_child_run_id(article.source_run_id)
+        if child_id:
+            child_id_by_article[article.id] = child_id
+            child_ids.add(child_id)
+    child_runs = (
+        {run.run_id: run for run in ContentFactoryRun.objects.filter(run_id__in=child_ids)}
+        if child_ids
+        else {}
+    )
+    attempts = {}
+    for article in articles:
+        child = child_runs.get(child_id_by_article.get(article.id))
+        attempt = _article_publish_attempt(child)
+        if attempt:
+            attempts[article.id] = attempt
+    return attempts
 
 
 def _written_article_identity_keys(organization):
@@ -2223,7 +2317,13 @@ def _article_restart_available(run):
 def _serialize_article_draft(run, *, written_keys):
     if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
         return None
-    if run.status == ContentFactoryRunStatus.COMPLETED and _article_draft_matches_written(run, written_keys):
+    # Once a topic has a WrittenArticle it has graduated into the publish
+    # lifecycle and lives in "recent articles", so it must not also appear as a
+    # draft. Hide any matching run that is not actively running — a stuck, failed
+    # or awaiting-review publish/revision run otherwise duplicates the article
+    # across both lists. Actively-running runs stay visible so genuinely in-flight
+    # work is never hidden (its state moves onto the article card in Phase 2).
+    if run.status not in RUNNING_RUN_STATUSES and _article_draft_matches_written(run, written_keys):
         return None
 
     title, keyword = _article_draft_title_keyword(run)
@@ -2533,6 +2633,38 @@ def _is_publish_child_run(run):
     return _run_delivery_mode(run) in {"publish_code", "publish_webflow"}
 
 
+def _pick_content_path(evidence, slug):
+    """Best-effort repo path of the article's content file, from publish evidence.
+
+    Used to verify the file literally exists on origin/main (and for the state
+    report). Prefers a changed file whose name carries the slug, then an obvious
+    content/markdown file, then the first path; "" when evidence lists no files.
+    """
+    changed = evidence.get("changedFiles") if isinstance(evidence, dict) else None
+    if not isinstance(changed, (list, tuple)):
+        return ""
+    paths = []
+    for item in changed:
+        if isinstance(item, str) and item.strip():
+            paths.append(item.strip())
+        elif isinstance(item, dict):
+            candidate = item.get("path") or item.get("filename") or item.get("file")
+            if candidate:
+                paths.append(str(candidate).strip())
+    if not paths:
+        return ""
+    slug_l = str(slug or "").strip().lower()
+    if slug_l:
+        for path in paths:
+            if slug_l in path.lower():
+                return path
+    for path in paths:
+        low = path.lower()
+        if low.endswith((".md", ".mdx")) or "/content/" in low or "/articles/" in low or "/posts/" in low:
+            return path
+    return paths[0]
+
+
 def _persist_article_memory_from_run(*, organization, run):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return None
@@ -2562,6 +2694,7 @@ def _persist_article_memory_from_run(*, organization, run):
     article_url = evidence.get("previewUrl") or result.get("article_url") or ""
     pr_url = evidence.get("prUrl") or result.get("pr_url") or ""
     pr_number = coerce_pr_number(evidence.get("prNumber"))
+    content_path = _pick_content_path(evidence, slug)
     derived_status = derive_publish_status_from_evidence(evidence)
     article, created = WrittenArticle.objects.get_or_create(
         organization=organization,
@@ -2572,6 +2705,7 @@ def _persist_article_memory_from_run(*, organization, run):
             "article_url": article_url,
             "pr_url": pr_url,
             "pr_number": pr_number,
+            "content_path": content_path,
             "primary_keyword": primary_keyword,
             # When the article was packaged — NOT proof it reached the site;
             # publish_status tracks the real lifecycle.
@@ -2588,6 +2722,7 @@ def _persist_article_memory_from_run(*, organization, run):
             ("category", category),
             ("article_url", article_url),
             ("pr_url", pr_url),
+            ("content_path", content_path),
             ("primary_keyword", primary_keyword),
         ):
             # Only overwrite with real values so a later evidence-less run
@@ -2673,6 +2808,10 @@ def _apply_publish_child_evidence_to_article_inner(organization, source_run, chi
     if pr_url and article.pr_url != pr_url:
         article.pr_url = pr_url
         update_fields.add("pr_url")
+    content_path = _pick_content_path(evidence, slug)
+    if content_path and not article.content_path:
+        article.content_path = content_path
+        update_fields.add("content_path")
     update_fields.update(
         advance_publish_status(article, derived_status, pr_number=coerce_pr_number(evidence.get("prNumber")))
     )

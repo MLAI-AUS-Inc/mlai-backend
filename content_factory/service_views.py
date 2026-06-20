@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -14,6 +15,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -39,6 +41,7 @@ from content_factory.delivery import (
     validate_content_factory_preview_signature,
 )
 from content_factory.article_publish_status import advance_publish_status
+from content_factory.github_webhook import process_github_event, verify_github_signature
 from content_factory.models import (
     ArticlePublishStatus,
     ComponentMapping,
@@ -2994,6 +2997,40 @@ def _clear_article_system_setup_retry_state(result, *, current_step="", resume_g
             resume_generation=resume_generation,
         )
     return cleaned
+
+
+class ContentFactoryGitHubWebhookView(APIView):
+    """Receive GitHub webhooks and update article publish state immediately.
+
+    POST /api/content-factory/github/webhook
+
+    Verifies the X-Hub-Signature-256 HMAC against GITHUB_WEBHOOK_SECRET, then
+    applies `pull_request` (PR / merged / on-main) and `push`-to-default-branch
+    (on-main via content path) events. Authenticated solely by the signature, so
+    it never trusts an unsigned request.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # Read the raw body before any request.data access so the HMAC is
+        # computed over exactly what GitHub signed.
+        body = request.body
+        secret = getattr(settings, "GITHUB_WEBHOOK_SECRET", "") or ""
+        signature = request.META.get("HTTP_X_HUB_SIGNATURE_256", "")
+        if not verify_github_signature(secret, body, signature):
+            return Response({"detail": "invalid signature"}, status=status.HTTP_401_UNAUTHORIZED)
+        try:
+            payload = json.loads(body or b"{}")
+        except (ValueError, TypeError):
+            return Response({"detail": "invalid json"}, status=status.HTTP_400_BAD_REQUEST)
+        event_type = request.META.get("HTTP_X_GITHUB_EVENT", "")
+        try:
+            summary = process_github_event(event_type, payload)
+        except Exception:
+            logger.exception("github_webhook_failed event=%s", event_type)
+            return Response({"detail": "processing error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"ok": True, **summary})
 
 
 class ContentFactoryCallbackView(APIView):
