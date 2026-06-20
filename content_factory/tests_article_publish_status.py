@@ -641,3 +641,48 @@ class ArticlePublishAttemptTest(TestCase):
         topics = {topic["slug"]: topic for topic in _recent_written_topics(self.organization)}
         self.assertEqual(topics["pub"]["publishAttempt"]["state"], "failed")
         self.assertIsNone(topics["done"]["publishAttempt"])
+
+
+class WrittenTopicCollapseTest(TestCase):
+    """A topic must never appear in both the Publishing and recent lists."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(domain="mlai.au", name="MLAI")
+
+    def _article(self, slug, keyword, **overrides):
+        fields = {
+            "organization": self.organization,
+            "title": slug,
+            "slug": slug,
+            "category": "featured",
+            "primary_keyword": keyword,
+        }
+        fields.update(overrides)
+        return WrittenArticle.objects.create(**fields)
+
+    def test_live_row_wins_over_newer_stale_pr_open(self):
+        # The live row must win even though the stale duplicate was created later.
+        self._article("meetup-and", "ai meetup sydney", publish_status=ArticlePublishStatus.LIVE)
+        self._article(
+            "meetup-or",
+            "ai meetup sydney",
+            publish_status=ArticlePublishStatus.PR_OPEN,
+            pr_url="https://github.com/o/r/pull/1",
+        )
+        topics = _recent_written_topics(self.organization)
+        self.assertEqual(len(topics), 1)
+        self.assertEqual(topics[0]["slug"], "meetup-and")
+        self.assertEqual(topics[0]["bucket"], "published")
+
+    def test_distinct_topics_are_both_kept(self):
+        self._article("a", "keyword a", publish_status=ArticlePublishStatus.LIVE)
+        self._article("b", "keyword b", publish_status=ArticlePublishStatus.PR_OPEN)
+        slugs = {topic["slug"] for topic in _recent_written_topics(self.organization)}
+        self.assertEqual(slugs, {"a", "b"})
+
+    def test_same_topic_both_in_flight_collapses_to_most_recent(self):
+        self._article("draft-old", "same topic", publish_status=ArticlePublishStatus.WRITTEN)
+        self._article("draft-new", "same topic", publish_status=ArticlePublishStatus.PR_OPEN)
+        topics = _recent_written_topics(self.organization)
+        self.assertEqual(len(topics), 1)
+        self.assertEqual(topics[0]["slug"], "draft-new")
