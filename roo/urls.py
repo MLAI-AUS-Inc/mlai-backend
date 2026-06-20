@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
+    CurrentUserBalanceView,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     StripeWebhookView, SystemAwardView,
@@ -27,6 +28,7 @@ urlpatterns = [
     # ============================================================
     # User Balance (by Slack ID)
     # ============================================================
+    path('me/balance/', CurrentUserBalanceView.as_view(), name='current-user-balance'),
     path('users/<str:pk>/balance/', UserBalanceViewSet.as_view({'get': 'retrieve'}), name='user-balance'),
     
     # ============================================================
