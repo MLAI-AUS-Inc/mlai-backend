@@ -2087,10 +2087,45 @@ def _topic_candidates_from_runs(
     return sorted_candidates[:limit] if limit else sorted_candidates
 
 
+def _written_article_rank(article):
+    # Canonical row for a topic: a published (on-main / live) row outranks an
+    # in-flight one; ties break to the most recently created.
+    bucket_rank = 1 if article_bucket(article) == "published" else 0
+    return (bucket_rank, article.created_at)
+
+
+def _collapse_written_articles_by_topic(articles):
+    """Keep one row per topic so a topic never appears in BOTH the Publishing and
+    recent lists.
+
+    A slug change on a revision creates a second WrittenArticle for the same
+    topic (same researched keyword), leaving a stale duplicate — e.g. an orphaned
+    "PR open" row alongside the live one. Collapse to the canonical row per topic
+    (most-advanced bucket, then most recent). `articles` arrives newest-first;
+    topic order follows first appearance.
+    """
+    best_by_topic = {}
+    order = []
+    for article in articles:
+        key = _normalize_keyword_memory(article.primary_keyword) or f"id:{article.id}"
+        current = best_by_topic.get(key)
+        if current is None:
+            best_by_topic[key] = article
+            order.append(key)
+        elif _written_article_rank(article) > _written_article_rank(current):
+            best_by_topic[key] = article
+    return [best_by_topic[key] for key in order]
+
+
 def _recent_written_topics(organization, *, limit=8):
-    articles = list(
-        WrittenArticle.objects.filter(organization=organization).order_by("-created_at")[:limit]
-    )
+    # Pull a wider window so topic-collapsing (dropping stale duplicate rows left
+    # by slug changes) still yields up to `limit` cards.
+    articles = _collapse_written_articles_by_topic(
+        list(
+            WrittenArticle.objects.filter(organization=organization)
+            .order_by("-created_at")[: max(limit * 5, 40)]
+        )
+    )[:limit]
     # Only in-flight (publishing) articles can have a stuck/failed publish worth
     # surfacing; published ones are done, so skip the run lookups for them.
     publishing = [article for article in articles if article_bucket(article) != "published"]
