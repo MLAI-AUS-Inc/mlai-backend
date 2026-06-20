@@ -530,6 +530,63 @@ class StripeWebhookViewTests(APITestCase):
         self.assertTrue(second_response.data['already_paid'])
 
 
+class CurrentUserBalanceViewTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('current-user-balance')
+        self.user = User.objects.create_user(
+            email='current-balance@example.com',
+            slack_id='UCURRENTBALANCE',
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_authenticated_user_gets_zero_balance_and_account_is_created(self):
+        self.assertFalse(PointsAccount.objects.filter(user=self.user).exists())
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['user_id'], self.user.id)
+        self.assertEqual(response.data['email'], self.user.email)
+        self.assertEqual(response.data['slack_user_id'], self.user.slack_id)
+        self.assertEqual(response.data['balance'], 0)
+        self.assertEqual(response.data['earned_balance'], 0)
+        self.assertEqual(response.data['purchased_topup_balance'], 0)
+        self.assertEqual(response.data['lifetime_earned'], 0)
+        self.assertEqual(response.data['lifetime_purchased_topup'], 0)
+        self.assertEqual(response.data['lifetime_spent'], 0)
+        self.assertEqual(response.data['expired_or_reversed_points'], 0)
+        self.assertTrue(PointsAccount.objects.filter(user=self.user).exists())
+
+    def test_authenticated_user_gets_existing_positive_balance(self):
+        PointsAccount.objects.create(
+            user=self.user,
+            balance=17,
+            earned_balance=12,
+            purchased_topup_balance=5,
+            lifetime_earned=30,
+            lifetime_purchased_topup=10,
+            lifetime_spent=13,
+            expired_or_reversed_points=2,
+        )
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['balance'], 17)
+        self.assertEqual(response.data['earned_balance'], 12)
+        self.assertEqual(response.data['purchased_topup_balance'], 5)
+        self.assertEqual(response.data['lifetime_earned'], 30)
+        self.assertEqual(response.data['lifetime_purchased_topup'], 10)
+        self.assertEqual(response.data['lifetime_spent'], 13)
+        self.assertEqual(response.data['expired_or_reversed_points'], 2)
+
+
 class ManualAwardViewTests(APITestCase):
     def setUp(self):
         self.url = reverse('manual-award')

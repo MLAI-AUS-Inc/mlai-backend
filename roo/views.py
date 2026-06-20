@@ -5,7 +5,7 @@ import time
 
 from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 # Removed mixins as they are not used in new code usually, but kept if needed for legacy.
 # Also added logging
 
@@ -1134,6 +1134,30 @@ class UserBalanceViewSet(viewsets.ViewSet):
             }
         
         return Response(data)
+
+
+class CurrentUserBalanceView(APIView):
+    """Get the authenticated user's current Roo Points balance."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        balance_data = PointsService.get_balance(user)
+        return Response(
+            {
+                'user_id': user.id,
+                'email': user.email,
+                'slack_user_id': user.slack_id,
+                'balance': balance_data['balance'],
+                'earned_balance': balance_data['earned_balance'],
+                'purchased_topup_balance': balance_data['purchased_topup_balance'],
+                'lifetime_earned': balance_data['lifetime_earned'],
+                'lifetime_purchased_topup': balance_data['lifetime_purchased_topup'],
+                'lifetime_spent': balance_data['lifetime_spent'],
+                'expired_or_reversed_points': balance_data['expired_or_reversed_points'],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
