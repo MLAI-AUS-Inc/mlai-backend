@@ -117,3 +117,36 @@ class ArticleSetupExistingSurfaceStateTests(TestCase):
         self.config.save(update_fields=["article_system"])
         state = _article_setup_state_for_config(self.config)
         self.assertEqual(state.get("routePath"), "/blog")
+
+    def test_setup_run_hint_sets_route_path_when_pending_state_is_missing(self):
+        self.config.article_system = {
+            "state": "missing",
+            "scan": {"status": "completed"},
+            "pending_article_system_setup": {
+                "setupRunId": "setup-with-route-hint",
+            },
+        }
+        self.config.save(update_fields=["article_system"])
+
+        ContentFactoryRun.objects.create(
+            domain=self.org.domain,
+            run_id="setup-with-route-hint",
+            workflow="article_system_setup",
+            github_repo="DrAnuG1995/website",
+            status=ContentFactoryRunStatus.BLOCKED,
+            result={
+                "article_surface_hint": {
+                    "source": "user_input",
+                    "route_path": "/articles",
+                },
+                "article_system_setup": {
+                    "setup_run_id": "setup-with-route-hint",
+                    "status": "failed",
+                },
+            },
+        )
+
+        state = _article_setup_state_for_config(self.config)
+
+        self.assertEqual(state.get("setupRunId"), "setup-with-route-hint")
+        self.assertEqual(state.get("routePath"), "/articles")
