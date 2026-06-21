@@ -115,6 +115,42 @@ class PointsPurchaseService:
 
     @staticmethod
     @transaction.atomic
+    def create_purchase_for_user(
+        user: User,
+        pack_id: str,
+        *,
+        purchase_from: Optional[dict] = None,
+    ) -> PointsPurchase:
+        """Create a pending purchase for an already-authenticated web user.
+
+        Unlike ``create_purchase`` (which resolves a user from a Slack id for the
+        Roo bot), this is the entry point for the dashboard checkout flow: the
+        user is taken directly from the authenticated request and a linked Slack
+        account is not required.
+        """
+        if user is None or not getattr(user, "is_authenticated", False):
+            raise PermissionDeniedError("Authentication is required for top-up purchases")
+
+        cleaned_pack_id = (pack_id or '').strip()
+        pack = PointsPurchaseService.get_pack_config(cleaned_pack_id)
+
+        PointsPurchaseService.validate_purchase_limits(user, pack['points'])
+
+        origin = dict(purchase_from or {})
+        origin.setdefault('source', 'web')
+
+        return PointsPurchase.objects.create(
+            user=user,
+            slack_user_id=(getattr(user, 'slack_id', '') or ''),
+            pack_id=cleaned_pack_id,
+            points_amount=pack['points'],
+            amount_cents=pack['amount_cents'],
+            currency=pack['currency'],
+            purchase_from=origin,
+        )
+
+    @staticmethod
+    @transaction.atomic
     def create_checkout_session(
         purchase: PointsPurchase,
         terms_version_accepted: str,
@@ -212,47 +248,24 @@ class PointsPurchaseService:
         manual_balance_approval: bool = False,
     ) -> None:
         """
-        Validate conservative purchase limits for the top-up MVP.
+        Validate a Top-up Roo Points purchase.
+
+        The previous policy guardrails (Slack linkage, 25-point per-purchase cap,
+        7-day account age, 50-point rolling-year limit, and 100-point spendable
+        cap) have intentionally been removed: any authenticated user may buy any
+        available pack as often as they like. Only baseline correctness checks
+        remain. The ``now`` and ``manual_balance_approval`` parameters are kept
+        for call-site compatibility but are no longer used.
 
         Raises:
-            PermissionDeniedError: when the caller is anonymous/guest-like.
-            ValueError: when a policy limit is violated.
+            PermissionDeniedError: when the caller is anonymous.
+            ValueError: when points_amount is not positive.
         """
         if user is None or not getattr(user, "is_authenticated", False):
             raise PermissionDeniedError("A linked user account is required for top-up purchases")
 
-        if not getattr(user, "slack_id", None):
-            raise PermissionDeniedError("Guest checkout is not supported for top-up purchases")
-
         if points_amount <= 0:
             raise ValueError("points_amount must be positive")
-        if points_amount > PointsPurchaseService.MAX_POINTS_PER_PURCHASE:
-            raise ValueError("Top-up purchase exceeds 25-point per-purchase limit")
-
-        reference_now = now or timezone.now()
-        account_age = reference_now - user.date_joined
-        if account_age < timedelta(days=PointsPurchaseService.MIN_ACCOUNT_AGE_DAYS):
-            raise ValueError("Top-up purchases require an account age of at least 7 days")
-
-        window_start = reference_now - timedelta(days=PointsPurchaseService.LOOKBACK_DAYS)
-        rolling_total = (
-            PointsPurchase.objects.filter(
-                user=user,
-                status='paid',
-                paid_at__gte=window_start,
-            ).aggregate(total=models.Sum('points_amount'))['total'] or 0
-        )
-        if rolling_total + points_amount > PointsPurchaseService.MAX_POINTS_PER_ROLLING_YEAR:
-            raise ValueError("Top-up purchases exceed the 50-point rolling 12-month limit")
-
-        try:
-            current_balance = user.points_account.balance
-        except PointsAccount.DoesNotExist:
-            current_balance = 0
-
-        projected_balance = current_balance + points_amount
-        if projected_balance > PointsPurchaseService.MAX_SPENDABLE_BALANCE and not manual_balance_approval:
-            raise ValueError("Top-up purchase would exceed the 100-point spendable balance cap")
 
 
 class PointsService:

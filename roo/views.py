@@ -1690,7 +1690,8 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
             return [AllowAny()]
         return [permission() for permission in self.permission_classes]
 
-    def _response_data(self, purchase):
+    @staticmethod
+    def _response_data(purchase):
         return {
             'id': str(purchase.id),
             'status': purchase.status,
@@ -1774,6 +1775,74 @@ class PointsPurchaseViewSet(viewsets.ViewSet):
                 'stripe_checkout_session_id': checkout_result['checkout_session_id'],
                 'checkout_session_url': checkout_result['checkout_session_url'],
             }
+        )
+
+
+class PointsPacksView(APIView):
+    """Public list of available Top-up Roo Points packs.
+
+    Lets the frontend render the upgrade page from a single source of truth
+    instead of duplicating prices, keeping it in sync with ``ROO_TOPUP_PACKS``.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        packs = [
+            {
+                'pack_id': pack_id,
+                'points': cfg['points'],
+                'amount_cents': cfg['amount_cents'],
+                'currency': cfg['currency'],
+                'label': cfg['label'],
+            }
+            for pack_id, cfg in PointsPurchaseService.ROO_TOPUP_PACKS.items()
+        ]
+        return Response({'packs': packs})
+
+
+class CurrentUserPurchaseView(APIView):
+    """Create a pending Top-up Roo Points purchase for the authenticated user.
+
+    This is the dashboard/web entry point (e.g. /founder-tools/upgrade). It
+    mirrors ``CurrentUserBalanceView`` auth: any logged-in user can buy, no Roo
+    API key or linked Slack account required. The response carries the
+    ``frontend_checkout_page_url`` so the caller can hand off to the existing
+    /roo/topup/{id} review + Stripe Checkout flow.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        pack_id = (request.data.get('pack_id') or '').strip()
+        if not pack_id:
+            return Response(
+                {'error': 'pack_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        purchase_from = request.data.get('purchase_from') or {}
+        if not isinstance(purchase_from, dict):
+            return Response(
+                {'error': 'purchase_from must be an object when provided'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        origin = dict(purchase_from)
+        origin.setdefault('source', 'web')
+
+        try:
+            purchase = PointsPurchaseService.create_purchase_for_user(
+                user=request.user,
+                pack_id=pack_id,
+                purchase_from=origin,
+            )
+        except PermissionDeniedError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            PointsPurchaseViewSet._response_data(purchase),
+            status=status.HTTP_201_CREATED,
         )
 
 
