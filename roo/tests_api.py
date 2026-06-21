@@ -80,7 +80,7 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(response.data['id'], str(purchase.id))
         self.assertEqual(response.data['status'], 'pending')
         self.assertEqual(response.data['pack_id'], 'topup_10')
-        self.assertEqual(response.data['points_amount'], 10)
+        self.assertEqual(response.data['points_amount'], 20)
         self.assertEqual(response.data['amount_cents'], 3699)
         self.assertEqual(response.data['currency'], 'aud')
         self.assertEqual(
@@ -102,7 +102,7 @@ class PointsPurchaseViewSetTests(APITestCase):
             user=self.user,
             slack_user_id=self.slack_user_id,
             pack_id='topup_5',
-            points_amount=5,
+            points_amount=10,
             amount_cents=1999,
         )
 
@@ -112,7 +112,7 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(response.data['id'], str(purchase.id))
         self.assertEqual(response.data['status'], 'pending')
         self.assertEqual(response.data['pack_id'], 'topup_5')
-        self.assertEqual(response.data['points_amount'], 5)
+        self.assertEqual(response.data['points_amount'], 10)
         self.assertEqual(response.data['amount_cents'], 1999)
         self.assertEqual(response.data['currency'], 'aud')
         self.assertEqual(
@@ -185,7 +185,7 @@ class PointsPurchaseViewSetTests(APITestCase):
         self.assertEqual(stripe_data['cancel_url'], f'https://mlai.test/roo/topup/{purchase.id}?checkout=cancelled')
         self.assertEqual(stripe_data['line_items[0][price_data][currency]'], 'aud')
         self.assertEqual(stripe_data['line_items[0][price_data][unit_amount]'], '3699')
-        self.assertEqual(stripe_data['line_items[0][price_data][product_data][name]'], '10 Top-up Roo Points')
+        self.assertEqual(stripe_data['line_items[0][price_data][product_data][name]'], '20 Top-up Roo Points')
         self.assertEqual(stripe_data['metadata[points_purchase_id]'], str(purchase.id))
         self.assertEqual(stripe_data['metadata[mlai_user_id]'], str(self.user.id))
         self.assertEqual(stripe_data['metadata[slack_user_id]'], self.slack_user_id)
@@ -594,10 +594,10 @@ class PointsPacksViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         packs_by_id = {pack['pack_id']: pack for pack in response.data['packs']}
         self.assertEqual(set(packs_by_id), {'topup_5', 'topup_10', 'topup_25'})
-        self.assertEqual(packs_by_id['topup_10']['points'], 10)
+        self.assertEqual(packs_by_id['topup_10']['points'], 20)
         self.assertEqual(packs_by_id['topup_10']['amount_cents'], 3699)
         self.assertEqual(packs_by_id['topup_10']['currency'], 'aud')
-        self.assertEqual(packs_by_id['topup_25']['points'], 25)
+        self.assertEqual(packs_by_id['topup_25']['points'], 50)
         self.assertEqual(packs_by_id['topup_25']['amount_cents'], 6399)
 
 
@@ -624,7 +624,7 @@ class CurrentUserPurchaseViewTests(APITestCase):
         purchase = PointsPurchase.objects.get()
         self.assertEqual(purchase.user, self.user)
         self.assertEqual(purchase.pack_id, 'topup_10')
-        self.assertEqual(purchase.points_amount, 10)
+        self.assertEqual(purchase.points_amount, 20)
         self.assertEqual(purchase.amount_cents, 3699)
         self.assertEqual(purchase.status, 'pending')
         self.assertEqual(purchase.purchase_from['source'], 'web')
@@ -655,7 +655,7 @@ class CurrentUserPurchaseViewTests(APITestCase):
         response = self.client.post(self.url, {'pack_id': 'topup_25'}, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(PointsPurchase.objects.get().points_amount, 25)
+        self.assertEqual(PointsPurchase.objects.get().points_amount, 50)
 
     def test_invalid_pack_is_rejected(self):
         self.client.force_authenticate(user=self.user)
