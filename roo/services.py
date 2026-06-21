@@ -30,24 +30,27 @@ from core.models import User
 class PointsPurchaseService:
     """Business rules for Top-up Roo Points purchases."""
 
+    # NOTE: pack ids are opaque (kept stable across the points-doubling change so
+    # in-flight purchases, the Slack reverse-map, and the frontend "popular" key
+    # keep working); the id number no longer matches the points it grants.
     ROO_TOPUP_PACKS = {
         'topup_5': {
-            'points': 5,
-            'amount_cents': 1999,
-            'currency': 'aud',
-            'label': '5 Top-up Roo Points',
-        },
-        'topup_10': {
             'points': 10,
-            'amount_cents': 3699,
+            'amount_cents': 1999,
             'currency': 'aud',
             'label': '10 Top-up Roo Points',
         },
+        'topup_10': {
+            'points': 20,
+            'amount_cents': 3699,
+            'currency': 'aud',
+            'label': '20 Top-up Roo Points',
+        },
         'topup_25': {
-            'points': 25,
+            'points': 50,
             'amount_cents': 6399,
             'currency': 'aud',
-            'label': '25 Top-up Roo Points',
+            'label': '50 Top-up Roo Points',
         },
     }
     MAX_POINTS_PER_PURCHASE = 25
