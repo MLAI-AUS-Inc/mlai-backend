@@ -78,6 +78,23 @@ class DurableResetTests(TestCase):
         self.assertIsNone(state.get("setupRunId"))
         self.assertFalse(state.get("setupBlocked"))
 
+    def test_reset_restores_default_path_patterns(self):
+        # A stale pattern (e.g. from a prior repo layout) must not survive the reset, or a
+        # re-scaffold inherits the wrong content/registry location.
+        self.config.article_path_pattern = "src/app/articles/content/{category}/{slug}.tsx"
+        self.config.registry_path = "src/app/articles/registry.ts"
+        self.config.save(update_fields=["article_path_pattern", "registry_path"])
+
+        result = reset_article_setup_config(self.config)
+        self.config.refresh_from_db()
+
+        default_pattern = OrganizationContentConfig._meta.get_field("article_path_pattern").get_default()
+        default_registry = OrganizationContentConfig._meta.get_field("registry_path").get_default()
+        self.assertEqual(self.config.article_path_pattern, default_pattern)
+        self.assertEqual(self.config.registry_path, default_registry)
+        self.assertIn("article_path_pattern", result["cleared_fields"])
+        self.assertIn("registry_path", result["cleared_fields"])
+
     def test_gate_honors_reset_with_unfiltered_runs(self):
         old = self._setup_run("old-1")
         reset_article_setup_config(self.config)

@@ -162,6 +162,15 @@ def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
         config.articles_scaffold_preview_url = None
         update_fields.append("articles_scaffold_preview_url")
         cleared_fields.append("articles_scaffold_preview_url")
+    # Reset the content/registry path patterns to their model defaults so a re-scaffold
+    # re-derives them from the fresh repo instead of inheriting a stale pattern (e.g. a prior
+    # repo's `app/articles/...` when the new target keeps its system at the repo root).
+    for _path_field in ("article_path_pattern", "registry_path"):
+        _default_value = config._meta.get_field(_path_field).get_default()
+        if getattr(config, _path_field) != _default_value:
+            setattr(config, _path_field, _default_value)
+            update_fields.append(_path_field)
+            cleared_fields.append(_path_field)
 
     if update_fields:
         update_fields.append("updated_at")
