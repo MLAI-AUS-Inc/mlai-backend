@@ -130,6 +130,25 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="Framework-adapted component spec docs from the last scan, reused to skip regeneration.",
     )
+    # Live-site visual capture round-trip (content-factory sends these on scan/style feedback).
+    # Without these columns the PUT whitelist silently dropped them, breaking the design-memory
+    # loop so generated articles and scaffolded directories lost the target site's look.
+    visual_context = models.JSONField(
+        default=dict, blank=True,
+        help_text="Computed design tokens + screenshot/page metadata captured from the live target site.",
+    )
+    renderer_style_profile = models.JSONField(
+        default=dict, blank=True,
+        help_text="Derived Tailwind class profile applied by the article renderer.",
+    )
+    reference_screenshots = models.JSONField(
+        default=list, blank=True,
+        help_text="Hosted screenshot URLs of the live target site, used as image-generation references.",
+    )
+    directory_style_feedback = models.JSONField(
+        default=dict, blank=True,
+        help_text="Accepted directory visual-style report (renderer profile, page spec, component manifest).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -275,6 +294,89 @@ class ComponentMapping(models.Model):
     
     def __str__(self):
         return f"{self.organization.domain} mapping ({self.matched_count}/{self.total_components} matched)"
+
+
+class WebsiteDesignSnapshot(models.Model):
+    """
+    Durable, versioned snapshot of a target website's real visual design system.
+
+    Captured by content-factory (live pages + repo source + screenshots) and consumed
+    as a design contract when generating articles and scaffolding the articles directory.
+    Exactly one snapshot per organization is active at a time; a new active snapshot
+    supersedes the previous one. The structured `spec` shape is owned by content-factory's
+    design schema and versioned via `schema_version`, so new design dimensions need no
+    migration.
+    """
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='design_snapshots',
+    )
+    schema_version = models.PositiveIntegerField(
+        default=1,
+        help_text="Version of the `spec` shape (owned by content-factory's design schema).",
+    )
+    domain = models.CharField(max_length=255, blank=True, default="")
+    github_repo = models.CharField(max_length=255, blank=True, default="")
+    repo_head_sha = models.CharField(max_length=40, blank=True, default="")
+    source_urls = models.JSONField(
+        default=list, blank=True,
+        help_text="Live URLs sampled to build this snapshot.",
+    )
+    screenshot_urls = models.JSONField(
+        default=list, blank=True,
+        help_text="Hosted screenshot URLs captured during the design scan.",
+    )
+    captured_at = models.DateTimeField(blank=True, null=True)
+    status = models.CharField(
+        max_length=32, default="active",
+        help_text="active | superseded | capturing | failed",
+    )
+    is_active = models.BooleanField(default=False, db_index=True)
+    spec = models.JSONField(
+        default=dict, blank=True,
+        help_text="Structured design spec: typography, color system, components, layout, application rules.",
+    )
+    design_spec_md = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'content_factory_design_snapshot'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=["organization", "is_active"], name="cf_design_snapshot_active_idx"),
+        ]
+
+    def __str__(self):
+        flag = "active" if self.is_active else self.status
+        return f"{self.domain or self.organization_id} design snapshot v{self.schema_version} ({flag})"
+
+    @classmethod
+    def active_for_org(cls, organization):
+        """Return the active snapshot for an organization, or None."""
+        if organization is None:
+            return None
+        return (
+            cls.objects.filter(organization=organization, is_active=True)
+            .order_by('-created_at')
+            .first()
+        )
+
+    def serialize(self) -> dict:
+        """Shape returned to content-factory on the org-config GET as active_design_snapshot."""
+        return {
+            "schema_version": self.schema_version,
+            "domain": self.domain,
+            "github_repo": self.github_repo,
+            "repo_head_sha": self.repo_head_sha,
+            "source_urls": self.source_urls or [],
+            "screenshot_urls": self.screenshot_urls or [],
+            "captured_at": self.captured_at.isoformat() if self.captured_at else None,
+            "status": self.status,
+            "spec": self.spec or {},
+            "design_spec_md": self.design_spec_md or "",
+        }
 
 
 class ContentFactoryJob(models.Model):

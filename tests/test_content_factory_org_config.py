@@ -4,7 +4,7 @@ from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from content_factory.models import OrganizationContentConfig
+from content_factory.models import OrganizationContentConfig, WebsiteDesignSnapshot
 from organizations.models import Organization
 from integrations.models import UserIntegration
 
@@ -371,3 +371,128 @@ class ContentFactoryOrgConfigTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("No more than 1 organizations", response.data["error"])
+
+    def test_org_config_round_trips_visual_design_fields(self):
+        """The four live-site visual fields must survive PUT->GET. Previously the PUT
+        whitelist dropped them, breaking the design-memory loop so articles and the
+        scaffolded directory lost the target site's look."""
+        visual_context = {
+            "consolidated_tokens": {
+                "background_color": "rgb(251, 243, 219)",
+                "text_color": "rgb(17, 17, 17)",
+                "primary_font": "Inter",
+                "content_width": "1024px",
+            },
+            "pages": [{"page_path": "/", "screenshot_url": "https://cdn.example.com/home.png"}],
+        }
+        renderer_style_profile = {
+            "section": "mt-10",
+            "h2": "text-3xl font-semibold",
+            "paragraph": "text-base leading-7",
+        }
+        reference_screenshots = [
+            "https://cdn.example.com/home.png",
+            "https://cdn.example.com/articles.png",
+        ]
+        directory_style_feedback = {
+            "renderer_style_profile": renderer_style_profile,
+            "directory_page_spec": {"sections": ["hero", "list"]},
+            "accepted_at": "2026-06-21T00:00:00+00:00",
+        }
+
+        response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "visual_context": visual_context,
+                "renderer_style_profile": renderer_style_profile,
+                "reference_screenshots": reference_screenshots,
+                "directory_style_feedback": directory_style_feedback,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.visual_context, visual_context)
+        self.assertEqual(self.config.renderer_style_profile, renderer_style_profile)
+        self.assertEqual(self.config.reference_screenshots, reference_screenshots)
+        self.assertEqual(self.config.directory_style_feedback, directory_style_feedback)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        data = get_response.data
+        self.assertEqual(data["visual_context"], visual_context)
+        self.assertEqual(data["renderer_style_profile"], renderer_style_profile)
+        self.assertEqual(data["reference_screenshots"], reference_screenshots)
+        self.assertEqual(data["directory_style_feedback"], directory_style_feedback)
+
+    def test_org_config_design_snapshot_lifecycle(self):
+        """A design_snapshot payload creates exactly one active WebsiteDesignSnapshot,
+        round-trips on GET as active_design_snapshot, and is superseded by the next."""
+        first = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "design_snapshot": {
+                    "schema_version": 1,
+                    "repo_head_sha": "a" * 40,
+                    "source_urls": ["https://mlai.au/", "https://mlai.au/articles"],
+                    "screenshot_urls": ["https://cdn.example.com/home.png"],
+                    "captured_at": "2026-06-21T00:00:00+00:00",
+                    "spec": {"color_system": {"background": "#fbf3db", "accent": "#ffd400"}},
+                    "design_spec_md": "# Design Spec\nBold black display type.",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+
+        snapshots = WebsiteDesignSnapshot.objects.filter(organization=self.organization)
+        self.assertEqual(snapshots.count(), 1)
+        self.assertEqual(snapshots.filter(is_active=True).count(), 1)
+        active = snapshots.get(is_active=True)
+        self.assertEqual(active.spec["color_system"]["accent"], "#ffd400")
+        self.assertEqual(active.repo_head_sha, "a" * 40)
+        self.assertIsNotNone(active.captured_at)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        snapshot_payload = get_response.data["active_design_snapshot"]
+        self.assertIsNotNone(snapshot_payload)
+        self.assertEqual(snapshot_payload["schema_version"], 1)
+        self.assertEqual(snapshot_payload["spec"]["color_system"]["background"], "#fbf3db")
+        self.assertEqual(snapshot_payload["design_spec_md"], "# Design Spec\nBold black display type.")
+
+        # A second snapshot supersedes the first; exactly one stays active.
+        second = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "design_snapshot": {
+                    "schema_version": 2,
+                    "spec": {"color_system": {"background": "#ffffff"}},
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+
+        snapshots = WebsiteDesignSnapshot.objects.filter(organization=self.organization)
+        self.assertEqual(snapshots.count(), 2)
+        self.assertEqual(snapshots.filter(is_active=True).count(), 1)
+        newest = snapshots.get(is_active=True)
+        self.assertEqual(newest.schema_version, 2)
+        self.assertEqual(snapshots.filter(status="superseded").count(), 1)
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.data["active_design_snapshot"]["schema_version"], 2)

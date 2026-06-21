@@ -27,6 +27,7 @@ from core.models import (
     ContentFactoryRunStatus,
     Organization,
     OrganizationContentConfig,
+    WebsiteDesignSnapshot,
 )
 from content_factory.service_views import _serialize_content_factory_run, _sync_content_factory_run_snapshot
 from integrations import http_client as http_requests
@@ -94,6 +95,7 @@ def _serialize_config(config: OrganizationContentConfig | None) -> dict | None:
     article_system = resolve_article_system(config)
     registry_target = best_registry_driven_publish_target(config.publish_targets, article_system)
     registry_ready = registry_target_publish_ready(registry_target)
+    active_design_snapshot = WebsiteDesignSnapshot.active_for_org(org)
     return {
         "org_id": org.id,
         "org_name": org.name,
@@ -129,6 +131,11 @@ def _serialize_config(config: OrganizationContentConfig | None) -> dict | None:
         "articles_scaffold_preview_url": config.articles_scaffold_preview_url,
         "last_scanned_at": config.last_scanned_at.isoformat() if config.last_scanned_at else None,
         "last_scanned_sha": config.last_scanned_sha,
+        "visual_context": config.visual_context or {},
+        "renderer_style_profile": config.renderer_style_profile or {},
+        "reference_screenshots": config.reference_screenshots or [],
+        "directory_style_feedback": config.directory_style_feedback or {},
+        "active_design_snapshot": active_design_snapshot.serialize() if active_design_snapshot else None,
     }
 
 

@@ -135,5 +135,6 @@ from content_factory.models import (
     SemanticCluster,
     TopicMap,
     TrendStatus,
+    WebsiteDesignSnapshot,
     WrittenArticle,
 )

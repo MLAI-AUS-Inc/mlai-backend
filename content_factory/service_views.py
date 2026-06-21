@@ -13,6 +13,7 @@ from django.db.models import Q
 from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views import View
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -49,6 +50,7 @@ from content_factory.models import (
     GeneratedComponent,
     OrganizationContentConfig,
     WebsiteBaselineSnapshot,
+    WebsiteDesignSnapshot,
 )
 from content_factory.progress import (
     live_card_summary_for_job,
@@ -327,7 +329,8 @@ class ContentFactoryOrgConfigView(APIView):
         
         # Get config if exists (might have already fetched it, but get fresh ref)
         config = getattr(org, 'content_config', None)
-        
+        active_design_snapshot = WebsiteDesignSnapshot.active_for_org(org)
+
         response_data = {
             'org_id': org.id,
             'org_name': org.name,
@@ -369,6 +372,15 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
+            # Live-site visual capture round-trip + first-class design snapshot. content-factory
+            # reads these back to apply the target site's look to articles and the directory.
+            'visual_context': (config.visual_context if config else {}),
+            'renderer_style_profile': (config.renderer_style_profile if config else {}),
+            'reference_screenshots': (config.reference_screenshots if config else []),
+            'directory_style_feedback': (config.directory_style_feedback if config else {}),
+            'active_design_snapshot': (
+                active_design_snapshot.serialize() if active_design_snapshot else None
+            ),
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -512,6 +524,12 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint',
             'article_system_setup_cache',
             'framework_component_specs',
+            # Live-site visual capture round-trip. Previously dropped here, which broke the
+            # design-memory loop (articles/scaffold lost the target site's look).
+            'visual_context',
+            'renderer_style_profile',
+            'reference_screenshots',
+            'directory_style_feedback',
         ]
 
         for field in target_fields:
@@ -625,7 +643,43 @@ class ContentFactoryOrgConfigView(APIView):
                 organization=org,
                 defaults=mapping_defaults
             )
-        
+
+        # Handle a first-class design snapshot: deactivate the prior active snapshot and
+        # create a new active one. This is the durable, versioned design contract consumed
+        # by article generation and directory scaffolding.
+        design_snapshot_data = data.get('design_snapshot')
+        if isinstance(design_snapshot_data, dict) and design_snapshot_data:
+            captured_raw = design_snapshot_data.get('captured_at')
+            captured_at = parse_datetime(captured_raw) if isinstance(captured_raw, str) else None
+            try:
+                schema_version = int(design_snapshot_data.get('schema_version') or 1)
+            except (TypeError, ValueError):
+                schema_version = 1
+            with transaction.atomic():
+                WebsiteDesignSnapshot.objects.filter(
+                    organization=org, is_active=True
+                ).update(is_active=False, status='superseded')
+                WebsiteDesignSnapshot.objects.create(
+                    organization=org,
+                    is_active=True,
+                    status='active',
+                    schema_version=schema_version,
+                    domain=str(design_snapshot_data.get('domain') or org.domain or '')[:255],
+                    github_repo=str(
+                        design_snapshot_data.get('github_repo')
+                        or resulting_github_repo
+                        or ''
+                    )[:255],
+                    repo_head_sha=str(
+                        design_snapshot_data.get('repo_head_sha') or scan_head_sha or ''
+                    )[:40],
+                    source_urls=design_snapshot_data.get('source_urls') or [],
+                    screenshot_urls=design_snapshot_data.get('screenshot_urls') or [],
+                    captured_at=captured_at,
+                    spec=design_snapshot_data.get('spec') or {},
+                    design_spec_md=str(design_snapshot_data.get('design_spec_md') or ''),
+                )
+
         status_text = 'created' if org_created else 'updated'
         
         response_data = {
