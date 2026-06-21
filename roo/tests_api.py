@@ -587,6 +587,93 @@ class CurrentUserBalanceViewTests(APITestCase):
         self.assertEqual(response.data['expired_or_reversed_points'], 2)
 
 
+class PointsPacksViewTests(APITestCase):
+    def test_packs_are_public_and_match_config(self):
+        response = self.client.get(reverse('points-packs'))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        packs_by_id = {pack['pack_id']: pack for pack in response.data['packs']}
+        self.assertEqual(set(packs_by_id), {'topup_5', 'topup_10', 'topup_25'})
+        self.assertEqual(packs_by_id['topup_10']['points'], 10)
+        self.assertEqual(packs_by_id['topup_10']['amount_cents'], 3699)
+        self.assertEqual(packs_by_id['topup_10']['currency'], 'aud')
+        self.assertEqual(packs_by_id['topup_25']['points'], 25)
+        self.assertEqual(packs_by_id['topup_25']['amount_cents'], 6399)
+
+
+class CurrentUserPurchaseViewTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('current-user-purchase')
+        self.user = User.objects.create_user(
+            email='web-buyer@example.com',
+            slack_id='UWEBBUYER',
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.post(self.url, {'pack_id': 'topup_10'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(DEFAULT_FRONTEND_URL='https://mlai.test')
+    def test_authenticated_user_creates_purchase_for_self(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(self.url, {'pack_id': 'topup_10'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        purchase = PointsPurchase.objects.get()
+        self.assertEqual(purchase.user, self.user)
+        self.assertEqual(purchase.pack_id, 'topup_10')
+        self.assertEqual(purchase.points_amount, 10)
+        self.assertEqual(purchase.amount_cents, 3699)
+        self.assertEqual(purchase.status, 'pending')
+        self.assertEqual(purchase.purchase_from['source'], 'web')
+        self.assertEqual(
+            response.data['frontend_checkout_page_url'],
+            f'https://mlai.test/roo/topup/{purchase.id}',
+        )
+
+    def test_user_without_linked_slack_can_buy(self):
+        web_only_user = User.objects.create_user(email='no-slack@example.com')
+        self.client.force_authenticate(user=web_only_user)
+
+        response = self.client.post(self.url, {'pack_id': 'topup_5'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        purchase = PointsPurchase.objects.get()
+        self.assertEqual(purchase.user, web_only_user)
+        self.assertEqual(purchase.slack_user_id, '')
+
+    def test_guardrails_removed_brand_new_account_over_old_cap_is_allowed(self):
+        # Brand-new account (would have failed the old 7-day age rule) with a
+        # balance over the old 100-point cap: both guardrails are gone now.
+        self.user.date_joined = timezone.now()
+        self.user.save(update_fields=['date_joined'])
+        PointsAccount.objects.create(user=self.user, balance=500)
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(self.url, {'pack_id': 'topup_25'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(PointsPurchase.objects.get().points_amount, 25)
+
+    def test_invalid_pack_is_rejected(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(self.url, {'pack_id': 'topup_999'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PointsPurchase.objects.exists())
+
+    def test_missing_pack_id_is_rejected(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(self.url, {}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('pack_id is required', response.data['error'])
+
+
 class ManualAwardViewTests(APITestCase):
     def setUp(self):
         self.url = reverse('manual-award')

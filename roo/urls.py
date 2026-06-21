@@ -5,6 +5,7 @@ from .views import (
     CurrentUserBalanceView,
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
+    PointsPacksView, CurrentUserPurchaseView,
     StripeWebhookView, SystemAwardView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
@@ -25,6 +26,12 @@ urlpatterns = [
     path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('', include(router.urls)),
     
+    # ============================================================
+    # Top-up packs + self-serve purchase (web dashboard checkout)
+    # ============================================================
+    path('packs/', PointsPacksView.as_view(), name='points-packs'),
+    path('me/purchases/', CurrentUserPurchaseView.as_view(), name='current-user-purchase'),
+
     # ============================================================
     # User Balance (by Slack ID)
     # ============================================================
