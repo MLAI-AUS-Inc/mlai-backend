@@ -6896,6 +6896,23 @@ def _article_setup_state_run_from_latest(latest_runs, run_id: str):
     return next((run for run in latest_runs or [] if run.run_id == run_id), None)
 
 
+def _content_factory_run_exists(run_id: str) -> bool:
+    """True if a ContentFactoryRun with this run_id still exists.
+
+    Guards against dangling run references reaching the wizard: an article-setup
+    teardown can delete a run while its id lives on in a scan result / config
+    pending, and navigating to the deleted run 404s (which the mlai.au run-status
+    loader turns into a 500).
+    """
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return False
+    try:
+        return ContentFactoryRun.objects.filter(run_id=run_id).exists()
+    except Exception:
+        return False
+
+
 def _article_system_setup_run_is_dispatch_blocked(run) -> bool:
     if not run or run.workflow != "article_system_setup":
         return False
@@ -7479,6 +7496,20 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
                 meta[key] = value
         if not meta.get("setupStatus"):
             meta["setupStatus"] = setup_run.status
+
+    # A setupRunId can outlive its run: an article-setup teardown deletes the
+    # article_system_setup run, but its id survives in the latest scan result
+    # (e.g. article_system_setup_cache.setup_run_id, seeded above from the scan) or
+    # in config pending. Surfacing that dead id makes the wizard open
+    # /runs/<id>/status, which 404s — and the mlai.au run-status loader turns the 404
+    # into a 500. When the seeded id resolves to no live run AND no longer exists in
+    # the DB, drop the run-scoped fields so the wizard falls back to the clean setup
+    # entry point instead of a dead run route. (An existing-but-not-in-latest_runs or
+    # dispatch-blocked run still exists, so it is preserved — only true orphans drop.)
+    seeded_setup_run_id = str(meta.get("setupRunId") or "").strip()
+    if seeded_setup_run_id and not setup_run and not _content_factory_run_exists(seeded_setup_run_id):
+        meta["setupRunId"] = None
+        meta["livePreviewUrl"] = None
 
     rescan_run = _verification_scan_for_setup(latest_runs or [], rescan_run_id=str(meta.get("rescanRunId") or ""))
     verification_published = bool(
