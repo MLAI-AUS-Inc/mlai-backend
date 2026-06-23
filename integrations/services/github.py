@@ -730,17 +730,26 @@ def scan_github_project(
                 comp_name = comp_data.get('name')
                 if not comp_name:
                     continue
+                comp_defaults = {
+                    'content': comp_data.get('content', ''),
+                    'source': comp_data.get('source', 'generated'),
+                    'original_path': comp_data.get('original_path'),
+                    'similarity_score': comp_data.get('similarity_score', 0.0),
+                    'matched_component': comp_data.get('matched_component'),
+                    'adaptation_notes': comp_data.get('adaptation_notes', ''),
+                }
+                # Article-assembly metadata (Phase 0): persist the component's real import + spec so
+                # the library is available for article composition, regardless of which scan path
+                # (this inline Slack-triggered save or the content-factory config PUT) ingested it.
+                # Only (re)write when the payload carries the keys so a reuse-path scan can't clobber it.
+                if 'import_statement' in comp_data:
+                    comp_defaults['import_statement'] = comp_data.get('import_statement') or ''
+                if 'metadata' in comp_data:
+                    comp_defaults['metadata'] = comp_data.get('metadata') or {}
                 GeneratedComponent.objects.update_or_create(
                     organization=org,
                     name=comp_name,
-                    defaults={
-                        'content': comp_data.get('content', ''),
-                        'source': comp_data.get('source', 'generated'),
-                        'original_path': comp_data.get('original_path'),
-                        'similarity_score': comp_data.get('similarity_score', 0.0),
-                        'matched_component': comp_data.get('matched_component'),
-                        'adaptation_notes': comp_data.get('adaptation_notes', ''),
-                    }
+                    defaults=comp_defaults,
                 )
                 components_saved += 1
             logger.info(f"Saved {components_saved} generated components for {org_domain}")

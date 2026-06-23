@@ -330,6 +330,28 @@ class ContentFactoryOrgConfigView(APIView):
         # Get config if exists (might have already fetched it, but get fresh ref)
         config = getattr(org, 'content_config', None)
         active_design_snapshot = WebsiteDesignSnapshot.active_for_org(org)
+        # Phase 0: surface the org's generated component LIBRARY (names + real import + assembly
+        # metadata, NOT the component source which lives in the repo) so content-factory can import +
+        # compose the real components for articles instead of inlining generic helpers.
+        #
+        # Deliberately surfaced under its OWN key (`article_component_library`), NOT `generated_components`:
+        # content-factory's render pipeline already has dormant consumers that read
+        # org_config["generated_components"][].import_statement (build_component_catalog /
+        # _verified_import_entries). Re-using that key would silently activate them before the library
+        # assembly machinery is wired (a later phase), risking unresolved/invalid shared imports in
+        # otherwise self-contained articles. The library is inert until a phase explicitly reads this key.
+        article_component_library = []
+        if config is not None:
+            for _comp in GeneratedComponent.objects.filter(
+                organization_id=config.organization_id
+            ).only('name', 'import_statement', 'metadata', 'source'):
+                _entry = dict(_comp.metadata) if isinstance(_comp.metadata, dict) else {}
+                _entry.update({
+                    'name': _comp.name,
+                    'import_statement': _comp.import_statement or '',
+                    'source': _comp.source,
+                })
+                article_component_library.append(_entry)
 
         response_data = {
             'org_id': org.id,
@@ -372,6 +394,13 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
+            # Opt-in gate read by content-factory (_component_library_enabled) to import + compose the
+            # real component library for articles instead of inlining generic helpers.
+            'use_component_library': (config.use_component_library if config else False),
+            # Phase 0: the org's generated component library (names + import_statement + assembly
+            # metadata). Surfaced under a dedicated key so it stays inert until article-assembly reads
+            # it explicitly (see the note where article_component_library is built above).
+            'article_component_library': article_component_library,
             # Live-site visual capture round-trip + first-class design snapshot. content-factory
             # reads these back to apply the target site's look to articles and the directory.
             'visual_context': (config.visual_context if config else {}),
@@ -524,6 +553,8 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint',
             'article_system_setup_cache',
             'framework_component_specs',
+            # Opt-in gate for component-library article assembly (default off, enable per org).
+            'use_component_library',
             # Live-site visual capture round-trip. Previously dropped here, which broke the
             # design-memory loop (articles/scaffold lost the target site's look).
             'visual_context',
@@ -598,7 +629,15 @@ class ContentFactoryOrgConfigView(APIView):
                 'matched_component': comp_data.get('matched_component'),
                 'adaptation_notes': comp_data.get('adaptation_notes', ''),
             }
-            
+            # Article-assembly metadata (Phase 0): persist the component's real import + spec so the
+            # org-config GET can surface them for library-based article composition. Only (re)write
+            # them when the payload actually carries the keys — a reuse-path PUT (SHA unchanged) sends
+            # the lightweight inventory without them, and must not clobber a previously-captured library.
+            if 'import_statement' in comp_data:
+                comp_defaults['import_statement'] = comp_data.get('import_statement') or ''
+            if 'metadata' in comp_data:
+                comp_defaults['metadata'] = comp_data.get('metadata') or {}
+
             _, created = GeneratedComponent.objects.update_or_create(
                 organization=org,
                 name=comp_name,

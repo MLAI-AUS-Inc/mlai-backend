@@ -130,6 +130,14 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="Framework-adapted component spec docs from the last scan, reused to skip regeneration.",
     )
+    use_component_library = models.BooleanField(
+        default=False,
+        help_text=(
+            "Opt-in: when true, article generation imports + composes this org's real generated "
+            "component library (article_component_library) in a planned layout instead of inlining "
+            "generic helpers. Default off; enable per validated org."
+        ),
+    )
     # Live-site visual capture round-trip (content-factory sends these on scan/style feedback).
     # Without these columns the PUT whitelist silently dropped them, breaking the design-memory
     # loop so generated articles and scaffolded directories lost the target site's look.
@@ -240,6 +248,13 @@ class GeneratedComponent(models.Model):
     similarity_score = models.FloatField(default=0.0)  # 0.0 - 1.0
     matched_component = models.CharField(max_length=100, blank=True, null=True)  # Their component name
     adaptation_notes = models.TextField(blank=True, default='')
+
+    # Article-assembly metadata (Phase 0): lets article generation IMPORT + compose this org's real
+    # component library instead of inlining generic helpers. import_statement is the component's
+    # actual repo import; metadata carries supported_section_types / prop_schema / default_export /
+    # usage rules consumed by the planner + the render component catalog.
+    import_statement = models.CharField(max_length=500, blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
