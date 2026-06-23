@@ -59,6 +59,21 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.data['full_name'], 'Current User')
         self.assertEqual(response.data['role'], 'participant')
         self.assertFalse(response.data['has_team'])
+        # Non-admin users carry an explicit False so the frontend can gate the
+        # Vibe Raising admin dashboard off this flag.
+        self.assertIn('is_vibe_raising_admin', response.data)
+        self.assertFalse(response.data['is_vibe_raising_admin'])
+
+    def test_current_user_marks_superuser_as_vibe_raising_admin(self):
+        user = User.objects.create_user(email='superuser@example.com')
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get('/api/v1/auth/me/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['is_vibe_raising_admin'])
 
     def test_current_user_derives_has_team_from_membership(self):
         user = User.objects.create_user(
