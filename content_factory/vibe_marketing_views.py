@@ -12432,7 +12432,15 @@ class VibeMarketingRunView(APIView):
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
             return error_response
-        run = get_object_or_404(ContentFactoryRun.objects.prefetch_related("steps"), run_id=run_id)
+        run = ContentFactoryRun.objects.prefetch_related("steps").filter(run_id=run_id).first()
+        if run is None:
+            # A deleted/reset run (e.g. after an article-setup reset) is polled by a stale
+            # wizard session. Return an explicit, stable "gone" 404 the frontend run-status
+            # loader can branch on, instead of a bare Http404 it turns into a 500.
+            return Response(
+                {"detail": "Run not found.", "code": "run_not_found", "runId": run_id, "gone": True},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
         if run.workflow in ARTICLE_WORKFLOWS:
