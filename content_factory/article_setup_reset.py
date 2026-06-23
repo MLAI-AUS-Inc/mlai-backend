@@ -54,6 +54,26 @@ def article_setup_reset_excluded_run_ids(config) -> set[str]:
 
 ARTICLE_SETUP_RESET_KEYS = ("article_setup_reset", "article_setup_reset_at", "articleSetupResetAt")
 
+# Fields the *deep* reset additionally restores to their model defaults. The shallow
+# reset leaves these, which made a "reset" still reuse old components, short-circuit the
+# next scan (stale sha/fingerprint), and inherit stale repo classification + design memory.
+ARTICLE_SETUP_DEEP_RESET_FIELDS = (
+    "article_system_setup_cache",
+    "framework_component_specs",
+    "last_scanned_sha",
+    "last_scanned_at",
+    "scan_request_fingerprint",
+    "scan_summary",
+    "tech_stack",
+    "installed_packages",
+    "repo_execution_contract",
+    "build_healing_hints",
+    "visual_context",
+    "renderer_style_profile",
+    "reference_screenshots",
+    "directory_style_feedback",
+)
+
 
 def carry_reset_markers(source, target):
     """Copy the reset watermark + tombstone keys from ``source`` onto ``target``.
@@ -113,7 +133,7 @@ def _existing_article_system_setup_run_ids(config) -> list[str]:
     return seen
 
 
-def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
+def reset_article_setup_config(config, *, github_repo: str = "", deep: bool = False) -> dict:
     reset_at = timezone.now()
     reset_at_iso = reset_at.isoformat()
     raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
@@ -172,15 +192,59 @@ def reset_article_setup_config(config, *, github_repo: str = "") -> dict:
             update_fields.append(_path_field)
             cleared_fields.append(_path_field)
 
+    # Deep reset: also restore the scan/reuse/design caches the shallow reset leaves
+    # behind, so a re-scaffold re-derives everything from a fresh scan instead of reusing
+    # stale components, short-circuiting the next scan, or inheriting stale design memory.
+    if deep:
+        for _cache_field in ARTICLE_SETUP_DEEP_RESET_FIELDS:
+            _default_value = config._meta.get_field(_cache_field).get_default()
+            if getattr(config, _cache_field) != _default_value:
+                setattr(config, _cache_field, _default_value)
+                update_fields.append(_cache_field)
+                cleared_fields.append(_cache_field)
+
     if update_fields:
         update_fields.append("updated_at")
         config.save(update_fields=update_fields)
 
+    # Deep reset: delete the article_system_setup runs (tombstoning alone left them
+    # resolvable, resurfacing phantom wizard state) and drop persisted design snapshots.
+    # Best-effort + reported. Deleting the runs is safe even though the latest scan
+    # result may still reference them: the bootstrap gate drops dangling run refs (#474).
+    deleted_setup_runs = 0
+    dropped_design_snapshots = 0
+    if deep:
+        organization = getattr(config, "organization", None)
+        domain = str(getattr(organization, "domain", "") or "").strip()
+        if domain:
+            try:
+                from workflow_runs.models import ContentFactoryRun
+
+                _deleted = ContentFactoryRun.objects.filter(
+                    domain__iexact=domain, workflow="article_system_setup"
+                ).delete()
+                deleted_setup_runs = _deleted[1].get(ContentFactoryRun._meta.label, 0)
+            except Exception:
+                deleted_setup_runs = 0
+        if organization is not None:
+            try:
+                from content_factory.models import WebsiteDesignSnapshot
+
+                _dropped = WebsiteDesignSnapshot.objects.filter(organization=organization).delete()
+                dropped_design_snapshots = _dropped[1].get(WebsiteDesignSnapshot._meta.label, 0)
+            except Exception:
+                dropped_design_snapshots = 0
+
     return {
         "status": "reset",
         "changed": bool(update_fields),
+        "deep": bool(deep),
         "clearedFields": cleared_fields,
         "cleared_fields": cleared_fields,
+        "deletedSetupRuns": deleted_setup_runs,
+        "deleted_setup_runs": deleted_setup_runs,
+        "droppedDesignSnapshots": dropped_design_snapshots,
+        "dropped_design_snapshots": dropped_design_snapshots,
         "resetAt": reset_at_iso,
         "reset_at": reset_at_iso,
         "excludedRunIds": excluded_run_ids,

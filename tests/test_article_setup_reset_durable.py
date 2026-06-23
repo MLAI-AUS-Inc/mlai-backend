@@ -125,3 +125,68 @@ class DurableResetTests(TestCase):
         self.config.save(update_fields=["article_system", "updated_at"])
         run.refresh_from_db()
         self.assertFalse(article_setup_reset_ignores_run(self.config, run))
+
+    # --- deep reset (full teardown wired to the "Reset articles setup" button + --keep-org) ---
+    def test_deep_reset_clears_scan_and_reuse_caches(self):
+        self.config.article_system_setup_cache = {"setup_run_id": "x"}
+        self.config.framework_component_specs = {"ArticleCard": {"reuse": True}}
+        self.config.last_scanned_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        self.config.scan_request_fingerprint = "fp-123"
+        self.config.tech_stack = {"framework": "nextjs"}
+        self.config.reference_screenshots = ["https://x/y.png"]
+        self.config.build_healing_hints = ["hint"]
+        self.config.save()
+
+        result = reset_article_setup_config(self.config, github_repo=REPO, deep=True)
+        self.config.refresh_from_db()
+
+        self.assertTrue(result["deep"])
+        self.assertEqual(self.config.article_system_setup_cache, {})
+        self.assertEqual(self.config.framework_component_specs, {})
+        self.assertIn(self.config.last_scanned_sha, ("", None))
+        self.assertEqual(self.config.scan_request_fingerprint, "")
+        self.assertEqual(self.config.tech_stack, {})
+        self.assertEqual(self.config.reference_screenshots, [])
+        self.assertEqual(self.config.build_healing_hints, [])
+        self.assertIn("article_system_setup_cache", result["clearedFields"])
+        self.assertIn("tech_stack", result["clearedFields"])
+
+    def test_deep_reset_deletes_setup_runs_but_keeps_other_runs(self):
+        self._setup_run("setup-1")
+        self._setup_run("setup-2")
+        ContentFactoryRun.objects.create(
+            domain=self.org.domain, run_id="scan-1", workflow="repo_scan",
+            github_repo=REPO, status="completed", result={},
+        )
+        result = reset_article_setup_config(self.config, github_repo=REPO, deep=True)
+        self.assertEqual(result["deletedSetupRuns"], 2)
+        self.assertFalse(ContentFactoryRun.objects.filter(workflow="article_system_setup").exists())
+        self.assertTrue(ContentFactoryRun.objects.filter(run_id="scan-1").exists())  # repo_scan kept
+
+    def test_deep_reset_drops_design_snapshots(self):
+        from content_factory.models import WebsiteDesignSnapshot
+
+        WebsiteDesignSnapshot.objects.create(organization=self.org, domain=self.org.domain)
+        result = reset_article_setup_config(self.config, github_repo=REPO, deep=True)
+        self.assertEqual(result["droppedDesignSnapshots"], 1)
+        self.assertFalse(WebsiteDesignSnapshot.objects.filter(organization=self.org).exists())
+
+    def test_shallow_reset_leaves_caches_runs_and_snapshots(self):
+        # No-regression: the default (shallow) reset must NOT touch caches/runs/snapshots.
+        from content_factory.models import WebsiteDesignSnapshot
+
+        self.config.tech_stack = {"framework": "nextjs"}
+        self.config.article_system_setup_cache = {"setup_run_id": "x"}
+        self.config.save()
+        self._setup_run("setup-1")
+        WebsiteDesignSnapshot.objects.create(organization=self.org, domain=self.org.domain)
+
+        result = reset_article_setup_config(self.config, github_repo=REPO)  # deep defaults False
+        self.config.refresh_from_db()
+
+        self.assertFalse(result.get("deep"))
+        self.assertEqual(result.get("deletedSetupRuns", 0), 0)
+        self.assertEqual(self.config.tech_stack, {"framework": "nextjs"})
+        self.assertEqual(self.config.article_system_setup_cache, {"setup_run_id": "x"})
+        self.assertTrue(ContentFactoryRun.objects.filter(run_id="setup-1").exists())
+        self.assertTrue(WebsiteDesignSnapshot.objects.filter(organization=self.org).exists())

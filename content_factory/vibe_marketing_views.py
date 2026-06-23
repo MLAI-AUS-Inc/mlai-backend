@@ -11896,7 +11896,10 @@ class VibeMarketingArticleSetupResetView(APIView):
         scaffold_cleanup = _delete_article_setup_scaffold_branches(config)
         # The persisted setup state lives in this service's OrganizationContentConfig,
         # so the local clear is the source of truth that _article_setup_state reads.
-        reset_payload = reset_article_setup_config(config, github_repo=github_repo)
+        # deep=True = full teardown: also clears scan/reuse/design caches, deletes the
+        # article_system_setup runs, and drops design snapshots (not just scaffold flags),
+        # so a re-scaffold starts from a genuinely fresh state.
+        reset_payload = reset_article_setup_config(config, github_repo=github_repo, deep=True)
         latest_runs = _latest_runs_for_org(context.organization, limit=12)
         article_setup_state = _article_setup_state(
             context=context,
