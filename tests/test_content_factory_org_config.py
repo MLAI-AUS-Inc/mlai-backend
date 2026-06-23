@@ -160,6 +160,29 @@ class ContentFactoryOrgConfigTests(TestCase):
         )
         self.assertEqual(callout.metadata["supported_section_types"], ["callout"])
 
+    def test_org_config_round_trips_use_component_library_flag(self):
+        """The per-org opt-in flag for component-library assembly must default off and round-trip,
+        so content-factory's `_component_library_enabled` can gate the feature per validated org."""
+        from content_factory.models import OrganizationContentConfig
+
+        # Default off until explicitly enabled.
+        get_default = self.client.get("/api/content-factory/org/config/", {"domain": "mlai.au"})
+        self.assertEqual(get_default.status_code, status.HTTP_200_OK)
+        self.assertFalse(get_default.data["use_component_library"])
+
+        put_response = self.client.put(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au", "use_component_library": True},
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            OrganizationContentConfig.objects.get(organization=self.organization).use_component_library
+        )
+
+        get_enabled = self.client.get("/api/content-factory/org/config/", {"domain": "mlai.au"})
+        self.assertTrue(get_enabled.data["use_component_library"])
+
     def test_org_config_round_trips_component_reuse_fields(self):
         """Component-reuse fields must survive PUT->GET so content-factory's SHA
         short-circuit and reuse decision stop regenerating components every scan."""

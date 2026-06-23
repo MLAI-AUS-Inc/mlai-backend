@@ -394,6 +394,9 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
+            # Opt-in gate read by content-factory (_component_library_enabled) to import + compose the
+            # real component library for articles instead of inlining generic helpers.
+            'use_component_library': (config.use_component_library if config else False),
             # Phase 0: the org's generated component library (names + import_statement + assembly
             # metadata). Surfaced under a dedicated key so it stays inert until article-assembly reads
             # it explicitly (see the note where article_component_library is built above).
@@ -550,6 +553,8 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint',
             'article_system_setup_cache',
             'framework_component_specs',
+            # Opt-in gate for component-library article assembly (default off, enable per org).
+            'use_component_library',
             # Live-site visual capture round-trip. Previously dropped here, which broke the
             # design-memory loop (articles/scaffold lost the target site's look).
             'visual_context',
