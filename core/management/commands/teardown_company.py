@@ -266,7 +266,7 @@ class Command(BaseCommand):
         self.stdout.write("  Startup data scrub (delete_startup_data_for_organization): artifacts + cancel runs")
 
         if keep_org:
-            self.stdout.write("  Article-setup reset: clear scaffold flags + state (Organization kept)")
+            self.stdout.write("  Article-setup reset (deep): clear scaffold flags/state + scan/reuse/design caches, delete article_system_setup runs, drop design snapshots (Organization kept)")
         else:
             self.stdout.write("  Direct deletes (dependency-ordered):")
             for phase, label, qs in self._structural_querysets(org) + self._residue_querysets(domain):
@@ -301,9 +301,14 @@ class Command(BaseCommand):
                 from content_factory.article_setup_reset import reset_article_setup_config
 
                 payload = reset_article_setup_config(
-                    config, github_repo=str(getattr(config, "github_repo", "") or "")
+                    config, github_repo=str(getattr(config, "github_repo", "") or ""), deep=True
                 )
                 self.stdout.write(f"  article setup reset: cleared {payload.get('cleared_fields') or []}")
+                self.stdout.write(
+                    "  deep reset: deleted "
+                    f"{payload.get('deleted_setup_runs', 0)} article_system_setup run(s), dropped "
+                    f"{payload.get('dropped_design_snapshots', 0)} design snapshot(s)"
+                )
             self.stdout.write("")
             self.stdout.write(self.style.SUCCESS(f"Reset complete for org_id={org.id} (organization kept)."))
             self.stdout.write("Re-scaffold via POST /api/v1/integrations/github/scaffold for this domain.")
