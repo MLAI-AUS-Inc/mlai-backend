@@ -23,9 +23,21 @@ from .views import (
     VibeRaisingVideoUploadSessionView,
     VibeRaisingVideoUploadView,
 )
+from .admin_views import (
+    VibeRaisingAdminOverviewView,
+    VibeRaisingAdminUpdateDetailView,
+    VibeRaisingAdminUpdatesView,
+)
 
 
 urlpatterns = [
+    path("admin/overview/", VibeRaisingAdminOverviewView.as_view(), name="vibe-raising-admin-overview"),
+    path("admin/updates/", VibeRaisingAdminUpdatesView.as_view(), name="vibe-raising-admin-updates"),
+    path(
+        "admin/updates/<int:update_id>/",
+        VibeRaisingAdminUpdateDetailView.as_view(),
+        name="vibe-raising-admin-update-detail",
+    ),
     path("profile/", VibeRaisingProfileView.as_view(), name="vibe-raising-profile"),
     path("companies/", VibeRaisingCompanyView.as_view(), name="vibe-raising-companies"),
     path("active-company/", VibeRaisingActiveCompanyView.as_view(), name="vibe-raising-active-company"),

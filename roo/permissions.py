@@ -53,6 +53,31 @@ def is_points_admin(slack_id: str) -> bool:
     return _active_admin_with_role_exists(slack_id, FULL_POINTS_ADMIN_ROLES)
 
 
+def is_points_admin_user(user) -> bool:
+    """
+    Check whether an authenticated web user is an active full Points Admin.
+
+    Unlike :func:`is_points_admin` (keyed on Slack ID), this resolves admin
+    status from the ``PointsAdmin.user`` FK so the web app can gate features by
+    the logged-in account (e.g. the Vibe Raising admin dashboard). Django
+    superusers are always treated as admins.
+
+    Note: this relies on ``PointsAdmin.user`` being linked. Rows where ``user``
+    is null (the historical default, since the points system is keyed on Slack
+    ID) will not match -- run ``manage.py link_points_admins_to_users`` to
+    backfill the FK.
+    """
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    return PointsAdmin.objects.filter(
+        user=user,
+        is_active=True,
+        role__in=FULL_POINTS_ADMIN_ROLES,
+    ).exists()
+
+
 def can_generate_coworking_reports(slack_id: str) -> bool:
     """
     Check if a Slack user ID can generate coworking reports.

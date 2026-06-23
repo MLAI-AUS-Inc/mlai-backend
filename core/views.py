@@ -499,6 +499,12 @@ class CurrentUserView(APIView):
         # Determine primary team for backward compatibility (prefer hospital)
         primary_team_data = hospital_team_data or esafety_team_data
 
+        # PointsAdmin-based admin flag, consumed by the founder-tools / Vibe
+        # Raising frontend to gate the admin dashboard. Resolves from
+        # PointsAdmin.user (Django superusers always count). Local import keeps
+        # core from depending on the roo feature app at module load.
+        from roo.permissions import is_points_admin_user
+
         data = {
             'id': user.id,
             'first_name': user.first_name,
@@ -509,6 +515,7 @@ class CurrentUserView(APIView):
             'about': user.about,
             'role': get_compat_user_role(user),
             'is_superuser': user.is_superuser,
+            'is_vibe_raising_admin': is_points_admin_user(user),
             'has_team': user_has_team(user),
             'team': primary_team_data,  # Backward compatibility
             'hospital_team': hospital_team_data,
