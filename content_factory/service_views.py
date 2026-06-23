@@ -330,6 +330,21 @@ class ContentFactoryOrgConfigView(APIView):
         # Get config if exists (might have already fetched it, but get fresh ref)
         config = getattr(org, 'content_config', None)
         active_design_snapshot = WebsiteDesignSnapshot.active_for_org(org)
+        # Phase 0: surface the org's generated component LIBRARY (names + real import + assembly
+        # metadata, NOT the component source which lives in the repo) so content-factory can import +
+        # compose the real components for articles instead of inlining generic helpers.
+        generated_components = []
+        if config is not None:
+            for _comp in GeneratedComponent.objects.filter(
+                organization_id=config.organization_id
+            ).only('name', 'import_statement', 'metadata', 'source'):
+                _entry = dict(_comp.metadata) if isinstance(_comp.metadata, dict) else {}
+                _entry.update({
+                    'name': _comp.name,
+                    'import_statement': _comp.import_statement or '',
+                    'source': _comp.source,
+                })
+                generated_components.append(_entry)
 
         response_data = {
             'org_id': org.id,
@@ -372,6 +387,9 @@ class ContentFactoryOrgConfigView(APIView):
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
+            # Phase 0: the org's generated component library (names + import_statement + assembly
+            # metadata) — consumed by content-factory build_component_catalog / _verified_import_entries.
+            'generated_components': generated_components,
             # Live-site visual capture round-trip + first-class design snapshot. content-factory
             # reads these back to apply the target site's look to articles and the directory.
             'visual_context': (config.visual_context if config else {}),
@@ -597,6 +615,10 @@ class ContentFactoryOrgConfigView(APIView):
                 'similarity_score': comp_data.get('similarity_score', 0.0),
                 'matched_component': comp_data.get('matched_component'),
                 'adaptation_notes': comp_data.get('adaptation_notes', ''),
+                # Article-assembly metadata (Phase 0): persist the component's real import + spec so
+                # the org-config GET can surface them for library-based article composition.
+                'import_statement': comp_data.get('import_statement', '') or '',
+                'metadata': comp_data.get('metadata') or {},
             }
             
             _, created = GeneratedComponent.objects.update_or_create(
