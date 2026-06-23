@@ -85,9 +85,10 @@ class ContentFactoryOrgConfigTests(TestCase):
 
     def test_org_config_round_trips_generated_component_library(self):
         """Phase 0: PUT persists each generated component's import_statement + assembly metadata,
-        and the GET surfaces a bounded `generated_components` library (name + import + metadata, NOT
-        the component source) so content-factory can import + compose the real components instead of
-        inlining generic helpers."""
+        and the GET surfaces a bounded `article_component_library` (name + import + metadata, NOT the
+        component source) so content-factory can import + compose the real components instead of
+        inlining generic helpers. Surfaced under its own key (not `generated_components`) to stay inert
+        until article-assembly reads it explicitly."""
         from content_factory.models import GeneratedComponent
 
         components = [
@@ -127,10 +128,13 @@ class ContentFactoryOrgConfigTests(TestCase):
         self.assertEqual(callout.metadata["supported_section_types"], ["callout"])
         self.assertEqual(callout.metadata["prop_schema"], {"title": "string", "body": "string"})
 
-        # GET surfaces a bounded library: name + import_statement + flattened metadata, never `content`.
+        # GET surfaces a bounded library under its own key: name + import_statement + flattened
+        # metadata, never `content`. Must NOT appear under `generated_components` (which would
+        # activate content-factory's dormant render consumers prematurely).
         get_response = self.client.get("/api/content-factory/org/config/", {"domain": "mlai.au"})
         self.assertEqual(get_response.status_code, status.HTTP_200_OK)
-        library = {c["name"]: c for c in get_response.data["generated_components"]}
+        self.assertNotIn("generated_components", get_response.data)
+        library = {c["name"]: c for c in get_response.data["article_component_library"]}
         self.assertEqual(set(library), {"ArticleCallout", "ArticleHeroHeader"})
         self.assertEqual(
             library["ArticleCallout"]["import_statement"],
@@ -138,8 +142,23 @@ class ContentFactoryOrgConfigTests(TestCase):
         )
         self.assertEqual(library["ArticleCallout"]["supported_section_types"], ["callout"])
         self.assertTrue(library["ArticleHeroHeader"]["default_export"])
-        for entry in get_response.data["generated_components"]:
+        for entry in get_response.data["article_component_library"]:
             self.assertNotIn("content", entry)  # bounded: source code never surfaced in the GET
+
+        # Reuse-path PUT (SHA unchanged) sends the lightweight inventory WITHOUT import_statement /
+        # metadata; it must not clobber the previously-captured library.
+        reuse_put = self.client.put(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au", "generated_components": [{"name": "ArticleCallout", "source": "generated"}]},
+            format="json",
+        )
+        self.assertEqual(reuse_put.status_code, status.HTTP_200_OK)
+        callout.refresh_from_db()
+        self.assertEqual(
+            callout.import_statement,
+            "import { ArticleCallout } from '~/components/articles/ArticleCallout'",
+        )
+        self.assertEqual(callout.metadata["supported_section_types"], ["callout"])
 
     def test_org_config_round_trips_component_reuse_fields(self):
         """Component-reuse fields must survive PUT->GET so content-factory's SHA

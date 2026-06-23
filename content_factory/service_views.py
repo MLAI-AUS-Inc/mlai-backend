@@ -333,7 +333,14 @@ class ContentFactoryOrgConfigView(APIView):
         # Phase 0: surface the org's generated component LIBRARY (names + real import + assembly
         # metadata, NOT the component source which lives in the repo) so content-factory can import +
         # compose the real components for articles instead of inlining generic helpers.
-        generated_components = []
+        #
+        # Deliberately surfaced under its OWN key (`article_component_library`), NOT `generated_components`:
+        # content-factory's render pipeline already has dormant consumers that read
+        # org_config["generated_components"][].import_statement (build_component_catalog /
+        # _verified_import_entries). Re-using that key would silently activate them before the library
+        # assembly machinery is wired (a later phase), risking unresolved/invalid shared imports in
+        # otherwise self-contained articles. The library is inert until a phase explicitly reads this key.
+        article_component_library = []
         if config is not None:
             for _comp in GeneratedComponent.objects.filter(
                 organization_id=config.organization_id
@@ -344,7 +351,7 @@ class ContentFactoryOrgConfigView(APIView):
                     'import_statement': _comp.import_statement or '',
                     'source': _comp.source,
                 })
-                generated_components.append(_entry)
+                article_component_library.append(_entry)
 
         response_data = {
             'org_id': org.id,
@@ -388,8 +395,9 @@ class ContentFactoryOrgConfigView(APIView):
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
             # Phase 0: the org's generated component library (names + import_statement + assembly
-            # metadata) — consumed by content-factory build_component_catalog / _verified_import_entries.
-            'generated_components': generated_components,
+            # metadata). Surfaced under a dedicated key so it stays inert until article-assembly reads
+            # it explicitly (see the note where article_component_library is built above).
+            'article_component_library': article_component_library,
             # Live-site visual capture round-trip + first-class design snapshot. content-factory
             # reads these back to apply the target site's look to articles and the directory.
             'visual_context': (config.visual_context if config else {}),
@@ -615,12 +623,16 @@ class ContentFactoryOrgConfigView(APIView):
                 'similarity_score': comp_data.get('similarity_score', 0.0),
                 'matched_component': comp_data.get('matched_component'),
                 'adaptation_notes': comp_data.get('adaptation_notes', ''),
-                # Article-assembly metadata (Phase 0): persist the component's real import + spec so
-                # the org-config GET can surface them for library-based article composition.
-                'import_statement': comp_data.get('import_statement', '') or '',
-                'metadata': comp_data.get('metadata') or {},
             }
-            
+            # Article-assembly metadata (Phase 0): persist the component's real import + spec so the
+            # org-config GET can surface them for library-based article composition. Only (re)write
+            # them when the payload actually carries the keys — a reuse-path PUT (SHA unchanged) sends
+            # the lightweight inventory without them, and must not clobber a previously-captured library.
+            if 'import_statement' in comp_data:
+                comp_defaults['import_statement'] = comp_data.get('import_statement') or ''
+            if 'metadata' in comp_data:
+                comp_defaults['metadata'] = comp_data.get('metadata') or {}
+
             _, created = GeneratedComponent.objects.update_or_create(
                 organization=org,
                 name=comp_name,
