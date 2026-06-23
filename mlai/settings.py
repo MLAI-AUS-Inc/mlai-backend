@@ -174,8 +174,15 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'mlai.wsgi.application'
 
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au').split(',')
-CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au').split(',')
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,https://admin.mlai.au').split(',')
+CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:3000,http://localhost:5173,https://mlai.au,https://www.mlai.au,https://admin.mlai.au').split(',')
+# The standalone admin dashboard (admin.mlai.au) must always be an allowed,
+# credentialed origin, even if the env-var lists above are overridden in prod.
+for _admin_origin in ('https://admin.mlai.au',):
+    if _admin_origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(_admin_origin)
+    if _admin_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_admin_origin)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (*default_headers, "x-request-id")
 CORS_EXPOSE_HEADERS = ["X-Request-ID"]
@@ -422,6 +429,9 @@ WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
 CONTENT_FACTORY_FRONTEND_URL = os.getenv('CONTENT_FACTORY_FRONTEND_URL') or DEFAULT_FRONTEND_URL
+ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL') or (
+    'http://localhost:3001' if IS_LOCAL_ENV else 'https://admin.mlai.au'
+)
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )

@@ -333,6 +333,28 @@ class AuthContractTests(TestCase):
         self.assertTrue(user.is_active)
         mock_verify.assert_called_once_with('test-token')
 
+    @override_settings(ADMIN_FRONTEND_URL='https://admin.mlai.au')
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'admin-verify@example.com'})
+    def test_verify_magic_link_admin_app_returns_to_admin_frontend(self, mock_verify):
+        user = User.objects.create_user(
+            email='admin-verify@example.com',
+            first_name='Ada',
+            last_name='Admin',
+        )
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=admin'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['user']['id'], user.id)
+        self.assertEqual(response.data['redirect'], '/')
+        self.assertEqual(response.data['next_url'], 'https://admin.mlai.au/')
+        self.assertIn('access_token', response.cookies)
+        self.assertIn('refresh_token', response.cookies)
+
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'vibe-verify@example.com'})
     def test_verify_magic_link_defaults_to_founder_tools_for_vibe_raising_alias(self, mock_verify):
         user = User.objects.create_user(
