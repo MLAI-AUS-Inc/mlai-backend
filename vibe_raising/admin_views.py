@@ -104,7 +104,10 @@ def _summary_for_draft(draft, company=None, founder=None) -> dict:
         or "Unknown startup"
     )
     return {
-        "id": draft.id,
+        # Must be a string: the frontend normalizer (normalizeAdminUpdateSummary)
+        # drops any summary whose id is not a string, which silently empties
+        # recentUpdates and the updates list.
+        "id": str(draft.id),
         "startupName": startup_name,
         "startupAvatarUrl": company.avatar_url if company else None,
         "updateMonth": _month_label(draft.month),
