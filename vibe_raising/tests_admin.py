@@ -75,7 +75,9 @@ class VibeRaisingAdminEndpointsTests(TestCase):
         self.assertEqual(body["reviewCount"], 1)
         self.assertIn("updatesCreated", {stat["key"] for stat in body["stats"]})
 
-        summary = next(u for u in body["recentUpdates"] if u["id"] == self.draft.id)
+        summary = next(u for u in body["recentUpdates"] if u["id"] == str(self.draft.id))
+        # IDs must be strings or the frontend normalizer drops the whole summary.
+        self.assertIsInstance(summary["id"], str)
         self.assertEqual(summary["startupName"], "Acme Inc")
         self.assertEqual(summary["founderName"], "Fiona Founder")
         self.assertEqual(summary["companyId"], str(self.company.id))
@@ -90,6 +92,7 @@ class VibeRaisingAdminEndpointsTests(TestCase):
         self.assertEqual(body["total"], 1)
         self.assertEqual(len(body["updates"]), 1)
         self.assertEqual(body["updates"][0]["startupName"], "Acme Inc")
+        self.assertIsInstance(body["updates"][0]["id"], str)
         self.assertFalse(body["hasNext"])
         self.assertFalse(body["hasPrevious"])
 
