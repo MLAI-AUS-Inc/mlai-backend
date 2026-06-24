@@ -7018,6 +7018,38 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         scan_status = "completed"
     scan_stale = bool(last_scanned_sha and scan_head_sha and last_scanned_sha != scan_head_sha)
 
+    # Surface the scan's scaffold approvability so the wizard can gate the
+    # "Build articles scaffold" action. A scan that resolved the requested
+    # articles route as ambiguous/unmatched finishes with scaffold_status
+    # "not_needed" and no approve_url; without this the UI would still render an
+    # enabled Build button that 409s on /approve and silently refreshes.
+    scan_result_payload = _run_mapping(latest_scan.result) if latest_scan else {}
+    scan_inner_result = (
+        scan_result_payload.get("result") if isinstance(scan_result_payload.get("result"), dict) else {}
+    )
+    scan_surface_resolution = (
+        scan_inner_result.get("article_surface_resolution")
+        if isinstance(scan_inner_result.get("article_surface_resolution"), dict)
+        else {}
+    )
+    scan_capability = (
+        scan_inner_result.get("capability_snapshot")
+        if isinstance(scan_inner_result.get("capability_snapshot"), dict)
+        else {}
+    )
+    scan_scaffold_status = str(
+        scan_result_payload.get("scaffold_status") or scan_inner_result.get("scaffold_status") or ""
+    ).strip()
+    scan_approve_url = str(
+        scan_result_payload.get("approve_url") or scan_inner_result.get("approve_url") or ""
+    ).strip()
+    scan_article_surface_state = str(
+        scan_surface_resolution.get("existence_state")
+        or scan_capability.get("article_surface_state")
+        or scan_inner_result.get("article_surface_state")
+        or ""
+    ).strip()
+
     setup_meta = _setup_metadata_from_run(setup_run) if setup_run else {}
     setup_status = setup_meta.get("setupStatus") or setup_gate.get("setupStatus") or (setup_run.status if setup_run else "") or ""
     setup_run_id = setup_meta.get("setupRunId") or setup_gate.get("setupRunId") or (setup_run.run_id if setup_run else "") or ""
@@ -7078,6 +7110,9 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         "scanStale": scan_stale,
         "scanNeedsRescan": scan_stale,
         "staleReason": "default_branch_changed" if scan_stale else None,
+        "scaffoldStatus": scan_scaffold_status or None,
+        "approveUrl": scan_approve_url or None,
+        "articleSurfaceState": scan_article_surface_state or None,
         "setupRunId": setup_run_id or None,
         "setupStatus": str(setup_status or "").strip() or None,
         "setupRunStatus": setup_run.status if setup_run else None,
