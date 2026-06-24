@@ -52,6 +52,7 @@ APP_CONTEXT_ALIASES = {
     "content-factory": "content-factory",
     "content_factory": "content-factory",
     "contentfactory": "content-factory",
+    "admin": "admin",
 }
 
 
@@ -130,6 +131,8 @@ def _frontend_base_url(app_context):
         )
     if app_context == 'content-factory':
         return _origin_from_url(getattr(settings, 'CONTENT_FACTORY_FRONTEND_URL', None), default_origin)
+    if app_context == 'admin':
+        return _origin_from_url(getattr(settings, 'ADMIN_FRONTEND_URL', None), default_origin)
     return default_origin
 
 
@@ -337,6 +340,8 @@ class MagicLinkVerifyView(APIView):
                     redirect_path = "/watt-the-hack/dashboard"
                 elif app_param == 'content-factory':
                     redirect_path = "/content-factory"
+                elif app_param == 'admin':
+                    redirect_path = "/"
                 else:
                     redirect_path = "/hospital/app"
 
