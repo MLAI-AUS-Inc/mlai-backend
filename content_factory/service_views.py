@@ -606,6 +606,37 @@ class ContentFactoryOrgConfigView(APIView):
                     **{key: value for key, value in scan_state.items() if value not in (None, '')},
                 }
 
+        # Mirror the article_system protection above for publish targets. This PUT
+        # is a second write path (alongside the scan callback) and a routine scan
+        # recomputes an empty publish_targets list when it cannot re-derive the
+        # safe target. Without this guard, an empty incoming list silently unlinks
+        # publishing — wiping a previously-registered, high-confidence target even
+        # though the article surface is still live. Preserve the registered target
+        # unless the article system is genuinely no longer ready.
+        if 'publish_targets' in defaults:
+            existing_config = getattr(org, 'content_config', None)
+            resulting_article_system = (
+                defaults['article_system']
+                if 'article_system' in defaults
+                else resolve_article_system(existing_config)
+            )
+            existing_default_id = getattr(existing_config, 'default_publish_target_id', None)
+            incoming_default_id = (
+                defaults['default_publish_target_id']
+                if 'default_publish_target_id' in defaults
+                else existing_default_id
+            )
+            persisted_targets, persisted_default_id = preserve_registered_publish_targets(
+                incoming_targets=defaults.get('publish_targets'),
+                incoming_default_id=incoming_default_id,
+                existing_targets=getattr(existing_config, 'publish_targets', None),
+                existing_default_id=existing_default_id,
+                article_system=resulting_article_system,
+            )
+            if persisted_targets != (defaults.get('publish_targets') or []):
+                defaults['publish_targets'] = persisted_targets
+                defaults['default_publish_target_id'] = persisted_default_id
+
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
             organization=org,
