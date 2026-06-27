@@ -25,6 +25,7 @@ from content_factory.article_system import (
     best_registry_driven_publish_target,
     merge_article_system,
     normalize_article_system,
+    preserve_registered_publish_targets,
     registry_target_publish_ready,
     resolve_article_system,
 )
@@ -5098,10 +5099,19 @@ class ContentFactoryCallbackView(APIView):
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
-                if publish_targets != (config.publish_targets or []):
-                    config.publish_targets = publish_targets
+                # A scan that finds no publish target must not erase a target the
+                # scaffold previously registered while the surface is still live.
+                persist_targets, persist_default_id = preserve_registered_publish_targets(
+                    incoming_targets=publish_targets,
+                    incoming_default_id=default_publish_target_id,
+                    existing_targets=config.publish_targets,
+                    existing_default_id=config.default_publish_target_id,
+                    article_system=merged_article_system,
+                )
+                if persist_targets != (config.publish_targets or []):
+                    config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
-                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                normalized_default_target_id = str(persist_default_id or '').strip() or None
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')
@@ -5131,10 +5141,19 @@ class ContentFactoryCallbackView(APIView):
                 if next_article_system != (config.article_system or {}):
                     config.article_system = next_article_system
                     update_fields.append('article_system')
-                if publish_targets != (config.publish_targets or []):
-                    config.publish_targets = publish_targets
+                # A scan that finds no publish target must not erase a target the
+                # scaffold previously registered while the surface is still live.
+                persist_targets, persist_default_id = preserve_registered_publish_targets(
+                    incoming_targets=publish_targets,
+                    incoming_default_id=default_publish_target_id,
+                    existing_targets=config.publish_targets,
+                    existing_default_id=config.default_publish_target_id,
+                    article_system=next_article_system,
+                )
+                if persist_targets != (config.publish_targets or []):
+                    config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
-                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                normalized_default_target_id = str(persist_default_id or '').strip() or None
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')
