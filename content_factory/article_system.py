@@ -323,6 +323,44 @@ def merge_article_system(current_value: Optional[Dict[str, Any]], incoming_value
     return incoming
 
 
+def preserve_registered_publish_targets(
+    *,
+    incoming_targets: Optional[list],
+    incoming_default_id: Optional[str],
+    existing_targets: Optional[list],
+    existing_default_id: Optional[str],
+    article_system: Optional[Dict[str, Any]],
+) -> tuple[list, Optional[str]]:
+    """Decide which publish targets a scan callback should persist.
+
+    The scaffold registers a high-confidence publish target at setup time, but
+    the generic scan detector frequently cannot re-derive that target from the
+    repository alone (a chicken-and-egg problem: it needs the registered surface
+    to recognise the surface). Without this guard, a routine re-scan that returns
+    ``publish_targets=[]`` overwrites the stored target and silently unlinks
+    publishing even though the article surface is still live in the repo.
+
+    Rule: a non-empty incoming scan result always wins (a fresh detection is
+    authoritative). But when the scan returns *no* targets, only clear the stored
+    targets if the article surface is genuinely gone (the article system is no
+    longer ready). If the surface still exists, keep the previously-registered
+    target rather than erasing publishing capability.
+
+    A deliberate teardown still clears targets via ``article_setup_reset`` — that
+    path does not flow through here, so this guard does not block resets.
+    """
+    incoming_targets = incoming_targets or []
+    existing_targets = existing_targets or []
+
+    if incoming_targets:
+        return incoming_targets, incoming_default_id
+
+    if existing_targets and article_system_ready(article_system):
+        return existing_targets, existing_default_id
+
+    return incoming_targets, incoming_default_id
+
+
 def recommended_next_action(scan_completed: bool, article_system: Dict[str, Any]) -> str:
     resolved = normalize_article_system(article_system)
     if not scan_completed:
