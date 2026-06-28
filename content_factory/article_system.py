@@ -323,6 +323,31 @@ def merge_article_system(current_value: Optional[Dict[str, Any]], incoming_value
     return incoming
 
 
+def is_directly_publishable_target(target: Optional[Dict[str, Any]]) -> bool:
+    """Whether a target represents a real, safe publish route (not a manual bundle fallback).
+
+    ``react_article_system`` file-drop targets carry ``publish_capability == "direct"``; a
+    registry-driven target counts when it is publish-ready. A ``bundle_only_article_directory``
+    fallback (``publish_capability == "bundle_only"``) is explicitly NOT directly publishable —
+    it is what the generic scan emits when it cannot confirm a safe publish route.
+    """
+    if not isinstance(target, dict):
+        return False
+    kind = str(target.get("kind") or "").strip()
+    capability = str(target.get("publish_capability") or "").strip()
+    if kind == "bundle_only_article_directory" or capability == "bundle_only":
+        return False
+    if capability == "direct":
+        return True
+    if is_registry_driven_publish_target(target) and registry_target_publish_ready(target):
+        return True
+    return False
+
+
+def _has_directly_publishable_target(targets: Optional[list]) -> bool:
+    return any(is_directly_publishable_target(item) for item in (targets or []))
+
+
 def preserve_registered_publish_targets(
     *,
     incoming_targets: Optional[list],
@@ -336,15 +361,23 @@ def preserve_registered_publish_targets(
     The scaffold registers a high-confidence publish target at setup time, but
     the generic scan detector frequently cannot re-derive that target from the
     repository alone (a chicken-and-egg problem: it needs the registered surface
-    to recognise the surface). Without this guard, a routine re-scan that returns
-    ``publish_targets=[]`` overwrites the stored target and silently unlinks
-    publishing even though the article surface is still live in the repo.
+    to recognise the surface). Without this guard, a routine re-scan overwrites the
+    stored target and silently unlinks publishing even though the article surface
+    is still live in the repo.
 
-    Rule: a non-empty incoming scan result always wins (a fresh detection is
-    authoritative). But when the scan returns *no* targets, only clear the stored
-    targets if the article surface is genuinely gone (the article system is no
-    longer ready). If the surface still exists, keep the previously-registered
-    target rather than erasing publishing capability.
+    Two ways a re-scan would erase a registered publish-capable target:
+
+    1. It returns ``publish_targets=[]`` — keep the stored target while the surface
+       is still ready.
+    2. It returns only a *weaker* fallback (e.g. a ``bundle_only_article_directory``
+       for an RR v6 Vite SPA the generic detector cannot confirm as directly
+       publishable). A non-empty result is normally authoritative, but a downgrade
+       from a directly-publishable target to a bundle-only fallback must not clobber
+       a live, publishing surface — that is exactly what silently forces
+       ``content_only`` delivery on a working article system.
+
+    A genuinely better detection still wins: if the incoming scan itself carries a
+    directly-publishable target, it is authoritative and replaces the stored one.
 
     A deliberate teardown still clears targets via ``article_setup_reset`` — that
     path does not flow through here, so this guard does not block resets.
@@ -353,6 +386,12 @@ def preserve_registered_publish_targets(
     existing_targets = existing_targets or []
 
     if incoming_targets:
+        if (
+            not _has_directly_publishable_target(incoming_targets)
+            and _has_directly_publishable_target(existing_targets)
+            and article_system_ready(article_system)
+        ):
+            return existing_targets, existing_default_id
         return incoming_targets, incoming_default_id
 
     if existing_targets and article_system_ready(article_system):
