@@ -4598,6 +4598,53 @@ def _pull_request_url_from_run(run) -> str:
     ).strip()
 
 
+def _link_built_scaffold_publish_target(config) -> bool:
+    """Register the durable ``react_article_system`` publish target from the built scaffold cache.
+
+    Shared by the manual Accept action AND the automatic approve/merge of an article-system setup,
+    so a FRESH scaffold self-registers without anyone touching the Accept button. Synthesizes the
+    target from the scaffold's committed support files (``article_system_setup_cache.managed_files``)
+    via the path-correct ``react_article_system_target_from_setup_cache`` and persists it, marking the
+    article system ``react_article_system`` and clearing any user-unlink watermark (an explicit
+    approve/accept re-links). No-op (returns False) when there is no built scaffold cache to
+    synthesize from. Idempotent: re-running just re-asserts the same target.
+
+    Does NOT preserve a *stronger* existing target — the scaffold's own target is authoritative for
+    its surface — but it also never downgrades to a weaker one because it only ever writes the
+    direct ``react_article_system`` target (or no-ops).
+    """
+    if not config:
+        return False
+    bundle = react_article_system_target_from_setup_cache(config.article_system_setup_cache)
+    if not bundle:
+        return False
+    article_system = dict(config.article_system or {})
+    config.publish_targets = bundle["publish_targets"]
+    config.default_publish_target_id = bundle["default_publish_target_id"]
+    config.article_path_pattern = bundle["article_path_pattern"]
+    config.registry_path = bundle["registry_path"]
+    if str(article_system.get("state") or "") not in {"existing", "roo_scaffolded"}:
+        article_system["state"] = "existing"
+    article_system["system_type"] = "react_article_system"
+    article_system["publish_mutation_target"] = bundle["registry_path"]
+    article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
+    article_system["scaffold_accepted_at"] = timezone.now().isoformat()
+    config.article_system = article_system
+    update_fields = [
+        "publish_targets",
+        "default_publish_target_id",
+        "article_path_pattern",
+        "registry_path",
+        "article_system",
+        "updated_at",
+    ]
+    if not config.articles_scaffolded:
+        config.articles_scaffolded = True
+        update_fields.append("articles_scaffolded")
+    config.save(update_fields=update_fields)
+    return True
+
+
 def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, pr_url="", pr_number=None):
     if not config:
         return
@@ -4677,6 +4724,9 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         update_fields.append("articles_scaffold_pr_url")
     update_fields.append("updated_at")
     config.save(update_fields=update_fields)
+    # Self-register the durable publish target from the built scaffold so a merged scaffold is
+    # immediately publishable (no manual Accept). No-op when there's no scaffold cache to link.
+    _link_built_scaffold_publish_target(config)
 
 
 def _mark_pending_article_system_setup_pr_created(config, *, run, result):
@@ -4718,6 +4768,9 @@ def _mark_pending_article_system_setup_pr_created(config, *, run, result):
     article_system["pending_article_system_setup"] = pending
     config.article_system = article_system
     config.save(update_fields=["article_system", "updated_at"])
+    # Self-register the durable publish target on approve (PR created), so a fresh scaffold is
+    # linked the moment it's approved — no manual Accept. No-op without a scaffold cache to link.
+    _link_built_scaffold_publish_target(config)
 
 
 def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
@@ -11995,38 +12048,11 @@ class VibeMarketingArticleSetupAcceptView(APIView):
                 {"detail": "Choose a GitHub repository before linking the articles scaffold."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        bundle = react_article_system_target_from_setup_cache(config.article_system_setup_cache)
-        if not bundle:
+        if not _link_built_scaffold_publish_target(config):
             return Response(
                 {"detail": "No built articles scaffold to link yet. Build and publish the scaffold first."},
                 status=status.HTTP_409_CONFLICT,
             )
-
-        config.publish_targets = bundle["publish_targets"]
-        config.default_publish_target_id = bundle["default_publish_target_id"]
-        config.article_path_pattern = bundle["article_path_pattern"]
-        config.registry_path = bundle["registry_path"]
-        config.articles_scaffolded = True
-
-        article_system = dict(config.article_system or {})
-        if str(article_system.get("state") or "") not in {"existing", "roo_scaffolded"}:
-            article_system["state"] = "existing"
-        article_system["system_type"] = "react_article_system"
-        article_system["publish_mutation_target"] = bundle["registry_path"]
-        article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
-        article_system["scaffold_accepted_at"] = timezone.now().isoformat()
-        config.article_system = article_system
-        config.save(
-            update_fields=[
-                "publish_targets",
-                "default_publish_target_id",
-                "article_path_pattern",
-                "registry_path",
-                "articles_scaffolded",
-                "article_system",
-                "updated_at",
-            ]
-        )
 
         latest_runs = _latest_runs_for_org(context.organization, limit=12)
         article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
