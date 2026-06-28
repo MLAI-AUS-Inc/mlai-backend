@@ -35,7 +35,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from content_factory.article_setup_reset import article_setup_reset_ignores_run, reset_article_setup_config
-from content_factory.article_system import article_system_ready, resolve_article_system
+from content_factory.article_system import (
+    PUBLISH_DISCONNECTED_KEY,
+    article_system_ready,
+    is_directly_publishable_target,
+    react_article_system_target_from_setup_cache,
+    resolve_article_system,
+)
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
@@ -8575,6 +8581,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "articleSystem": article_system,
             "componentCatalogReady": component_catalog_ready,
             "missingComponents": missing_featured_components,
+            **_scaffold_connection_state(config),
         },
         "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
         "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
@@ -11944,6 +11951,133 @@ class VibeMarketingArticleSetupResetView(APIView):
             {
                 **reset_payload,
                 "remote": scaffold_cleanup,
+                "articleSetupState": article_setup_state,
+                "article_setup_state": article_setup_state,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _scaffold_connection_state(config) -> dict:
+    """Compact connection summary the wizard reads to render link/accept + danger-zone state."""
+    targets = config.publish_targets if isinstance(config.publish_targets, list) else []
+    article_system = config.article_system if isinstance(config.article_system, dict) else {}
+    connected = any(is_directly_publishable_target(item) for item in targets)
+    built_unlinked = bool(
+        not connected
+        and react_article_system_target_from_setup_cache(config.article_system_setup_cache)
+    )
+    return {
+        "scaffoldConnected": connected,
+        "scaffoldBuiltUnlinked": built_unlinked,
+        "scaffoldDisconnectedAt": str(article_system.get(PUBLISH_DISCONNECTED_KEY) or "") or None,
+        "defaultPublishTargetId": config.default_publish_target_id or None,
+        "routePath": (str((config.article_path_pattern or "")).split("{", 1)[0].rstrip("/") or None),
+    }
+
+
+class VibeMarketingArticleSetupAcceptView(APIView):
+    """Link/accept an already-built articles scaffold as the durable publish target.
+
+    The scaffold's support files are recorded in ``article_system_setup_cache.managed_files``;
+    we synthesize the canonical ``react_article_system`` target from them and persist it, so
+    delivery resolves off ``content_only`` without re-running the scaffold or a detection scan.
+    Idempotent: re-accepting just re-asserts the target.
+    """
+
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+        if not str(config.github_repo or "").strip():
+            return Response(
+                {"detail": "Choose a GitHub repository before linking the articles scaffold."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        bundle = react_article_system_target_from_setup_cache(config.article_system_setup_cache)
+        if not bundle:
+            return Response(
+                {"detail": "No built articles scaffold to link yet. Build and publish the scaffold first."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        config.publish_targets = bundle["publish_targets"]
+        config.default_publish_target_id = bundle["default_publish_target_id"]
+        config.article_path_pattern = bundle["article_path_pattern"]
+        config.registry_path = bundle["registry_path"]
+        config.articles_scaffolded = True
+
+        article_system = dict(config.article_system or {})
+        if str(article_system.get("state") or "") not in {"existing", "roo_scaffolded"}:
+            article_system["state"] = "existing"
+        article_system["system_type"] = "react_article_system"
+        article_system["publish_mutation_target"] = bundle["registry_path"]
+        article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
+        article_system["scaffold_accepted_at"] = timezone.now().isoformat()
+        config.article_system = article_system
+        config.save(
+            update_fields=[
+                "publish_targets",
+                "default_publish_target_id",
+                "article_path_pattern",
+                "registry_path",
+                "articles_scaffolded",
+                "article_system",
+                "updated_at",
+            ]
+        )
+
+        latest_runs = _latest_runs_for_org(context.organization, limit=12)
+        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
+        return Response(
+            {
+                "ok": True,
+                **_scaffold_connection_state(config),
+                "articleSetupState": article_setup_state,
+                "article_setup_state": article_setup_state,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeMarketingArticleSetupDisconnectView(APIView):
+    """Lightweight UNLINK: drop the publish target so delivery falls back to content-only,
+    but KEEP the scaffold + scan so the user can re-link with one click (Accept).
+
+    Distinct from the full reset (which tears down scan/scaffold state). A
+    ``publish_disconnected_at`` watermark is set so a routine scan does not silently re-link;
+    accepting again clears it.
+    """
+
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+
+        config.publish_targets = []
+        config.default_publish_target_id = None
+        article_system = dict(config.article_system or {})
+        article_system[PUBLISH_DISCONNECTED_KEY] = timezone.now().isoformat()
+        article_system.pop("scaffold_accepted_at", None)
+        article_system["publish_mutation_target"] = None
+        config.article_system = article_system
+        config.save(
+            update_fields=[
+                "publish_targets",
+                "default_publish_target_id",
+                "article_system",
+                "updated_at",
+            ]
+        )
+
+        latest_runs = _latest_runs_for_org(context.organization, limit=12)
+        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
+        return Response(
+            {
+                "ok": True,
+                **_scaffold_connection_state(config),
                 "articleSetupState": article_setup_state,
                 "article_setup_state": article_setup_state,
             },

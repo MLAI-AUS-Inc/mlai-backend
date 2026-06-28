@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 ARTICLE_SYSTEM_TEMPLATE = {
@@ -323,6 +324,95 @@ def merge_article_system(current_value: Optional[Dict[str, Any]], incoming_value
     return incoming
 
 
+SCAFFOLD_ACCEPT_TARGET_KIND = "react_article_system"
+PUBLISH_DISCONNECTED_KEY = "publish_disconnected_at"
+
+
+def _managed_files(setup_cache: Optional[Dict[str, Any]]) -> List[str]:
+    cache = setup_cache if isinstance(setup_cache, dict) else {}
+    return [
+        str(path).strip().strip("/")
+        for path in (cache.get("managed_files") or [])
+        if str(path or "").strip()
+    ]
+
+
+def _find_managed_file(managed: List[str], basename: str) -> str:
+    """First managed file whose path is, or ends with, ``basename``."""
+    return next(
+        (path for path in managed if path == basename or path.endswith("/" + basename)),
+        "",
+    )
+
+
+def react_article_system_target_from_setup_cache(
+    setup_cache: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the canonical ``react_article_system`` publish target from a BUILT scaffold's cache.
+
+    Used to "accept/link" an already-built article-system scaffold: the scaffold committed its
+    registry / seo / author support files (recorded in ``managed_files``), so we can register the
+    direct publish target without re-running detection (the generic scan can't confirm an RR v6
+    Vite SPA as directly publishable and falls back to ``bundle_only`` → ``content_only``).
+
+    The real content root is derived from the committed ``registry.ts`` path — the cache's logical
+    ``content_root`` is only the directory *name* (e.g. ``articles``), not the on-disk path
+    (``src/pages/articles``). Returns ``{}`` when the cache has no committed registry to anchor on.
+    """
+    managed = _managed_files(setup_cache)
+    registry_path = _find_managed_file(managed, "registry.ts")
+    if not registry_path or "/" not in registry_path:
+        return {}
+    content_root = registry_path.rsplit("/", 1)[0]
+    ext = ".tsx"
+    route_root = str((setup_cache or {}).get("route_path") or "").strip("/") or content_root.rsplit("/", 1)[-1]
+    route_template = f"/{route_root}/{{category}}/{{slug}}"
+    content_path_pattern = f"{content_root}/{{category}}/{{slug}}{ext}"
+    target_id = "react_article_system_" + (
+        re.sub(r"[^a-zA-Z0-9]+", "_", content_path_pattern).strip("_") + "_" + ext.lstrip(".")
+    )
+    target = {
+        "target_id": target_id,
+        "kind": SCAFFOLD_ACCEPT_TARGET_KIND,
+        "delivery_adapter": "react_component",
+        "preview_strategy": "repo_preview",
+        "confidence": "high",
+        "content_path_pattern": content_path_pattern,
+        "route_template": route_template,
+        "metadata_strategy": {
+            "type": SCAFFOLD_ACCEPT_TARGET_KIND,
+            "registry_slug_template": "{category}/{slug}",
+            "seo_path_template": route_template,
+        },
+        "registration_strategy": {
+            "type": "registry_seo_patch",
+            "registry_path": registry_path,
+            "seo_config_path": _find_managed_file(managed, "seo.ts") or _find_managed_file(managed, "seo-config.ts"),
+            "author_registry_path": _find_managed_file(managed, "authorRegistry.ts"),
+            "author_alias_path": _find_managed_file(managed, "authors.ts"),
+        },
+        "verification": {"mode": "node_build", "confidence": "high", "preview_capable": True},
+        "publish_capability": "direct",
+        "source": "scaffold_accept",
+        "content_extension": ext,
+        "input_format": "content_bundle_v1",
+        "evidence": [{"source": "scaffold_accept", "directory_path": content_root, "content_format": ext.lstrip(".")}],
+    }
+    return {
+        "publish_targets": [target],
+        "default_publish_target_id": target_id,
+        "article_path_pattern": content_path_pattern,
+        "registry_path": registry_path,
+    }
+
+
+def publish_disconnected_at(article_system: Optional[Dict[str, Any]]) -> str:
+    """The user-initiated unlink watermark, if the publish target was disconnected."""
+    if not isinstance(article_system, dict):
+        return ""
+    return str(article_system.get(PUBLISH_DISCONNECTED_KEY) or "").strip()
+
+
 def is_directly_publishable_target(target: Optional[Dict[str, Any]]) -> bool:
     """Whether a target represents a real, safe publish route (not a manual bundle fallback).
 
@@ -380,10 +470,17 @@ def preserve_registered_publish_targets(
     directly-publishable target, it is authoritative and replaces the stored one.
 
     A deliberate teardown still clears targets via ``article_setup_reset`` — that
-    path does not flow through here, so this guard does not block resets.
+    path does not flow through here, so this guard does not block resets. A user
+    "unlink" (``publish_disconnected_at`` watermark) is honoured the same way: while
+    the publish target is disconnected, a scan must not silently re-link one — the
+    user owns that state until they re-accept (which clears the watermark).
     """
     incoming_targets = incoming_targets or []
     existing_targets = existing_targets or []
+
+    # User explicitly unlinked the publish target: don't let a scan re-link until re-accept.
+    if publish_disconnected_at(article_system) and not _has_directly_publishable_target(existing_targets):
+        return existing_targets, existing_default_id
 
     if incoming_targets:
         if (
