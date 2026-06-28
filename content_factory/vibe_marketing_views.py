@@ -42,6 +42,11 @@ from content_factory.article_system import (
     react_article_system_target_from_setup_cache,
     resolve_article_system,
 )
+from content_factory.authors import (
+    author_profile_for_renderer,
+    normalize_authors,
+    resolve_default_author,
+)
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
@@ -8933,6 +8938,8 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             "dailyDiscoveryPriority": config.daily_discovery_priority,
             "defaultTimezone": config.default_timezone,
             "githubConnectionState": config.github_connection_state,
+            "authors": normalize_authors(config.authors),
+            "defaultAuthorId": str(config.default_author_id or ""),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
@@ -11307,6 +11314,12 @@ class VibeMarketingSettingsView(APIView):
             )
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
+        if "authors" in request.data or "authorsData" in request.data:
+            config.authors = normalize_authors(request.data.get("authors", request.data.get("authorsData")))
+        if "default_author_id" in request.data or "defaultAuthorId" in request.data:
+            config.default_author_id = str(
+                request.data.get("default_author_id", request.data.get("defaultAuthorId")) or ""
+            ).strip()
         if daily_enabled_submitted and config.daily_discovery_enabled:
             checks = _profile_checks(
                 organization,
@@ -12588,6 +12601,15 @@ class VibeMarketingArticleView(APIView):
         }
         if delivery_mode_explicit and delivery_mode:
             payload["delivery_mode"] = delivery_mode
+        # Byline: resolve the per-article author pick (else the org default) and carry the resolved
+        # profile so content-factory's renderer stamps the right author for this run.
+        article_authors = normalize_authors(config.authors)
+        requested_author_id = str(_request_value(request.data, "author_id", "authorId", default="") or "").strip()
+        effective_author = resolve_default_author(article_authors, requested_author_id or config.default_author_id)
+        if effective_author:
+            payload["author_id"] = effective_author.get("id", "")
+            payload["default_author_name"] = effective_author.get("name", "")
+            payload["default_author_profile"] = author_profile_for_renderer(effective_author)
         charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
             request,
             context=context,

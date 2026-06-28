@@ -230,6 +230,60 @@ class ContentFactoryOrgConfigTests(TestCase):
         self.assertEqual(data["framework_component_specs"], specs)
         self.assertTrue(data["scan_completed_at"])  # set from last_scanned_at on PUT
 
+    def test_org_config_round_trips_authors_and_default_byline(self):
+        """Authors PUT->normalize->GET, and the GET exposes the resolved default byline that
+        content-factory's renderer seeds the inline author registry from."""
+        put_response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "authors": [
+                    {
+                        "name": "Priya Nair",
+                        "role": "Head of Content",
+                        "bio": "Writes about enterprise RFP workflows.",
+                        "avatarUrl": "https://cdn.example/priya.png",
+                        "sameAs": [{"label": "LinkedIn", "href": "https://lnkd.in/priya"}],
+                    },
+                    {"author": "Sam Donegan", "authorTitle": "Founder"},
+                    {"name": ""},  # dropped: no byline
+                ],
+                "default_author_id": "sam-donegan",
+            },
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        # Stored in canonical, de-blanked shape with derived ids.
+        self.assertEqual([a["id"] for a in self.config.authors], ["priya-nair", "sam-donegan"])
+        self.assertEqual(self.config.authors[0]["avatarAlt"], "Priya Nair profile photo")
+        self.assertEqual(self.config.default_author_id, "sam-donegan")
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(get_response.data["authors"]), 2)
+        self.assertEqual(get_response.data["default_author_id"], "sam-donegan")
+        self.assertEqual(get_response.data["default_author_name"], "Sam Donegan")
+        self.assertEqual(get_response.data["default_author_profile"]["name"], "Sam Donegan")
+        self.assertEqual(get_response.data["default_author_profile"]["role"], "Founder")
+
+    def test_org_config_default_byline_falls_back_to_first_author(self):
+        """With authors but no default_author_id, the GET default byline is the first author."""
+        self.client.put(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au", "authors": [{"name": "Priya Nair"}, {"name": "Sam Donegan"}]},
+            format="json",
+        )
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.data["default_author_name"], "Priya Nair")
+
     def test_org_config_round_trips_registry_driven_publish_target_metadata(self):
         publish_targets = [
             {
