@@ -11,13 +11,40 @@ and a real removal.
 """
 from django.test import SimpleTestCase
 
-from content_factory.article_system import preserve_registered_publish_targets
+from content_factory.article_system import (
+    is_directly_publishable_target,
+    preserve_registered_publish_targets,
+)
 
 REGISTERED = [{"target_id": "react_article_system_articles_{slug}_tsx__tsx", "confidence": "high"}]
 FRESH = [{"target_id": "fresh_target", "confidence": "high"}]
 READY = {"state": "roo_scaffolded", "confidence": "high", "directory_path": "articles"}
 EXISTING = {"state": "existing", "confidence": "high", "directory_path": "articles"}
 GONE = {"state": "missing", "confidence": "high"}
+
+# Targets that carry a real publish capability (the vyavos regression fixtures).
+REGISTERED_DIRECT = [
+    {
+        "target_id": "react_article_system_src_pages_articles_{category}_{slug}_tsx__tsx",
+        "kind": "react_article_system",
+        "delivery_adapter": "react_component",
+        "publish_capability": "direct",
+    }
+]
+FRESH_DIRECT = [
+    {
+        "target_id": "react_article_system_fresh",
+        "kind": "react_article_system",
+        "publish_capability": "direct",
+    }
+]
+BUNDLE_ONLY = [
+    {
+        "target_id": "bundle_only_article_directory_src_pages_articles_ts",
+        "kind": "bundle_only_article_directory",
+        "publish_capability": "bundle_only",
+    }
+]
 
 
 class PreserveRegisteredPublishTargetsTests(SimpleTestCase):
@@ -78,3 +105,57 @@ class PreserveRegisteredPublishTargetsTests(SimpleTestCase):
         )
         self.assertEqual(targets, [])
         self.assertIsNone(default_id)
+
+    def test_bundle_only_rescan_keeps_registered_direct_target(self):
+        # The vyavos regression: a re-scan can only re-derive a weaker bundle_only fallback for an
+        # RR v6 Vite SPA, which would downgrade a live, directly-publishable surface to content_only.
+        # Keep the registered direct target instead.
+        targets, default_id = preserve_registered_publish_targets(
+            incoming_targets=BUNDLE_ONLY,
+            incoming_default_id="bundle_only_article_directory_src_pages_articles_ts",
+            existing_targets=REGISTERED_DIRECT,
+            existing_default_id="react_article_system_src_pages_articles_{category}_{slug}_tsx__tsx",
+            article_system=EXISTING,
+        )
+        self.assertEqual(targets, REGISTERED_DIRECT)
+        self.assertEqual(default_id, "react_article_system_src_pages_articles_{category}_{slug}_tsx__tsx")
+
+    def test_capable_incoming_replaces_registered_direct_target(self):
+        # A genuinely better detection (its own direct target) is still authoritative.
+        targets, default_id = preserve_registered_publish_targets(
+            incoming_targets=FRESH_DIRECT,
+            incoming_default_id="react_article_system_fresh",
+            existing_targets=REGISTERED_DIRECT,
+            existing_default_id="old",
+            article_system=EXISTING,
+        )
+        self.assertEqual(targets, FRESH_DIRECT)
+        self.assertEqual(default_id, "react_article_system_fresh")
+
+    def test_bundle_only_rescan_wins_when_existing_not_publish_capable(self):
+        # No registered direct target to protect -> the bundle_only detection is accepted.
+        targets, default_id = preserve_registered_publish_targets(
+            incoming_targets=BUNDLE_ONLY,
+            incoming_default_id="bundle_only_article_directory_src_pages_articles_ts",
+            existing_targets=BUNDLE_ONLY,
+            existing_default_id="bundle_only_article_directory_src_pages_articles_ts",
+            article_system=EXISTING,
+        )
+        self.assertEqual(targets, BUNDLE_ONLY)
+
+    def test_bundle_only_rescan_wins_when_surface_gone(self):
+        # If the surface is genuinely gone, the registered direct target is stale -> accept incoming.
+        targets, default_id = preserve_registered_publish_targets(
+            incoming_targets=BUNDLE_ONLY,
+            incoming_default_id="bundle_only_article_directory_src_pages_articles_ts",
+            existing_targets=REGISTERED_DIRECT,
+            existing_default_id="old",
+            article_system=GONE,
+        )
+        self.assertEqual(targets, BUNDLE_ONLY)
+
+    def test_is_directly_publishable_target_classification(self):
+        self.assertTrue(is_directly_publishable_target(REGISTERED_DIRECT[0]))
+        self.assertFalse(is_directly_publishable_target(BUNDLE_ONLY[0]))
+        # A target with no capability marker is not assumed directly publishable.
+        self.assertFalse(is_directly_publishable_target({"target_id": "x"}))
