@@ -16,7 +16,11 @@ BASELINE_GOOGLE_SCOPES = [GSC_SCOPE]
 
 
 def google_connection_for_user(user):
-    return GoogleConnection.objects.filter(user=user).first()
+    # Resolve the active startup's Gmail connection (baseline runs in the
+    # context of the active company).
+    from integrations.services.external_connectors import active_google_connection
+
+    return active_google_connection(user)
 
 
 def google_connection_has_baseline_scope(connection: Optional[GoogleConnection]) -> bool:

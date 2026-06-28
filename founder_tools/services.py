@@ -15,6 +15,50 @@ def normalize_company_domain(domain: str | None) -> str:
     return normalize_domain(domain or "") or ""
 
 
+class DuplicateCompanyDomainError(ValueError):
+    """A profile already has a different company registered on this domain.
+
+    Two companies sharing a domain collapse onto the same Organization (which is
+    keyed on a globally-unique domain), so their marketing/raising data would
+    silently merge. We block that at the create/update boundary instead.
+    """
+
+    def __init__(self, domain: str, existing_company: "VibeRaisingCompany"):
+        self.domain = domain
+        self.existing_company = existing_company
+        super().__init__(
+            f"You already have a company registered on the domain '{domain}'. "
+            "Switch to that company instead of creating a duplicate."
+        )
+
+
+def find_company_with_domain(profile, domain, *, exclude_company_id=None):
+    """Return another company under ``profile`` whose (normalized) domain matches.
+
+    Compares normalized forms so a sibling stored as ``https://www.acme.com`` is
+    still detected against ``acme.com``. Returns ``None`` when the domain is blank
+    or no conflicting sibling exists.
+    """
+    normalized = normalize_company_domain(domain)
+    if not normalized:
+        return None
+    for company in profile.companies.all():
+        if exclude_company_id is not None and company.id == exclude_company_id:
+            continue
+        if normalize_company_domain(company.domain) == normalized:
+            return company
+    return None
+
+
+def assert_company_domain_available(profile, domain, *, exclude_company_id=None):
+    """Raise :class:`DuplicateCompanyDomainError` if ``domain`` is taken by a sibling."""
+    existing = find_company_with_domain(
+        profile, domain, exclude_company_id=exclude_company_id
+    )
+    if existing is not None:
+        raise DuplicateCompanyDomainError(normalize_company_domain(domain), existing)
+
+
 def normalize_company_linkedin_url(value: str | None) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -343,15 +387,23 @@ class FounderCompanyContext:
     organization: Organization
 
 
-def get_founder_company_context(user, company_id=None) -> FounderCompanyContext:
+def get_founder_company_context(user, company_id=None, *, persist_active=False) -> FounderCompanyContext:
     profile = get_or_create_founder_profile(user)
     if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
         raise PermissionError("Only founders can access this product.")
 
     companies = profile.companies.select_related("organization")
     if company_id:
+        # `companies` is already scoped to this profile, so .get() enforces
+        # ownership (DoesNotExist for a company the user does not own).
         company = companies.get(pk=company_id)
-        if profile.active_company_id != company.id:
+        # By default a per-request company_id only SCOPES this request; it does
+        # NOT mutate the profile's shared active_company. Only the explicit
+        # switch endpoint (and write/setup flows that opt in via persist_active)
+        # should persist the selection — otherwise concurrent per-startup
+        # requests thrash each other's active company. See Phase 4 of the
+        # multi-startup isolation plan.
+        if persist_active and profile.active_company_id != company.id:
             set_active_company(profile, company)
     else:
         company = resolve_active_company(profile)

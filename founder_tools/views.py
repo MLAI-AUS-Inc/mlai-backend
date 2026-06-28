@@ -16,7 +16,9 @@ from .serializers import (
     serialize_founder_bootstrap,
 )
 from .services import (
+    DuplicateCompanyDomainError,
     apply_shared_startup_details,
+    assert_company_domain_available,
     ensure_company_organization,
     get_or_create_founder_profile,
     set_active_company,
@@ -25,7 +27,14 @@ from .services import (
 
 def _connector_summaries(user):
     try:
+        from integrations.services.external_connectors import active_organization_for_user
+
         connections = ExternalServiceConnection.objects.filter(user=user).order_by("provider", "-updated_at")
+        organization = active_organization_for_user(user)
+        if organization is not None:
+            # Scope the connector summary to the active startup so two startups
+            # under one login don't see each other's connections.
+            connections = connections.filter(organization=organization)
     except Exception:
         return []
 
@@ -99,19 +108,40 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
-        if company_id:
-            company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-            for field, value in company_fields.items():
-                setattr(company, field, value)
-            company.save()
-        else:
-            company = profile.companies.filter(name__iexact=company_fields["name"]).first()
-            if company is None:
-                company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
-            else:
+        try:
+            if company_id:
+                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                if "domain" in company_fields:
+                    assert_company_domain_available(
+                        profile, company_fields["domain"], exclude_company_id=company.id
+                    )
                 for field, value in company_fields.items():
                     setattr(company, field, value)
                 company.save()
+            else:
+                company = profile.companies.filter(name__iexact=company_fields["name"]).first()
+                if "domain" in company_fields:
+                    assert_company_domain_available(
+                        profile,
+                        company_fields["domain"],
+                        exclude_company_id=company.id if company else None,
+                    )
+                if company is None:
+                    company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
+                else:
+                    for field, value in company_fields.items():
+                        setattr(company, field, value)
+                    company.save()
+        except DuplicateCompanyDomainError as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "duplicate_company_domain",
+                    "field": "domain",
+                    "companyId": str(exc.existing_company.id),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)

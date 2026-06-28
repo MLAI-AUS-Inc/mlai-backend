@@ -982,9 +982,10 @@ def fetch_last_month_emails(connection: GoogleConnection):
 
 
 def fetch_recent_subject_lines(user, days=30):
-    try:
-        conn = user.google_connection
-    except GoogleConnection.DoesNotExist:
+    from integrations.services.external_connectors import active_google_connection
+
+    conn = active_google_connection(user)
+    if conn is None:
         return []
 
     service = build_gmail_service(conn, cache_discovery=False)

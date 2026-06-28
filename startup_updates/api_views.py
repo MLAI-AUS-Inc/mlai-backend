@@ -59,6 +59,7 @@ from integrations.services.external_connectors import (
     ConnectorConfigurationError,
     ConnectorOAuthError,
     ConnectorRateLimitError,
+    google_connection_for_org,
     sync_linear_connection_page,
     sync_slack_connection_page,
 )
@@ -838,7 +839,9 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
     )
     google_connection_id = get_startup_update_run_google_connection_id(run)
     if google_connection_id is None:
-        google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
+        google_connection = binding.google_connection or google_connection_for_org(
+            binding.user, binding.organization
+        )
         if google_connection is not None:
             pin_startup_update_run_connection(run, google_connection.id)
     else:
@@ -963,7 +966,7 @@ class StartupProfileView(APIView):
         binding = bind_user_to_startup(
             user=user,
             organization=organization,
-            google_connection=getattr(user, "google_connection", None),
+            google_connection=google_connection_for_org(user, organization, adopt_unassigned=True),
             role=data.get("role", ""),
             is_default_for_gmail=bool(data.get("is_default_for_gmail", True)),
         )
@@ -972,7 +975,7 @@ class StartupProfileView(APIView):
             {
                 "profile": _serialize_profile(profile),
                 "binding": _serialize_binding(binding),
-                "google_connected": bool(getattr(user, "google_connection", None)),
+                "google_connected": bool(binding.google_connection),
             },
             status=status.HTTP_200_OK,
         )
@@ -1003,7 +1006,9 @@ class StartupUpdateRunView(APIView):
             target_month = parse_startup_update_target_month(raw_target_month)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = binding.google_connection or getattr(user, "google_connection", None)
+        google_connection = binding.google_connection or google_connection_for_org(
+            binding.user, binding.organization
+        )
         input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
             input_sources,
             google_connection,
@@ -1800,17 +1805,7 @@ class StartupUpdateSlackBackfillView(APIView):
             .first()
         )
         if connection is None:
-            connection = (
-                binding.user.external_service_connections.filter(provider="slack")
-                .exclude(status="disconnected")
-                .order_by("-updated_at", "-id")
-                .first()
-            )
-        if connection is None:
             return Response({"error": "Slack is not connected."}, status=status.HTTP_400_BAD_REQUEST)
-        if connection.organization_id != organization.id:
-            connection.organization = organization
-            connection.save(update_fields=["organization", "updated_at"])
 
         if not channel_ids:
             channel_ids = [
@@ -2307,17 +2302,7 @@ class StartupUpdateLinearBackfillView(APIView):
             .first()
         )
         if connection is None:
-            connection = (
-                binding.user.external_service_connections.filter(provider=ExternalServiceProvider.LINEAR)
-                .exclude(status="disconnected")
-                .order_by("-updated_at", "-id")
-                .first()
-            )
-        if connection is None:
             return Response({"error": "Linear is not connected."}, status=status.HTTP_400_BAD_REQUEST)
-        if connection.organization_id != organization.id:
-            connection.organization = organization
-            connection.save(update_fields=["organization", "updated_at"])
 
         if not project_ids:
             project_ids = [
