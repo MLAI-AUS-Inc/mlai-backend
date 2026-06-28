@@ -147,6 +147,52 @@ class ArticleGenerationServiceTest(TestCase):
         job = ContentFactoryJob.objects.get(job_id="job_delegated_123")
         self.assertEqual(job.request_meta["requested_by_slack_user_id"], "U_REQUESTER")
 
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_payload_includes_resolved_author(self, mock_post):
+        self.config.authors = [
+            {"id": "priya-nair", "name": "Priya Nair", "role": "Head of Content"},
+            {"id": "sam-donegan", "name": "Sam Donegan", "role": "Founder"},
+        ]
+        self.config.default_author_id = "sam-donegan"
+        self.config.save(update_fields=["authors", "default_author_id"])
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_author_123", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            trigger_article_generation(self.slack_user_id, self._article_request())
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual([a["id"] for a in payload["authors"]], ["priya-nair", "sam-donegan"])
+        # No per-article override -> the org default byline is used.
+        self.assertEqual(payload["author_id"], "sam-donegan")
+        self.assertEqual(payload["default_author_name"], "Sam Donegan")
+        self.assertEqual(payload["default_author_profile"]["name"], "Sam Donegan")
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_generation_payload_honors_per_article_author_override(self, mock_post):
+        self.config.authors = [
+            {"id": "priya-nair", "name": "Priya Nair", "role": "Head of Content"},
+            {"id": "sam-donegan", "name": "Sam Donegan", "role": "Founder"},
+        ]
+        self.config.default_author_id = "sam-donegan"
+        self.config.save(update_fields=["authors", "default_author_id"])
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"job_id": "job_author_override", "status": "queued"}
+        mock_post.return_value = mock_response
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            trigger_article_generation(
+                self.slack_user_id,
+                self._article_request(author_id="priya-nair"),
+            )
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["author_id"], "priya-nair")
+        self.assertEqual(payload["default_author_name"], "Priya Nair")
+
     def test_paid_article_cost_is_six_points(self):
         self.assertEqual(get_content_factory_article_cost_points("example.com"), 6)
         self.assertEqual(get_content_factory_article_cost_points("mlai.au"), 0)

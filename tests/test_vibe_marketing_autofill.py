@@ -489,6 +489,40 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(startup_profile.organization_kind, "Not-for-profit")
         self.assertEqual(response.data["startupProfile"]["organizationKind"], "Not-for-profit")
 
+    def test_settings_save_round_trips_authors_into_bootstrap(self):
+        organization = Organization.objects.create(domain="mlai.au", name="MLAI")
+        self.company.organization = organization
+        self.company.domain = "mlai.au"
+        self.company.save(update_fields=["organization", "domain", "updated_at"])
+        OrganizationContentConfig.objects.create(organization=organization)
+
+        response = self.client.put(
+            "/api/v1/vibe-marketing/settings/",
+            {
+                "domain": "mlai.au",
+                "authors": [
+                    {"name": "Priya Nair", "role": "Head of Content"},
+                    {"author": "Sam Donegan", "authorTitle": "Founder"},
+                    {"name": ""},  # dropped: no byline
+                ],
+                "defaultAuthorId": "sam-donegan",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [a["id"] for a in response.data["settings"]["authors"]],
+            ["priya-nair", "sam-donegan"],
+        )
+        self.assertEqual(response.data["settings"]["defaultAuthorId"], "sam-donegan")
+
+        bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        self.assertEqual(
+            [a["name"] for a in bootstrap.data["settings"]["authors"]],
+            ["Priya Nair", "Sam Donegan"],
+        )
+        self.assertEqual(bootstrap.data["settings"]["defaultAuthorId"], "sam-donegan")
+
     @override_settings(GOOGLE_PLACES_API_KEY="")
     def test_location_lookup_missing_key_returns_empty_configured_false(self):
         response = self.client.get("/api/v1/vibe-marketing/lookups/locations/?q=Mel")
