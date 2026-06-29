@@ -7691,6 +7691,110 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     return meta
 
 
+def compute_article_readiness(
+    organization,
+    config,
+    latest_runs=None,
+    *,
+    article_system=None,
+    setup_gate=None,
+):
+    """Single authoritative rollup of "can this org generate an article into its repo?".
+
+    The same readiness boolean was previously re-derived in three places with subtly
+    different ``or`` chains (``_article_generation_ready_for_config`` + the setup gate +
+    ``_profile_checks``' history fallback). This collapses that into one function so the
+    answer can't disagree with itself, and surfaces WHICH step is missing (``blocking_reason``
+    / ``reason_code``) so the wizard can tell the user instead of a generic "setup required".
+
+    Semantics are byte-for-byte the canonical formula ``_profile_checks`` already used:
+    ``setup_gate.generationReady or _article_generation_ready_for_config(...) or history``
+    (history restricted to work done after an article-setup reset). The individual signals
+    are returned as ``proofs`` for diagnostics; the gate's own internals are left untouched.
+    """
+    latest_runs = latest_runs or []
+    if not isinstance(article_system, dict):
+        article_system = resolve_article_system(config) if config else {}
+    if setup_gate is None:
+        setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
+
+    scaffolded = bool(getattr(config, "articles_scaffolded", False)) if config else False
+    published = bool(setup_gate.get("published")) or bool(
+        config and _article_system_is_published(config, article_system)
+    )
+    setup_merged = bool(setup_gate.get("setupMerged"))
+    history = bool(
+        organization is not None
+        and _article_generation_history_exists(
+            organization, latest_runs, since=article_setup_reset_at(config) if config else None
+        )
+    )
+
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or (config and _article_generation_ready_for_config(config, latest_runs, article_system))
+        or history
+    )
+
+    proofs = {
+        "articles_scaffolded": scaffolded,
+        "article_system_published": published,
+        "setup_merged": setup_merged,
+        "generation_history": history,
+    }
+
+    if generation_ready:
+        via = next(
+            (name for name, ok in (
+                ("scaffolded", scaffolded),
+                ("published", published),
+                ("setup_merged", setup_merged),
+                ("history", history),
+            ) if ok),
+            "ready",
+        )
+        return {
+            "generation_ready": True,
+            "blocking_reason": None,
+            "reason_code": "",
+            "via": via,
+            "proofs": proofs,
+        }
+
+    # Not ready: classify the blocker in wizard order so the UI can point at the next step.
+    github_ready = bool(config and config.github_connection_state == "connected" and config.github_repo)
+    scan_ready = bool(
+        config
+        and (config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
+    )
+    if not github_ready:
+        reason_code, reason = "github_required", "Connect a GitHub repository before generating articles."
+    elif setup_gate.get("setupBlocked"):
+        reason_code, reason = (
+            "setup_pr_unmerged",
+            "Merge the articles setup PR before generating articles. If you merged it in GitHub, refresh merge status.",
+        )
+    elif not scan_ready:
+        reason_code, reason = "scan_required", "Scan the repository to locate the articles publishing surface."
+    elif not _article_repo_is_review_capable(config, github_ready=github_ready):
+        reason_code, reason = (
+            "articles_location_required",
+            "Connect and verify the articles location before generating an exact preview article.",
+        )
+    elif setup_gate.get("setupRunId"):
+        reason_code, reason = "awaiting_setup", "The articles setup build is in progress. Wait for it to finish, then generate."
+    else:
+        reason_code, reason = "setup_required", "Set up the articles publishing surface before generating articles."
+
+    return {
+        "generation_ready": False,
+        "blocking_reason": reason,
+        "reason_code": reason_code,
+        "via": "",
+        "proofs": proofs,
+    }
+
+
 def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
     organization, config, latest_runs, checks = _workflow_progress_context(
         context=context,
@@ -8546,14 +8650,12 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
-    # After "Reset everything", prior article history must not keep the scaffold
-    # reported as ready (which hid the Build button). Restrict history evidence to
-    # work done after the reset; config-derived readiness is already reset-safe.
-    generation_ready = bool(
-        setup_gate.get("generationReady")
-        or _article_generation_ready_for_config(config, latest_runs, article_system)
-        or _article_generation_history_exists(organization, latest_runs, since=article_setup_reset_at(config))
+    # Single source of truth for "can this org generate?" + why-not. The reset-safety
+    # (history restricted to post-reset work) lives inside compute_article_readiness.
+    readiness = compute_article_readiness(
+        organization, config, latest_runs, article_system=article_system, setup_gate=setup_gate
     )
+    generation_ready = readiness["generation_ready"]
     if generation_ready:
         setup_gate["setupBlocked"] = False
         setup_gate["generationReady"] = True
@@ -8659,6 +8761,9 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "setupBlocked": bool(setup_gate.get("setupBlocked")),
             "setupMerged": bool(setup_gate.get("setupMerged")),
             "generationReady": bool(generation_ready),
+            "blockingReason": readiness["blocking_reason"],
+            "reasonCode": readiness["reason_code"],
+            "readinessProofs": readiness["proofs"],
             "setupRunId": setup_gate.get("setupRunId"),
             "setupStatus": setup_gate.get("setupStatus"),
             "rescanRunId": setup_gate.get("rescanRunId"),
@@ -9162,8 +9267,10 @@ def _setup_blocked_response_for_generation(context, config):
         return None
     return Response(
         {
-            "detail": "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
+            "detail": scaffold_check.get("blockingReason")
+            or "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
             "code": "article_system_setup_blocked",
+            "reasonCode": scaffold_check.get("reasonCode") or "setup_pr_unmerged",
             "check": "scaffold",
             "scaffold": scaffold_check,
         },
