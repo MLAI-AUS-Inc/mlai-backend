@@ -34,7 +34,11 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from content_factory.article_setup_reset import article_setup_reset_ignores_run, reset_article_setup_config
+from content_factory.article_setup_reset import (
+    article_setup_reset_at,
+    article_setup_reset_ignores_run,
+    reset_article_setup_config,
+)
 from content_factory.article_system import (
     PUBLISH_DISCONNECTED_KEY,
     article_system_ready,
@@ -2430,14 +2434,33 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     return drafts
 
 
-def _article_generation_history_exists(organization, latest_runs=None):
+def _article_generation_history_exists(organization, latest_runs=None, *, since=None):
+    """Whether the org has any article-generation evidence.
+
+    ``since`` (e.g. the article-setup reset timestamp) restricts evidence to work
+    that happened AFTER that moment. Scaffold-readiness callers pass the reset
+    timestamp so a pre-reset article no longer marks the (now-cleared) scaffold as
+    "ready" — which previously hid the Build button after "Reset everything". The
+    start-page / topic-picker caller leaves it None so the org is still remembered
+    as having written articles before.
+    """
     if not organization:
         return False
-    if WrittenArticle.objects.filter(organization=organization).exists():
+    written = WrittenArticle.objects.filter(organization=organization)
+    if since is not None:
+        written = written.filter(created_at__gt=since)
+    if written.exists():
         return True
     for run in latest_runs or []:
         if run.workflow not in ARTICLE_WORKFLOWS or run.status != ContentFactoryRunStatus.COMPLETED:
             continue
+        if since is not None:
+            run_ts = getattr(run, "updated_at", None) or getattr(run, "created_at", None)
+            if run_ts is not None:
+                if timezone.is_naive(run_ts):
+                    run_ts = timezone.make_aware(run_ts)
+                if run_ts <= since:
+                    continue
         content_package = _content_package_from_run(run)
         if content_package and content_package.get("contentPackaged"):
             return True
@@ -7047,7 +7070,11 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     generation_ready = bool(
         setup_gate.get("generationReady")
         or bool(generation_ready)
-        or (generation_ready is None and organization is not None and _article_generation_history_exists(organization, related_runs))
+        or (
+            generation_ready is None
+            and organization is not None
+            and _article_generation_history_exists(organization, related_runs, since=article_setup_reset_at(config))
+        )
     )
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
         setup_run = (
@@ -8519,10 +8546,13 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
+    # After "Reset everything", prior article history must not keep the scaffold
+    # reported as ready (which hid the Build button). Restrict history evidence to
+    # work done after the reset; config-derived readiness is already reset-safe.
     generation_ready = bool(
         setup_gate.get("generationReady")
         or _article_generation_ready_for_config(config, latest_runs, article_system)
-        or _article_generation_history_exists(organization, latest_runs)
+        or _article_generation_history_exists(organization, latest_runs, since=article_setup_reset_at(config))
     )
     if generation_ready:
         setup_gate["setupBlocked"] = False
