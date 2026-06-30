@@ -592,8 +592,9 @@ class CoworkingServiceTests(TestCase):
 
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
-    """The coworking cost drops to 4 when the user's startup has a 'ready'
-    monthly update for the booking's month, otherwise it is the standard 8."""
+    """The coworking cost drops to 4 when the user's startup is a verified
+    registered company AND has a 'ready' monthly update for the booking's
+    month, otherwise it is the standard 8."""
 
     def setUp(self):
         from organizations.models import Organization
@@ -613,6 +614,26 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         )
         self.org = Organization.objects.create(name='Acme', domain='acme.example')
         UserStartupBinding.objects.create(user=self.user, organization=self.org)
+        # The discount requires a verified registered company on the org.
+        self._verify_company_for(self.org, name='Acme Pty Ltd')
+
+    def _verify_company_for(self, org, *, name='Verified Pty Ltd', user=None):
+        """Attach a verified registered company (registered + ACN + ABR-verified) to ``org``."""
+        from django.utils import timezone
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=user or self.user,
+            defaults={'role': VibeRaisingProfile.ROLE_FOUNDER},
+        )
+        return VibeRaisingCompany.objects.create(
+            profile=profile,
+            organization=org,
+            name=name,
+            registered=True,
+            acn='000000019',
+            abr_verified_at=timezone.now(),
+        )
 
     def _make_update(self, booking_date, status):
         from startup_updates.models import MonthlyUpdateDraft
@@ -686,6 +707,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         )
         second_org = Organization.objects.create(name='Beta', domain='beta.example')
         UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        self._verify_company_for(second_org, name='Beta Pty Ltd')
         today = date.today()
         MonthlyUpdateDraft.objects.create(
             organization=second_org,
@@ -695,6 +717,53 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             4,
+        )
+
+    def test_ready_update_without_company_does_not_discount(self):
+        # A ready update on an org with no founder company gets no discount.
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        other = User.objects.create_user(email='nocompany@example.com', slack_id='UNOCOMP')
+        org = Organization.objects.create(name='Gamma', domain='gamma.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_with_unverified_company_does_not_discount(self):
+        # Registered but not ABR-verified (no ACN) -> not eligible for the discount.
+        from organizations.models import Organization
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        other = User.objects.create_user(email='unverif@example.com', slack_id='UUNVERIF')
+        org = Organization.objects.create(name='Delta', domain='delta.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        profile = VibeRaisingProfile.objects.create(
+            user=other, role=VibeRaisingProfile.ROLE_FOUNDER,
+        )
+        VibeRaisingCompany.objects.create(
+            profile=profile, organization=org, name='Delta', registered=True,
+        )  # no acn / abr_verified_at
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
         )
 
     def test_no_args_returns_standard_cost(self):

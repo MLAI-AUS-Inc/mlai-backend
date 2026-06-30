@@ -1755,6 +1755,19 @@ class CoworkingViewSetTests(APITestCase):
             idempotency_key='coworking_api_setup',
         )
 
+    def _verify_company_for(self, org):
+        """Attach a verified registered company to ``org`` (required for the discount)."""
+        from django.utils import timezone
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=self.user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
+        )
+        VibeRaisingCompany.objects.create(
+            profile=profile, organization=org, name='Acme Pty Ltd',
+            registered=True, acn='000000019', abr_verified_at=timezone.now(),
+        )
+
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_availability_quotes_standard_cost_without_user(self, mock_permission):
         url = reverse('coworking-availability')
@@ -1774,6 +1787,7 @@ class CoworkingViewSetTests(APITestCase):
 
         org = Organization.objects.create(name='Acme', domain='acme.coworking.example')
         UserStartupBinding.objects.create(user=self.user, organization=org)
+        self._verify_company_for(org)
         MonthlyUpdateDraft.objects.create(
             organization=org,
             month=date.today().replace(day=1),
@@ -1810,6 +1824,7 @@ class CoworkingViewSetTests(APITestCase):
         booking_date = date.today() + timedelta(days=1)
         org = Organization.objects.create(name='Acme', domain='acme.book.example')
         UserStartupBinding.objects.create(user=self.user, organization=org)
+        self._verify_company_for(org)
         MonthlyUpdateDraft.objects.create(
             organization=org,
             month=booking_date.replace(day=1),
