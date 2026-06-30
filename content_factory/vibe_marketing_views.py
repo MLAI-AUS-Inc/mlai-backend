@@ -627,6 +627,76 @@ def _refund_roo_points_for_content_island_topic_start(*, charged_user, actor_id:
     )
 
 
+def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
+    """Return the ledger id of a REAL, non-refunded Content Factory charge in this run's billing
+    lineage, or None.
+
+    The article-generation service records the charge on the ``ContentFactoryJob`` / Roo ``Ledger``
+    (keyed by ``client_request_id``), and content-factory syncs the article run back WITHOUT the web
+    ``roo_points_*`` fields — so a paid article's run often has no billing stamp even though it was
+    charged. Reuse must therefore look the charge up via the lineage (the run's job, its billing source
+    job, and the Roo ledger by client_request_id). Only ever returns a real, non-refunded charge — it
+    never invents authorization, so this is not a billing bypass.
+    """
+    try:
+        from content_factory.models import ContentFactoryJob
+        from roo.models import Ledger
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+    job_ids: list[str] = []
+    client_request_ids: list[str] = []
+    run_id = str(getattr(run, "run_id", "") or "").strip()
+    if run_id:
+        job_ids.append(run_id)
+    for key in ("source_run_id", "revision_source_run_id", "billing_source_run_id"):
+        value = str(run_request.get(key) or "").strip()
+        if value:
+            job_ids.append(value)
+    crid = str(run_request.get("client_request_id") or "").strip()
+    if crid:
+        client_request_ids.append(crid)
+
+    # 1) A job in the lineage that carries a real charge (billing recorded by the generation service).
+    seen: set[str] = set()
+    queue = list(job_ids)
+    while queue:
+        jid = queue.pop(0)
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        job = ContentFactoryJob.objects.filter(job_id=jid).first()
+        if not job:
+            continue
+        billing_status = str(getattr(job, "billing_status", "") or "").strip()
+        ledger_id = getattr(job, "billing_ledger_id", None)
+        if billing_status in {"charged", "reused"} and ledger_id:
+            return int(ledger_id)
+        source_job_id = str(getattr(job, "billing_source_job_id", "") or "").strip()
+        if source_job_id and source_job_id not in seen:
+            queue.append(source_job_id)
+        job_crid = str(getattr(job, "client_request_id", "") or "").strip()
+        if job_crid:
+            client_request_ids.append(job_crid)
+
+    # 2) A non-refunded Content Factory SPEND ledger entry for any client_request_id in the lineage.
+    for candidate in dict.fromkeys(client_request_ids):
+        charge = (
+            Ledger.objects.filter(source="CONTENT_FACTORY", kind="SPEND", reference_id=candidate)
+            .order_by("-id")
+            .first()
+        )
+        if not charge:
+            continue
+        refunded = Ledger.objects.filter(
+            source="CONTENT_FACTORY", kind="REFUND", reference_id=candidate
+        ).exists()
+        if not refunded:
+            return int(charge.id)
+    return None
+
+
 def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
     if is_free_content_factory_domain(domain):
         payload.update(
@@ -655,20 +725,30 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
         required_points = get_content_factory_ai_agent_required_points(domain)
         ledger_id = ""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
-    if not (
+    web_authorized = (
         authorized
         and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
         and cost_points >= get_content_factory_article_cost_points(domain)
         and billing_status in {"charged", "reused", "free"}
         and ledger_id
-    ):
-        return Response(
-            {
-                "detail": failure_detail,
-                "code": "roo_points_billing_required",
-            },
-            status=status.HTTP_409_CONFLICT,
-        )
+    )
+
+    if not web_authorized:
+        # The article-generation service records the charge on the ContentFactoryJob / Roo Ledger, and
+        # content-factory syncs the run back without the web `roo_points_*` fields — so a paid article's
+        # run often has no stamp. Reuse a REAL, non-refunded charge from the run's billing lineage before
+        # rejecting; only reject when no genuine charge exists anywhere in the lineage.
+        lineage_ledger_id = _reusable_content_factory_charge_for_run(run)
+        if lineage_ledger_id is None:
+            return Response(
+                {
+                    "detail": failure_detail,
+                    "code": "roo_points_billing_required",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        cost_points = max(cost_points, get_content_factory_article_cost_points(domain))
+        ledger_id = str(lineage_ledger_id)
 
     payload.update(
         build_roo_points_authorization_payload(
