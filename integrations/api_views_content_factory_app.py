@@ -523,6 +523,13 @@ class ContentFactoryAppScanView(APIView):
             "existing_artifacts": existing_artifacts,
             "scaffold_if_missing": bool(data.get("scaffold_if_missing", True)),
             "generate_components": bool(data.get("generate_components", True)),
+            # A manual founder-tools scan is a deliberate user action — force a fresh visual
+            # capture + design-snapshot re-synthesis so a website restyle flows into the org's
+            # active WebsiteDesignSnapshot (and thus generated articles). force_refresh bypasses
+            # the unchanged-repo SHA short-circuit and the visual-capture TTL on the scanner.
+            # Automated/daily paths (article generation) don't go through this view, so they
+            # stay cheap. Caller-overridable for a lightweight re-scan.
+            "force_refresh": bool(data.get("force_refresh", True)),
         }
 
         try:

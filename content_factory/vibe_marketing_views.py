@@ -11984,17 +11984,21 @@ class VibeMarketingGitHubReposView(APIView):
 
 
 def _scan_should_force_refresh(config, request_data) -> bool:
-    """Whether a repo scan should bypass content-factory's unchanged-HEAD reuse.
+    """Whether a manual founder-tools repo scan should force a full refresh.
 
-    True when the caller asks explicitly (forceRefresh/force_refresh), or when the
-    user re-scans within ARTICLE_SCAN_RAPID_RESCAN_WINDOW of the last completed scan:
-    a quick reuse doesn't refresh the scaffold plan, which leaves the wizard stuck on
-    the "plan has drifted, re-run the scan" guard.
+    A manual scan is a deliberate, points-charged user action, so it forces by default. A forced
+    scan (a) bypasses content-factory's unchanged-HEAD scan reuse so the scaffold plan refreshes
+    (the original "plan has drifted" guard), AND (b) drives a fresh website screenshot capture +
+    design-snapshot re-synthesis on the scanner, so a SITE RESTYLE flows into the org's active
+    WebsiteDesignSnapshot — and thus into newly generated articles — even though the repo itself is
+    unchanged. The user no longer has to change the repo (or hit a hidden rapid-rescan window) to
+    refresh the captured design. A caller can opt out of the heavier refresh with an explicit
+    ``forceRefresh=false`` for a lightweight scan that keeps the unchanged-HEAD reuse.
     """
-    if _bool_from_request(_request_value(request_data, "forceRefresh", "force_refresh", default=False)):
-        return True
-    last_scanned_at = getattr(config, "last_scanned_at", None)
-    return bool(last_scanned_at and (timezone.now() - last_scanned_at) <= ARTICLE_SCAN_RAPID_RESCAN_WINDOW)
+    explicit = _request_value(request_data, "forceRefresh", "force_refresh", default=None)
+    if explicit is not None:
+        return _bool_from_request(explicit)
+    return True
 
 
 class VibeMarketingScanView(APIView):
