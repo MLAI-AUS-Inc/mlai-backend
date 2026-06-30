@@ -10081,6 +10081,70 @@ def _article_system_setup_current_retry_attempt(*payloads) -> bool:
     return False
 
 
+def _persist_run_billing_to_job(run) -> None:
+    """Persist a run's web Roo-points charge onto its ContentFactoryJob (a sync-proof breadcrumb).
+
+    The web vibe-marketing flow charges Roo points and stamps the authorization on ``run_request`` only
+    (via ``_charge_roo_points_for_article``); it never records the charge on the ContentFactoryJob.
+    content-factory then re-syncs the run and STRIPS the web ``roo_points_*`` fields from run_request,
+    orphaning the charge — neither the job nor the run carries the payment link, so the revision verifier
+    (``_reusable_content_factory_charge_for_run``) can't find it and rejects the redraft with a 409.
+
+    Mirror the run_request charge onto the ContentFactoryJob (job_id == run_id), which run syncs never
+    touch, so the link survives. The article callbacks create the job lazily and never write billing in
+    their ``update_or_create`` defaults, so creating the job early here is safe and the billing is not
+    clobbered later. Additive: never overwrites a job that already carries a real charge. This is the
+    inverse of ``_merge_job_billing_into_run_request`` and only ever persists a real (charged/reused)
+    charge, so it is not a billing bypass. Best-effort; never raises.
+    """
+    try:
+        run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+        if not run_request.get("roo_points_authorized"):
+            return
+        billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
+        ledger_id = str(run_request.get("roo_points_ledger_id") or "").strip()
+        if billing_status not in {"charged", "reused"} or not ledger_id:
+            return  # only persist a real charge; free/gated runs carry no ledger to reuse
+
+        from content_factory.models import ContentFactoryJob
+
+        run_id = str(getattr(run, "run_id", "") or "").strip()
+        if not run_id:
+            return
+        job, _created = ContentFactoryJob.objects.get_or_create(
+            job_id=run_id,
+            defaults={
+                "slack_user_id": str(getattr(run, "slack_user_id", "") or ""),
+                "domain": str(getattr(run, "domain", "") or run_request.get("domain") or ""),
+            },
+        )
+        existing_status = str(getattr(job, "billing_status", "") or "").strip()
+        if existing_status in {"charged", "reused"} and getattr(job, "billing_ledger_id", None):
+            return  # job already carries a real charge
+
+        update_fields = ["billing_status", "billing_ledger"]
+        job.billing_status = billing_status
+        job.billing_ledger_id = int(ledger_id)
+        try:
+            cost = int(run_request.get("roo_points_cost") or 0)
+        except (TypeError, ValueError):
+            cost = 0
+        if cost and not int(getattr(job, "billing_amount", 0) or 0):
+            job.billing_amount = cost
+            update_fields.append("billing_amount")
+        crid = str(run_request.get("client_request_id") or "").strip()
+        if crid and not str(getattr(job, "client_request_id", "") or "").strip():
+            job.client_request_id = crid
+            update_fields.append("client_request_id")
+        job.save(update_fields=list(dict.fromkeys(update_fields)))
+    except Exception:  # pragma: no cover - best-effort enrichment
+        logger.warning(
+            "Failed to persist run billing to job for %s",
+            getattr(run, "run_id", "?"),
+            exc_info=True,
+        )
+
+
 def _merge_job_billing_into_run_request(run) -> None:
     """Carry a ContentFactoryJob's recorded Roo-points charge onto the run's run_request when missing.
 
@@ -10170,8 +10234,13 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
             run.error = str(remote_data.get("error") or "")
             update_fields.extend(["status", "current_step", "result", "error"])
         run.save(update_fields=list(dict.fromkeys(update_fields)))
-    # Persist the billing link: a paid article's run synced from content-factory lacks the web
-    # roo_points_* fields, but its ContentFactoryJob carries the real charge — mirror it onto the run.
+    # Persist the billing link in BOTH directions so it survives content-factory run syncs (which strip
+    # the web roo_points_* fields from run_request):
+    #  - run_request charge -> ContentFactoryJob: the web flow only stamps run_request, so mirror the
+    #    charge onto the sync-proof job — this is what the revision verifier reuses.
+    #  - ContentFactoryJob charge -> run_request: the service/slackbot flow stamps the job, so fill the
+    #    run's run_request back in for the run-level checks.
+    _persist_run_billing_to_job(run)
     _merge_job_billing_into_run_request(run)
     return run
 
