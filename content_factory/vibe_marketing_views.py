@@ -642,6 +642,30 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
         return None
 
     run_request = run.run_request if isinstance(run.run_request, dict) else {}
+
+    # Articles initiated by the Roo Slack bot are billed through the bot's own Roo-points flow (charged
+    # at write/confirm time) and never carry the web `roo_points_*` authorization fields on the run.
+    # The web revision/restart flow must not block them on a reuse check the bot path never populates —
+    # the revision reuses the original (bot-side) authorization rather than charging again. Scoped to the
+    # slackbot source so web-initiated runs still require their own stamped authorization.
+    request_source = str(run_request.get("request_source") or "").strip().lower()
+    if request_source == "roo_slackbot":
+        payload.update(
+            build_roo_points_authorization_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                cost_points=int(run_request.get("roo_points_cost") or 0)
+                or get_content_factory_article_cost_points(domain),
+                required_points=get_content_factory_ai_agent_required_points(domain),
+                current_balance=None,
+                billing_status="reused",
+                ledger_id=str(run_request.get("roo_points_ledger_id") or "").strip() or None,
+            )
+        )
+        payload["original_billing_source_run_id"] = run.run_id
+        payload["roo_points_billing_source"] = "roo_slackbot"
+        return None
+
     try:
         authorized = bool(run_request.get("roo_points_authorized"))
         action = str(run_request.get("roo_points_action") or "").strip()
