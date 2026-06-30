@@ -647,18 +647,69 @@ class CoworkingService:
     MAX_REPORT_DAYS = 366
     
     @staticmethod
-    def get_coworking_cost() -> int:
+    def get_standard_coworking_cost() -> int:
         """
-        Get the cost for a coworking day.
-        
+        Get the standard (undiscounted) cost for a coworking day.
+
         Prioritizes 'COWORKING_DAY' reward from catalog.
-        Falls back to settings or default of 4 points.
+        Falls back to settings or default of 8 points.
         """
         try:
             reward = RewardsCatalog.objects.get(code='COWORKING_DAY', is_active=True)
             return reward.cost_points
         except RewardsCatalog.DoesNotExist:
-            return getattr(settings, 'COWORKING_DAY_COST_POINTS', 4)
+            return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
+
+    @staticmethod
+    def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
+        """
+        Return whether any startup the user is bound to has a monthly update
+        in the 'ready' status for the month of ``booking_date``.
+
+        ``MonthlyUpdateDraft.month`` is normalised to the first day of the
+        month, so we match against ``booking_date`` collapsed to day 1.
+        """
+        # Imported lazily to avoid a hard import dependency between the roo and
+        # startup_updates apps at module load time.
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        org_ids = list(
+            UserStartupBinding.objects.filter(user=user).values_list(
+                'organization_id', flat=True
+            )
+        )
+        if not org_ids:
+            return False
+
+        month_start = booking_date.replace(day=1)
+        return MonthlyUpdateDraft.objects.filter(
+            organization_id__in=org_ids,
+            month=month_start,
+            status=MonthlyUpdateDraftStatus.READY,
+        ).exists()
+
+    @staticmethod
+    def get_coworking_cost(
+        user: Optional[User] = None,
+        booking_date: Optional[date] = None,
+    ) -> int:
+        """
+        Get the cost for a coworking day.
+
+        Defaults to the standard cost (from catalog/settings). When both
+        ``user`` and ``booking_date`` are supplied and the user's startup has a
+        'ready' monthly update for that month, the discounted cost applies
+        instead — rewarding founders who keep their monthly update current.
+        """
+        standard = CoworkingService.get_standard_coworking_cost()
+        if user is not None and booking_date is not None:
+            if CoworkingService._has_ready_monthly_update(user, booking_date):
+                return getattr(settings, 'COWORKING_DAY_DISCOUNT_COST_POINTS', 4)
+        return standard
     
     @staticmethod
     def get_capacity(booking_date: date) -> int:
@@ -860,8 +911,9 @@ class CoworkingService:
         if available <= 0:
             raise ValueError(f"No availability for {booking_date} (capacity: {capacity})")
         
-        # Get cost
-        cost = CoworkingService.get_coworking_cost()
+        # Get cost (discounted when the user's startup has a 'ready' monthly
+        # update for the booking's month)
+        cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
         
         # Create idempotency key
         idempotency_key = f"coworking_book:{user.id}:{booking_date}"
