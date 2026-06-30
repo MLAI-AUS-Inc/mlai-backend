@@ -12780,15 +12780,6 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        baseline_snapshot = _latest_baseline_snapshot(context.organization)
-        if not _baseline_requirement_satisfied(config, baseline_snapshot):
-            return Response(
-                {
-                    "detail": "Run the website baseline or skip it before generating an article.",
-                    "check": _serialize_baseline_snapshot(baseline_snapshot, config),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         coverage_match = match_covered_topic(
             organization=context.organization,
             keyword=target_keyword or topic,

@@ -3203,7 +3203,8 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
         self.assertEqual(run.current_step, "synthesize_repository_contract")
 
-    def test_article_generation_requires_baseline_or_skip(self):
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_generation_does_not_require_baseline(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -3211,23 +3212,21 @@ class VibeMarketingAutofillTests(TestCase):
         config.github_repo = "acme/site"
         config.save(update_fields=["github_repo", "updated_at"])
 
-        response = self.client.post(
-            "/api/v1/vibe-marketing/article/",
-            {"topic": "Founder workflow automation"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("baseline", response.data["detail"])
-
-        skip = self.client.post("/api/v1/vibe-marketing/baseline/skip/", {}, format="json")
-        self.assertEqual(skip.status_code, 200)
+        # No baseline snapshot and no skip flag: generation must still proceed
+        # (the baseline prerequisite gate has been removed).
+        self.assertIsNone(config.baseline_skipped_at)
+        self.assertFalse(WebsiteBaselineSnapshot.objects.filter(organization=organization).exists())
         with patch("content_factory.vibe_marketing_views.http_client.post", return_value=_Response(status_code=202, payload={"run_id": "article-run-1", "status": "queued"})):
             response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
-                {"topic": "Founder workflow automation"},
+                {
+                    "topic": "Founder workflow automation",
+                    "deliveryMode": "content_only",
+                    "deliveryModeExplicit": True,
+                },
                 format="json",
             )
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
 
     def test_google_baseline_connection_accepts_search_console_scope(self):
         connection = GoogleConnection.objects.create(
