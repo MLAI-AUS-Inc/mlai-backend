@@ -10001,6 +10001,59 @@ def _article_system_setup_current_retry_attempt(*payloads) -> bool:
     return False
 
 
+def _merge_job_billing_into_run_request(run) -> None:
+    """Carry a ContentFactoryJob's recorded Roo-points charge onto the run's run_request when missing.
+
+    The article-generation service records the charge on the ContentFactoryJob (billing_status +
+    billing_ledger_id, keyed by client_request_id) at charge time, but content-factory syncs the article
+    run back WITHOUT the web ``roo_points_*`` fields — so a paid article's run can look unpaid and the
+    revision flow then rejects it. Mirror the job's billing onto the run_request so the payment link is
+    persisted at run materialization. Additive only: never overwrites an existing authorization, only
+    fills it in from a real (charged/reused) job charge. Best-effort; never raises.
+    """
+    try:
+        run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+        if run_request.get("roo_points_authorized") and run_request.get("roo_points_ledger_id"):
+            return  # run already carries its own authorization
+
+        from content_factory.models import ContentFactoryJob
+
+        job = ContentFactoryJob.objects.filter(job_id=run.run_id).first()
+        if job is None:
+            return
+        billing_status = str(getattr(job, "billing_status", "") or "").strip()
+        ledger_id = getattr(job, "billing_ledger_id", None)
+        if billing_status not in {"charged", "reused"} or not ledger_id:
+            return
+
+        domain = str(getattr(run, "domain", "") or run_request.get("domain") or "").strip()
+        merged = dict(run_request)
+        merged.update(
+            build_roo_points_authorization_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                cost_points=int(getattr(job, "billing_amount", 0) or 0)
+                or get_content_factory_article_cost_points(domain),
+                required_points=get_content_factory_ai_agent_required_points(domain),
+                current_balance=None,
+                billing_status=billing_status,
+                ledger_id=ledger_id,
+            )
+        )
+        job_crid = str(getattr(job, "client_request_id", "") or "").strip()
+        if job_crid and not merged.get("client_request_id"):
+            merged["client_request_id"] = job_crid
+        if merged != run_request:
+            run.run_request = merged
+            run.save(update_fields=["run_request", "updated_at"])
+    except Exception:  # pragma: no cover - best-effort enrichment
+        logger.warning(
+            "Failed to merge job billing into run_request for %s",
+            getattr(run, "run_id", "?"),
+            exc_info=True,
+        )
+
+
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
@@ -10037,6 +10090,9 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
             run.error = str(remote_data.get("error") or "")
             update_fields.extend(["status", "current_step", "result", "error"])
         run.save(update_fields=list(dict.fromkeys(update_fields)))
+    # Persist the billing link: a paid article's run synced from content-factory lacks the web
+    # roo_points_* fields, but its ContentFactoryJob carries the real charge — mirror it onto the run.
+    _merge_job_billing_into_run_request(run)
     return run
 
 
