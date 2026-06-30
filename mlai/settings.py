@@ -549,6 +549,9 @@ ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID"
 VIBE_RAISING_SKIP_ABR_VERIFICATION = os.environ.get(
     "VIBE_RAISING_SKIP_ABR_VERIFICATION", ""
 ).strip().lower() in ("1", "true", "yes", "on")
+# Roo points awarded to a founder of a verified registered company (valid ACN) the first
+# time they complete a monthly update each month. 0 disables the reward.
+ROO_POINTS_MONTHLY_UPDATE_REWARD = int(os.environ.get("ROO_POINTS_MONTHLY_UPDATE_REWARD", "20"))
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(
