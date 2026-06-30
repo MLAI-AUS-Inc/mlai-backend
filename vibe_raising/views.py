@@ -2336,6 +2336,14 @@ class VibeRaisingMonthlyUpdateView(APIView):
             },
         )
 
+        # Reward verified-company founders for completing the month's update (once per
+        # company per month; best-effort, never blocks the save).
+        from roo.services import StartupUpdateRewardService
+
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=request.user, company=company, month_bucket=month_bucket, draft=draft,
+        )
+
         return Response(
             {"update": _serialize_monthly_update(draft)},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

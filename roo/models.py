@@ -451,6 +451,7 @@ class Ledger(models.Model):
         ('EVENT', 'Event'),
         ('MERCH', 'Merch'),
         ('CONTENT_FACTORY', 'Content Factory'),
+        ('STARTUP_UPDATE', 'Startup Update'),
         ('TOOLS', 'Tools'),
         ('DONATION', 'Donation'),
         ('purchased_topup', 'Purchased Top-Up'),

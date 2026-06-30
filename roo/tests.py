@@ -4,7 +4,7 @@ Tests for the Points System.
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
@@ -15,7 +15,7 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
-from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService
+from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService, StartupUpdateRewardService
 from .permissions import (
     can_generate_coworking_reports,
     is_points_admin,
@@ -816,6 +816,86 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         self.assertEqual(booking.points_cost, 8)
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, balance_before - 8)
+
+
+class StartupUpdateRewardServiceTests(TestCase):
+    """20 roo points for a verified company's founder completing a monthly update,
+    once per company per month."""
+
+    def setUp(self):
+        from organizations.models import Organization
+
+        self.user = User.objects.create_user(email='founder@example.com', slack_id='UFOUNDER')
+        self.org = Organization.objects.create(name='Acme', domain='acme.example')
+        self.company = self._verified_company(self.org)
+        self.month = date(2026, 7, 1)
+
+    def _verified_company(self, org, *, name='Acme Pty Ltd'):
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=self.user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
+        )
+        return VibeRaisingCompany.objects.create(
+            profile=profile, organization=org, name=name,
+            registered=True, abn='89000000019', acn='000000019',
+            abr_verified_at=timezone.now(),
+        )
+
+    def _balance(self):
+        account = PointsAccount.objects.filter(user=self.user).first()
+        return account.balance if account else 0
+
+    def test_first_completion_awards_20(self):
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertTrue(awarded)
+        self.assertEqual(self._balance(), 20)
+        self.assertTrue(
+            Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE', delta=20).exists()
+        )
+
+    def test_second_completion_same_month_is_idempotent(self):
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        awarded_again = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertFalse(awarded_again)
+        self.assertEqual(self._balance(), 20)
+        self.assertEqual(Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE').count(), 1)
+
+    def test_different_month_awards_again(self):
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=date(2026, 8, 1)
+        )
+        self.assertEqual(self._balance(), 40)
+
+    def test_unverified_company_is_not_rewarded(self):
+        from founder_tools.models import VibeRaisingCompany
+
+        unverified = VibeRaisingCompany.objects.create(
+            profile=self.company.profile, organization=self.org, name='Draft Co',
+            registered=True, abn='89000000019',  # no acn / abr_verified_at
+        )
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=unverified, month_bucket=self.month
+        )
+        self.assertFalse(awarded)
+        self.assertEqual(self._balance(), 0)
+
+    @override_settings(ROO_POINTS_MONTHLY_UPDATE_REWARD=0)
+    def test_zero_reward_setting_disables_award(self):
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertFalse(awarded)
+        self.assertEqual(self._balance(), 0)
 
 
 class PermissionTests(TestCase):

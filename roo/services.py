@@ -6,6 +6,7 @@ All write operations use database transactions and idempotency keys to prevent
 race conditions and duplicate transactions.
 """
 import calendar
+import logging
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
@@ -25,6 +26,8 @@ from .permissions import (
     PermissionDeniedError, InsufficientBalanceError
 )
 from core.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class PointsPurchaseService:
@@ -1050,6 +1053,56 @@ class CoworkingService:
             }
         )
         return day_capacity
+
+
+class StartupUpdateRewardService:
+    """Rewards founders of verified registered companies for keeping their monthly
+    update current."""
+
+    REWARD_SOURCE = 'STARTUP_UPDATE'
+
+    @staticmethod
+    def reward_amount() -> int:
+        return int(getattr(settings, 'ROO_POINTS_MONTHLY_UPDATE_REWARD', 20))
+
+    @staticmethod
+    def award_monthly_update_completion(user, company, month_bucket, draft=None) -> bool:
+        """Award points the first time a *verified registered company* (valid ACN)
+        completes a monthly update for ``month_bucket`` (a date on the first of the
+        month).
+
+        Idempotent per company + month — re-saving the same month's update never awards
+        twice. Best-effort: returns False (and never raises) if the company isn't
+        eligible or the award can't be made, so it can't break the update flow.
+        """
+        # Imported lazily to avoid a load-order dependency between roo and vibe_raising.
+        from vibe_raising.registration import company_is_verified
+
+        if user is None or company is None or month_bucket is None:
+            return False
+        if not company_is_verified(company):
+            return False
+
+        amount = StartupUpdateRewardService.reward_amount()
+        if amount <= 0:
+            return False
+
+        month_key = month_bucket.strftime('%Y-%m')
+        try:
+            _ledger, created = PointsService.award(
+                user=user,
+                delta=amount,
+                source=StartupUpdateRewardService.REWARD_SOURCE,
+                description=f"Monthly update completed — {month_bucket.strftime('%B %Y')}",
+                created_by_slack_id=getattr(user, 'slack_id', '') or 'system',
+                idempotency_key=f"monthly_update_reward:{company.id}:{month_key}",
+                reference_type='MONTHLY_UPDATE_DRAFT',
+                reference_id=str(draft.id) if draft is not None else None,
+            )
+            return created
+        except Exception:
+            logger.exception("Failed to award monthly-update points to user %s", getattr(user, 'id', None))
+            return False
 
 
 class TaskService:
