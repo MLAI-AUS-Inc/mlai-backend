@@ -82,6 +82,12 @@ from startup_updates.services import (
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import ensure_company_organization, set_active_company
+from vibe_raising.registration import (
+    CompanyRegistrationError,
+    company_registration_blocker,
+    set_unverified_company_abn,
+    verify_and_persist_company_registration,
+)
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .metric_history import build_metric_history
@@ -1893,46 +1899,41 @@ class VibeRaisingCompanyView(APIView):
         serializer = VibeRaisingCompanyUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        company_id = serializer.validated_data.get("companyId")
+        data = serializer.validated_data
+        company_id = data.get("companyId")
+        wants_registered = data.get("registered") is True
 
-        with transaction.atomic():
-            if company_id:
-                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-                company.name = serializer.validated_data["name"]
-                if "domain" in serializer.validated_data:
-                    company.domain = serializer.validated_data["domain"]
-                if "abn" in serializer.validated_data:
-                    company.abn = serializer.validated_data["abn"]
-                if "registered" in serializer.validated_data:
-                    company.registered = serializer.validated_data["registered"]
-                company.save()
-            else:
-                company = profile.companies.filter(
-                    name__iexact=serializer.validated_data["name"]
-                ).first()
-                if company is None:
-                    company = VibeRaisingCompany.objects.create(
-                        profile=profile,
-                        name=serializer.validated_data["name"],
-                        domain=serializer.validated_data.get("domain"),
-                        abn=serializer.validated_data.get("abn"),
-                        registered=serializer.validated_data.get("registered", False),
+        try:
+            with transaction.atomic():
+                if company_id:
+                    company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                else:
+                    company = profile.companies.filter(name__iexact=data["name"]).first()
+                    if company is None:
+                        company = VibeRaisingCompany(profile=profile)
+
+                company.name = data["name"]
+                if "domain" in data:
+                    company.domain = data["domain"]
+
+                if wants_registered:
+                    # The only path to registered=True: prove an active registered
+                    # Australian company via the ABR, persisting the verified ACN.
+                    verify_and_persist_company_registration(
+                        company, abn=data.get("abn"), acn=data.get("acn"), save=True
                     )
                 else:
-                    company.name = serializer.validated_data["name"]
-                    if "domain" in serializer.validated_data:
-                        company.domain = serializer.validated_data["domain"]
-                    if "abn" in serializer.validated_data:
-                        company.abn = serializer.validated_data["abn"]
-                    if "registered" in serializer.validated_data:
-                        company.registered = serializer.validated_data["registered"]
+                    if "abn" in data:
+                        set_unverified_company_abn(company, data["abn"])
+                    if data.get("registered") is False:
+                        company.registered = False
                     company.save()
 
                 ensure_company_organization(company)
                 if profile.active_company_id is None:
                     set_active_company(profile, company)
-
-            ensure_company_organization(company)
+        except CompanyRegistrationError as exc:
+            return Response(exc.to_payload(), status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         return Response(VibeRaisingCompanySerializer(company).data, status=status.HTTP_200_OK)
 
@@ -2287,6 +2288,10 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        blocker = company_registration_blocker(context["company"])
+        if blocker is not None:
+            return Response(blocker, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
         serializer = VibeRaisingMonthlyUpdateUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -2402,6 +2407,10 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 _build_status_payload(user=request.user, company=company, domain=domain),
                 status=status.HTTP_200_OK,
             )
+
+        blocker = company_registration_blocker(company)
+        if blocker is not None:
+            return Response(blocker, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         organization, _startup_profile, binding = _ensure_binding_for_company(
             user=request.user,
