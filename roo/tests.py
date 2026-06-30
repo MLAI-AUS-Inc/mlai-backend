@@ -492,10 +492,10 @@ class CoworkingServiceTests(TestCase):
         
         self.assertTrue(created)
         self.assertEqual(booking.status, 'booked')
-        self.assertEqual(booking.points_cost, 4)  # Cost from COWORKING_DAY reward catalog
-        
+        self.assertEqual(booking.points_cost, 8)  # Standard cost from COWORKING_DAY reward catalog
+
         account = PointsAccount.objects.get(user=self.user)
-        self.assertEqual(account.balance, 6)  # 10 - 4
+        self.assertEqual(account.balance, 2)  # 10 - 8
     
     def test_book_respects_capacity(self):
         """Test that booking respects capacity limits."""
@@ -560,10 +560,10 @@ class CoworkingServiceTests(TestCase):
         
         self.assertEqual(booking.status, 'cancelled')
         # Refund should have happened (booking is far in future)
-        # Cost is 4 points from COWORKING_DAY reward catalog, not 1
+        # Cost is the standard 8 points from COWORKING_DAY reward catalog, not 1
         if refunded:
             account = PointsAccount.objects.get(user=self.user)
-            self.assertEqual(account.balance, initial_balance + 4)
+            self.assertEqual(account.balance, initial_balance + 8)
 
     def test_book_is_idempotent_for_existing_active_booking(self):
         """Test that repeat bookings for the same day return the existing booking."""
@@ -588,7 +588,149 @@ class CoworkingServiceTests(TestCase):
             1,
         )
         account = PointsAccount.objects.get(user=self.user)
-        self.assertEqual(account.balance, 6)
+        self.assertEqual(account.balance, 2)  # charged once at the standard 8
+
+
+class CoworkingMonthlyUpdateDiscountTests(TestCase):
+    """The coworking cost drops to 4 when the user's startup has a 'ready'
+    monthly update for the booking's month, otherwise it is the standard 8."""
+
+    def setUp(self):
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+
+        self.user = User.objects.create_user(
+            email='founder@example.com',
+            slack_id='UFOUNDER',
+        )
+        PointsService.award(
+            user=self.user,
+            delta=50,
+            source='MANUAL',
+            description='Test points',
+            created_by_slack_id='UADMIN',
+            idempotency_key='discount_test_setup',
+        )
+        self.org = Organization.objects.create(name='Acme', domain='acme.example')
+        UserStartupBinding.objects.create(user=self.user, organization=self.org)
+
+    def _make_update(self, booking_date, status):
+        from startup_updates.models import MonthlyUpdateDraft
+        return MonthlyUpdateDraft.objects.create(
+            organization=self.org,
+            month=booking_date.replace(day=1),
+            status=status,
+        )
+
+    def test_standard_cost_without_binding(self):
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+
+        unbound = User.objects.create_user(email='nobind@example.com', slack_id='UNOBIND')
+        self.assertFalse(UserStartupBinding.objects.filter(user=unbound).exists())
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=unbound, booking_date=date.today()),
+            8,
+        )
+
+    def test_standard_cost_with_binding_but_no_update(self):
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=date.today()),
+            8,
+        )
+
+    def test_draft_status_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.DRAFT)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_needs_review_status_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.NEEDS_REVIEW)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_discounts_to_four(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_for_other_month_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today().replace(day=15)
+        # 'ready' update exists, but for a different month than the booking.
+        other_month = (today.replace(day=1) - timedelta(days=1))
+        self._make_update(other_month, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_in_any_bound_org_discounts(self):
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        second_org = Organization.objects.create(name='Beta', domain='beta.example')
+        UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=second_org,
+            month=today.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_no_args_returns_standard_cost(self):
+        # Backwards-compatible: callers without user context get the standard price.
+        self.assertEqual(CoworkingService.get_coworking_cost(), 8)
+
+    def test_book_charges_discounted_cost_end_to_end(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        booking_date = date.today()
+        self._make_update(booking_date, MonthlyUpdateDraftStatus.READY)
+
+        balance_before = PointsAccount.objects.get(user=self.user).balance
+        booking, created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(booking.points_cost, 4)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, balance_before - 4)
+
+    def test_book_charges_standard_cost_without_ready_update(self):
+        booking_date = date.today()
+        balance_before = PointsAccount.objects.get(user=self.user).balance
+        booking, created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(booking.points_cost, 8)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, balance_before - 8)
 
 
 class PermissionTests(TestCase):

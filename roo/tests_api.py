@@ -1756,6 +1756,77 @@ class CoworkingViewSetTests(APITestCase):
         )
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_availability_quotes_standard_cost_without_user(self, mock_permission):
+        url = reverse('coworking-availability')
+        response = self.client.get(url, {'days': 1})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['cost_points'], 8)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_availability_quotes_discounted_cost_for_user_with_ready_update(self, mock_permission):
+        from datetime import date
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        org = Organization.objects.create(name='Acme', domain='acme.coworking.example')
+        UserStartupBinding.objects.create(user=self.user, organization=org)
+        MonthlyUpdateDraft.objects.create(
+            organization=org,
+            month=date.today().replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+
+        url = reverse('coworking-availability')
+        response = self.client.get(url, {'days': 1, 'slack_user_id': self.user.slack_id})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['cost_points'], 4)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_response_flags_standard_price_without_discount(self, mock_permission):
+        booking_date = (date.today() + timedelta(days=1)).isoformat()
+        response = self.client.post(
+            self.url,
+            {'slack_user_id': self.user.slack_id, 'date': booking_date},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['points_cost'], 8)
+        self.assertEqual(response.data['standard_points_cost'], 8)
+        self.assertFalse(response.data['monthly_update_discount_applied'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_response_flags_discount_when_monthly_update_ready(self, mock_permission):
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        booking_date = date.today() + timedelta(days=1)
+        org = Organization.objects.create(name='Acme', domain='acme.book.example')
+        UserStartupBinding.objects.create(user=self.user, organization=org)
+        MonthlyUpdateDraft.objects.create(
+            organization=org,
+            month=booking_date.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+
+        response = self.client.post(
+            self.url,
+            {'slack_user_id': self.user.slack_id, 'date': booking_date.isoformat()},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['points_cost'], 4)
+        self.assertEqual(response.data['standard_points_cost'], 8)
+        self.assertTrue(response.data['monthly_update_discount_applied'])
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_book_endpoint_is_idempotent_for_existing_booking(self, mock_permission):
         booking_date = (date.today() + timedelta(days=1)).isoformat()
 
@@ -1786,7 +1857,7 @@ class CoworkingViewSetTests(APITestCase):
             CoworkingBooking.objects.filter(user=self.user, date=booking_date, status='booked').count(),
             1,
         )
-        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 6)
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 2)  # charged once at the standard 8
 
 
 class CoworkingReportViewSetTests(APITestCase):
