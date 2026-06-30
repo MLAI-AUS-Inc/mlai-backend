@@ -1756,8 +1756,7 @@ class CoworkingViewSetTests(APITestCase):
         )
 
     def _verify_company_for(self, org):
-        """Attach a verified registered company to ``org`` (required for the discount)."""
-        from django.utils import timezone
+        """Attach a registered company with a valid ABN to ``org`` (required for the discount)."""
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 
         profile, _ = VibeRaisingProfile.objects.get_or_create(
@@ -1765,7 +1764,7 @@ class CoworkingViewSetTests(APITestCase):
         )
         VibeRaisingCompany.objects.create(
             profile=profile, organization=org, name='Acme Pty Ltd',
-            registered=True, acn='000000019', abr_verified_at=timezone.now(),
+            registered=True, abn='89000000019',
         )
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
