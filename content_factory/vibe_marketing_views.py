@@ -10142,6 +10142,81 @@ def _merge_job_billing_into_run_request(run) -> None:
         )
 
 
+def _persist_web_article_billing_to_job(run, payload) -> None:
+    """Stamp a web-charged article's Roo-points charge onto its durable ContentFactoryJob.
+
+    The Slack path charges via ``_store_job_tracking_record`` (integrations.services.article_generation),
+    which records ``client_request_id`` + ``billing_status`` + ``billing_ledger`` on the
+    ContentFactoryJob — the durable carrier the revision flow reads. The founder-tools WEB path
+    (``_charge_roo_points_for_article`` → ``_queue_content_factory_run`` → ``_create_local_run``)
+    charges too, but only ever materializes a ContentFactoryRun; its charge lives on ``run_request``,
+    which content-factory overwrites on every callback (``_sync_content_factory_run_snapshot``),
+    stripping the web ``roo_points_*`` fields. The charge is then orphaned and the revision flow
+    rejects the article as unpaid. Mirror the web charge onto the job (which CF callbacks never
+    rewrite the billing of) so ``_reusable_content_factory_charge_for_run`` can verify payment.
+
+    Additive only: never downgrades an existing charged/reused job. Best-effort; never raises.
+    """
+    try:
+        billing_status = str((payload or {}).get("roo_points_billing_status") or "").strip()
+        ledger_id = (payload or {}).get("roo_points_ledger_id")
+        if billing_status not in {"charged", "reused"} or ledger_id in (None, ""):
+            return
+        try:
+            ledger_id_int = int(ledger_id)
+        except (TypeError, ValueError):
+            return
+        crid = str((payload or {}).get("client_request_id") or "").strip()
+        try:
+            cost_points = int((payload or {}).get("roo_points_cost") or 0)
+        except (TypeError, ValueError):
+            cost_points = 0
+
+        from content_factory.models import ContentFactoryJob
+
+        job, created = ContentFactoryJob.objects.get_or_create(
+            job_id=run.run_id,
+            defaults={
+                "domain": run.domain or (payload or {}).get("domain") or "",
+                "slack_user_id": run.slack_user_id or "",
+                "status": run.status or "queued",
+                "client_request_id": crid or None,
+                "billing_source_job_id": run.run_id,
+                "billing_amount": cost_points,
+                "billing_status": billing_status,
+                "billing_ledger_id": ledger_id_int,
+            },
+        )
+        if created:
+            return
+        update_fields = []
+        if crid and job.client_request_id != crid:
+            job.client_request_id = crid
+            update_fields.append("client_request_id")
+        # Only fill in billing when the job isn't already carrying a real charge.
+        if str(job.billing_status or "").strip() not in {"charged", "reused"}:
+            job.billing_status = billing_status
+            update_fields.append("billing_status")
+            if not job.billing_ledger_id:
+                job.billing_ledger_id = ledger_id_int
+                update_fields.append("billing_ledger")
+            if not job.billing_amount and cost_points:
+                job.billing_amount = cost_points
+                update_fields.append("billing_amount")
+            if not str(job.billing_source_job_id or "").strip():
+                job.billing_source_job_id = run.run_id
+                update_fields.append("billing_source_job_id")
+        if update_fields:
+            update_fields.append("updated_at")
+            job.save(update_fields=update_fields)
+    except Exception:  # pragma: no cover - best-effort enrichment
+        logger.warning(
+            "Failed to persist web article billing to job for %s",
+            getattr(run, "run_id", "?"),
+            exc_info=True,
+        )
+
+
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
@@ -10178,8 +10253,13 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
             run.error = str(remote_data.get("error") or "")
             update_fields.extend(["status", "current_step", "result", "error"])
         run.save(update_fields=list(dict.fromkeys(update_fields)))
-    # Persist the billing link: a paid article's run synced from content-factory lacks the web
-    # roo_points_* fields, but its ContentFactoryJob carries the real charge — mirror it onto the run.
+    # Persist the billing link both ways:
+    # 1) The founder-tools web path charges Roo points but only materializes a ContentFactoryRun;
+    #    content-factory overwrites run_request on every callback, stripping the web roo_points_*
+    #    fields, so stamp the durable ContentFactoryJob from the charge carried in `payload`.
+    # 2) A paid article's run synced from content-factory lacks the web roo_points_* fields, but its
+    #    ContentFactoryJob carries the real charge — mirror it back onto the run_request.
+    _persist_web_article_billing_to_job(run, payload)
     _merge_job_billing_into_run_request(run)
     return run
 
