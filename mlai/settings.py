@@ -543,6 +543,12 @@ GOOGLE_WEBSITE_BASELINE_SCOPES = [
 ]
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
+# When true, the vibe-raising registration gate skips the live ABR lookup (used when no
+# ABR credential is configured) but still enforces the ABN and ACN checksums and derives
+# the ACN from the ABN. Lets registered companies with a valid ABN proceed without ABR.
+VIBE_RAISING_SKIP_ABR_VERIFICATION = os.environ.get(
+    "VIBE_RAISING_SKIP_ABR_VERIFICATION", ""
+).strip().lower() in ("1", "true", "yes", "on")
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(
