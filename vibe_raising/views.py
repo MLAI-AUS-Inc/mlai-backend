@@ -83,10 +83,8 @@ from startup_updates.services import (
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import ensure_company_organization, set_active_company
 from vibe_raising.registration import (
-    CompanyRegistrationError,
-    company_registration_blocker,
+    attempt_company_verification,
     set_unverified_company_abn,
-    verify_and_persist_company_registration,
 )
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
@@ -1901,39 +1899,32 @@ class VibeRaisingCompanyView(APIView):
 
         data = serializer.validated_data
         company_id = data.get("companyId")
-        wants_registered = data.get("registered") is True
 
-        try:
-            with transaction.atomic():
-                if company_id:
-                    company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-                else:
-                    company = profile.companies.filter(name__iexact=data["name"]).first()
-                    if company is None:
-                        company = VibeRaisingCompany(profile=profile)
+        with transaction.atomic():
+            if company_id:
+                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+            else:
+                company = profile.companies.filter(name__iexact=data["name"]).first()
+                if company is None:
+                    company = VibeRaisingCompany(profile=profile)
 
-                company.name = data["name"]
-                if "domain" in data:
-                    company.domain = data["domain"]
+            company.name = data["name"]
+            if "domain" in data:
+                company.domain = data["domain"]
+            if "abn" in data:
+                set_unverified_company_abn(company, data["abn"])
+            if "registered" in data:
+                company.registered = bool(data.get("registered"))
+            company.save()
 
-                if wants_registered:
-                    # The only path to registered=True: prove an active registered
-                    # Australian company via the ABR, persisting the verified ACN.
-                    verify_and_persist_company_registration(
-                        company, abn=data.get("abn"), acn=data.get("acn"), save=True
-                    )
-                else:
-                    if "abn" in data:
-                        set_unverified_company_abn(company, data["abn"])
-                    if data.get("registered") is False:
-                        company.registered = False
-                    company.save()
+            # Best-effort: stamp the company verified if its ABN/ACN check out. An
+            # unverifiable ABN does NOT block setup — it just means no perks (e.g. the
+            # coworking discount) until a valid one is provided.
+            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
-                ensure_company_organization(company)
-                if profile.active_company_id is None:
-                    set_active_company(profile, company)
-        except CompanyRegistrationError as exc:
-            return Response(exc.to_payload(), status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            ensure_company_organization(company)
+            if profile.active_company_id is None:
+                set_active_company(profile, company)
 
         return Response(VibeRaisingCompanySerializer(company).data, status=status.HTTP_200_OK)
 
@@ -2288,10 +2279,6 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        blocker = company_registration_blocker(context["company"])
-        if blocker is not None:
-            return Response(blocker, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-
         serializer = VibeRaisingMonthlyUpdateUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -2407,10 +2394,6 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 _build_status_payload(user=request.user, company=company, domain=domain),
                 status=status.HTTP_200_OK,
             )
-
-        blocker = company_registration_blocker(company)
-        if blocker is not None:
-            return Response(blocker, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         organization, _startup_profile, binding = _ensure_binding_for_company(
             user=request.user,

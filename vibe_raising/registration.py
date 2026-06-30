@@ -128,6 +128,31 @@ def company_registration_blocker(company) -> dict | None:
     }
 
 
+def attempt_company_verification(company, *, abn=None, acn=None, save: bool = True) -> bool:
+    """Best-effort verification: stamp the company as verified when its ABN/ACN check
+    out, otherwise leave it usable and unverified. Never raises.
+
+    Used where being a verified company *unlocks perks* (e.g. the coworking discount)
+    but is not required to use the product — so an invalid or missing ABN must not block
+    the founder. Returns ``True`` when the company is now verified.
+    """
+
+    target_abn = abn if abn is not None else company.abn
+    try:
+        verify_and_persist_company_registration(
+            company, abn=target_abn, acn=acn, save=save
+        )
+        return True
+    except CompanyRegistrationError:
+        # Not verifiable — drop any stale verification but keep the company as-is.
+        company.acn = None
+        company.entity_type_code = ""
+        company.abr_verified_at = None
+        if save and getattr(company, "pk", None):
+            company.save(update_fields=["acn", "entity_type_code", "abr_verified_at", "updated_at"])
+        return False
+
+
 def _abr_verifier():
     # Imported lazily: the ABR helper lives in the large vibe-marketing views module,
     # and a lazy import keeps this service layer cheap to import and free of load-order
