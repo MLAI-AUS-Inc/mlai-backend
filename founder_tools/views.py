@@ -21,6 +21,11 @@ from .services import (
     get_or_create_founder_profile,
     set_active_company,
 )
+from vibe_raising.registration import (
+    CompanyRegistrationError,
+    set_unverified_company_abn,
+    verify_and_persist_company_registration,
+)
 
 
 def _connector_summaries(user):
@@ -93,25 +98,37 @@ class FounderToolsCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
-        company_fields = {
+        wants_registered = data.get("registered") is True
+        # ABN/registration are handled through the verification gate, not assigned raw.
+        plain_fields = {
             key: data[key]
-            for key in ("name", "domain", "abn", "location", "registered")
+            for key in ("name", "domain", "location")
             if key in data
         }
 
-        if company_id:
-            company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-            for field, value in company_fields.items():
-                setattr(company, field, value)
-            company.save()
-        else:
-            company = profile.companies.filter(name__iexact=company_fields["name"]).first()
-            if company is None:
-                company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
+        try:
+            if company_id:
+                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
             else:
-                for field, value in company_fields.items():
-                    setattr(company, field, value)
+                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
+                    profile=profile
+                )
+
+            for field, value in plain_fields.items():
+                setattr(company, field, value)
+
+            if wants_registered:
+                verify_and_persist_company_registration(
+                    company, abn=data.get("abn"), acn=data.get("acn"), save=True
+                )
+            else:
+                if "abn" in data:
+                    set_unverified_company_abn(company, data["abn"])
+                if data.get("registered") is False:
+                    company.registered = False
                 company.save()
+        except CompanyRegistrationError as exc:
+            return Response(exc.to_payload(), status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)

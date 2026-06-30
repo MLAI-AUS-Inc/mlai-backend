@@ -51,11 +51,16 @@ class VibeRaisingApiTests(TestCase):
 
     def _create_founder_company(self, *, domain="acme.com", registered=True):
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        # A registered company is, post-gate, a verified one — carry the ACN and
+        # verification stamp so it can proceed to updates.
         company = VibeRaisingCompany.objects.create(
             profile=profile,
             name="Acme Inc.",
             domain=domain,
             registered=registered,
+            abn="89000000019" if registered else None,
+            acn="000000019" if registered else None,
+            abr_verified_at=timezone.now() if registered else None,
         )
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])
@@ -222,21 +227,32 @@ class VibeRaisingApiTests(TestCase):
             registered=False,
         )
 
-        response = self.client.post(
-            "/api/v1/vibe-raising/companies/",
-            {
-                "companyId": str(company.id),
-                "name": "Acme Inc.",
-                "domain": "new.example",
-                "registered": True,
-            },
-            format="json",
-        )
+        abr = lambda abn: {
+            "configured": True,
+            "reachable": True,
+            "found": True,
+            "is_company": True,
+            "acn": "000000019",
+            "entity_type_code": "PRV",
+        }
+        with patch("content_factory.vibe_marketing_views.verify_company_with_abr", side_effect=abr):
+            response = self.client.post(
+                "/api/v1/vibe-raising/companies/",
+                {
+                    "companyId": str(company.id),
+                    "name": "Acme Inc.",
+                    "domain": "new.example",
+                    "abn": "89000000019",
+                    "registered": True,
+                },
+                format="json",
+            )
 
         self.assertEqual(response.status_code, 200)
         company.refresh_from_db()
         self.assertEqual(company.domain, "new.example")
         self.assertTrue(company.registered)
+        self.assertEqual(company.acn, "000000019")
 
     def test_retry_create_same_name_does_not_duplicate_company(self):
         self.client.force_authenticate(user=self.user)
