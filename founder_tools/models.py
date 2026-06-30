@@ -64,6 +64,10 @@ class VibeRaisingCompany(models.Model):
     # When the company was last successfully verified as an active registered company
     # against the Australian Business Register. Null means never verified.
     abr_verified_at = models.DateTimeField(blank=True, null=True)
+    # True for registered not-for-profits (incorporated associations, charities, etc.)
+    # which have an ABN but no ACN. Set manually by an admin or auto-detected from the
+    # ABR entity type; exempts the org from the ACN requirement in the registration gate.
+    is_nonprofit = models.BooleanField(default=False)
     location = models.CharField(max_length=255, blank=True, default="")
     avatar_url = models.URLField(blank=True, null=True)
     registered = models.BooleanField(default=False)

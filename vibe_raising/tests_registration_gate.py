@@ -155,3 +155,22 @@ class UpdateGuardTests(TestCase):
         response = self.client.post("/api/v1/vibe-raising/updates/", {}, format="json")
         gated = response.status_code == 422 and getattr(response, "data", {}).get("code") == "ACN_REQUIRED"
         self.assertFalse(gated, "verified company should not be blocked by the ACN gate")
+
+    def test_verified_nonprofit_passes_the_gate_without_acn(self):
+        # A registered not-for-profit (flagged, ABR-verified, no ACN) is exempt from the
+        # ACN requirement and must not be blocked.
+        company = VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            name="MLAI Aus Inc",
+            domain="mlai.au",
+            registered=True,
+            abn=COMPANY_ABN,
+            acn=None,
+            is_nonprofit=True,
+            abr_verified_at=timezone.now(),
+        )
+        self.profile.active_company = company
+        self.profile.save(update_fields=["active_company", "updated_at"])
+        response = self.client.post("/api/v1/vibe-raising/updates/", {}, format="json")
+        gated = response.status_code == 422 and getattr(response, "data", {}).get("code") == "ACN_REQUIRED"
+        self.assertFalse(gated, "verified not-for-profit should not be blocked by the ACN gate")

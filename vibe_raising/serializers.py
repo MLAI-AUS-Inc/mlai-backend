@@ -82,6 +82,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
     organizationDomain = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    isNonprofit = serializers.BooleanField(source="is_nonprofit", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
@@ -92,6 +93,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
             "abn",
             "acn",
             "registered",
+            "isNonprofit",
             "entityTypeName",
             "abrVerifiedAt",
             "organizationId",

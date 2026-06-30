@@ -29,13 +29,15 @@ def _abr(abn):
             "acn": COMPANY_ACN,
             "entity_type_code": "PRV",
         }
+    # A sole trader: not a company and not a not-for-profit -> should be flagged.
     return {
         "configured": True,
         "reachable": True,
         "found": True,
         "is_company": False,
+        "is_nonprofit": False,
         "acn": None,
-        "entity_type_code": "OIE",
+        "entity_type_code": "IND",
     }
 
 

@@ -35,6 +35,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     avatarUrl = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    isNonprofit = serializers.BooleanField(source="is_nonprofit", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
@@ -48,6 +49,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "avatar_url",
             "avatarUrl",
             "registered",
+            "isNonprofit",
             "entityTypeName",
             "abrVerifiedAt",
             "organizationId",

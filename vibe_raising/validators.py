@@ -54,6 +54,27 @@ def entity_type_display(entity_type_code: str | None) -> str:
     return ENTITY_TYPE_NAMES.get(code, code)
 
 
+# ABR ``entityTypeCode`` values for registered not-for-profit organisations that have
+# an ABN but no ACN (incorporated associations, co-operatives, etc.). These are exempt
+# from the ACN requirement. Keep conservative and confirm against the ABR entity-type
+# reference before widening — and note this only auto-classifies when the ABR lookup is
+# available; otherwise the manual ``is_nonprofit`` flag is the signal.
+NONPROFIT_ENTITY_TYPE_CODES = frozenset(
+    {
+        "OIE",  # Other Incorporated Entity (incorporated associations)
+        "COP",  # Co-operative
+    }
+)
+
+
+def is_nonprofit_entity_type(entity_type_code: str | None) -> bool:
+    """Return ``True`` when an ABR ``entityTypeCode`` denotes a registered not-for-profit."""
+
+    if not entity_type_code:
+        return False
+    return entity_type_code.strip().upper() in NONPROFIT_ENTITY_TYPE_CODES
+
+
 def _digits(value: str | None) -> str:
     """Return only the decimal digits in ``value`` (drops spaces, hyphens, etc.)."""
 

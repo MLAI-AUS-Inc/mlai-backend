@@ -9,6 +9,7 @@ from content_factory.vibe_marketing_views import verify_company_with_abr
 from vibe_raising import registration as reg
 from vibe_raising.registration import (
     CompanyRegistrationError,
+    company_is_verified,
     verify_and_persist_company_registration,
 )
 
@@ -128,6 +129,7 @@ class _StubCompany:
         self.entity_type_code = ""
         self.abr_verified_at = None
         self.registered = False
+        self.is_nonprofit = False
         self.saved = False
 
     def save(self, *args, **kwargs):
@@ -135,12 +137,13 @@ class _StubCompany:
 
 
 class VerifyAndPersistTests(SimpleTestCase):
-    def _run(self, *, abn=COMPANY_ABN, acn=None, verifier=None, save=True):
-        company = _StubCompany()
+    def _run(self, *, abn=COMPANY_ABN, acn=None, is_nonprofit=None, verifier=None, save=True, company=None):
+        company = company or _StubCompany()
         verify_and_persist_company_registration(
             company,
             abn=abn,
             acn=acn,
+            is_nonprofit=is_nonprofit,
             save=save,
             abr_verifier=verifier or _abr_ok(),
         )
@@ -221,3 +224,70 @@ class VerifyAndPersistTests(SimpleTestCase):
     def test_skip_flag_still_rejects_bad_abn(self):
         with self.assertRaises(CompanyRegistrationError):
             verify_and_persist_company_registration(_StubCompany(), abn="94807394138")
+
+    # --- Not-for-profit exemption -------------------------------------------
+    def test_nonprofit_flag_passes_without_acn(self):
+        # A flagged NFP verifies on a valid ABN alone — no ACN required, even though
+        # its ABN's derived ACN is invalid (NON_COMPANY_ABN).
+        company = self._run(abn=NON_COMPANY_ABN, is_nonprofit=True)
+        self.assertTrue(company.registered)
+        self.assertTrue(company.is_nonprofit)
+        self.assertIsNone(company.acn)
+        self.assertIsNotNone(company.abr_verified_at)
+
+    def test_nonprofit_flag_on_company_instance_is_honoured(self):
+        company = _StubCompany()
+        company.is_nonprofit = True
+        self._run(abn=NON_COMPANY_ABN, company=company)
+        self.assertTrue(company.registered)
+        self.assertIsNone(company.acn)
+
+    def test_abr_detected_nonprofit_passes_without_acn(self):
+        # ABR reports a not-for-profit entity type → exempt from the ACN requirement.
+        company = self._run(
+            abn=NON_COMPANY_ABN,
+            verifier=_abr_ok(is_company=False, is_nonprofit=True, acn=None, entity_type_code="OIE"),
+        )
+        self.assertTrue(company.registered)
+        self.assertTrue(company.is_nonprofit)
+        self.assertEqual(company.entity_type_code, "OIE")
+
+    def test_nonprofit_still_requires_valid_abn(self):
+        with self.assertRaises(CompanyRegistrationError) as ctx:
+            self._run(abn="94807394138", is_nonprofit=True)
+        self.assertEqual(ctx.exception.code, reg.ABN_INVALID)
+
+    @override_settings(VIBE_RAISING_SKIP_ABR_VERIFICATION=True)
+    def test_nonprofit_flag_passes_in_skip_mode(self):
+        company = _StubCompany()
+        company.is_nonprofit = True
+        verify_and_persist_company_registration(company, abn=NON_COMPANY_ABN)
+        self.assertTrue(company.registered)
+        self.assertIsNone(company.acn)
+
+
+class CompanyIsVerifiedTests(SimpleTestCase):
+    def _company(self, **kwargs):
+        c = _StubCompany()
+        for k, v in kwargs.items():
+            setattr(c, k, v)
+        return c
+
+    def test_verified_company_with_acn(self):
+        from django.utils import timezone
+        c = self._company(registered=True, acn=COMPANY_ACN, abr_verified_at=timezone.now())
+        self.assertTrue(company_is_verified(c))
+
+    def test_verified_nonprofit_without_acn(self):
+        from django.utils import timezone
+        c = self._company(registered=True, is_nonprofit=True, abr_verified_at=timezone.now())
+        self.assertTrue(company_is_verified(c))
+
+    def test_unverified_company_without_acn(self):
+        from django.utils import timezone
+        c = self._company(registered=True, abr_verified_at=timezone.now())
+        self.assertFalse(company_is_verified(c))
+
+    def test_nonprofit_without_verification_timestamp_is_not_verified(self):
+        c = self._company(registered=True, is_nonprofit=True)
+        self.assertFalse(company_is_verified(c))

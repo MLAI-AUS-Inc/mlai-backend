@@ -102,6 +102,7 @@ from founder_tools.services import (
 )
 from vibe_raising.validators import (
     format_acn,
+    is_nonprofit_entity_type,
     is_registered_company_entity_type,
     normalize_abn,
     normalize_acn,
@@ -11160,6 +11161,7 @@ def verify_company_with_abr(abn) -> dict:
         "status": "",
         "active": False,
         "is_company": False,
+        "is_nonprofit": False,
     }
 
     if not result["abn"]:
@@ -11199,6 +11201,7 @@ def verify_company_with_abr(abn) -> dict:
     result["is_company"] = result["active"] and (
         has_company_acn or is_registered_company_entity_type(result["entity_type_code"])
     )
+    result["is_nonprofit"] = result["active"] and is_nonprofit_entity_type(result["entity_type_code"])
     return result
 
 

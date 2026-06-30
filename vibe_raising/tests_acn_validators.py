@@ -117,3 +117,18 @@ class EntityTypeTests(SimpleTestCase):
     def test_non_company_codes_fail(self):
         for code in ("IND", "DTT", "FPT", "", None):
             self.assertFalse(is_registered_company_entity_type(code), code)
+
+
+class NonprofitEntityTypeTests(SimpleTestCase):
+    def test_nonprofit_codes_pass(self):
+        from vibe_raising.validators import NONPROFIT_ENTITY_TYPE_CODES, is_nonprofit_entity_type
+
+        for code in NONPROFIT_ENTITY_TYPE_CODES:
+            self.assertTrue(is_nonprofit_entity_type(code))
+        self.assertTrue(is_nonprofit_entity_type(" oie "))
+
+    def test_company_and_blank_codes_are_not_nonprofit(self):
+        from vibe_raising.validators import is_nonprofit_entity_type
+
+        for code in ("PRV", "PUB", "IND", "", None):
+            self.assertFalse(is_nonprofit_entity_type(code), code)

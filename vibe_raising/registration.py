@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from vibe_raising.validators import (
     acn_from_abn,
+    is_nonprofit_entity_type,
     normalize_abn,
     normalize_acn,
     validate_abn_checksum,
@@ -99,14 +100,17 @@ def set_unverified_company_abn(company, abn) -> None:
 
 
 def company_is_verified(company) -> bool:
-    """True when a company is a confirmed registered Australian company."""
+    """True when a company is a confirmed registered Australian organisation.
 
-    return bool(
-        company is not None
-        and company.registered
-        and company.acn
-        and company.abr_verified_at
-    )
+    A company qualifies with a verified ACN; a registered not-for-profit (which has
+    an ABN but no ACN) qualifies on the ``is_nonprofit`` flag alone.
+    """
+
+    if company is None or not company.registered or not company.abr_verified_at:
+        return False
+    if getattr(company, "is_nonprofit", False):
+        return True
+    return bool(company.acn)
 
 
 def company_registration_blocker(company) -> dict | None:
@@ -142,15 +146,21 @@ def verify_and_persist_company_registration(
     *,
     abn,
     acn=None,
+    is_nonprofit=None,
     save: bool = True,
     abr_verifier=None,
 ):
-    """Verify ``company`` is an active registered Australian company and persist it.
+    """Verify ``company`` is an active registered Australian organisation and persist it.
+
+    Companies must resolve to a valid ACN. Registered not-for-profits (incorporated
+    associations, charities, etc.) have an ABN but no ACN — they are accepted on a
+    valid ABN alone when flagged (``is_nonprofit`` / ``company.is_nonprofit``) or when
+    the ABR entity type identifies them as a not-for-profit.
 
     On success, mutates ``company`` (``abn``, ``acn``, ``entity_type_code``,
-    ``abr_verified_at``, ``registered=True``) and writes the row when ``save`` is True.
-    Raises :class:`CompanyRegistrationError` on any failure, leaving ``company``
-    unmodified.
+    ``is_nonprofit``, ``abr_verified_at``, ``registered=True``) and writes the row when
+    ``save`` is True. Raises :class:`CompanyRegistrationError` on any failure, leaving
+    ``company`` unmodified.
 
     ``abr_verifier`` is injectable for tests; it defaults to the live ABR lookup.
     """
@@ -163,15 +173,21 @@ def verify_and_persist_company_registration(
         raise CompanyRegistrationError(ABN_INVALID)
     normalized_abn = normalize_abn(abn)
 
-    # --- Layer 2: authoritative ABR company check -----------------------------
+    # Nonprofit intent: explicit argument wins, else the flag already on the company.
+    nonprofit_requested = bool(
+        company.is_nonprofit if is_nonprofit is None else is_nonprofit
+    )
+
+    # --- Layer 2: authoritative ABR check -------------------------------------
     skip_abr = bool(getattr(settings, "VIBE_RAISING_SKIP_ABR_VERIFICATION", False))
     if skip_abr:
-        # Dev/local escape hatch when no ABR credentials are configured: trust the ABN
-        # and derive the ACN, but still enforce both checksums below.
+        # No ABR credential: trust the ABN. We can't read the entity type, so a
+        # not-for-profit is recognised only by the manual flag.
         abr = {
             "reachable": True,
             "found": True,
             "is_company": True,
+            "is_nonprofit": False,
             "acn": None,
             "entity_type_code": "",
         }
@@ -180,8 +196,29 @@ def verify_and_persist_company_registration(
         abr = verifier(normalized_abn)
         if not abr.get("reachable") or not abr.get("configured", True):
             raise CompanyRegistrationError(ABR_UNVERIFIABLE)
-        if not abr.get("found") or not abr.get("is_company"):
+        if not abr.get("found"):
             raise CompanyRegistrationError(NOT_A_REGISTERED_COMPANY)
+
+    # A not-for-profit is recognised from the flag or the ABR entity type.
+    nonprofit = nonprofit_requested or bool(
+        abr.get("is_nonprofit") or is_nonprofit_entity_type(abr.get("entity_type_code"))
+    )
+
+    if nonprofit:
+        # --- Not-for-profit path: valid ABN, no ACN required ------------------
+        company.abn = normalized_abn
+        company.acn = None
+        company.is_nonprofit = True
+        company.entity_type_code = abr.get("entity_type_code") or ""
+        company.abr_verified_at = timezone.now()
+        company.registered = True
+        if save:
+            company.save()
+        return abr
+
+    # Beyond this point we require an actual company.
+    if not abr.get("is_company"):
+        raise CompanyRegistrationError(NOT_A_REGISTERED_COMPANY)
 
     # --- Layer 3: resolve + validate the ACN ----------------------------------
     abr_acn = normalize_acn(abr.get("acn"))
@@ -203,6 +240,7 @@ def verify_and_persist_company_registration(
     # --- Persist --------------------------------------------------------------
     company.abn = normalized_abn
     company.acn = resolved_acn
+    company.is_nonprofit = False
     company.entity_type_code = abr.get("entity_type_code") or ""
     company.abr_verified_at = timezone.now()
     company.registered = True
