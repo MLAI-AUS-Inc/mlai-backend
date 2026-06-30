@@ -592,8 +592,12 @@ class CoworkingServiceTests(TestCase):
 
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
-    """The coworking cost drops to 4 when the user's startup has a 'ready'
-    monthly update for the booking's month, otherwise it is the standard 8."""
+    """The coworking cost drops to 4 when the user's startup is a registered
+    company with a valid ABN AND has a 'ready' monthly update for the booking's
+    month, otherwise it is the standard 8. Full ACN/ABR verification is NOT
+    required — a valid-but-not-fully-verified company still qualifies."""
+
+    VALID_ABN = '89000000019'
 
     def setUp(self):
         from organizations.models import Organization
@@ -613,6 +617,28 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         )
         self.org = Organization.objects.create(name='Acme', domain='acme.example')
         UserStartupBinding.objects.create(user=self.user, organization=self.org)
+        # The discount requires a registered company with a valid ABN on the org.
+        self._company_for(self.org, name='Acme Pty Ltd')
+
+    def _company_for(self, org, *, name='Acme Pty Ltd', abn=VALID_ABN, verified=False, user=None):
+        """Attach a registered company to ``org``. Has a valid ABN by default;
+        ``verified=True`` also sets the ACN + ABR-verified stamp."""
+        from django.utils import timezone
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=user or self.user,
+            defaults={'role': VibeRaisingProfile.ROLE_FOUNDER},
+        )
+        return VibeRaisingCompany.objects.create(
+            profile=profile,
+            organization=org,
+            name=name,
+            registered=True,
+            abn=abn,
+            acn='000000019' if verified else None,
+            abr_verified_at=timezone.now() if verified else None,
+        )
 
     def _make_update(self, booking_date, status):
         from startup_updates.models import MonthlyUpdateDraft
@@ -686,6 +712,7 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         )
         second_org = Organization.objects.create(name='Beta', domain='beta.example')
         UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        self._company_for(second_org, name='Beta Pty Ltd')
         today = date.today()
         MonthlyUpdateDraft.objects.create(
             organization=second_org,
@@ -695,6 +722,64 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             4,
+        )
+
+    def test_ready_update_without_company_does_not_discount(self):
+        # A ready update on an org with no founder company gets no discount.
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        other = User.objects.create_user(email='nocompany@example.com', slack_id='UNOCOMP')
+        org = Organization.objects.create(name='Gamma', domain='gamma.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_with_valid_abn_unverified_company_discounts(self):
+        # A registered company with a valid ABN but NO ACN/ABR verification still
+        # qualifies — this is the "valid but not perfect" cohort.
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        other = User.objects.create_user(email='validabn@example.com', slack_id='UVALIDABN')
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+        org = Organization.objects.create(name='Epsilon', domain='epsilon.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        self._company_for(org, name='Epsilon Pty Ltd', verified=False, user=other)
+        today = date.today()
+        from startup_updates.models import MonthlyUpdateDraft
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_with_invalid_abn_does_not_discount(self):
+        # Registered company but the stored ABN fails its checksum -> no discount.
+        from startup_updates.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+        other = User.objects.create_user(email='badabn@example.com', slack_id='UBADABN')
+        org = Organization.objects.create(name='Delta', domain='delta.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        self._company_for(org, name='Delta', abn='94807394138', verified=False, user=other)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
         )
 
     def test_no_args_returns_standard_cost(self):

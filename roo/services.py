@@ -663,14 +663,23 @@ class CoworkingService:
     @staticmethod
     def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
         """
-        Return whether any startup the user is bound to has a monthly update
-        in the 'ready' status for the month of ``booking_date``.
+        Return whether any registered company the user is bound to — one with a
+        structurally valid ABN — has a monthly update in the 'ready' status for
+        the month of ``booking_date``.
+
+        The coworking discount rewards founders who run a real registered
+        business and keep their monthly update current. We require a registered
+        company with a checksum-valid ABN (a genuine business identifier) but
+        deliberately do *not* require full ACN/ABR verification — founders with
+        valid-but-not-fully-verified companies still qualify.
 
         ``MonthlyUpdateDraft.month`` is normalised to the first day of the
         month, so we match against ``booking_date`` collapsed to day 1.
         """
         # Imported lazily to avoid a hard import dependency between the roo and
-        # startup_updates apps at module load time.
+        # startup_updates / founder_tools apps at module load time.
+        from founder_tools.models import VibeRaisingCompany
+        from vibe_raising.validators import validate_abn_checksum
         from startup_updates.models import (
             MonthlyUpdateDraft,
             MonthlyUpdateDraftStatus,
@@ -685,9 +694,26 @@ class CoworkingService:
         if not org_ids:
             return False
 
+        # Only organisations backed by a registered company with a valid ABN
+        # qualify. The ABN checksum can't be expressed in SQL, so validate the
+        # candidates in Python (there are only a handful per user).
+        eligible_org_ids = {
+            org_id
+            for org_id, abn in VibeRaisingCompany.objects.filter(
+                organization_id__in=org_ids,
+                registered=True,
+            )
+            .exclude(abn__isnull=True)
+            .exclude(abn='')
+            .values_list('organization_id', 'abn')
+            if validate_abn_checksum(abn)
+        }
+        if not eligible_org_ids:
+            return False
+
         month_start = booking_date.replace(day=1)
         return MonthlyUpdateDraft.objects.filter(
-            organization_id__in=org_ids,
+            organization_id__in=eligible_org_ids,
             month=month_start,
             status=MonthlyUpdateDraftStatus.READY,
         ).exists()
