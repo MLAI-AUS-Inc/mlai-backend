@@ -81,7 +81,13 @@ from startup_updates.services import (
     sync_startup_profile_from_company,
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
-from founder_tools.services import ensure_company_organization, set_active_company
+from founder_tools.services import (
+    DomainOwnershipError,
+    domain_is_available_to,
+    ensure_company_organization,
+    set_active_company,
+    user_may_use_organization,
+)
 from vibe_raising.registration import (
     attempt_company_verification,
     set_unverified_company_abn,
@@ -1037,8 +1043,14 @@ def _get_founder_company_context_or_response(user):
     }, None
 
 
-def _ensure_binding_for_company(*, user, company):
+def _ensure_binding_for_company(*, user, company, enforce_ownership=True):
     organization, startup_profile = resolve_or_create_profile(domain=company.domain)
+    if (
+        enforce_ownership
+        and not _is_admin_user(user)
+        and not user_may_use_organization(user, organization)
+    ):
+        raise DomainOwnershipError()
     _sync_startup_profile(
         startup_profile=startup_profile,
         organization=organization,
@@ -1223,6 +1235,28 @@ def _is_admin_user(user):
     return bool(getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
 
 
+def _resolve_owned_organization(*, user, domain):
+    """Organization for ``domain``, but only if ``user`` is entitled to it.
+
+    Replaces the old ``Organization.objects.filter(domain=domain).first()``
+    fallback, which let any founder read another startup's tenant just by typing
+    its domain into their company settings. Returns ``None`` (caller renders an
+    empty tenant) when the domain belongs to a different founder. Admins are
+    unrestricted.
+    """
+    normalized = normalize_domain(domain or "")
+    if not normalized:
+        return None
+    organization = Organization.objects.filter(domain=normalized).first()
+    if organization is None:
+        return None
+    if _is_admin_user(user):
+        return organization
+    if not user_may_use_organization(user, organization):
+        return None
+    return organization
+
+
 def _normalize_vibe_raising_manual_document_content_type(*, content_type="", filename=""):
     content_type = str(content_type or "").split(";")[0].strip().lower()
     if content_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
@@ -1374,6 +1408,7 @@ def _get_manual_document_company_context_or_response(request):
         organization, _startup_profile, binding = _ensure_binding_for_company(
             user=company.profile.user,
             company=company,
+            enforce_ownership=False,
         )
         return {
             "profile": company.profile,
@@ -1598,7 +1633,7 @@ def _build_status_payload(*, user, company, domain):
         }
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
-    organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+    organization = _resolve_owned_organization(user=user, domain=domain)
     open_run = (
         get_open_startup_update_run(
             organization=organization,
@@ -1698,7 +1733,7 @@ def _build_email_draft_payload(
         }
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
-    organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+    organization = _resolve_owned_organization(user=user, domain=domain)
     latest_run = None
     selected_run = None
     drafts = []
@@ -1898,6 +1933,18 @@ class VibeRaisingCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
+
+        # A founder may only claim a domain that is unclaimed or already theirs.
+        # Without this, setting domain to a rival's value joins you to their
+        # tenant (Organization is a unique, shared row keyed by domain).
+        requested_domain = data.get("domain")
+        if (
+            requested_domain
+            and not _is_admin_user(request.user)
+            and not domain_is_available_to(request.user, requested_domain)
+        ):
+            raise DomainOwnershipError()
+
         company_id = data.get("companyId")
 
         with transaction.atomic():
@@ -2247,8 +2294,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if not domain:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
-        binding = get_default_binding_for_domain(user=request.user, domain=domain)
-        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
         if organization is None:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
@@ -2844,8 +2890,7 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
         if not domain:
             return Response(None, status=status.HTTP_200_OK)
 
-        binding = get_default_binding_for_domain(user=request.user, domain=domain)
-        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
         open_run = (
             get_open_startup_update_run(
                 organization=organization,
