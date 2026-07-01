@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from django.db import transaction
+from rest_framework import status as drf_status
+from rest_framework.exceptions import APIException
 
 from integrations.utils import normalize_domain
 from organizations.models import Organization
@@ -57,6 +59,58 @@ def assert_company_domain_available(profile, domain, *, exclude_company_id=None)
     )
     if existing is not None:
         raise DuplicateCompanyDomainError(normalize_company_domain(domain), existing)
+
+
+class DomainOwnershipError(APIException):
+    """A founder tried to use a domain another founder already owns.
+
+    Vibe Raising tenancy is keyed on ``Organization.domain`` -- a unique, shared
+    row -- so claiming a domain attaches you to whatever tenant already owns it.
+    Until DNS-TXT domain verification lands, ownership is *first-claim-wins*: the
+    earliest founder to bind a company to a domain's Organization owns that
+    tenant, and no other (non-admin) founder may read or write it. Surfaces as
+    HTTP 409 so the frontend can tell the founder the domain is already linked.
+    """
+
+    status_code = drf_status.HTTP_409_CONFLICT
+    default_detail = "This domain is already linked to another account."
+    default_code = "domain_already_claimed"
+
+
+def organization_owner_user_id(organization) -> int | None:
+    """User id of the founder who owns this organization's Vibe Raising tenant.
+
+    First-claim-wins: the earliest ``VibeRaisingCompany`` bound to the org.
+    Returns ``None`` when no founder has claimed it yet (e.g. a content-factory
+    only org), meaning it is still available to claim.
+    """
+    if organization is None:
+        return None
+    first = (
+        VibeRaisingCompany.objects
+        .filter(organization=organization)
+        .select_related("profile")
+        .order_by("created_at", "id")
+        .first()
+    )
+    return first.profile.user_id if first else None
+
+
+def user_may_use_organization(user, organization) -> bool:
+    """True if ``user`` is the rightful owner of (or first to claim) ``organization``."""
+    owner_id = organization_owner_user_id(organization)
+    return owner_id is None or owner_id == getattr(user, "id", None)
+
+
+def domain_is_available_to(user, domain) -> bool:
+    """True if ``user`` may claim ``domain`` -- unclaimed, or already theirs."""
+    normalized = normalize_company_domain(domain)
+    if not normalized:
+        return True
+    organization = Organization.objects.filter(domain=normalized).first()
+    if organization is None:
+        return True
+    return user_may_use_organization(user, organization)
 
 
 def normalize_company_linkedin_url(value: str | None) -> str:

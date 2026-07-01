@@ -87,10 +87,17 @@ from startup_updates.services import (
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
+    DomainOwnershipError,
     DuplicateCompanyDomainError,
     assert_company_domain_available,
+    domain_is_available_to,
     ensure_company_organization,
     set_active_company,
+    user_may_use_organization,
+)
+from vibe_raising.registration import (
+    attempt_company_verification,
+    set_unverified_company_abn,
 )
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
@@ -1042,8 +1049,14 @@ def _get_founder_company_context_or_response(user):
     }, None
 
 
-def _ensure_binding_for_company(*, user, company):
+def _ensure_binding_for_company(*, user, company, enforce_ownership=True):
     organization, startup_profile = resolve_or_create_profile(domain=company.domain)
+    if (
+        enforce_ownership
+        and not _is_admin_user(user)
+        and not user_may_use_organization(user, organization)
+    ):
+        raise DomainOwnershipError()
     _sync_startup_profile(
         startup_profile=startup_profile,
         organization=organization,
@@ -1228,6 +1241,28 @@ def _is_admin_user(user):
     return bool(getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
 
 
+def _resolve_owned_organization(*, user, domain):
+    """Organization for ``domain``, but only if ``user`` is entitled to it.
+
+    Replaces the old ``Organization.objects.filter(domain=domain).first()``
+    fallback, which let any founder read another startup's tenant just by typing
+    its domain into their company settings. Returns ``None`` (caller renders an
+    empty tenant) when the domain belongs to a different founder. Admins are
+    unrestricted.
+    """
+    normalized = normalize_domain(domain or "")
+    if not normalized:
+        return None
+    organization = Organization.objects.filter(domain=normalized).first()
+    if organization is None:
+        return None
+    if _is_admin_user(user):
+        return organization
+    if not user_may_use_organization(user, organization):
+        return None
+    return organization
+
+
 def _normalize_vibe_raising_manual_document_content_type(*, content_type="", filename=""):
     content_type = str(content_type or "").split(";")[0].strip().lower()
     if content_type in VIBE_RAISING_MANUAL_DOCUMENT_CONTENT_TYPES:
@@ -1379,6 +1414,7 @@ def _get_manual_document_company_context_or_response(request):
         organization, _startup_profile, binding = _ensure_binding_for_company(
             user=company.profile.user,
             company=company,
+            enforce_ownership=False,
         )
         return {
             "profile": company.profile,
@@ -1599,7 +1635,7 @@ def _build_status_payload(*, user, company, domain):
         }
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
-    organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+    organization = _resolve_owned_organization(user=user, domain=domain)
     # Gmail is per-startup: resolve the connection for THIS company's org.
     google_connection = (
         (binding.google_connection if binding and binding.google_connection else None)
@@ -1703,7 +1739,7 @@ def _build_email_draft_payload(
         }
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
-    organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+    organization = _resolve_owned_organization(user=user, domain=domain)
     # Gmail is per-startup: resolve the connection for THIS company's org.
     google_connection = (
         (binding.google_connection if binding and binding.google_connection else None)
@@ -1910,59 +1946,52 @@ class VibeRaisingCompanyView(APIView):
         serializer = VibeRaisingCompanyUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        company_id = serializer.validated_data.get("companyId")
+        data = serializer.validated_data
+
+        # A founder may only claim a domain that is unclaimed or already theirs.
+        # Without this, setting domain to a rival's value joins you to their
+        # tenant (Organization is a unique, shared row keyed by domain).
+        requested_domain = data.get("domain")
+        if (
+            requested_domain
+            and not _is_admin_user(request.user)
+            and not domain_is_available_to(request.user, requested_domain)
+        ):
+            raise DomainOwnershipError()
+
+        company_id = data.get("companyId")
 
         try:
             with transaction.atomic():
                 if company_id:
                     company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-                    if "domain" in serializer.validated_data:
-                        assert_company_domain_available(
-                            profile,
-                            serializer.validated_data["domain"],
-                            exclude_company_id=company.id,
-                        )
-                    company.name = serializer.validated_data["name"]
-                    if "domain" in serializer.validated_data:
-                        company.domain = serializer.validated_data["domain"]
-                    if "abn" in serializer.validated_data:
-                        company.abn = serializer.validated_data["abn"]
-                    if "registered" in serializer.validated_data:
-                        company.registered = serializer.validated_data["registered"]
-                    company.save()
                 else:
-                    company = profile.companies.filter(
-                        name__iexact=serializer.validated_data["name"]
-                    ).first()
-                    if "domain" in serializer.validated_data:
-                        assert_company_domain_available(
-                            profile,
-                            serializer.validated_data["domain"],
-                            exclude_company_id=company.id if company else None,
-                        )
+                    company = profile.companies.filter(name__iexact=data["name"]).first()
                     if company is None:
-                        company = VibeRaisingCompany.objects.create(
-                            profile=profile,
-                            name=serializer.validated_data["name"],
-                            domain=serializer.validated_data.get("domain"),
-                            abn=serializer.validated_data.get("abn"),
-                            registered=serializer.validated_data.get("registered", False),
-                        )
-                    else:
-                        company.name = serializer.validated_data["name"]
-                        if "domain" in serializer.validated_data:
-                            company.domain = serializer.validated_data["domain"]
-                        if "abn" in serializer.validated_data:
-                            company.abn = serializer.validated_data["abn"]
-                        if "registered" in serializer.validated_data:
-                            company.registered = serializer.validated_data["registered"]
-                        company.save()
+                        company = VibeRaisingCompany(profile=profile)
 
-                    ensure_company_organization(company)
-                    if profile.active_company_id is None:
-                        set_active_company(profile, company)
+                if "domain" in data:
+                    assert_company_domain_available(
+                        profile, data["domain"], exclude_company_id=company.id
+                    )
+
+                company.name = data["name"]
+                if "domain" in data:
+                    company.domain = data["domain"]
+                if "abn" in data:
+                    set_unverified_company_abn(company, data["abn"])
+                if "registered" in data:
+                    company.registered = bool(data.get("registered"))
+                company.save()
+
+                # Best-effort: stamp the company verified if its ABN/ACN check out. An
+                # unverifiable ABN does NOT block setup — it just means no perks (e.g. the
+                # coworking discount) until a valid one is provided.
+                attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
                 ensure_company_organization(company)
+                if profile.active_company_id is None:
+                    set_active_company(profile, company)
         except DuplicateCompanyDomainError as exc:
             return Response(
                 {
@@ -2295,8 +2324,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if not domain:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
-        binding = get_default_binding_for_domain(user=request.user, domain=domain)
-        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
         if organization is None:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
@@ -2382,6 +2410,14 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 "model_name": "vibe-raising-manual",
                 "structured_memo": _build_manual_structured_memo(structured_payload),
             },
+        )
+
+        # Reward verified-company founders for completing the month's update (once per
+        # company per month; best-effort, never blocks the save).
+        from roo.services import StartupUpdateRewardService
+
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=request.user, company=company, month_bucket=month_bucket, draft=draft,
         )
 
         return Response(
@@ -2884,8 +2920,7 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
         if not domain:
             return Response(None, status=status.HTTP_200_OK)
 
-        binding = get_default_binding_for_domain(user=request.user, domain=domain)
-        organization = binding.organization if binding else Organization.objects.filter(domain=domain).first()
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
         open_run = (
             get_open_startup_update_run(
                 organization=organization,

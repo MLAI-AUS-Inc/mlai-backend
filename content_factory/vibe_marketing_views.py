@@ -34,8 +34,23 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from content_factory.article_setup_reset import article_setup_reset_ignores_run, reset_article_setup_config
-from content_factory.article_system import article_system_ready, resolve_article_system
+from content_factory.article_setup_reset import (
+    article_setup_reset_at,
+    article_setup_reset_ignores_run,
+    reset_article_setup_config,
+)
+from content_factory.article_system import (
+    PUBLISH_DISCONNECTED_KEY,
+    article_system_ready,
+    is_directly_publishable_target,
+    react_article_system_target_from_setup_cache,
+    resolve_article_system,
+)
+from content_factory.authors import (
+    author_profile_for_renderer,
+    normalize_authors,
+    resolve_default_author,
+)
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
@@ -87,6 +102,14 @@ from founder_tools.services import (
     resolve_active_company,
     string_list_from_value,
 )
+from vibe_raising.validators import (
+    format_acn,
+    is_registered_company_entity_type,
+    normalize_abn,
+    normalize_acn,
+    validate_acn_checksum,
+)
+from vibe_raising.registration import set_unverified_company_abn
 from integrations import http_client
 from integrations.models import UserIntegration
 from integrations.services.article_generation import ArticleGenerationError, ensure_valid_org_token
@@ -614,6 +637,76 @@ def _refund_roo_points_for_content_island_topic_start(*, charged_user, actor_id:
     )
 
 
+def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
+    """Return the ledger id of a REAL, non-refunded Content Factory charge in this run's billing
+    lineage, or None.
+
+    The article-generation service records the charge on the ``ContentFactoryJob`` / Roo ``Ledger``
+    (keyed by ``client_request_id``), and content-factory syncs the article run back WITHOUT the web
+    ``roo_points_*`` fields — so a paid article's run often has no billing stamp even though it was
+    charged. Reuse must therefore look the charge up via the lineage (the run's job, its billing source
+    job, and the Roo ledger by client_request_id). Only ever returns a real, non-refunded charge — it
+    never invents authorization, so this is not a billing bypass.
+    """
+    try:
+        from content_factory.models import ContentFactoryJob
+        from roo.models import Ledger
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+    job_ids: list[str] = []
+    client_request_ids: list[str] = []
+    run_id = str(getattr(run, "run_id", "") or "").strip()
+    if run_id:
+        job_ids.append(run_id)
+    for key in ("source_run_id", "revision_source_run_id", "billing_source_run_id"):
+        value = str(run_request.get(key) or "").strip()
+        if value:
+            job_ids.append(value)
+    crid = str(run_request.get("client_request_id") or "").strip()
+    if crid:
+        client_request_ids.append(crid)
+
+    # 1) A job in the lineage that carries a real charge (billing recorded by the generation service).
+    seen: set[str] = set()
+    queue = list(job_ids)
+    while queue:
+        jid = queue.pop(0)
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        job = ContentFactoryJob.objects.filter(job_id=jid).first()
+        if not job:
+            continue
+        billing_status = str(getattr(job, "billing_status", "") or "").strip()
+        ledger_id = getattr(job, "billing_ledger_id", None)
+        if billing_status in {"charged", "reused"} and ledger_id:
+            return int(ledger_id)
+        source_job_id = str(getattr(job, "billing_source_job_id", "") or "").strip()
+        if source_job_id and source_job_id not in seen:
+            queue.append(source_job_id)
+        job_crid = str(getattr(job, "client_request_id", "") or "").strip()
+        if job_crid:
+            client_request_ids.append(job_crid)
+
+    # 2) A non-refunded Content Factory SPEND ledger entry for any client_request_id in the lineage.
+    for candidate in dict.fromkeys(client_request_ids):
+        charge = (
+            Ledger.objects.filter(source="CONTENT_FACTORY", kind="SPEND", reference_id=candidate)
+            .order_by("-id")
+            .first()
+        )
+        if not charge:
+            continue
+        refunded = Ledger.objects.filter(
+            source="CONTENT_FACTORY", kind="REFUND", reference_id=candidate
+        ).exists()
+        if not refunded:
+            return int(charge.id)
+    return None
+
+
 def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domain: str, failure_detail: str) -> Response | None:
     if is_free_content_factory_domain(domain):
         payload.update(
@@ -642,20 +735,30 @@ def _reuse_roo_points_authorization_for_article_job(*, run, payload: dict, domai
         required_points = get_content_factory_ai_agent_required_points(domain)
         ledger_id = ""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
-    if not (
+    web_authorized = (
         authorized
         and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
         and cost_points >= get_content_factory_article_cost_points(domain)
         and billing_status in {"charged", "reused", "free"}
         and ledger_id
-    ):
-        return Response(
-            {
-                "detail": failure_detail,
-                "code": "roo_points_billing_required",
-            },
-            status=status.HTTP_409_CONFLICT,
-        )
+    )
+
+    if not web_authorized:
+        # The article-generation service records the charge on the ContentFactoryJob / Roo Ledger, and
+        # content-factory syncs the run back without the web `roo_points_*` fields — so a paid article's
+        # run often has no stamp. Reuse a REAL, non-refunded charge from the run's billing lineage before
+        # rejecting; only reject when no genuine charge exists anywhere in the lineage.
+        lineage_ledger_id = _reusable_content_factory_charge_for_run(run)
+        if lineage_ledger_id is None:
+            return Response(
+                {
+                    "detail": failure_detail,
+                    "code": "roo_points_billing_required",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        cost_points = max(cost_points, get_content_factory_article_cost_points(domain))
+        ledger_id = str(lineage_ledger_id)
 
     payload.update(
         build_roo_points_authorization_payload(
@@ -2426,14 +2529,33 @@ def _recent_article_drafts(organization, *, limit=8, scan_limit=50):
     return drafts
 
 
-def _article_generation_history_exists(organization, latest_runs=None):
+def _article_generation_history_exists(organization, latest_runs=None, *, since=None):
+    """Whether the org has any article-generation evidence.
+
+    ``since`` (e.g. the article-setup reset timestamp) restricts evidence to work
+    that happened AFTER that moment. Scaffold-readiness callers pass the reset
+    timestamp so a pre-reset article no longer marks the (now-cleared) scaffold as
+    "ready" — which previously hid the Build button after "Reset everything". The
+    start-page / topic-picker caller leaves it None so the org is still remembered
+    as having written articles before.
+    """
     if not organization:
         return False
-    if WrittenArticle.objects.filter(organization=organization).exists():
+    written = WrittenArticle.objects.filter(organization=organization)
+    if since is not None:
+        written = written.filter(created_at__gt=since)
+    if written.exists():
         return True
     for run in latest_runs or []:
         if run.workflow not in ARTICLE_WORKFLOWS or run.status != ContentFactoryRunStatus.COMPLETED:
             continue
+        if since is not None:
+            run_ts = getattr(run, "updated_at", None) or getattr(run, "created_at", None)
+            if run_ts is not None:
+                if timezone.is_naive(run_ts):
+                    run_ts = timezone.make_aware(run_ts)
+                if run_ts <= since:
+                    continue
         content_package = _content_package_from_run(run)
         if content_package and content_package.get("contentPackaged"):
             return True
@@ -4599,6 +4721,53 @@ def _pull_request_url_from_run(run) -> str:
     ).strip()
 
 
+def _link_built_scaffold_publish_target(config) -> bool:
+    """Register the durable ``react_article_system`` publish target from the built scaffold cache.
+
+    Shared by the manual Accept action AND the automatic approve/merge of an article-system setup,
+    so a FRESH scaffold self-registers without anyone touching the Accept button. Synthesizes the
+    target from the scaffold's committed support files (``article_system_setup_cache.managed_files``)
+    via the path-correct ``react_article_system_target_from_setup_cache`` and persists it, marking the
+    article system ``react_article_system`` and clearing any user-unlink watermark (an explicit
+    approve/accept re-links). No-op (returns False) when there is no built scaffold cache to
+    synthesize from. Idempotent: re-running just re-asserts the same target.
+
+    Does NOT preserve a *stronger* existing target — the scaffold's own target is authoritative for
+    its surface — but it also never downgrades to a weaker one because it only ever writes the
+    direct ``react_article_system`` target (or no-ops).
+    """
+    if not config:
+        return False
+    bundle = react_article_system_target_from_setup_cache(config.article_system_setup_cache)
+    if not bundle:
+        return False
+    article_system = dict(config.article_system or {})
+    config.publish_targets = bundle["publish_targets"]
+    config.default_publish_target_id = bundle["default_publish_target_id"]
+    config.article_path_pattern = bundle["article_path_pattern"]
+    config.registry_path = bundle["registry_path"]
+    if str(article_system.get("state") or "") not in {"existing", "roo_scaffolded"}:
+        article_system["state"] = "existing"
+    article_system["system_type"] = "react_article_system"
+    article_system["publish_mutation_target"] = bundle["registry_path"]
+    article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
+    article_system["scaffold_accepted_at"] = timezone.now().isoformat()
+    config.article_system = article_system
+    update_fields = [
+        "publish_targets",
+        "default_publish_target_id",
+        "article_path_pattern",
+        "registry_path",
+        "article_system",
+        "updated_at",
+    ]
+    if not config.articles_scaffolded:
+        config.articles_scaffolded = True
+        update_fields.append("articles_scaffolded")
+    config.save(update_fields=update_fields)
+    return True
+
+
 def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, pr_url="", pr_number=None):
     if not config:
         return
@@ -4678,6 +4847,9 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         update_fields.append("articles_scaffold_pr_url")
     update_fields.append("updated_at")
     config.save(update_fields=update_fields)
+    # Self-register the durable publish target from the built scaffold so a merged scaffold is
+    # immediately publishable (no manual Accept). No-op when there's no scaffold cache to link.
+    _link_built_scaffold_publish_target(config)
 
 
 def _mark_pending_article_system_setup_pr_created(config, *, run, result):
@@ -4719,6 +4891,9 @@ def _mark_pending_article_system_setup_pr_created(config, *, run, result):
     article_system["pending_article_system_setup"] = pending
     config.article_system = article_system
     config.save(update_fields=["article_system", "updated_at"])
+    # Self-register the durable publish target on approve (PR created), so a fresh scaffold is
+    # linked the moment it's approved — no manual Accept. No-op without a scaffold cache to link.
+    _link_built_scaffold_publish_target(config)
 
 
 def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
@@ -6990,7 +7165,11 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     generation_ready = bool(
         setup_gate.get("generationReady")
         or bool(generation_ready)
-        or (generation_ready is None and organization is not None and _article_generation_history_exists(organization, related_runs))
+        or (
+            generation_ready is None
+            and organization is not None
+            and _article_generation_history_exists(organization, related_runs, since=article_setup_reset_at(config))
+        )
     )
     if setup_gate.get("setupRunId") and (not setup_run or setup_run.run_id != setup_gate.get("setupRunId")):
         setup_run = (
@@ -7605,6 +7784,110 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     for key in ("setupRunId", "setupStatus", "rescanRunId", "mergeStatus", "prUrl", "prNumber", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
+
+
+def compute_article_readiness(
+    organization,
+    config,
+    latest_runs=None,
+    *,
+    article_system=None,
+    setup_gate=None,
+):
+    """Single authoritative rollup of "can this org generate an article into its repo?".
+
+    The same readiness boolean was previously re-derived in three places with subtly
+    different ``or`` chains (``_article_generation_ready_for_config`` + the setup gate +
+    ``_profile_checks``' history fallback). This collapses that into one function so the
+    answer can't disagree with itself, and surfaces WHICH step is missing (``blocking_reason``
+    / ``reason_code``) so the wizard can tell the user instead of a generic "setup required".
+
+    Semantics are byte-for-byte the canonical formula ``_profile_checks`` already used:
+    ``setup_gate.generationReady or _article_generation_ready_for_config(...) or history``
+    (history restricted to work done after an article-setup reset). The individual signals
+    are returned as ``proofs`` for diagnostics; the gate's own internals are left untouched.
+    """
+    latest_runs = latest_runs or []
+    if not isinstance(article_system, dict):
+        article_system = resolve_article_system(config) if config else {}
+    if setup_gate is None:
+        setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
+
+    scaffolded = bool(getattr(config, "articles_scaffolded", False)) if config else False
+    published = bool(setup_gate.get("published")) or bool(
+        config and _article_system_is_published(config, article_system)
+    )
+    setup_merged = bool(setup_gate.get("setupMerged"))
+    history = bool(
+        organization is not None
+        and _article_generation_history_exists(
+            organization, latest_runs, since=article_setup_reset_at(config) if config else None
+        )
+    )
+
+    generation_ready = bool(
+        setup_gate.get("generationReady")
+        or (config and _article_generation_ready_for_config(config, latest_runs, article_system))
+        or history
+    )
+
+    proofs = {
+        "articles_scaffolded": scaffolded,
+        "article_system_published": published,
+        "setup_merged": setup_merged,
+        "generation_history": history,
+    }
+
+    if generation_ready:
+        via = next(
+            (name for name, ok in (
+                ("scaffolded", scaffolded),
+                ("published", published),
+                ("setup_merged", setup_merged),
+                ("history", history),
+            ) if ok),
+            "ready",
+        )
+        return {
+            "generation_ready": True,
+            "blocking_reason": None,
+            "reason_code": "",
+            "via": via,
+            "proofs": proofs,
+        }
+
+    # Not ready: classify the blocker in wizard order so the UI can point at the next step.
+    github_ready = bool(config and config.github_connection_state == "connected" and config.github_repo)
+    scan_ready = bool(
+        config
+        and (config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
+    )
+    if not github_ready:
+        reason_code, reason = "github_required", "Connect a GitHub repository before generating articles."
+    elif setup_gate.get("setupBlocked"):
+        reason_code, reason = (
+            "setup_pr_unmerged",
+            "Merge the articles setup PR before generating articles. If you merged it in GitHub, refresh merge status.",
+        )
+    elif not scan_ready:
+        reason_code, reason = "scan_required", "Scan the repository to locate the articles publishing surface."
+    elif not _article_repo_is_review_capable(config, github_ready=github_ready):
+        reason_code, reason = (
+            "articles_location_required",
+            "Connect and verify the articles location before generating an exact preview article.",
+        )
+    elif setup_gate.get("setupRunId"):
+        reason_code, reason = "awaiting_setup", "The articles setup build is in progress. Wait for it to finish, then generate."
+    else:
+        reason_code, reason = "setup_required", "Set up the articles publishing surface before generating articles."
+
+    return {
+        "generation_ready": False,
+        "blocking_reason": reason,
+        "reason_code": reason_code,
+        "via": "",
+        "proofs": proofs,
+    }
 
 
 def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None, topic_candidates=None):
@@ -8313,6 +8596,67 @@ def _run_blocking_detail(result):
     }
 
 
+_SETUP_RUN_REF_KEYS = ("setup_run_id", "setupRunId", "scaffold_job_id", "scaffoldJobId")
+_SETUP_RUN_REF_NESTED_KEYS = ("result", "article_system_setup", "articleSystemSetup", "latest_control_response")
+_SETUP_RUN_PREVIEW_KEYS = ("live_preview_url", "livePreviewUrl")
+
+
+def _strip_missing_setup_run_refs(result):
+    """Return a copy of a serialized run ``result`` with setup-run pointers cleared when
+    they reference a ContentFactoryRun that no longer exists.
+
+    A teardown/reset can delete an ``article_system_setup`` run while the scan run that
+    spawned it still records its id (``setup_run_id`` / ``scaffold_job_id`` /
+    ``live_preview_url``, including nested setup blocks). Without this guard the bootstrap
+    hands the wizard a dangling run id, the frontend polls ``/runs/<id>/status`` against
+    it, the backend 404s, and the marketing page SSR-500s. Only the rare missing-ref case
+    pays a DB query + copy; runs with no setup pointer return unchanged.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    candidates = set()
+
+    def _collect(node):
+        if not isinstance(node, dict):
+            return
+        for key in _SETUP_RUN_REF_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.add(value.strip())
+        for nested in _SETUP_RUN_REF_NESTED_KEYS:
+            _collect(node.get(nested))
+
+    _collect(result)
+    if not candidates:
+        return result
+    existing = set(
+        ContentFactoryRun.objects.filter(run_id__in=candidates).values_list("run_id", flat=True)
+    )
+    missing = {candidate for candidate in candidates if candidate not in existing}
+    if not missing:
+        return result
+
+    scrubbed = copy.deepcopy(result)
+
+    def _scrub(node):
+        if not isinstance(node, dict):
+            return
+        for key in _SETUP_RUN_REF_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and value.strip() in missing:
+                node[key] = None
+        for key in _SETUP_RUN_PREVIEW_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and any(run_id in value for run_id in missing):
+                node[key] = None
+        for nested in _SETUP_RUN_REF_NESTED_KEYS:
+            _scrub(node.get(nested))
+
+    _scrub(scrubbed)
+    return scrubbed
+
+
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
@@ -8372,7 +8716,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "scanProgress": scan_progress,
             "scan_progress": scan_progress_snake,
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
-            "result": _compact_result_for_run(run),
+            "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
@@ -8422,7 +8766,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "scan_progress": scan_progress_snake,
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
-        "result": result,
+        "result": _strip_missing_setup_run_refs(result),
     }
 
 
@@ -8462,11 +8806,12 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
-    generation_ready = bool(
-        setup_gate.get("generationReady")
-        or _article_generation_ready_for_config(config, latest_runs, article_system)
-        or _article_generation_history_exists(organization, latest_runs)
+    # Single source of truth for "can this org generate?" + why-not. The reset-safety
+    # (history restricted to post-reset work) lives inside compute_article_readiness.
+    readiness = compute_article_readiness(
+        organization, config, latest_runs, article_system=article_system, setup_gate=setup_gate
     )
+    generation_ready = readiness["generation_ready"]
     if generation_ready:
         setup_gate["setupBlocked"] = False
         setup_gate["generationReady"] = True
@@ -8572,6 +8917,9 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "setupBlocked": bool(setup_gate.get("setupBlocked")),
             "setupMerged": bool(setup_gate.get("setupMerged")),
             "generationReady": bool(generation_ready),
+            "blockingReason": readiness["blocking_reason"],
+            "reasonCode": readiness["reason_code"],
+            "readinessProofs": readiness["proofs"],
             "setupRunId": setup_gate.get("setupRunId"),
             "setupStatus": setup_gate.get("setupStatus"),
             "rescanRunId": setup_gate.get("rescanRunId"),
@@ -8582,6 +8930,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "articleSystem": article_system,
             "componentCatalogReady": component_catalog_ready,
             "missingComponents": missing_featured_components,
+            **_scaffold_connection_state(config),
         },
         "research": {"passed": research_ready, "runId": discovery_run.run_id if discovery_run else None},
         "write": {"passed": write_ready, "runId": article_run.run_id if article_run else None},
@@ -8880,6 +9229,8 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             "dailyDiscoveryPriority": config.daily_discovery_priority,
             "defaultTimezone": config.default_timezone,
             "githubConnectionState": config.github_connection_state,
+            "authors": normalize_authors(config.authors),
+            "defaultAuthorId": str(config.default_author_id or ""),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
@@ -9072,8 +9423,10 @@ def _setup_blocked_response_for_generation(context, config):
         return None
     return Response(
         {
-            "detail": "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
+            "detail": scaffold_check.get("blockingReason")
+            or "Merge the articles setup PR before starting topic research or article generation. If you merged it in GitHub, refresh merge status.",
             "code": "article_system_setup_blocked",
+            "reasonCode": scaffold_check.get("reasonCode") or "setup_pr_unmerged",
             "check": "scaffold",
             "scaffold": scaffold_check,
         },
@@ -9804,6 +10157,134 @@ def _article_system_setup_current_retry_attempt(*payloads) -> bool:
     return False
 
 
+def _merge_job_billing_into_run_request(run) -> None:
+    """Carry a ContentFactoryJob's recorded Roo-points charge onto the run's run_request when missing.
+
+    The article-generation service records the charge on the ContentFactoryJob (billing_status +
+    billing_ledger_id, keyed by client_request_id) at charge time, but content-factory syncs the article
+    run back WITHOUT the web ``roo_points_*`` fields — so a paid article's run can look unpaid and the
+    revision flow then rejects it. Mirror the job's billing onto the run_request so the payment link is
+    persisted at run materialization. Additive only: never overwrites an existing authorization, only
+    fills it in from a real (charged/reused) job charge. Best-effort; never raises.
+    """
+    try:
+        run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+        if run_request.get("roo_points_authorized") and run_request.get("roo_points_ledger_id"):
+            return  # run already carries its own authorization
+
+        from content_factory.models import ContentFactoryJob
+
+        job = ContentFactoryJob.objects.filter(job_id=run.run_id).first()
+        if job is None:
+            return
+        billing_status = str(getattr(job, "billing_status", "") or "").strip()
+        ledger_id = getattr(job, "billing_ledger_id", None)
+        if billing_status not in {"charged", "reused"} or not ledger_id:
+            return
+
+        domain = str(getattr(run, "domain", "") or run_request.get("domain") or "").strip()
+        merged = dict(run_request)
+        merged.update(
+            build_roo_points_authorization_payload(
+                domain=domain,
+                action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
+                cost_points=int(getattr(job, "billing_amount", 0) or 0)
+                or get_content_factory_article_cost_points(domain),
+                required_points=get_content_factory_ai_agent_required_points(domain),
+                current_balance=None,
+                billing_status=billing_status,
+                ledger_id=ledger_id,
+            )
+        )
+        job_crid = str(getattr(job, "client_request_id", "") or "").strip()
+        if job_crid and not merged.get("client_request_id"):
+            merged["client_request_id"] = job_crid
+        if merged != run_request:
+            run.run_request = merged
+            run.save(update_fields=["run_request", "updated_at"])
+    except Exception:  # pragma: no cover - best-effort enrichment
+        logger.warning(
+            "Failed to merge job billing into run_request for %s",
+            getattr(run, "run_id", "?"),
+            exc_info=True,
+        )
+
+
+def _persist_web_article_billing_to_job(run, payload) -> None:
+    """Stamp a web-charged article's Roo-points charge onto its durable ContentFactoryJob.
+
+    The Slack path charges via ``_store_job_tracking_record`` (integrations.services.article_generation),
+    which records ``client_request_id`` + ``billing_status`` + ``billing_ledger`` on the
+    ContentFactoryJob — the durable carrier the revision flow reads. The founder-tools WEB path
+    (``_charge_roo_points_for_article`` → ``_queue_content_factory_run`` → ``_create_local_run``)
+    charges too, but only ever materializes a ContentFactoryRun; its charge lives on ``run_request``,
+    which content-factory overwrites on every callback (``_sync_content_factory_run_snapshot``),
+    stripping the web ``roo_points_*`` fields. The charge is then orphaned and the revision flow
+    rejects the article as unpaid. Mirror the web charge onto the job (which CF callbacks never
+    rewrite the billing of) so ``_reusable_content_factory_charge_for_run`` can verify payment.
+
+    Additive only: never downgrades an existing charged/reused job. Best-effort; never raises.
+    """
+    try:
+        billing_status = str((payload or {}).get("roo_points_billing_status") or "").strip()
+        ledger_id = (payload or {}).get("roo_points_ledger_id")
+        if billing_status not in {"charged", "reused"} or ledger_id in (None, ""):
+            return
+        try:
+            ledger_id_int = int(ledger_id)
+        except (TypeError, ValueError):
+            return
+        crid = str((payload or {}).get("client_request_id") or "").strip()
+        try:
+            cost_points = int((payload or {}).get("roo_points_cost") or 0)
+        except (TypeError, ValueError):
+            cost_points = 0
+
+        from content_factory.models import ContentFactoryJob
+
+        job, created = ContentFactoryJob.objects.get_or_create(
+            job_id=run.run_id,
+            defaults={
+                "domain": run.domain or (payload or {}).get("domain") or "",
+                "slack_user_id": run.slack_user_id or "",
+                "status": run.status or "queued",
+                "client_request_id": crid or None,
+                "billing_source_job_id": run.run_id,
+                "billing_amount": cost_points,
+                "billing_status": billing_status,
+                "billing_ledger_id": ledger_id_int,
+            },
+        )
+        if created:
+            return
+        update_fields = []
+        if crid and job.client_request_id != crid:
+            job.client_request_id = crid
+            update_fields.append("client_request_id")
+        # Only fill in billing when the job isn't already carrying a real charge.
+        if str(job.billing_status or "").strip() not in {"charged", "reused"}:
+            job.billing_status = billing_status
+            update_fields.append("billing_status")
+            if not job.billing_ledger_id:
+                job.billing_ledger_id = ledger_id_int
+                update_fields.append("billing_ledger")
+            if not job.billing_amount and cost_points:
+                job.billing_amount = cost_points
+                update_fields.append("billing_amount")
+            if not str(job.billing_source_job_id or "").strip():
+                job.billing_source_job_id = run.run_id
+                update_fields.append("billing_source_job_id")
+        if update_fields:
+            update_fields.append("updated_at")
+            job.save(update_fields=update_fields)
+    except Exception:  # pragma: no cover - best-effort enrichment
+        logger.warning(
+            "Failed to persist web article billing to job for %s",
+            getattr(run, "run_id", "?"),
+            exc_info=True,
+        )
+
+
 def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
@@ -9840,6 +10321,14 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
             run.error = str(remote_data.get("error") or "")
             update_fields.extend(["status", "current_step", "result", "error"])
         run.save(update_fields=list(dict.fromkeys(update_fields)))
+    # Persist the billing link both ways:
+    # 1) The founder-tools web path charges Roo points but only materializes a ContentFactoryRun;
+    #    content-factory overwrites run_request on every callback, stripping the web roo_points_*
+    #    fields, so stamp the durable ContentFactoryJob from the charge carried in `payload`.
+    # 2) A paid article's run synced from content-factory lacks the web roo_points_* fields, but its
+    #    ContentFactoryJob carries the real charge — mirror it back onto the run_request.
+    _persist_web_article_billing_to_job(run, payload)
+    _merge_job_billing_into_run_request(run)
     return run
 
 
@@ -10728,7 +11217,10 @@ def _local_xml_name(tag: str) -> str:
 def _xml_text(element, *names: str) -> str:
     wanted = set(names)
     for node in element.iter():
-        if _local_xml_name(node.tag) in wanted and node.text:
+        # Skip whitespace-only text: in pretty-printed ABR responses a wrapper element
+        # (e.g. <ABN>) whose name is in ``names`` carries only indentation, so we must
+        # keep looking for the real leaf value (e.g. <identifierValue>) inside it.
+        if _local_xml_name(node.tag) in wanted and node.text and node.text.strip():
             return node.text.strip()
     return ""
 
@@ -10762,17 +11254,103 @@ def _abn_records_from_xml(xml_text: str) -> list[dict]:
         if not abn or abn in seen:
             continue
         seen.add(abn)
+        # ASICNumber is the ACN — present only for registered companies, which is the
+        # signal vibe-raising uses to gate company-ness downstream.
+        acn = format_acn(_xml_text(node, "ASICNumber", "ACN", "acn"))
         results.append(
             {
                 "abn": abn,
+                "acn": acn or None,
                 "entityName": _xml_text(node, "organisationName", "entityName", "name"),
                 "businessName": _xml_text(node, "businessName", "tradingName", "mainTradingName"),
                 "status": _xml_text(node, "entityStatusCode", "status"),
+                "entityTypeCode": _xml_text(node, "entityTypeCode"),
+                "entityTypeName": _xml_text(node, "entityTypeName", "entityDescription", "entityTypeDescription"),
                 "state": _xml_text(node, "stateCode", "state"),
                 "postcode": _xml_text(node, "postcode"),
             }
         )
     return results
+
+
+# ABR endpoint for an exact-ABN lookup. Shared by the type-ahead suggestion view and
+# the registration-gate verification helper so they hit the same authoritative record.
+ABR_SEARCH_BY_ABN_ENDPOINT = "https://abr.business.gov.au/abrxmlsearch/AbrXmlSearch.asmx/SearchByABNv202001"
+
+
+def verify_company_with_abr(abn) -> dict:
+    """Look an ABN up on the Australian Business Register and report company status.
+
+    Returns a structured dict the registration gate can act on without re-parsing XML::
+
+        {
+            "configured": bool,   # ABR auth GUID is set in settings
+            "reachable": bool,    # the ABR request actually succeeded
+            "found": bool,        # a record matched the ABN
+            "abn": str | None,    # normalized 11 digits
+            "acn": str | None,    # normalized 9 digits (ASICNumber), companies only
+            "entity_type_code": str,
+            "entity_type_name": str,
+            "status": str,        # ABR entity status code, e.g. "Active"
+            "active": bool,
+            "is_company": bool,   # active AND (has a valid ACN OR a company entity type)
+        }
+
+    Network/parse failures degrade to ``reachable=False`` rather than raising, so the
+    caller decides whether to fail closed.
+    """
+
+    result = {
+        "configured": False,
+        "reachable": False,
+        "found": False,
+        "abn": normalize_abn(abn),
+        "acn": None,
+        "entity_type_code": "",
+        "entity_type_name": "",
+        "status": "",
+        "active": False,
+        "is_company": False,
+    }
+
+    if not result["abn"]:
+        return result
+
+    auth_guid = getattr(settings, "ABR_LOOKUP_AUTHENTICATION_GUID", "")
+    result["configured"] = bool(auth_guid)
+    if not auth_guid:
+        return result
+
+    params = {
+        "searchString": result["abn"],
+        "includeHistoricalDetails": "N",
+        "authenticationGuid": auth_guid,
+    }
+    try:
+        response = http_client.get(ABR_SEARCH_BY_ABN_ENDPOINT, params=params, timeout=(2, 6))
+        if getattr(response, "status_code", 200) >= 400:
+            raise http_client.RequestException(f"ABN Lookup returned {response.status_code}.")
+    except Exception:
+        return result
+
+    result["reachable"] = True
+    records = _abn_records_from_xml(response.text)
+    if not records:
+        return result
+
+    record = records[0]
+    result["found"] = True
+    result["acn"] = normalize_acn(record.get("acn"))
+    result["entity_type_code"] = (record.get("entityTypeCode") or "").strip()
+    result["entity_type_name"] = (record.get("entityTypeName") or "").strip()
+    result["status"] = (record.get("status") or "").strip()
+    result["active"] = result["status"].lower() == "active"
+
+    has_company_acn = bool(result["acn"]) and validate_acn_checksum(result["acn"])
+    result["is_company"] = result["active"] and (
+        has_company_acn or is_registered_company_entity_type(result["entity_type_code"])
+    )
+    return result
 
 
 class VibeMarketingAbnLookupView(APIView):
@@ -11212,7 +11790,9 @@ class VibeMarketingSettingsView(APIView):
         if "location" in request.data:
             company.location = str(request.data.get("location") or "").strip()
         if "abn" in request.data:
-            company.abn = str(request.data.get("abn") or "").strip() or None
+            # Settings updates don't grant registration; if the ABN changes, any prior
+            # verification is dropped so it can't outlive the ABN it was tied to.
+            set_unverified_company_abn(company, request.data.get("abn"))
         if domain:
             company.domain = domain
             company.save()
@@ -11254,6 +11834,12 @@ class VibeMarketingSettingsView(APIView):
             )
         if request.data.get("default_timezone") or request.data.get("defaultTimezone"):
             config.default_timezone = request.data.get("default_timezone") or request.data.get("defaultTimezone")
+        if "authors" in request.data or "authorsData" in request.data:
+            config.authors = normalize_authors(request.data.get("authors", request.data.get("authorsData")))
+        if "default_author_id" in request.data or "defaultAuthorId" in request.data:
+            config.default_author_id = str(
+                request.data.get("default_author_id", request.data.get("defaultAuthorId")) or ""
+            ).strip()
         if daily_enabled_submitted and config.daily_discovery_enabled:
             checks = _profile_checks(
                 organization,
@@ -11355,8 +11941,20 @@ class VibeMarketingAutofillView(APIView):
                 if "location" in request.data:
                     company.location = str(request.data.get("location") or "").strip()
                 if "abn" in request.data:
-                    company.abn = str(request.data.get("abn") or "").strip() or None
-                company.save(update_fields=["name", "domain", "location", "abn", "updated_at"])
+                    set_unverified_company_abn(company, request.data.get("abn"))
+                company.save(
+                    update_fields=[
+                        "name",
+                        "domain",
+                        "location",
+                        "abn",
+                        "registered",
+                        "acn",
+                        "entity_type_code",
+                        "abr_verified_at",
+                        "updated_at",
+                    ]
+                )
 
             organization = ensure_company_organization(company)
             if organization is None:
@@ -11664,17 +12262,21 @@ class VibeMarketingGitHubReposView(APIView):
 
 
 def _scan_should_force_refresh(config, request_data) -> bool:
-    """Whether a repo scan should bypass content-factory's unchanged-HEAD reuse.
+    """Whether a manual founder-tools repo scan should force a full refresh.
 
-    True when the caller asks explicitly (forceRefresh/force_refresh), or when the
-    user re-scans within ARTICLE_SCAN_RAPID_RESCAN_WINDOW of the last completed scan:
-    a quick reuse doesn't refresh the scaffold plan, which leaves the wizard stuck on
-    the "plan has drifted, re-run the scan" guard.
+    A manual scan is a deliberate, points-charged user action, so it forces by default. A forced
+    scan (a) bypasses content-factory's unchanged-HEAD scan reuse so the scaffold plan refreshes
+    (the original "plan has drifted" guard), AND (b) drives a fresh website screenshot capture +
+    design-snapshot re-synthesis on the scanner, so a SITE RESTYLE flows into the org's active
+    WebsiteDesignSnapshot — and thus into newly generated articles — even though the repo itself is
+    unchanged. The user no longer has to change the repo (or hit a hidden rapid-rescan window) to
+    refresh the captured design. A caller can opt out of the heavier refresh with an explicit
+    ``forceRefresh=false`` for a lightweight scan that keeps the unchanged-HEAD reuse.
     """
-    if _bool_from_request(_request_value(request_data, "forceRefresh", "force_refresh", default=False)):
-        return True
-    last_scanned_at = getattr(config, "last_scanned_at", None)
-    return bool(last_scanned_at and (timezone.now() - last_scanned_at) <= ARTICLE_SCAN_RAPID_RESCAN_WINDOW)
+    explicit = _request_value(request_data, "forceRefresh", "force_refresh", default=None)
+    if explicit is not None:
+        return _bool_from_request(explicit)
+    return True
 
 
 class VibeMarketingScanView(APIView):
@@ -11970,6 +12572,106 @@ class VibeMarketingArticleSetupResetView(APIView):
             {
                 **reset_payload,
                 "remote": scaffold_cleanup,
+                "articleSetupState": article_setup_state,
+                "article_setup_state": article_setup_state,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _scaffold_connection_state(config) -> dict:
+    """Compact connection summary the wizard reads to render link/accept + danger-zone state."""
+    targets = config.publish_targets if isinstance(config.publish_targets, list) else []
+    article_system = config.article_system if isinstance(config.article_system, dict) else {}
+    connected = any(is_directly_publishable_target(item) for item in targets)
+    built_unlinked = bool(
+        not connected
+        and react_article_system_target_from_setup_cache(config.article_system_setup_cache)
+    )
+    return {
+        "scaffoldConnected": connected,
+        "scaffoldBuiltUnlinked": built_unlinked,
+        "scaffoldDisconnectedAt": str(article_system.get(PUBLISH_DISCONNECTED_KEY) or "") or None,
+        "defaultPublishTargetId": config.default_publish_target_id or None,
+        "routePath": (str((config.article_path_pattern or "")).split("{", 1)[0].rstrip("/") or None),
+    }
+
+
+class VibeMarketingArticleSetupAcceptView(APIView):
+    """Link/accept an already-built articles scaffold as the durable publish target.
+
+    The scaffold's support files are recorded in ``article_system_setup_cache.managed_files``;
+    we synthesize the canonical ``react_article_system`` target from them and persist it, so
+    delivery resolves off ``content_only`` without re-running the scaffold or a detection scan.
+    Idempotent: re-accepting just re-asserts the target.
+    """
+
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+        if not str(config.github_repo or "").strip():
+            return Response(
+                {"detail": "Choose a GitHub repository before linking the articles scaffold."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not _link_built_scaffold_publish_target(config):
+            return Response(
+                {"detail": "No built articles scaffold to link yet. Build and publish the scaffold first."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        latest_runs = _latest_runs_for_org(context.organization, limit=12)
+        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
+        return Response(
+            {
+                "ok": True,
+                **_scaffold_connection_state(config),
+                "articleSetupState": article_setup_state,
+                "article_setup_state": article_setup_state,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeMarketingArticleSetupDisconnectView(APIView):
+    """Lightweight UNLINK: drop the publish target so delivery falls back to content-only,
+    but KEEP the scaffold + scan so the user can re-link with one click (Accept).
+
+    Distinct from the full reset (which tears down scan/scaffold state). A
+    ``publish_disconnected_at`` watermark is set so a routine scan does not silently re-link;
+    accepting again clears it.
+    """
+
+    def post(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        config = _get_config(context.organization)
+
+        config.publish_targets = []
+        config.default_publish_target_id = None
+        article_system = dict(config.article_system or {})
+        article_system[PUBLISH_DISCONNECTED_KEY] = timezone.now().isoformat()
+        article_system.pop("scaffold_accepted_at", None)
+        article_system["publish_mutation_target"] = None
+        config.article_system = article_system
+        config.save(
+            update_fields=[
+                "publish_targets",
+                "default_publish_target_id",
+                "article_system",
+                "updated_at",
+            ]
+        )
+
+        latest_runs = _latest_runs_for_org(context.organization, limit=12)
+        article_setup_state = _article_setup_state(context=context, latest_runs=latest_runs)
+        return Response(
+            {
+                "ok": True,
+                **_scaffold_connection_state(config),
                 "articleSetupState": article_setup_state,
                 "article_setup_state": article_setup_state,
             },
@@ -12356,15 +13058,6 @@ class VibeMarketingArticleView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        baseline_snapshot = _latest_baseline_snapshot(context.organization)
-        if not _baseline_requirement_satisfied(config, baseline_snapshot):
-            return Response(
-                {
-                    "detail": "Run the website baseline or skip it before generating an article.",
-                    "check": _serialize_baseline_snapshot(baseline_snapshot, config),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         coverage_match = match_covered_topic(
             organization=context.organization,
             keyword=target_keyword or topic,
@@ -12454,6 +13147,15 @@ class VibeMarketingArticleView(APIView):
         }
         if delivery_mode_explicit and delivery_mode:
             payload["delivery_mode"] = delivery_mode
+        # Byline: resolve the per-article author pick (else the org default) and carry the resolved
+        # profile so content-factory's renderer stamps the right author for this run.
+        article_authors = normalize_authors(config.authors)
+        requested_author_id = str(_request_value(request.data, "author_id", "authorId", default="") or "").strip()
+        effective_author = resolve_default_author(article_authors, requested_author_id or config.default_author_id)
+        if effective_author:
+            payload["author_id"] = effective_author.get("id", "")
+            payload["default_author_name"] = effective_author.get("name", "")
+            payload["default_author_profile"] = author_profile_for_renderer(effective_author)
         charged_user, _charge_ledger, article_request, billing_error = _charge_roo_points_for_article(
             request,
             context=context,

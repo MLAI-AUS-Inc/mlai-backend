@@ -33,6 +33,8 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     organizationDomain = serializers.SerializerMethodField()
     companyLinkedInUrl = serializers.SerializerMethodField()
     avatarUrl = serializers.SerializerMethodField()
+    entityTypeName = serializers.SerializerMethodField()
+    abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
@@ -41,14 +43,22 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "name",
             "domain",
             "abn",
+            "acn",
             "location",
             "avatar_url",
             "avatarUrl",
             "registered",
+            "entityTypeName",
+            "abrVerifiedAt",
             "organizationId",
             "organizationDomain",
             "companyLinkedInUrl",
         ]
+
+    def get_entityTypeName(self, obj):
+        from vibe_raising.validators import entity_type_display
+
+        return entity_type_display(obj.entity_type_code)
 
     def get_organizationId(self, obj):
         return obj.organization_id
@@ -121,6 +131,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    acn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     location = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     registered = serializers.BooleanField(required=False)
     brandName = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -150,6 +161,8 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
             attrs["domain"] = normalize_company_domain(domain) if domain else None
         if "abn" in attrs:
             attrs["abn"] = _blank_to_none(attrs.get("abn"))
+        if "acn" in attrs:
+            attrs["acn"] = _blank_to_none(attrs.get("acn"))
         if "location" in attrs:
             attrs["location"] = attrs.get("location") or ""
         if "companyLinkedInUrl" in attrs:

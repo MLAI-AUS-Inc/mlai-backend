@@ -18,6 +18,7 @@ from datetime import timedelta
 from corsheaders.defaults import default_headers
 
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
 load_dotenv()
 
@@ -92,9 +93,6 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+'
-
 # SECURITY WARNING: don't run with debug turned on in production!
 RAW_APP_ENV = os.getenv('APP_ENV', '').strip().lower()
 DEBUG_DEFAULT = False if RAW_APP_ENV in {'production', 'prod'} else True
@@ -103,6 +101,44 @@ APP_ENV = _resolve_app_env(debug=DEBUG, raw_env=RAW_APP_ENV)
 APP_RELEASE = _resolve_app_release(BASE_DIR)
 IS_LOCAL_ENV = APP_ENV in {'local', 'development', 'dev', 'test'}
 IS_PRODUCTION_ENV = not IS_LOCAL_ENV
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# Production MUST supply SECRET_KEY via the environment. We fail closed rather
+# than fall back to a committed value: a known signing key makes every JWT
+# forgeable (full auth bypass) and -- because EncryptedTextField derives its key
+# from SECRET_KEY by default -- every stored OAuth token decryptable. The
+# insecure literal below is a convenience fallback for local/dev/test ONLY.
+_DEV_INSECURE_SECRET_KEY = 'django-insecure-vh##sgy=^gqeoyqjm0*%23zewxuw=&l&-dv6%%k*$sw7#+vzp+'
+
+
+def _resolve_secret_key(*, is_production: bool) -> str:
+    secret = _env_first('SECRET_KEY', 'DJANGO_SECRET_KEY')
+    if secret:
+        return secret
+    if is_production:
+        raise ImproperlyConfigured(
+            "SECRET_KEY (or DJANGO_SECRET_KEY) must be set in the environment in "
+            "production. Refusing to start with the committed development key."
+        )
+    return _DEV_INSECURE_SECRET_KEY
+
+
+SECRET_KEY = _resolve_secret_key(is_production=IS_PRODUCTION_ENV)
+
+# --- Field-level encryption (integrations.fields.EncryptedTextField) ----------
+# Connector OAuth tokens (Gmail/Stripe/Xero/Notion/Slack/Linear/GitHub) are
+# encrypted at rest. Historically the Fernet key was derived from SECRET_KEY,
+# coupling token secrecy to the (previously committed) signing key. Provide a
+# dedicated FIELD_ENCRYPTION_KEY -- a urlsafe-base64 Fernet key, e.g.
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# -- so the two concerns rotate independently. When unset, the field key falls
+# back to one derived from SECRET_KEY. LEGACY_FIELD_ENCRYPTION_SECRET lets rows
+# written under the old key still decrypt until re-encrypted via
+# `manage.py reencrypt_secrets`.
+FIELD_ENCRYPTION_KEY = os.getenv('FIELD_ENCRYPTION_KEY', '')
+LEGACY_FIELD_ENCRYPTION_SECRET = os.getenv(
+    'LEGACY_FIELD_ENCRYPTION_SECRET', _DEV_INSECURE_SECRET_KEY
+)
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,0.0.0.0').split(',')
 ALLOWED_HOSTS.extend(['.localhost'])
@@ -543,6 +579,15 @@ GOOGLE_WEBSITE_BASELINE_SCOPES = [
 ]
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
+# When true, the vibe-raising registration gate skips the live ABR lookup (used when no
+# ABR credential is configured) but still enforces the ABN and ACN checksums and derives
+# the ACN from the ABN. Lets registered companies with a valid ABN proceed without ABR.
+VIBE_RAISING_SKIP_ABR_VERIFICATION = os.environ.get(
+    "VIBE_RAISING_SKIP_ABR_VERIFICATION", ""
+).strip().lower() in ("1", "true", "yes", "on")
+# Roo points awarded to a founder of a verified registered company (valid ACN) the first
+# time they complete a monthly update each month. 0 disables the reward.
+ROO_POINTS_MONTHLY_UPDATE_REWARD = int(os.environ.get("ROO_POINTS_MONTHLY_UPDATE_REWARD", "20"))
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(
@@ -687,7 +732,12 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 # Points System Configuration
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]
 DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '24'))
-COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '1'))
+# Standard coworking cost. The active 'COWORKING_DAY' RewardsCatalog row takes
+# precedence over this fallback when present (see CoworkingService).
+COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
+# Discounted cost charged when the user's startup has a 'ready' monthly update
+# for the booking's month.
+COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 

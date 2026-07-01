@@ -8,6 +8,11 @@ from content_factory.article_system import (
     resolve_article_system_with_source,
 )
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
+from content_factory.authors import (
+    author_profile_for_renderer,
+    normalize_authors,
+    resolve_default_author,
+)
 from content_factory.billing import (
     CONTENT_FACTORY_ACTION_ARTICLE_GENERATION,
     CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
@@ -2035,6 +2040,23 @@ def trigger_article_generation(slack_user_id: str, article_request: dict) -> dic
         payload["source_run_id"] = article_request["source_run_id"]
     if isinstance(article_request.get("notification_context"), dict):
         payload["notification_context"] = article_request["notification_context"]
+
+    # Author byline: the org default flows to content-factory via the org-config endpoint it
+    # re-fetches per run; here we also carry the resolved author (and an optional per-article
+    # `author_id` override) so the run payload names a concrete byline.
+    article_authors = normalize_authors(getattr(config, "authors", None) if config else None)
+    requested_author_id = str(article_request.get("author_id") or "").strip()
+    effective_author = resolve_default_author(
+        article_authors,
+        requested_author_id or (getattr(config, "default_author_id", "") if config else ""),
+    )
+    if article_authors:
+        payload["authors"] = article_authors
+    if effective_author:
+        payload["author_id"] = effective_author.get("id", "")
+        payload["author"] = effective_author
+        payload["default_author_name"] = effective_author.get("name", "")
+        payload["default_author_profile"] = author_profile_for_renderer(effective_author)
 
     masked_payload = payload.copy()
     logger.info(f"Triggering article generation at {generate_endpoint} with payload: {masked_payload}")

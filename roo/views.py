@@ -1199,17 +1199,30 @@ class CoworkingViewSet(viewsets.ViewSet):
         """Check availability for dates."""
         date_param = request.query_params.get('date')
         days_ahead = int(request.query_params.get('days', 7))
-        
+        slack_user_id = (request.query_params.get('slack_user_id') or '').strip()
+
         start_date = date.today()
         if date_param:
             start_date = date.fromisoformat(date_param)
-        
+
+        # When the caller identifies the user we can quote the price they would
+        # actually be charged (which can drop with a 'ready' monthly update, and
+        # can differ per date across a month boundary). Without a user we quote
+        # the standard price.
+        user = PointsService.get_user_by_slack_id(slack_user_id) if slack_user_id else None
+
         results = []
-        cost_points = CoworkingService.get_coworking_cost()
-        
+        standard_cost = CoworkingService.get_standard_coworking_cost()
+
         for i in range(days_ahead):
             check_date = start_date + timedelta(days=i)
             available, capacity = CoworkingService.check_availability(check_date)
+            if user is not None:
+                cost_points = CoworkingService.get_coworking_cost(
+                    user=user, booking_date=check_date
+                )
+            else:
+                cost_points = standard_cost
             results.append({
                 'date': check_date.isoformat(),
                 'available_slots': available,
@@ -1217,7 +1230,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 'cost_points': cost_points,
                 'is_bookable': available > 0,
             })
-        
+
         return Response(results)
 
     @action(detail=False, methods=['get'])
@@ -1304,6 +1317,12 @@ class CoworkingViewSet(viewsets.ViewSet):
                 slack_channel_id=slack_channel_id,
             )
             response_data = CoworkingBookingSerializer(booking).data
+            # Surface whether the monthly-update discount applied so callers
+            # (e.g. Roo) don't have to hardcode the price. The standard cost is
+            # the single source of truth in get_standard_coworking_cost().
+            standard_cost = CoworkingService.get_standard_coworking_cost()
+            response_data["standard_points_cost"] = standard_cost
+            response_data["monthly_update_discount_applied"] = booking.points_cost < standard_cost
             if not created:
                 response_data["already_booked"] = True
                 response_data["idempotent"] = True

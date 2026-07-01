@@ -30,6 +30,7 @@ from content_factory.article_system import (
     resolve_article_system,
 )
 from content_factory.article_setup_reset import carry_reset_markers
+from content_factory.authors import normalize_authors, org_config_author_payload
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -412,6 +413,9 @@ class ContentFactoryOrgConfigView(APIView):
                 active_design_snapshot.serialize() if active_design_snapshot else None
             ),
         }
+        # authors + default_author_name/default_author_profile: content-factory re-fetches this
+        # per run and the renderer seeds its inline author byline from the default profile.
+        response_data.update(org_config_author_payload(config))
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -562,11 +566,20 @@ class ContentFactoryOrgConfigView(APIView):
             'renderer_style_profile',
             'reference_screenshots',
             'directory_style_feedback',
+            'authors',
+            'default_author_id',
         ]
 
         for field in target_fields:
             if field in data:
                 defaults[field] = data[field]
+
+        # Normalize author records to the canonical stored shape so the GET response and the
+        # article-generation payload stay consistent regardless of how the caller shaped them.
+        if 'authors' in defaults:
+            defaults['authors'] = normalize_authors(defaults['authors'])
+        if 'default_author_id' in defaults:
+            defaults['default_author_id'] = str(defaults['default_author_id'] or '').strip()
 
         scan_head_sha = str(data.get('repo_head_sha') or data.get('commit_sha') or '').strip()
         scan_timestamp = timezone.now()

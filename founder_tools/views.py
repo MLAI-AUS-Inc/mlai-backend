@@ -23,6 +23,10 @@ from .services import (
     get_or_create_founder_profile,
     set_active_company,
 )
+from vibe_raising.registration import (
+    attempt_company_verification,
+    set_unverified_company_abn,
+)
 
 
 def _connector_summaries(user):
@@ -102,36 +106,36 @@ class FounderToolsCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
-        company_fields = {
+        plain_fields = {
             key: data[key]
-            for key in ("name", "domain", "abn", "location", "registered")
+            for key in ("name", "domain", "location")
             if key in data
         }
 
         try:
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-                if "domain" in company_fields:
-                    assert_company_domain_available(
-                        profile, company_fields["domain"], exclude_company_id=company.id
-                    )
-                for field, value in company_fields.items():
-                    setattr(company, field, value)
-                company.save()
             else:
-                company = profile.companies.filter(name__iexact=company_fields["name"]).first()
-                if "domain" in company_fields:
-                    assert_company_domain_available(
-                        profile,
-                        company_fields["domain"],
-                        exclude_company_id=company.id if company else None,
-                    )
-                if company is None:
-                    company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
-                else:
-                    for field, value in company_fields.items():
-                        setattr(company, field, value)
-                    company.save()
+                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
+                    profile=profile
+                )
+
+            if "domain" in plain_fields:
+                assert_company_domain_available(
+                    profile, plain_fields["domain"], exclude_company_id=company.id
+                )
+
+            for field, value in plain_fields.items():
+                setattr(company, field, value)
+            if "abn" in data:
+                set_unverified_company_abn(company, data["abn"])
+            if "registered" in data:
+                company.registered = bool(data.get("registered"))
+            company.save()
+
+            # Best-effort verification — unlocks perks (e.g. the coworking discount) when
+            # the ABN/ACN check out, but never blocks setup if they don't.
+            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
         except DuplicateCompanyDomainError as exc:
             return Response(
                 {
