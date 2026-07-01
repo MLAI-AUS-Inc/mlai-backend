@@ -31,6 +31,12 @@ jobs:
       env:
         APP_ENV: production
         DEBUG: "False"
+        # settings.py fails closed on a missing SECRET_KEY when APP_ENV=production (a committed
+        # signing key would make JWTs forgeable + OAuth tokens decryptable). This step only
+        # validates URL *settings* — no JWTs are signed and no tokens are encrypted — so the value
+        # is irrelevant to the check; supply the real repo secret when present, else a labelled
+        # placeholder so the check stays self-contained (doesn't require the secret to be set).
+        SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY || 'ci-prod-url-validation-placeholder-not-a-real-secret' }}
         ALLOWED_HOSTS: api.mlai.au,10.126.0.2
         DEFAULT_BACKEND_URL: https://api.mlai.au
         DEFAULT_FRONTEND_URL: https://mlai.au
