@@ -8,7 +8,7 @@ the founder from saving their company or creating updates.
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -130,3 +130,75 @@ class UpdateNotBlockedTests(TestCase):
         self._not_acn_blocked(
             self.client.post("/api/v1/vibe-raising/startup-update/run/", {}, format="json")
         )
+
+
+class _FakeResponse:
+    def __init__(self, *, status_code=200, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+def _company_xml(abn=COMPANY_ABN, acn=COMPANY_ACN, entity_code="PRV", status="Active"):
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+    <ABRPayloadSearchResults xmlns="http://abr.business.gov.au/ABRXMLSearch/">
+      <response>
+        <businessEntity202001>
+          <ABN><identifierValue>{abn}</identifierValue></ABN>
+          <entityStatus><entityStatusCode>{status}</entityStatusCode></entityStatus>
+          <entityType><entityTypeCode>{entity_code}</entityTypeCode><entityDescription>Australian Private Company</entityDescription></entityType>
+          <ASICNumber>{acn}</ASICNumber>
+          <mainName><organisationName>EXAMPLE PTY LTD</organisationName></mainName>
+        </businessEntity202001>
+      </response>
+    </ABRPayloadSearchResults>"""
+
+
+_HTTP_GET = "content_factory.vibe_marketing_views.http_client.get"
+
+
+@override_settings(VIBE_RAISING_SKIP_ABR_VERIFICATION=False, ABR_LOOKUP_AUTHENTICATION_GUID="abr-guid")
+class RealAbrModeTests(TestCase):
+    """End-to-end company save with the real ABR path (skip OFF + GUID set) — the
+    production cutover state. The ABR HTTP call itself is mocked."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="founder@example.com", password="password", role="participant",
+        )
+        self.client.force_authenticate(user=self.user)
+        VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+
+    def _post(self, payload):
+        return self.client.post("/api/v1/vibe-raising/companies/", payload, format="json")
+
+    def test_active_company_verifies_against_real_abr(self):
+        with patch(_HTTP_GET, side_effect=lambda *a, **k: _FakeResponse(text=_company_xml())):
+            response = self._post(
+                {"name": "Example Pty Ltd", "domain": "example.com", "abn": COMPANY_ABN, "registered": True}
+            )
+        self.assertEqual(response.status_code, 200)
+        company = VibeRaisingCompany.objects.get(name="Example Pty Ltd")
+        self.assertEqual(company.acn, COMPANY_ACN)
+        self.assertEqual(company.entity_type_code, "PRV")
+        self.assertIsNotNone(company.abr_verified_at)
+
+    def test_cancelled_abn_saved_but_unverified(self):
+        with patch(_HTTP_GET, side_effect=lambda *a, **k: _FakeResponse(text=_company_xml(status="Cancelled"))):
+            response = self._post(
+                {"name": "Gone Pty Ltd", "domain": "gone.com", "abn": COMPANY_ABN, "registered": True}
+            )
+        self.assertEqual(response.status_code, 200)
+        company = VibeRaisingCompany.objects.get(name="Gone Pty Ltd")
+        self.assertIsNone(company.acn)
+        self.assertIsNone(company.abr_verified_at)
+
+    def test_abr_unreachable_saved_but_unverified(self):
+        with patch(_HTTP_GET, side_effect=RuntimeError("network down")):
+            response = self._post(
+                {"name": "Acme Pty Ltd", "domain": "acme.com", "abn": COMPANY_ABN, "registered": True}
+            )
+        self.assertEqual(response.status_code, 200)
+        company = VibeRaisingCompany.objects.get(name="Acme Pty Ltd")
+        self.assertIsNone(company.acn)
+        self.assertIsNone(company.abr_verified_at)
