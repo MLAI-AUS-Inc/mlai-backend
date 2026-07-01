@@ -8589,6 +8589,67 @@ def _run_blocking_detail(result):
     }
 
 
+_SETUP_RUN_REF_KEYS = ("setup_run_id", "setupRunId", "scaffold_job_id", "scaffoldJobId")
+_SETUP_RUN_REF_NESTED_KEYS = ("result", "article_system_setup", "articleSystemSetup", "latest_control_response")
+_SETUP_RUN_PREVIEW_KEYS = ("live_preview_url", "livePreviewUrl")
+
+
+def _strip_missing_setup_run_refs(result):
+    """Return a copy of a serialized run ``result`` with setup-run pointers cleared when
+    they reference a ContentFactoryRun that no longer exists.
+
+    A teardown/reset can delete an ``article_system_setup`` run while the scan run that
+    spawned it still records its id (``setup_run_id`` / ``scaffold_job_id`` /
+    ``live_preview_url``, including nested setup blocks). Without this guard the bootstrap
+    hands the wizard a dangling run id, the frontend polls ``/runs/<id>/status`` against
+    it, the backend 404s, and the marketing page SSR-500s. Only the rare missing-ref case
+    pays a DB query + copy; runs with no setup pointer return unchanged.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    candidates = set()
+
+    def _collect(node):
+        if not isinstance(node, dict):
+            return
+        for key in _SETUP_RUN_REF_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.add(value.strip())
+        for nested in _SETUP_RUN_REF_NESTED_KEYS:
+            _collect(node.get(nested))
+
+    _collect(result)
+    if not candidates:
+        return result
+    existing = set(
+        ContentFactoryRun.objects.filter(run_id__in=candidates).values_list("run_id", flat=True)
+    )
+    missing = {candidate for candidate in candidates if candidate not in existing}
+    if not missing:
+        return result
+
+    scrubbed = copy.deepcopy(result)
+
+    def _scrub(node):
+        if not isinstance(node, dict):
+            return
+        for key in _SETUP_RUN_REF_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and value.strip() in missing:
+                node[key] = None
+        for key in _SETUP_RUN_PREVIEW_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and any(run_id in value for run_id in missing):
+                node[key] = None
+        for nested in _SETUP_RUN_REF_NESTED_KEYS:
+            _scrub(node.get(nested))
+
+    _scrub(scrubbed)
+    return scrubbed
+
+
 def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="full"):
     compact = mode in {"summary", "status"}
     step_states = _serialize_run_steps(run, compact=compact)
@@ -8648,7 +8709,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "scanProgress": scan_progress,
             "scan_progress": scan_progress_snake,
             "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
-            "result": _compact_result_for_run(run),
+            "result": _strip_missing_setup_run_refs(_compact_result_for_run(run)),
         }
     content_package = _content_package_from_run(run)
     component_manifest = _component_manifest_from_run(run)
@@ -8698,7 +8759,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "scan_progress": scan_progress_snake,
         "componentFeedback": _component_feedback_from_run(run),
         "workflowProgress": _workflow_progress(context=context, run=run, latest_runs=latest_runs, checks=checks),
-        "result": result,
+        "result": _strip_missing_setup_run_refs(result),
     }
 
 
