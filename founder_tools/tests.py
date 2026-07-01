@@ -1,8 +1,28 @@
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
+
+# Mocked ABR response for a verified registered company (ABN 89 000 000 019).
+_VERIFIED_ABN = "89000000019"
+_VERIFIED_ACN = "000000019"
+
+
+def _abr_company(abn):
+    return {
+        "configured": True,
+        "reachable": True,
+        "found": True,
+        "is_company": True,
+        "acn": _VERIFIED_ACN,
+        "entity_type_code": "PRV",
+    }
+
+
+_PATCH_ABR = "content_factory.vibe_marketing_views.verify_company_with_abr"
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .services import ensure_company_organization
@@ -26,18 +46,20 @@ class FounderToolsCompanyApiTests(TestCase):
     def test_founder_can_create_first_company(self):
         self.client.force_authenticate(user=self.user)
 
-        response = self.client.post(
-            "/api/v1/founder-tools/companies/",
-            {
-                "name": "Acme Inc.",
-                "domain": "https://www.acme.com",
-                "companyLinkedInUrl": "https://www.linkedin.com/company/acme",
-                "companyContext": "Acme helps founders write investor updates.",
-                "organizationKind": "For-profit",
-                "registered": True,
-            },
-            format="json",
-        )
+        with patch(_PATCH_ABR, side_effect=_abr_company):
+            response = self.client.post(
+                "/api/v1/founder-tools/companies/",
+                {
+                    "name": "Acme Inc.",
+                    "domain": "https://www.acme.com",
+                    "companyLinkedInUrl": "https://www.linkedin.com/company/acme",
+                    "companyContext": "Acme helps founders write investor updates.",
+                    "organizationKind": "For-profit",
+                    "abn": _VERIFIED_ABN,
+                    "registered": True,
+                },
+                format="json",
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["name"], "Acme Inc.")
@@ -85,16 +107,18 @@ class FounderToolsCompanyApiTests(TestCase):
             },
             format="json",
         )
-        second = self.client.post(
-            "/api/v1/founder-tools/companies/",
-            {
-                "name": "acme inc.",
-                "domain": "second.example",
-                "companyLinkedInUrl": "https://www.linkedin.com/company/acme-second",
-                "registered": True,
-            },
-            format="json",
-        )
+        with patch(_PATCH_ABR, side_effect=_abr_company):
+            second = self.client.post(
+                "/api/v1/founder-tools/companies/",
+                {
+                    "name": "acme inc.",
+                    "domain": "second.example",
+                    "companyLinkedInUrl": "https://www.linkedin.com/company/acme-second",
+                    "abn": _VERIFIED_ABN,
+                    "registered": True,
+                },
+                format="json",
+            )
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)

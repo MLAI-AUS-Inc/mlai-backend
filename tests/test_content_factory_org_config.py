@@ -230,6 +230,60 @@ class ContentFactoryOrgConfigTests(TestCase):
         self.assertEqual(data["framework_component_specs"], specs)
         self.assertTrue(data["scan_completed_at"])  # set from last_scanned_at on PUT
 
+    def test_org_config_round_trips_authors_and_default_byline(self):
+        """Authors PUT->normalize->GET, and the GET exposes the resolved default byline that
+        content-factory's renderer seeds the inline author registry from."""
+        put_response = self.client.put(
+            "/api/content-factory/org/config/",
+            {
+                "domain": "mlai.au",
+                "authors": [
+                    {
+                        "name": "Priya Nair",
+                        "role": "Head of Content",
+                        "bio": "Writes about enterprise RFP workflows.",
+                        "avatarUrl": "https://cdn.example/priya.png",
+                        "sameAs": [{"label": "LinkedIn", "href": "https://lnkd.in/priya"}],
+                    },
+                    {"author": "Sam Donegan", "authorTitle": "Founder"},
+                    {"name": ""},  # dropped: no byline
+                ],
+                "default_author_id": "sam-donegan",
+            },
+            format="json",
+        )
+        self.assertEqual(put_response.status_code, status.HTTP_200_OK)
+
+        self.config.refresh_from_db()
+        # Stored in canonical, de-blanked shape with derived ids.
+        self.assertEqual([a["id"] for a in self.config.authors], ["priya-nair", "sam-donegan"])
+        self.assertEqual(self.config.authors[0]["avatarAlt"], "Priya Nair profile photo")
+        self.assertEqual(self.config.default_author_id, "sam-donegan")
+
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(get_response.data["authors"]), 2)
+        self.assertEqual(get_response.data["default_author_id"], "sam-donegan")
+        self.assertEqual(get_response.data["default_author_name"], "Sam Donegan")
+        self.assertEqual(get_response.data["default_author_profile"]["name"], "Sam Donegan")
+        self.assertEqual(get_response.data["default_author_profile"]["role"], "Founder")
+
+    def test_org_config_default_byline_falls_back_to_first_author(self):
+        """With authors but no default_author_id, the GET default byline is the first author."""
+        self.client.put(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au", "authors": [{"name": "Priya Nair"}, {"name": "Sam Donegan"}]},
+            format="json",
+        )
+        get_response = self.client.get(
+            "/api/content-factory/org/config/",
+            {"domain": "mlai.au"},
+        )
+        self.assertEqual(get_response.data["default_author_name"], "Priya Nair")
+
     def test_org_config_round_trips_registry_driven_publish_target_metadata(self):
         publish_targets = [
             {
@@ -596,3 +650,104 @@ class ContentFactoryOrgConfigTests(TestCase):
             {"domain": "mlai.au"},
         )
         self.assertEqual(get_response.data["active_design_snapshot"]["schema_version"], 2)
+
+
+REGISTERED_TARGET = {
+    "target_id": "react_article_system_articles_{slug}_tsx__tsx",
+    "kind": "react_article_system",
+    "confidence": "high",
+    "content_path_pattern": "articles/{slug}.tsx",
+    "registration_strategy": {"type": "registry_seo_patch", "registry_path": "articles/registry.ts"},
+}
+
+
+@override_settings(SCHEDULED_DISCOVERY_MAX_TARGETS=1)
+class ContentFactoryOrgConfigPublishTargetPreservationTests(TestCase):
+    """A routine scan PUT that recomputes an empty publish_targets list must not
+    silently unlink a previously-registered, high-confidence target while the
+    article surface is still present. The org/config PUT is a second write path
+    alongside the scan callback; both must preserve the registered target.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ["ROO_API_KEY"] = self.api_key
+        os.environ["INTERNAL_API_KEY"] = self.api_key
+
+        from django.conf import settings
+
+        settings.ROO_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = self.api_key
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+        self.organization = Organization.objects.create(name="TPB", domain="theproductbus.com")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.organization,
+            article_delivery_mode="publish_code",
+            publish_targets=[REGISTERED_TARGET],
+            default_publish_target_id=REGISTERED_TARGET["target_id"],
+            article_system={"state": "roo_scaffolded", "source": "scaffold", "confidence": "high"},
+        )
+
+    def _put(self, body):
+        payload = {"domain": "theproductbus.com"}
+        payload.update(body)
+        return self.client.put("/api/content-factory/org/config/", payload, format="json")
+
+    def test_empty_publish_targets_put_preserves_registered_target(self):
+        # The exact regression: a scan re-derives no target and downgrades the
+        # article system to existing/scan, but the surface is still live.
+        resp = self._put(
+            {
+                "publish_targets": [],
+                "default_publish_target_id": None,
+                "article_system": {
+                    "state": "existing",
+                    "source": "scan",
+                    "confidence": "high",
+                    "directory_path": "articles",
+                },
+            }
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.publish_targets, [REGISTERED_TARGET])
+        self.assertEqual(self.config.default_publish_target_id, REGISTERED_TARGET["target_id"])
+
+    def test_empty_publish_targets_put_preserves_without_article_system_in_payload(self):
+        # No article_system in the PUT -> fall back to the stored (ready) one.
+        resp = self._put({"publish_targets": []})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.publish_targets, [REGISTERED_TARGET])
+        self.assertEqual(self.config.default_publish_target_id, REGISTERED_TARGET["target_id"])
+
+    def test_fresh_nonempty_publish_targets_replace_existing(self):
+        fresh = [{"target_id": "fresh_target", "kind": "react_article_system", "confidence": "high"}]
+        resp = self._put({"publish_targets": fresh, "default_publish_target_id": "fresh_target"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.publish_targets, fresh)
+        self.assertEqual(self.config.default_publish_target_id, "fresh_target")
+
+    def test_empty_publish_targets_put_clears_when_surface_gone(self):
+        # Genuine removal: the scan reports the article system is missing.
+        resp = self._put(
+            {
+                "publish_targets": [],
+                "default_publish_target_id": None,
+                "article_system": {"state": "missing", "source": "scan", "confidence": "high"},
+            }
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.publish_targets, [])
+
+    def test_put_without_publish_targets_key_leaves_target_untouched(self):
+        # A PUT that does not mention publish_targets must not touch them.
+        resp = self._put({"default_timezone": "Australia/Melbourne"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.publish_targets, [REGISTERED_TARGET])
+        self.assertEqual(self.config.default_timezone, "Australia/Melbourne")

@@ -4,7 +4,7 @@ Tests for the Points System.
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
@@ -15,7 +15,7 @@ from .models import (
     CoworkingBooking, CoworkingDayCapacity, RewardsCatalog, RewardRedemption,
     PointsPurchase,
 )
-from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService
+from .services import PointsService, PointsPurchaseService, CoworkingService, TaskService, RewardsService, StartupUpdateRewardService
 from .permissions import (
     can_generate_coworking_reports,
     is_points_admin,
@@ -492,10 +492,10 @@ class CoworkingServiceTests(TestCase):
         
         self.assertTrue(created)
         self.assertEqual(booking.status, 'booked')
-        self.assertEqual(booking.points_cost, 4)  # Cost from COWORKING_DAY reward catalog
-        
+        self.assertEqual(booking.points_cost, 8)  # Standard cost from COWORKING_DAY reward catalog
+
         account = PointsAccount.objects.get(user=self.user)
-        self.assertEqual(account.balance, 6)  # 10 - 4
+        self.assertEqual(account.balance, 2)  # 10 - 8
     
     def test_book_respects_capacity(self):
         """Test that booking respects capacity limits."""
@@ -560,10 +560,10 @@ class CoworkingServiceTests(TestCase):
         
         self.assertEqual(booking.status, 'cancelled')
         # Refund should have happened (booking is far in future)
-        # Cost is 4 points from COWORKING_DAY reward catalog, not 1
+        # Cost is the standard 8 points from COWORKING_DAY reward catalog, not 1
         if refunded:
             account = PointsAccount.objects.get(user=self.user)
-            self.assertEqual(account.balance, initial_balance + 4)
+            self.assertEqual(account.balance, initial_balance + 8)
 
     def test_book_is_idempotent_for_existing_active_booking(self):
         """Test that repeat bookings for the same day return the existing booking."""
@@ -588,7 +588,314 @@ class CoworkingServiceTests(TestCase):
             1,
         )
         account = PointsAccount.objects.get(user=self.user)
-        self.assertEqual(account.balance, 6)
+        self.assertEqual(account.balance, 2)  # charged once at the standard 8
+
+
+class CoworkingMonthlyUpdateDiscountTests(TestCase):
+    """The coworking cost drops to 4 when the user's startup is a registered
+    company with a valid ABN AND has a 'ready' monthly update for the booking's
+    month, otherwise it is the standard 8. Full ACN/ABR verification is NOT
+    required — a valid-but-not-fully-verified company still qualifies."""
+
+    VALID_ABN = '89000000019'
+
+    def setUp(self):
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+
+        self.user = User.objects.create_user(
+            email='founder@example.com',
+            slack_id='UFOUNDER',
+        )
+        PointsService.award(
+            user=self.user,
+            delta=50,
+            source='MANUAL',
+            description='Test points',
+            created_by_slack_id='UADMIN',
+            idempotency_key='discount_test_setup',
+        )
+        self.org = Organization.objects.create(name='Acme', domain='acme.example')
+        UserStartupBinding.objects.create(user=self.user, organization=self.org)
+        # The discount requires a registered company with a valid ABN on the org.
+        self._company_for(self.org, name='Acme Pty Ltd')
+
+    def _company_for(self, org, *, name='Acme Pty Ltd', abn=VALID_ABN, verified=False, user=None):
+        """Attach a registered company to ``org``. Has a valid ABN by default;
+        ``verified=True`` also sets the ACN + ABR-verified stamp."""
+        from django.utils import timezone
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=user or self.user,
+            defaults={'role': VibeRaisingProfile.ROLE_FOUNDER},
+        )
+        return VibeRaisingCompany.objects.create(
+            profile=profile,
+            organization=org,
+            name=name,
+            registered=True,
+            abn=abn,
+            acn='000000019' if verified else None,
+            abr_verified_at=timezone.now() if verified else None,
+        )
+
+    def _make_update(self, booking_date, status):
+        from startup_updates.models import MonthlyUpdateDraft
+        return MonthlyUpdateDraft.objects.create(
+            organization=self.org,
+            month=booking_date.replace(day=1),
+            status=status,
+        )
+
+    def test_standard_cost_without_binding(self):
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+
+        unbound = User.objects.create_user(email='nobind@example.com', slack_id='UNOBIND')
+        self.assertFalse(UserStartupBinding.objects.filter(user=unbound).exists())
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=unbound, booking_date=date.today()),
+            8,
+        )
+
+    def test_standard_cost_with_binding_but_no_update(self):
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=date.today()),
+            8,
+        )
+
+    def test_draft_status_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.DRAFT)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_needs_review_status_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.NEEDS_REVIEW)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_discounts_to_four(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_for_other_month_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today().replace(day=15)
+        # 'ready' update exists, but for a different month than the booking.
+        other_month = (today.replace(day=1) - timedelta(days=1))
+        self._make_update(other_month, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_in_any_bound_org_discounts(self):
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        second_org = Organization.objects.create(name='Beta', domain='beta.example')
+        UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        self._company_for(second_org, name='Beta Pty Ltd')
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=second_org,
+            month=today.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_without_company_does_not_discount(self):
+        # A ready update on an org with no founder company gets no discount.
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+        other = User.objects.create_user(email='nocompany@example.com', slack_id='UNOCOMP')
+        org = Organization.objects.create(name='Gamma', domain='gamma.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
+        )
+
+    def test_ready_update_with_valid_abn_unverified_company_discounts(self):
+        # A registered company with a valid ABN but NO ACN/ABR verification still
+        # qualifies — this is the "valid but not perfect" cohort.
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        other = User.objects.create_user(email='validabn@example.com', slack_id='UVALIDABN')
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+        org = Organization.objects.create(name='Epsilon', domain='epsilon.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        self._company_for(org, name='Epsilon Pty Ltd', verified=False, user=other)
+        today = date.today()
+        from startup_updates.models import MonthlyUpdateDraft
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            4,
+        )
+
+    def test_ready_update_with_invalid_abn_does_not_discount(self):
+        # Registered company but the stored ABN fails its checksum -> no discount.
+        from startup_updates.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
+        from organizations.models import Organization
+        from startup_updates.models import UserStartupBinding
+        other = User.objects.create_user(email='badabn@example.com', slack_id='UBADABN')
+        org = Organization.objects.create(name='Delta', domain='delta.example')
+        UserStartupBinding.objects.create(user=other, organization=org)
+        self._company_for(org, name='Delta', abn='94807394138', verified=False, user=other)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=org, month=today.replace(day=1), status=MonthlyUpdateDraftStatus.READY,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=other, booking_date=today),
+            8,
+        )
+
+    def test_no_args_returns_standard_cost(self):
+        # Backwards-compatible: callers without user context get the standard price.
+        self.assertEqual(CoworkingService.get_coworking_cost(), 8)
+
+    def test_book_charges_discounted_cost_end_to_end(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        booking_date = date.today()
+        self._make_update(booking_date, MonthlyUpdateDraftStatus.READY)
+
+        balance_before = PointsAccount.objects.get(user=self.user).balance
+        booking, created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(booking.points_cost, 4)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, balance_before - 4)
+
+    def test_book_charges_standard_cost_without_ready_update(self):
+        booking_date = date.today()
+        balance_before = PointsAccount.objects.get(user=self.user).balance
+        booking, created = CoworkingService.book(
+            user=self.user,
+            booking_date=booking_date,
+            created_by_slack_id=self.user.slack_id,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(booking.points_cost, 8)
+        account = PointsAccount.objects.get(user=self.user)
+        self.assertEqual(account.balance, balance_before - 8)
+
+
+class StartupUpdateRewardServiceTests(TestCase):
+    """20 roo points for a verified company's founder completing a monthly update,
+    once per company per month."""
+
+    def setUp(self):
+        from organizations.models import Organization
+
+        self.user = User.objects.create_user(email='founder@example.com', slack_id='UFOUNDER')
+        self.org = Organization.objects.create(name='Acme', domain='acme.example')
+        self.company = self._verified_company(self.org)
+        self.month = date(2026, 7, 1)
+
+    def _verified_company(self, org, *, name='Acme Pty Ltd'):
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+
+        profile, _ = VibeRaisingProfile.objects.get_or_create(
+            user=self.user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
+        )
+        return VibeRaisingCompany.objects.create(
+            profile=profile, organization=org, name=name,
+            registered=True, abn='89000000019', acn='000000019',
+            abr_verified_at=timezone.now(),
+        )
+
+    def _balance(self):
+        account = PointsAccount.objects.filter(user=self.user).first()
+        return account.balance if account else 0
+
+    def test_first_completion_awards_20(self):
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertTrue(awarded)
+        self.assertEqual(self._balance(), 20)
+        self.assertTrue(
+            Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE', delta=20).exists()
+        )
+
+    def test_second_completion_same_month_is_idempotent(self):
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        awarded_again = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertFalse(awarded_again)
+        self.assertEqual(self._balance(), 20)
+        self.assertEqual(Ledger.objects.filter(user=self.user, source='STARTUP_UPDATE').count(), 1)
+
+    def test_different_month_awards_again(self):
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=date(2026, 8, 1)
+        )
+        self.assertEqual(self._balance(), 40)
+
+    def test_unverified_company_is_not_rewarded(self):
+        from founder_tools.models import VibeRaisingCompany
+
+        unverified = VibeRaisingCompany.objects.create(
+            profile=self.company.profile, organization=self.org, name='Draft Co',
+            registered=True, abn='89000000019',  # no acn / abr_verified_at
+        )
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=unverified, month_bucket=self.month
+        )
+        self.assertFalse(awarded)
+        self.assertEqual(self._balance(), 0)
+
+    @override_settings(ROO_POINTS_MONTHLY_UPDATE_REWARD=0)
+    def test_zero_reward_setting_disables_award(self):
+        awarded = StartupUpdateRewardService.award_monthly_update_completion(
+            user=self.user, company=self.company, month_bucket=self.month
+        )
+        self.assertFalse(awarded)
+        self.assertEqual(self._balance(), 0)
 
 
 class PermissionTests(TestCase):

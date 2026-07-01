@@ -6,6 +6,7 @@ All write operations use database transactions and idempotency keys to prevent
 race conditions and duplicate transactions.
 """
 import calendar
+import logging
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
@@ -25,6 +26,8 @@ from .permissions import (
     PermissionDeniedError, InsufficientBalanceError
 )
 from core.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class PointsPurchaseService:
@@ -647,18 +650,95 @@ class CoworkingService:
     MAX_REPORT_DAYS = 366
     
     @staticmethod
-    def get_coworking_cost() -> int:
+    def get_standard_coworking_cost() -> int:
         """
-        Get the cost for a coworking day.
-        
+        Get the standard (undiscounted) cost for a coworking day.
+
         Prioritizes 'COWORKING_DAY' reward from catalog.
-        Falls back to settings or default of 4 points.
+        Falls back to settings or default of 8 points.
         """
         try:
             reward = RewardsCatalog.objects.get(code='COWORKING_DAY', is_active=True)
             return reward.cost_points
         except RewardsCatalog.DoesNotExist:
-            return getattr(settings, 'COWORKING_DAY_COST_POINTS', 4)
+            return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
+
+    @staticmethod
+    def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
+        """
+        Return whether any registered company the user is bound to — one with a
+        structurally valid ABN — has a monthly update in the 'ready' status for
+        the month of ``booking_date``.
+
+        The coworking discount rewards founders who run a real registered
+        business and keep their monthly update current. We require a registered
+        company with a checksum-valid ABN (a genuine business identifier) but
+        deliberately do *not* require full ACN/ABR verification — founders with
+        valid-but-not-fully-verified companies still qualify.
+
+        ``MonthlyUpdateDraft.month`` is normalised to the first day of the
+        month, so we match against ``booking_date`` collapsed to day 1.
+        """
+        # Imported lazily to avoid a hard import dependency between the roo and
+        # startup_updates / founder_tools apps at module load time.
+        from founder_tools.models import VibeRaisingCompany
+        from vibe_raising.validators import validate_abn_checksum
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        org_ids = list(
+            UserStartupBinding.objects.filter(user=user).values_list(
+                'organization_id', flat=True
+            )
+        )
+        if not org_ids:
+            return False
+
+        # Only organisations backed by a registered company with a valid ABN
+        # qualify. The ABN checksum can't be expressed in SQL, so validate the
+        # candidates in Python (there are only a handful per user).
+        eligible_org_ids = {
+            org_id
+            for org_id, abn in VibeRaisingCompany.objects.filter(
+                organization_id__in=org_ids,
+                registered=True,
+            )
+            .exclude(abn__isnull=True)
+            .exclude(abn='')
+            .values_list('organization_id', 'abn')
+            if validate_abn_checksum(abn)
+        }
+        if not eligible_org_ids:
+            return False
+
+        month_start = booking_date.replace(day=1)
+        return MonthlyUpdateDraft.objects.filter(
+            organization_id__in=eligible_org_ids,
+            month=month_start,
+            status=MonthlyUpdateDraftStatus.READY,
+        ).exists()
+
+    @staticmethod
+    def get_coworking_cost(
+        user: Optional[User] = None,
+        booking_date: Optional[date] = None,
+    ) -> int:
+        """
+        Get the cost for a coworking day.
+
+        Defaults to the standard cost (from catalog/settings). When both
+        ``user`` and ``booking_date`` are supplied and the user's startup has a
+        'ready' monthly update for that month, the discounted cost applies
+        instead — rewarding founders who keep their monthly update current.
+        """
+        standard = CoworkingService.get_standard_coworking_cost()
+        if user is not None and booking_date is not None:
+            if CoworkingService._has_ready_monthly_update(user, booking_date):
+                return getattr(settings, 'COWORKING_DAY_DISCOUNT_COST_POINTS', 4)
+        return standard
     
     @staticmethod
     def get_capacity(booking_date: date) -> int:
@@ -860,8 +940,9 @@ class CoworkingService:
         if available <= 0:
             raise ValueError(f"No availability for {booking_date} (capacity: {capacity})")
         
-        # Get cost
-        cost = CoworkingService.get_coworking_cost()
+        # Get cost (discounted when the user's startup has a 'ready' monthly
+        # update for the booking's month)
+        cost = CoworkingService.get_coworking_cost(user=user, booking_date=booking_date)
         
         # Create idempotency key
         idempotency_key = f"coworking_book:{user.id}:{booking_date}"
@@ -972,6 +1053,56 @@ class CoworkingService:
             }
         )
         return day_capacity
+
+
+class StartupUpdateRewardService:
+    """Rewards founders of verified registered companies for keeping their monthly
+    update current."""
+
+    REWARD_SOURCE = 'STARTUP_UPDATE'
+
+    @staticmethod
+    def reward_amount() -> int:
+        return int(getattr(settings, 'ROO_POINTS_MONTHLY_UPDATE_REWARD', 20))
+
+    @staticmethod
+    def award_monthly_update_completion(user, company, month_bucket, draft=None) -> bool:
+        """Award points the first time a *verified registered company* (valid ACN)
+        completes a monthly update for ``month_bucket`` (a date on the first of the
+        month).
+
+        Idempotent per company + month — re-saving the same month's update never awards
+        twice. Best-effort: returns False (and never raises) if the company isn't
+        eligible or the award can't be made, so it can't break the update flow.
+        """
+        # Imported lazily to avoid a load-order dependency between roo and vibe_raising.
+        from vibe_raising.registration import company_is_verified
+
+        if user is None or company is None or month_bucket is None:
+            return False
+        if not company_is_verified(company):
+            return False
+
+        amount = StartupUpdateRewardService.reward_amount()
+        if amount <= 0:
+            return False
+
+        month_key = month_bucket.strftime('%Y-%m')
+        try:
+            _ledger, created = PointsService.award(
+                user=user,
+                delta=amount,
+                source=StartupUpdateRewardService.REWARD_SOURCE,
+                description=f"Monthly update completed — {month_bucket.strftime('%B %Y')}",
+                created_by_slack_id=getattr(user, 'slack_id', '') or 'system',
+                idempotency_key=f"monthly_update_reward:{company.id}:{month_key}",
+                reference_type='MONTHLY_UPDATE_DRAFT',
+                reference_id=str(draft.id) if draft is not None else None,
+            )
+            return created
+        except Exception:
+            logger.exception("Failed to award monthly-update points to user %s", getattr(user, 'id', None))
+            return False
 
 
 class TaskService:

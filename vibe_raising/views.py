@@ -88,6 +88,10 @@ from founder_tools.services import (
     set_active_company,
     user_may_use_organization,
 )
+from vibe_raising.registration import (
+    attempt_company_verification,
+    set_unverified_company_abn,
+)
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .metric_history import build_metric_history
@@ -1928,10 +1932,12 @@ class VibeRaisingCompanyView(APIView):
         serializer = VibeRaisingCompanyUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        data = serializer.validated_data
+
         # A founder may only claim a domain that is unclaimed or already theirs.
         # Without this, setting domain to a rival's value joins you to their
         # tenant (Organization is a unique, shared row keyed by domain).
-        requested_domain = serializer.validated_data.get("domain")
+        requested_domain = data.get("domain")
         if (
             requested_domain
             and not _is_admin_user(request.user)
@@ -1939,46 +1945,33 @@ class VibeRaisingCompanyView(APIView):
         ):
             raise DomainOwnershipError()
 
-        company_id = serializer.validated_data.get("companyId")
+        company_id = data.get("companyId")
 
         with transaction.atomic():
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-                company.name = serializer.validated_data["name"]
-                if "domain" in serializer.validated_data:
-                    company.domain = serializer.validated_data["domain"]
-                if "abn" in serializer.validated_data:
-                    company.abn = serializer.validated_data["abn"]
-                if "registered" in serializer.validated_data:
-                    company.registered = serializer.validated_data["registered"]
-                company.save()
             else:
-                company = profile.companies.filter(
-                    name__iexact=serializer.validated_data["name"]
-                ).first()
+                company = profile.companies.filter(name__iexact=data["name"]).first()
                 if company is None:
-                    company = VibeRaisingCompany.objects.create(
-                        profile=profile,
-                        name=serializer.validated_data["name"],
-                        domain=serializer.validated_data.get("domain"),
-                        abn=serializer.validated_data.get("abn"),
-                        registered=serializer.validated_data.get("registered", False),
-                    )
-                else:
-                    company.name = serializer.validated_data["name"]
-                    if "domain" in serializer.validated_data:
-                        company.domain = serializer.validated_data["domain"]
-                    if "abn" in serializer.validated_data:
-                        company.abn = serializer.validated_data["abn"]
-                    if "registered" in serializer.validated_data:
-                        company.registered = serializer.validated_data["registered"]
-                    company.save()
+                    company = VibeRaisingCompany(profile=profile)
 
-                ensure_company_organization(company)
-                if profile.active_company_id is None:
-                    set_active_company(profile, company)
+            company.name = data["name"]
+            if "domain" in data:
+                company.domain = data["domain"]
+            if "abn" in data:
+                set_unverified_company_abn(company, data["abn"])
+            if "registered" in data:
+                company.registered = bool(data.get("registered"))
+            company.save()
+
+            # Best-effort: stamp the company verified if its ABN/ACN check out. An
+            # unverifiable ABN does NOT block setup — it just means no perks (e.g. the
+            # coworking discount) until a valid one is provided.
+            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
             ensure_company_organization(company)
+            if profile.active_company_id is None:
+                set_active_company(profile, company)
 
         return Response(VibeRaisingCompanySerializer(company).data, status=status.HTTP_200_OK)
 
@@ -2387,6 +2380,14 @@ class VibeRaisingMonthlyUpdateView(APIView):
                 "model_name": "vibe-raising-manual",
                 "structured_memo": _build_manual_structured_memo(structured_payload),
             },
+        )
+
+        # Reward verified-company founders for completing the month's update (once per
+        # company per month; best-effort, never blocks the save).
+        from roo.services import StartupUpdateRewardService
+
+        StartupUpdateRewardService.award_monthly_update_completion(
+            user=request.user, company=company, month_bucket=month_bucket, draft=draft,
         )
 
         return Response(

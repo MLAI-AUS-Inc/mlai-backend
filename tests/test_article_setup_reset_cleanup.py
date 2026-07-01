@@ -8,12 +8,16 @@
    This is what lets "Reset articles setup" return the wizard to a clean picker
    instead of a stale "scaffold is live" view.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase
+from django.utils import timezone
 
-from content_factory.models import OrganizationContentConfig
+from content_factory.article_setup_reset import reset_article_setup_config
+from content_factory.models import OrganizationContentConfig, WrittenArticle
 from content_factory.vibe_marketing_views import (
+    _article_generation_history_exists,
     _article_setup_state_for_config,
     _delete_article_setup_scaffold_branches,
 )
@@ -150,3 +154,55 @@ class ArticleSetupExistingSurfaceStateTests(TestCase):
 
         self.assertEqual(state.get("setupRunId"), "setup-with-route-hint")
         self.assertEqual(state.get("routePath"), "/articles")
+
+
+class GenerationHistorySurvivesResetTests(TestCase):
+    """Pre-reset article history must not keep the (now-cleared) scaffold reported
+    as "ready" — that hid the Build button after "Reset everything". `since` (the
+    reset timestamp) restricts the WrittenArticle/run evidence to work done after
+    the reset; the start-page caller leaves it None and still remembers history."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(domain="statdoctor.app", name="StatDoctor")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="DrAnuG1995/website",
+        )
+
+    def _written_article(self, *, when):
+        article = WrittenArticle.objects.create(
+            organization=self.org,
+            title="Old article",
+            slug="old-article",
+            category="guide",
+            primary_keyword="old article",
+        )
+        WrittenArticle.objects.filter(pk=article.pk).update(created_at=when)
+        return article
+
+    def test_history_excluded_when_since_postdates_the_article(self):
+        article_time = timezone.now() - timedelta(days=2)
+        self._written_article(when=article_time)
+
+        # No cutoff → history counts (e.g. start-page topic-picker still remembers).
+        self.assertTrue(_article_generation_history_exists(self.org))
+        # Reset stamped AFTER the article → excluded.
+        self.assertFalse(
+            _article_generation_history_exists(self.org, since=article_time + timedelta(days=1))
+        )
+        # Reset stamped BEFORE the article (i.e. a post-reset article) → counts again.
+        self.assertTrue(
+            _article_generation_history_exists(self.org, since=article_time - timedelta(days=1))
+        )
+
+    def test_article_setup_state_drops_generation_ready_after_reset(self):
+        self._written_article(when=timezone.now() - timedelta(days=2))
+
+        before = _article_setup_state_for_config(self.config, organization=self.org)
+        self.assertTrue(before.get("generationReady"))
+
+        reset_article_setup_config(self.config, github_repo="DrAnuG1995/website")
+        self.config.refresh_from_db()
+
+        after = _article_setup_state_for_config(self.config, organization=self.org)
+        self.assertFalse(after.get("generationReady"))

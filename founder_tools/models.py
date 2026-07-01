@@ -54,6 +54,16 @@ class VibeRaisingCompany(models.Model):
     name = models.CharField(max_length=255)
     domain = models.CharField(max_length=255, blank=True, null=True)
     abn = models.CharField(max_length=64, blank=True, null=True)
+    # ACN of the registered Australian company behind this startup. Only companies
+    # (Pty Ltd / Ltd) have one, so a verified ACN is what gates vibe-raising to
+    # registered companies. Derived from the ABN and cross-checked against the ABR.
+    acn = models.CharField(max_length=32, blank=True, null=True)
+    # ABR entity-type code (e.g. "PRV") captured at verification time, kept for audit
+    # and so the gate decision is inspectable without re-hitting the register.
+    entity_type_code = models.CharField(max_length=16, blank=True, default="")
+    # When the company was last successfully verified as an active registered company
+    # against the Australian Business Register. Null means never verified.
+    abr_verified_at = models.DateTimeField(blank=True, null=True)
     location = models.CharField(max_length=255, blank=True, default="")
     avatar_url = models.URLField(blank=True, null=True)
     registered = models.BooleanField(default=False)

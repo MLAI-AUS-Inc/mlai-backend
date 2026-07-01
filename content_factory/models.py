@@ -157,6 +157,14 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="Accepted directory visual-style report (renderer profile, page spec, component manifest).",
     )
+    authors = models.JSONField(
+        default=list, blank=True,
+        help_text="Article author profiles for this org: [{id, name, role, credentials, bio, avatarUrl, avatarAlt, url, sameAs}, ...].",
+    )
+    default_author_id = models.CharField(
+        max_length=128, blank=True, default="",
+        help_text="id of the author in `authors` used as the byline when an article run does not name one.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

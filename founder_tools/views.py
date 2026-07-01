@@ -21,6 +21,10 @@ from .services import (
     get_or_create_founder_profile,
     set_active_company,
 )
+from vibe_raising.registration import (
+    attempt_company_verification,
+    set_unverified_company_abn,
+)
 
 
 def _connector_summaries(user):
@@ -93,25 +97,30 @@ class FounderToolsCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
-        company_fields = {
+        plain_fields = {
             key: data[key]
-            for key in ("name", "domain", "abn", "location", "registered")
+            for key in ("name", "domain", "location")
             if key in data
         }
 
         if company_id:
             company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-            for field, value in company_fields.items():
-                setattr(company, field, value)
-            company.save()
         else:
-            company = profile.companies.filter(name__iexact=company_fields["name"]).first()
-            if company is None:
-                company = VibeRaisingCompany.objects.create(profile=profile, **company_fields)
-            else:
-                for field, value in company_fields.items():
-                    setattr(company, field, value)
-                company.save()
+            company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
+                profile=profile
+            )
+
+        for field, value in plain_fields.items():
+            setattr(company, field, value)
+        if "abn" in data:
+            set_unverified_company_abn(company, data["abn"])
+        if "registered" in data:
+            company.registered = bool(data.get("registered"))
+        company.save()
+
+        # Best-effort verification — unlocks perks (e.g. the coworking discount) when the
+        # ABN/ACN check out, but never blocks setup if they don't.
+        attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)

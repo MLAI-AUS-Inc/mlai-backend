@@ -579,6 +579,15 @@ GOOGLE_WEBSITE_BASELINE_SCOPES = [
 ]
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
+# When true, the vibe-raising registration gate skips the live ABR lookup (used when no
+# ABR credential is configured) but still enforces the ABN and ACN checksums and derives
+# the ACN from the ABN. Lets registered companies with a valid ABN proceed without ABR.
+VIBE_RAISING_SKIP_ABR_VERIFICATION = os.environ.get(
+    "VIBE_RAISING_SKIP_ABR_VERIFICATION", ""
+).strip().lower() in ("1", "true", "yes", "on")
+# Roo points awarded to a founder of a verified registered company (valid ACN) the first
+# time they complete a monthly update each month. 0 disables the reward.
+ROO_POINTS_MONTHLY_UPDATE_REWARD = int(os.environ.get("ROO_POINTS_MONTHLY_UPDATE_REWARD", "20"))
 
 # Founder-authorized connector OAuth settings
 STRIPE_CONNECT_CLIENT_ID = _env_first(
@@ -723,7 +732,12 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 # Points System Configuration
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]
 DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '24'))
-COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '1'))
+# Standard coworking cost. The active 'COWORKING_DAY' RewardsCatalog row takes
+# precedence over this fallback when present (see CoworkingService).
+COWORKING_DAY_COST_POINTS = int(os.getenv('COWORKING_DAY_COST_POINTS', '8'))
+# Discounted cost charged when the user's startup has a 'ready' monthly update
+# for the booking's month.
+COWORKING_DAY_DISCOUNT_COST_POINTS = int(os.getenv('COWORKING_DAY_DISCOUNT_COST_POINTS', '4'))
 COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '18'))  # 6pm prev day
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 

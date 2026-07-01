@@ -25,10 +25,12 @@ from content_factory.article_system import (
     best_registry_driven_publish_target,
     merge_article_system,
     normalize_article_system,
+    preserve_registered_publish_targets,
     registry_target_publish_ready,
     resolve_article_system,
 )
 from content_factory.article_setup_reset import carry_reset_markers
+from content_factory.authors import normalize_authors, org_config_author_payload
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
     build_content_factory_preview_url,
@@ -411,6 +413,9 @@ class ContentFactoryOrgConfigView(APIView):
                 active_design_snapshot.serialize() if active_design_snapshot else None
             ),
         }
+        # authors + default_author_name/default_author_profile: content-factory re-fetches this
+        # per run and the renderer seeds its inline author byline from the default profile.
+        response_data.update(org_config_author_payload(config))
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -561,11 +566,20 @@ class ContentFactoryOrgConfigView(APIView):
             'renderer_style_profile',
             'reference_screenshots',
             'directory_style_feedback',
+            'authors',
+            'default_author_id',
         ]
 
         for field in target_fields:
             if field in data:
                 defaults[field] = data[field]
+
+        # Normalize author records to the canonical stored shape so the GET response and the
+        # article-generation payload stay consistent regardless of how the caller shaped them.
+        if 'authors' in defaults:
+            defaults['authors'] = normalize_authors(defaults['authors'])
+        if 'default_author_id' in defaults:
+            defaults['default_author_id'] = str(defaults['default_author_id'] or '').strip()
 
         scan_head_sha = str(data.get('repo_head_sha') or data.get('commit_sha') or '').strip()
         scan_timestamp = timezone.now()
@@ -604,6 +618,37 @@ class ContentFactoryOrgConfigView(APIView):
                     **dict(current_article_system.get('scan') or {}),
                     **{key: value for key, value in scan_state.items() if value not in (None, '')},
                 }
+
+        # Mirror the article_system protection above for publish targets. This PUT
+        # is a second write path (alongside the scan callback) and a routine scan
+        # recomputes an empty publish_targets list when it cannot re-derive the
+        # safe target. Without this guard, an empty incoming list silently unlinks
+        # publishing — wiping a previously-registered, high-confidence target even
+        # though the article surface is still live. Preserve the registered target
+        # unless the article system is genuinely no longer ready.
+        if 'publish_targets' in defaults:
+            existing_config = getattr(org, 'content_config', None)
+            resulting_article_system = (
+                defaults['article_system']
+                if 'article_system' in defaults
+                else resolve_article_system(existing_config)
+            )
+            existing_default_id = getattr(existing_config, 'default_publish_target_id', None)
+            incoming_default_id = (
+                defaults['default_publish_target_id']
+                if 'default_publish_target_id' in defaults
+                else existing_default_id
+            )
+            persisted_targets, persisted_default_id = preserve_registered_publish_targets(
+                incoming_targets=defaults.get('publish_targets'),
+                incoming_default_id=incoming_default_id,
+                existing_targets=getattr(existing_config, 'publish_targets', None),
+                existing_default_id=existing_default_id,
+                article_system=resulting_article_system,
+            )
+            if persisted_targets != (defaults.get('publish_targets') or []):
+                defaults['publish_targets'] = persisted_targets
+                defaults['default_publish_target_id'] = persisted_default_id
 
         # Upsert config
         config, config_created = OrganizationContentConfig.objects.update_or_create(
@@ -5098,10 +5143,19 @@ class ContentFactoryCallbackView(APIView):
                 if merged_article_system != (config.article_system or {}):
                     config.article_system = merged_article_system
                     update_fields.append('article_system')
-                if publish_targets != (config.publish_targets or []):
-                    config.publish_targets = publish_targets
+                # A scan that finds no publish target must not erase a target the
+                # scaffold previously registered while the surface is still live.
+                persist_targets, persist_default_id = preserve_registered_publish_targets(
+                    incoming_targets=publish_targets,
+                    incoming_default_id=default_publish_target_id,
+                    existing_targets=config.publish_targets,
+                    existing_default_id=config.default_publish_target_id,
+                    article_system=merged_article_system,
+                )
+                if persist_targets != (config.publish_targets or []):
+                    config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
-                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                normalized_default_target_id = str(persist_default_id or '').strip() or None
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')
@@ -5131,10 +5185,19 @@ class ContentFactoryCallbackView(APIView):
                 if next_article_system != (config.article_system or {}):
                     config.article_system = next_article_system
                     update_fields.append('article_system')
-                if publish_targets != (config.publish_targets or []):
-                    config.publish_targets = publish_targets
+                # A scan that finds no publish target must not erase a target the
+                # scaffold previously registered while the surface is still live.
+                persist_targets, persist_default_id = preserve_registered_publish_targets(
+                    incoming_targets=publish_targets,
+                    incoming_default_id=default_publish_target_id,
+                    existing_targets=config.publish_targets,
+                    existing_default_id=config.default_publish_target_id,
+                    article_system=next_article_system,
+                )
+                if persist_targets != (config.publish_targets or []):
+                    config.publish_targets = persist_targets
                     update_fields.append('publish_targets')
-                normalized_default_target_id = str(default_publish_target_id or '').strip() or None
+                normalized_default_target_id = str(persist_default_id or '').strip() or None
                 if normalized_default_target_id != config.default_publish_target_id:
                     config.default_publish_target_id = normalized_default_target_id
                     update_fields.append('default_publish_target_id')

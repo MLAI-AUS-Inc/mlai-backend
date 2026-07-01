@@ -80,10 +80,28 @@ class AliasInputSerializer(serializers.Serializer):
 class VibeRaisingCompanySerializer(serializers.ModelSerializer):
     organizationId = serializers.SerializerMethodField()
     organizationDomain = serializers.SerializerMethodField()
+    entityTypeName = serializers.SerializerMethodField()
+    abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
-        fields = ["id", "name", "domain", "abn", "registered", "organizationId", "organizationDomain"]
+        fields = [
+            "id",
+            "name",
+            "domain",
+            "abn",
+            "acn",
+            "registered",
+            "entityTypeName",
+            "abrVerifiedAt",
+            "organizationId",
+            "organizationDomain",
+        ]
+
+    def get_entityTypeName(self, obj):
+        from vibe_raising.validators import entity_type_display
+
+        return entity_type_display(obj.entity_type_code)
 
     def get_organizationId(self, obj):
         return obj.organization_id
@@ -154,6 +172,9 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    # Optional manual ACN fallback; the verification gate cross-checks it against the
+    # ABN/ABR rather than trusting it directly.
+    acn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     registered = serializers.BooleanField(required=False)
 
     def validate(self, attrs):
@@ -165,6 +186,8 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
             attrs["domain"] = _blank_to_none(attrs.get("domain"))
         if "abn" in attrs:
             attrs["abn"] = _blank_to_none(attrs.get("abn"))
+        if "acn" in attrs:
+            attrs["acn"] = _blank_to_none(attrs.get("acn"))
         return attrs
 
 
