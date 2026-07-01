@@ -11149,7 +11149,10 @@ def _local_xml_name(tag: str) -> str:
 def _xml_text(element, *names: str) -> str:
     wanted = set(names)
     for node in element.iter():
-        if _local_xml_name(node.tag) in wanted and node.text:
+        # Skip whitespace-only text: in pretty-printed ABR responses a wrapper element
+        # (e.g. <ABN>) whose name is in ``names`` carries only indentation, so we must
+        # keep looking for the real leaf value (e.g. <identifierValue>) inside it.
+        if _local_xml_name(node.tag) in wanted and node.text and node.text.strip():
             return node.text.strip()
     return ""
 

@@ -74,6 +74,36 @@ class VerifyCompanyWithAbrTests(SimpleTestCase):
         self.assertEqual(result["acn"], COMPANY_ACN)
         self.assertEqual(result["entity_type_code"], "PRV")
 
+    def test_pretty_printed_abr_response_is_parsed(self):
+        # Real ABR responses are indented, so <ABN> carries whitespace text before its
+        # inner <identifierValue>. The parser must skip the wrapper and read the leaf.
+        pretty = f"""<?xml version="1.0" encoding="utf-8"?>
+        <ABRPayloadSearchResults xmlns="http://abr.business.gov.au/ABRXMLSearch/">
+          <response>
+            <businessEntity202001>
+              <ABN>
+                <identifierValue>{COMPANY_ABN}</identifierValue>
+                <isCurrentIndicator>Y</isCurrentIndicator>
+              </ABN>
+              <entityStatus>
+                <entityStatusCode>Active</entityStatusCode>
+              </entityStatus>
+              <ASICNumber>{COMPANY_ACN}</ASICNumber>
+              <entityType>
+                <entityTypeCode>PRV</entityTypeCode>
+              </entityType>
+              <mainName>
+                <organisationName>EXAMPLE PTY LTD</organisationName>
+              </mainName>
+            </businessEntity202001>
+          </response>
+        </ABRPayloadSearchResults>"""
+        result = self._verify(pretty)
+        self.assertTrue(result["found"])
+        self.assertTrue(result["is_company"])
+        self.assertEqual(result["acn"], COMPANY_ACN)
+        self.assertEqual(result["entity_type_code"], "PRV")
+
     def test_inactive_company_is_not_a_company(self):
         result = self._verify(_company_xml(status="Cancelled"))
         self.assertTrue(result["found"])
