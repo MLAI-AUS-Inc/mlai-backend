@@ -30,6 +30,7 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_OAUTH_STATE_SESSION_KEY = "google_oauth_state"
 GOOGLE_OAUTH_NEXT_SESSION_KEY = "google_oauth_next"
+GOOGLE_OAUTH_ORG_SESSION_KEY = "google_oauth_org_id"
 GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,20 @@ def google_connect(request):
     state = secrets.token_urlsafe(32)
     request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
 
+    # Attach the connection to the founder's active startup so each startup can
+    # hold its own Gmail. resolve_connector_organization also creates the org +
+    # binding if needed. Carry it through the OAuth round-trip via the session.
+    from integrations.services.external_connectors import resolve_connector_organization
+
+    try:
+        organization = resolve_connector_organization(user)
+    except Exception:  # pragma: no cover - never block connect on org resolution
+        organization = None
+    if organization is not None:
+        request.session[GOOGLE_OAUTH_ORG_SESSION_KEY] = organization.id
+    else:
+        request.session.pop(GOOGLE_OAUTH_ORG_SESSION_KEY, None)
+
     next_url = _normalize_google_next(request.GET.get("next"))
     if next_url:
         request.session[GOOGLE_OAUTH_NEXT_SESSION_KEY] = next_url
@@ -222,6 +237,10 @@ def google_callback(request):
 
     request.session.pop(GOOGLE_OAUTH_STATE_SESSION_KEY, None)
     success_url = _normalize_google_next(request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None))
+    org_id = request.session.pop(GOOGLE_OAUTH_ORG_SESSION_KEY, None)
+    from organizations.models import Organization
+
+    organization = Organization.objects.filter(id=org_id).first() if org_id else None
 
     # 2) Handle errors
     if request.GET.get("error"):
@@ -231,7 +250,9 @@ def google_callback(request):
     if not code:
         return HttpResponseBadRequest("Missing code")
 
-    existing_connection = GoogleConnection.objects.filter(user=user).first()
+    existing_connection = GoogleConnection.objects.filter(
+        user=user, organization=organization
+    ).first()
 
     # 3) Exchange code for tokens
     try:
@@ -286,6 +307,7 @@ def google_callback(request):
 
     GoogleConnection.objects.update_or_create(
         user=user,
+        organization=organization,
         defaults=defaults,
     )
 

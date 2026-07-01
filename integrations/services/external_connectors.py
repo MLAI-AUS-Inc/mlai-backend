@@ -574,7 +574,7 @@ def resolve_connector_organization(user) -> Optional[Organization]:
         bind_user_to_startup(
             user=user,
             organization=organization,
-            google_connection=getattr(user, "google_connection", None),
+            google_connection=google_connection_for_org(user, organization, adopt_unassigned=True),
             role="founder",
             is_default_for_gmail=True,
         )
@@ -586,6 +586,91 @@ def resolve_connector_organization(user) -> Optional[Organization]:
         .first()
     )
     return binding.organization if binding else None
+
+
+# Sentinel for "scope to the user's active organization" so callers can still
+# pass an explicit organization (including None for the unscoped/global view).
+_ACTIVE_ORG = object()
+
+
+def active_organization_for_user(user) -> Optional[Organization]:
+    """Resolve the user's active startup organization for scoping reads/syncs.
+
+    Read-only counterpart to :func:`resolve_connector_organization` — it never
+    creates an Organization, profile, or binding, so it is safe on GET paths.
+    """
+    company = _get_active_vibe_raising_company(user)
+    domain = normalize_domain(getattr(company, "domain", "") or "")
+    if domain:
+        organization = Organization.objects.filter(domain=domain).first()
+        if organization is not None:
+            return organization
+
+    binding = (
+        user.startup_bindings.select_related("organization")
+        .order_by("-is_default_for_gmail", "-updated_at", "-id")
+        .first()
+    )
+    return binding.organization if binding else None
+
+
+def _scope_org(user, organization):
+    """Map the _ACTIVE_ORG sentinel to the user's active organization."""
+    if organization is _ACTIVE_ORG:
+        return active_organization_for_user(user)
+    return organization
+
+
+def google_connection_for_org(user, organization, *, adopt_unassigned=False) -> Optional[GoogleConnection]:
+    """Return the user's Gmail connection for a specific startup, or None.
+
+    When ``adopt_unassigned`` is set (use only on write/bind paths), a legacy
+    org-less connection — e.g. Gmail connected before the founder created this
+    company — is claimed by this org on first use instead of being ignored.
+    """
+    if organization is None:
+        return None
+    connection = (
+        GoogleConnection.objects.filter(user=user, organization=organization)
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if connection is not None:
+        return connection
+    if adopt_unassigned:
+        orphan = (
+            GoogleConnection.objects.filter(user=user, organization__isnull=True)
+            .order_by("-updated_at", "-id")
+            .first()
+        )
+        if orphan is not None:
+            orphan.organization = organization
+            orphan.save(update_fields=["organization", "updated_at"])
+            return orphan
+    return None
+
+
+def active_google_connection(user) -> Optional[GoogleConnection]:
+    """Resolve the Gmail connection for the user's active startup.
+
+    Replaces the old one-Gmail-per-user ``user.google_connection`` accessor. A
+    multi-startup founder never sees another startup's mailbox: when the active
+    startup has no connection we fall back only to an unassigned (org-less)
+    connection, never to a sibling startup's. Users with no startup at all keep
+    their single legacy connection.
+    """
+    queryset = GoogleConnection.objects.filter(user=user)
+    organization = active_organization_for_user(user)
+    if organization is not None:
+        connection = (
+            queryset.filter(organization=organization).order_by("-updated_at", "-id").first()
+        )
+        if connection is not None:
+            return connection
+        return (
+            queryset.filter(organization__isnull=True).order_by("-updated_at", "-id").first()
+        )
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _state_store(request) -> dict[str, dict[str, Any]]:
@@ -1076,14 +1161,23 @@ def _upsert_connection(
     status: str = ExternalServiceConnectionStatus.CONNECTED,
     provider_metadata: Optional[dict[str, Any]] = None,
 ) -> ExternalServiceConnection:
-    queryset = ExternalServiceConnection.objects.filter(user=user, provider=provider)
+    # Scope the lookup to (user, organization, provider) so connecting a provider
+    # for one startup never matches — and overwrites — a sibling startup's
+    # connection. Previously this filtered on (user, provider) only and
+    # reassigned .organization in place, which silently moved a connection
+    # between startups.
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=provider, organization=organization
+    )
     connection = None
     if external_account_id:
         connection = queryset.filter(external_account_id=external_account_id).first()
     if connection is None:
         connection = queryset.first()
     if connection is None:
-        connection = ExternalServiceConnection(user=user, provider=provider)
+        connection = ExternalServiceConnection(
+            user=user, provider=provider, organization=organization
+        )
 
     connection.organization = organization
     connection.access_token = access_token or connection.access_token or ""
@@ -1363,9 +1457,13 @@ def complete_oauth_callback(request, provider: str) -> str:
             if item.strip()
         ]
         basiq_user_id = str(state_payload.get("basiq_user_id") or "").strip()
+        # The same Basiq user id is reused across a founder's startups, so scope
+        # to the organization from the OAuth state to update the right startup's
+        # bank-feed connection rather than whichever row sorts first.
         connection = ExternalServiceConnection.objects.filter(
             user=request.user,
             provider=ExternalServiceProvider.BANK_FEED,
+            organization=organization,
             external_account_id=basiq_user_id,
         ).first()
         if connection:
@@ -2423,13 +2521,14 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
     }
 
 
-def _latest_xero_connection(user) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.XERO)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def _latest_xero_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=ExternalServiceProvider.XERO
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _xero_record_source_id(record: ExternalFinancialRecord) -> str:
@@ -2769,13 +2868,19 @@ def _serialize_gmail_metadata_preview(metadata: dict[str, Any]) -> dict[str, Any
 
 
 def _gmail_preview_binding(user):
-    binding = get_default_gmail_binding(user=user)
-    if binding and binding.google_connection:
-        return binding
-    connection = GoogleConnection.objects.filter(user=user).first()
-    if not connection:
+    # Prefer the active startup's own mailbox so previews never show another
+    # startup's email.
+    connection = active_google_connection(user)
+    if connection is None:
         return None
-    return type("GmailPreviewBinding", (), {"organization": None, "google_connection": connection})()
+    binding = get_default_gmail_binding(user=user)
+    if binding and binding.google_connection_id == connection.id:
+        return binding
+    return type(
+        "GmailPreviewBinding",
+        (),
+        {"organization": getattr(connection, "organization", None), "google_connection": connection},
+    )()
 
 
 def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
@@ -2962,13 +3067,14 @@ query LinearProjectDetail($id: String!, $issueFirst: Int!, $issueAfter: String, 
 """
 
 
-def _latest_linear_connection(user) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.LINEAR)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def _latest_linear_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=ExternalServiceProvider.LINEAR
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _linear_retry_after_seconds(response) -> int:
@@ -3792,13 +3898,14 @@ def serialize_linear_preview(user, *, limit: int = 5) -> dict[str, Any]:
     }
 
 
-def _latest_slack_connection(user) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.SLACK)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def _latest_slack_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=ExternalServiceProvider.SLACK
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _slack_source_id(channel_id: str, message_ts: str) -> str:
@@ -4698,7 +4805,7 @@ def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
 
 
 def _serialize_google_source(user) -> dict[str, Any]:
-    connection = GoogleConnection.objects.filter(user=user).first()
+    connection = active_google_connection(user)
     configured = is_provider_configured("gmail")
     scope_status = gmail_scope_status_payload(connection)
     if connection and scope_status["hasGmailScope"]:
@@ -4741,13 +4848,14 @@ def _serialize_google_source(user) -> dict[str, Any]:
 GOOGLE_ANALYTICS_ADMIN_ACCOUNT_SUMMARIES_URL = "https://analyticsadmin.googleapis.com/v1beta/accountSummaries"
 
 
-def _latest_google_analytics_connection(user) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.GOOGLE_ANALYTICS)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def _latest_google_analytics_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=ExternalServiceProvider.GOOGLE_ANALYTICS
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _normalize_ga_property_id(raw: str) -> str:
@@ -4888,13 +4996,14 @@ def update_google_analytics_property_selections(user, property_ids: Iterable[str
     }
 
 
-def _latest_luma_connection(user) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(user=user, provider=ExternalServiceProvider.LUMA)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def _latest_luma_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=ExternalServiceProvider.LUMA
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    return queryset.order_by("-updated_at", "-id").first()
 
 
 def _serialize_luma_event_selection(selection: LumaEventSelection) -> dict[str, Any]:
@@ -5054,14 +5163,15 @@ def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable
     }
 
 
-def _serialize_external_source(user, provider: str) -> dict[str, Any]:
+def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) -> dict[str, Any]:
     definition = CONNECTOR_DEFINITIONS[provider]
-    connection = (
-        ExternalServiceConnection.objects.filter(user=user, provider=provider)
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    organization = _scope_org(user, organization)
+    queryset = ExternalServiceConnection.objects.filter(
+        user=user, provider=provider
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    connection = queryset.order_by("-updated_at", "-id").first()
     configuration_error = _provider_configuration_error(provider)
     configured = configuration_error is None
     if connection:
@@ -5170,6 +5280,7 @@ def _serialize_external_source(user, provider: str) -> dict[str, Any]:
 
 
 def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, Any]:
+    organization = active_organization_for_user(user)
     sources = []
     if not financial_only:
         sources.append(_serialize_google_source(user))
@@ -5178,7 +5289,7 @@ def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, 
         definition = CONNECTOR_DEFINITIONS[provider]
         if financial_only and not definition.financial:
             continue
-        sources.append(_serialize_external_source(user, provider))
+        sources.append(_serialize_external_source(user, provider, organization))
 
     return {
         "sources": sources,
@@ -5203,6 +5314,10 @@ def mark_sources_sync_requested(user, providers: Optional[list[str]] = None, *, 
         ]
 
     queryset = ExternalServiceConnection.objects.filter(user=user).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    organization = active_organization_for_user(user)
+    if organization is not None:
+        # Only sync the active startup's connections, never a sibling startup's.
+        queryset = queryset.filter(organization=organization)
     if provider_filter:
         queryset = queryset.filter(provider__in=provider_filter)
 

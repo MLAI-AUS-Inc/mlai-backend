@@ -16,7 +16,9 @@ from .serializers import (
     serialize_founder_bootstrap,
 )
 from .services import (
+    DuplicateCompanyDomainError,
     apply_shared_startup_details,
+    assert_company_domain_available,
     ensure_company_organization,
     get_or_create_founder_profile,
     set_active_company,
@@ -29,7 +31,14 @@ from vibe_raising.registration import (
 
 def _connector_summaries(user):
     try:
+        from integrations.services.external_connectors import active_organization_for_user
+
         connections = ExternalServiceConnection.objects.filter(user=user).order_by("provider", "-updated_at")
+        organization = active_organization_for_user(user)
+        if organization is not None:
+            # Scope the connector summary to the active startup so two startups
+            # under one login don't see each other's connections.
+            connections = connections.filter(organization=organization)
     except Exception:
         return []
 
@@ -103,24 +112,40 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
-        if company_id:
-            company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-        else:
-            company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
-                profile=profile
+        try:
+            if company_id:
+                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+            else:
+                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
+                    profile=profile
+                )
+
+            if "domain" in plain_fields:
+                assert_company_domain_available(
+                    profile, plain_fields["domain"], exclude_company_id=company.id
+                )
+
+            for field, value in plain_fields.items():
+                setattr(company, field, value)
+            if "abn" in data:
+                set_unverified_company_abn(company, data["abn"])
+            if "registered" in data:
+                company.registered = bool(data.get("registered"))
+            company.save()
+
+            # Best-effort verification — unlocks perks (e.g. the coworking discount) when
+            # the ABN/ACN check out, but never blocks setup if they don't.
+            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
+        except DuplicateCompanyDomainError as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "duplicate_company_domain",
+                    "field": "domain",
+                    "companyId": str(exc.existing_company.id),
+                },
+                status=status.HTTP_409_CONFLICT,
             )
-
-        for field, value in plain_fields.items():
-            setattr(company, field, value)
-        if "abn" in data:
-            set_unverified_company_abn(company, data["abn"])
-        if "registered" in data:
-            company.registered = bool(data.get("registered"))
-        company.save()
-
-        # Best-effort verification — unlocks perks (e.g. the coworking discount) when the
-        # ABN/ACN check out, but never blocks setup if they don't.
-        attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)

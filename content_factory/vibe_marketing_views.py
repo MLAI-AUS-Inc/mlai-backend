@@ -89,8 +89,10 @@ from content_factory.topic_feedback import (
 from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
+    DuplicateCompanyDomainError,
     apply_shared_startup_details,
     actor_ids_for_user,
+    assert_company_domain_available,
     ensure_company_organization,
     founder_actor_id_for_user,
     get_founder_company_context,
@@ -1052,6 +1054,11 @@ def _connect_with_existing_github_credentials(config, *, domain: str, actor_id: 
 
 
 def _run_belongs_to_context(run, context) -> bool:
+    # Prefer the exact organization FK (populated from the unique domain on save).
+    # Fall back to the normalized-domain compare for runs created before an
+    # Organization existed (callback ingest), preserving prior behavior.
+    if run.organization_id is not None:
+        return run.organization_id == context.organization.id
     return normalize_company_domain(run.domain) == normalize_company_domain(context.organization.domain)
 
 
@@ -11867,7 +11874,9 @@ class VibeMarketingSettingsView(APIView):
                 ).update(status=ResearchAutomationStatus.PAUSED)
         apply_shared_startup_details(user=request.user, company=company, data=request.data)
 
-        refreshed_context = get_founder_company_context(request.user, company_id=company.id)
+        refreshed_context = get_founder_company_context(
+            request.user, company_id=company.id, persist_active=True
+        )
         return Response(_serialize_bootstrap(refreshed_context, request=request), status=status.HTTP_200_OK)
 
 
@@ -11900,6 +11909,21 @@ class VibeMarketingAutofillView(APIView):
                     return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
             else:
                 company = resolve_active_company(profile)
+
+            try:
+                assert_company_domain_available(
+                    profile, domain, exclude_company_id=company.id if company else None
+                )
+            except DuplicateCompanyDomainError as exc:
+                return Response(
+                    {
+                        "detail": str(exc),
+                        "code": "duplicate_company_domain",
+                        "field": "domain",
+                        "companyId": str(exc.existing_company.id),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             if company is None:
                 company = VibeRaisingCompany.objects.create(
@@ -11941,7 +11965,9 @@ class VibeMarketingAutofillView(APIView):
             except ValueError as exc:
                 return Response({"detail": str(exc), "field": "companyLinkedInUrl"}, status=status.HTTP_400_BAD_REQUEST)
 
-        context = get_founder_company_context(request.user, company_id=company.id)
+        context = get_founder_company_context(
+            request.user, company_id=company.id, persist_active=True
+        )
         company = context.company
         organization = context.organization
         config = _get_config(organization)

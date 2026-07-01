@@ -1817,19 +1817,13 @@ def latest_external_connection_for_startup(
     organization: Organization,
     provider: str,
 ) -> Optional[ExternalServiceConnection]:
-    connection = (
+    # Strictly scoped to the startup's organization — no cross-org fallback, so
+    # one startup never borrows another startup's connection.
+    return (
         user.external_service_connections.filter(
             provider=provider,
             organization=organization,
         )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
-    if connection is not None:
-        return connection
-    return (
-        user.external_service_connections.filter(provider=provider)
         .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
         .order_by("-updated_at", "-id")
         .first()
@@ -2748,7 +2742,11 @@ def create_startup_update_run(
     windows = build_startup_update_target_windows(target_month, reference=now)
     selected_target_month = windows["target_month"]
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
-    google_connection = binding.google_connection or getattr(binding.user, "google_connection", None)
+    from integrations.services.external_connectors import google_connection_for_org
+
+    google_connection = binding.google_connection or google_connection_for_org(
+        binding.user, binding.organization
+    )
     selected_input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
         selected_input_sources,
         google_connection,

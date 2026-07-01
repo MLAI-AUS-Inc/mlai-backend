@@ -567,7 +567,11 @@ def disconnect_gmail_for_user(
     delete_derived_data: bool = False,
     reason: str = "user_request",
 ) -> dict[str, Any]:
-    connection = GoogleConnection.objects.filter(user=user).first()
+    # Disconnect the active startup's mailbox (a founder may have one Gmail per
+    # startup). Falls back to the user's only/legacy connection.
+    from integrations.services.external_connectors import active_google_connection
+
+    connection = active_google_connection(user)
     if connection is None:
         return {
             "status": "not_connected",

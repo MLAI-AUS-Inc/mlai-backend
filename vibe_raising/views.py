@@ -45,7 +45,12 @@ from startup_updates.metric_catalog import (
     startup_update_metric_key,
     startup_update_metric_label,
 )
-from integrations.services.external_connectors import mark_sources_sync_requested
+from integrations.services.external_connectors import (
+    active_google_connection,
+    active_organization_for_user,
+    google_connection_for_org,
+    mark_sources_sync_requested,
+)
 from integrations.services.gmail_scopes import (
     gmail_scope_status_payload,
     has_gmail_read_scope,
@@ -83,6 +88,8 @@ from startup_updates.services import (
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
     DomainOwnershipError,
+    DuplicateCompanyDomainError,
+    assert_company_domain_available,
     domain_is_available_to,
     ensure_company_organization,
     set_active_company,
@@ -180,15 +187,14 @@ def _sync_selected_financial_sources_for_draft(user, input_sources: list[str]) -
     if ExternalServiceProvider.XERO not in selected:
         return warnings
 
-    connection = (
-        ExternalServiceConnection.objects.filter(
-            user=user,
-            provider=ExternalServiceProvider.XERO,
-        )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    connection_qs = ExternalServiceConnection.objects.filter(
+        user=user,
+        provider=ExternalServiceProvider.XERO,
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+    organization = active_organization_for_user(user)
+    if organization is not None:
+        connection_qs = connection_qs.filter(organization=organization)
+    connection = connection_qs.order_by("-updated_at", "-id").first()
     if not connection:
         warnings[ExternalServiceProvider.XERO] = ["Xero was selected but no active Xero connection is available."]
         return warnings
@@ -1060,7 +1066,7 @@ def _ensure_binding_for_company(*, user, company, enforce_ownership=True):
     binding = bind_user_to_startup(
         user=user,
         organization=organization,
-        google_connection=getattr(user, "google_connection", None),
+        google_connection=google_connection_for_org(user, organization, adopt_unassigned=True),
         role="founder",
         is_default_for_gmail=True,
     )
@@ -1615,17 +1621,13 @@ def _get_drafts_for_run(run):
 
 
 def _build_status_payload(*, user, company, domain):
-    google_connection = getattr(user, "google_connection", None)
-    google_connected = bool(google_connection)
-    google_scope_status = gmail_scope_status_payload(google_connection)
-    google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
 
     if not domain:
         return {
             "state": "needs_domain",
-            "googleConnected": google_connected,
-            **google_scope_status,
+            "googleConnected": False,
+            **gmail_scope_status_payload(None),
             "company": company_payload,
             "run": None,
             "draft": None,
@@ -1634,6 +1636,14 @@ def _build_status_payload(*, user, company, domain):
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
     organization = _resolve_owned_organization(user=user, domain=domain)
+    # Gmail is per-startup: resolve the connection for THIS company's org.
+    google_connection = (
+        (binding.google_connection if binding and binding.google_connection else None)
+        or google_connection_for_org(user, organization)
+    )
+    google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
+    google_connection_id = getattr(google_connection, "id", None)
     open_run = (
         get_open_startup_update_run(
             organization=organization,
@@ -1704,10 +1714,6 @@ def _build_email_draft_payload(
     run_id: Optional[str] = None,
     target_month: Optional[date] = None,
 ):
-    google_connection = getattr(user, "google_connection", None)
-    google_connected = bool(google_connection)
-    google_scope_status = gmail_scope_status_payload(google_connection)
-    google_connection_id = getattr(google_connection, "id", None)
     company_payload = _serialize_company_summary(company)
     auth_url = _build_google_oauth_url(request)
     requested_target_month = target_month
@@ -1715,8 +1721,8 @@ def _build_email_draft_payload(
     if not domain:
         return {
             "state": "needs_domain",
-            "gmailConnected": google_connected,
-            **google_scope_status,
+            "gmailConnected": False,
+            **gmail_scope_status_payload(None),
             "company": company_payload,
             "authUrl": auth_url,
             "run": None,
@@ -1734,6 +1740,14 @@ def _build_email_draft_payload(
 
     binding = get_default_binding_for_domain(user=user, domain=domain)
     organization = _resolve_owned_organization(user=user, domain=domain)
+    # Gmail is per-startup: resolve the connection for THIS company's org.
+    google_connection = (
+        (binding.google_connection if binding and binding.google_connection else None)
+        or google_connection_for_org(user, organization)
+    )
+    google_connected = bool(google_connection)
+    google_scope_status = gmail_scope_status_payload(google_connection)
+    google_connection_id = getattr(google_connection, "id", None)
     latest_run = None
     selected_run = None
     drafts = []
@@ -1947,31 +1961,47 @@ class VibeRaisingCompanyView(APIView):
 
         company_id = data.get("companyId")
 
-        with transaction.atomic():
-            if company_id:
-                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
-            else:
-                company = profile.companies.filter(name__iexact=data["name"]).first()
-                if company is None:
-                    company = VibeRaisingCompany(profile=profile)
+        try:
+            with transaction.atomic():
+                if company_id:
+                    company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                else:
+                    company = profile.companies.filter(name__iexact=data["name"]).first()
+                    if company is None:
+                        company = VibeRaisingCompany(profile=profile)
 
-            company.name = data["name"]
-            if "domain" in data:
-                company.domain = data["domain"]
-            if "abn" in data:
-                set_unverified_company_abn(company, data["abn"])
-            if "registered" in data:
-                company.registered = bool(data.get("registered"))
-            company.save()
+                if "domain" in data:
+                    assert_company_domain_available(
+                        profile, data["domain"], exclude_company_id=company.id
+                    )
 
-            # Best-effort: stamp the company verified if its ABN/ACN check out. An
-            # unverifiable ABN does NOT block setup — it just means no perks (e.g. the
-            # coworking discount) until a valid one is provided.
-            attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
+                company.name = data["name"]
+                if "domain" in data:
+                    company.domain = data["domain"]
+                if "abn" in data:
+                    set_unverified_company_abn(company, data["abn"])
+                if "registered" in data:
+                    company.registered = bool(data.get("registered"))
+                company.save()
 
-            ensure_company_organization(company)
-            if profile.active_company_id is None:
-                set_active_company(profile, company)
+                # Best-effort: stamp the company verified if its ABN/ACN check out. An
+                # unverifiable ABN does NOT block setup — it just means no perks (e.g. the
+                # coworking discount) until a valid one is provided.
+                attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
+
+                ensure_company_organization(company)
+                if profile.active_company_id is None:
+                    set_active_company(profile, company)
+        except DuplicateCompanyDomainError as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "duplicate_company_domain",
+                    "field": "domain",
+                    "companyId": str(exc.existing_company.id),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         return Response(VibeRaisingCompanySerializer(company).data, status=status.HTTP_200_OK)
 
@@ -2423,8 +2453,8 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
 
         return Response(
             {
-                "googleConnected": bool(getattr(request.user, "google_connection", None)),
-                **gmail_scope_status_payload(getattr(request.user, "google_connection", None)),
+                "googleConnected": bool(binding.google_connection or active_google_connection(request.user)),
+                **gmail_scope_status_payload(binding.google_connection or active_google_connection(request.user)),
                 "company": _serialize_company_summary(company),
                 "binding": _serialize_binding_summary(binding),
                 "oauthUrl": _build_google_oauth_url(request),
@@ -2474,7 +2504,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = getattr(request.user, "google_connection", None)
+        google_connection = active_google_connection(request.user)
         input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
             input_sources,
             google_connection,
@@ -2630,7 +2660,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             target_month = _requested_target_month_from_request(request)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = getattr(request.user, "google_connection", None)
+        google_connection = active_google_connection(request.user)
         input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
             input_sources,
             google_connection,
@@ -2884,7 +2914,7 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
         if error_response:
             return error_response
 
-        google_connection = getattr(request.user, "google_connection", None)
+        google_connection = active_google_connection(request.user)
         google_connection_id = getattr(google_connection, "id", None)
         domain = context["domain"]
         if not domain:
@@ -2934,7 +2964,7 @@ class VibeRaisingEmailDraftCancelView(APIView):
             user=request.user,
             company=company,
         )
-        google_connection = getattr(request.user, "google_connection", None)
+        google_connection = active_google_connection(request.user)
         google_connection_id = getattr(google_connection, "id", None) or binding.google_connection_id
 
         try:

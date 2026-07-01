@@ -38,6 +38,17 @@ class ContentFactoryRun(models.Model):
     run_id = models.CharField(max_length=100, unique=True, db_index=True)
     workflow = models.CharField(max_length=50, db_index=True)
     domain = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    # The owning tenant. Resolved from `domain` (Organization.domain is unique)
+    # when unset — see save(). Run authorization prefers this exact FK over the
+    # legacy domain-string compare; `domain` stays the wire-level key because
+    # content-factory callbacks can create a run before its Organization exists.
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.SET_NULL,
+        related_name="content_factory_runs",
+        blank=True,
+        null=True,
+    )
     github_repo = models.CharField(max_length=255, blank=True, default="")
     slack_user_id = models.CharField(max_length=50, blank=True, default="")
     status = models.CharField(
@@ -80,7 +91,29 @@ class ContentFactoryRun(models.Model):
             # order by -updated_at. Without this Postgres filters then sorts every
             # matching row for the domain on each bootstrap call.
             models.Index(fields=["domain", "workflow", "-updated_at"], name="cf_run_domain_wf_updated_idx"),
+            models.Index(fields=["organization", "workflow", "-updated_at"], name="cf_run_org_wf_updated_idx"),
         ]
+
+    def save(self, *args, **kwargs):
+        # Auto-resolve the owning Organization from the (unique) domain so every
+        # create/update path populates the FK without each call site having to.
+        # Runs through this once per run: after organization_id is set, the
+        # lookup is skipped. Resolution is best-effort — a callback-ingested run
+        # whose Organization does not exist yet simply stays unscoped (org=None)
+        # and falls back to the domain-string compare in authorization.
+        if self.organization_id is None and self.domain:
+            from integrations.utils import normalize_domain
+            from organizations.models import Organization
+
+            normalized = normalize_domain(self.domain)
+            if normalized:
+                organization = Organization.objects.filter(domain=normalized).first()
+                if organization is not None:
+                    self.organization = organization
+                    update_fields = kwargs.get("update_fields")
+                    if update_fields is not None:
+                        kwargs["update_fields"] = set(update_fields) | {"organization"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.run_id} ({self.workflow}/{self.status})"

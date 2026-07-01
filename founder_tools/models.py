@@ -73,6 +73,17 @@ class VibeRaisingCompany(models.Model):
     class Meta:
         db_table = "vibe_raising_viberaisingcompany"
         ordering = ["created_at", "name"]
+        constraints = [
+            # A profile cannot register two companies on the same domain — they
+            # would collapse onto one Organization (keyed on a unique domain) and
+            # silently share marketing/raising data. Partial so domainless drafts
+            # are exempt and two *different* founders may share a domain.
+            models.UniqueConstraint(
+                fields=["profile", "domain"],
+                condition=models.Q(domain__isnull=False) & ~models.Q(domain=""),
+                name="uniq_profile_domain",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.profile.user.email})"

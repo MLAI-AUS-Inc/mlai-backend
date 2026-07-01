@@ -50,12 +50,33 @@ class ExternalServiceConnectionStatus(models.TextChoices):
 
 
 class GoogleConnection(models.Model):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='google_connection')
+    # FK (not OneToOne) so one founder can connect a separate Gmail per startup.
+    # The owning startup is `organization`; resolve the right connection with
+    # external_connectors.active_google_connection / google_connection_for_org.
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='google_connections')
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="google_connections",
+        null=True,
+        blank=True,
+    )
     google_email = models.EmailField()
     refresh_token = EncryptedTextField()  # encrypted at rest
     scope = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # One Gmail mailbox per (user, startup). NULL-organization rows
+            # (legacy/unassigned) are treated as distinct by the DB and resolved
+            # at the app layer.
+            models.UniqueConstraint(
+                fields=["user", "organization"],
+                name="uniq_google_connection_user_org",
+            ),
+        ]
 
     def __str__(self):
         return f"Google Connection for {self.user.email} ({self.google_email})"
@@ -100,6 +121,17 @@ class ExternalServiceConnection(models.Model):
             models.Index(fields=["user", "provider"], name="extsvc_user_provider_idx"),
             models.Index(fields=["organization", "provider"], name="extsvc_org_provider_idx"),
             models.Index(fields=["provider", "external_account_id"], name="extsvc_provider_extid_idx"),
+        ]
+        constraints = [
+            # One connection per (user, org, provider, external account). This is
+            # the key _upsert_connection matches on, so a startup can hold its own
+            # connection per provider without a sibling startup's connect
+            # overwriting it. NULL organization rows (legacy/unassigned) are
+            # treated as distinct by Postgres and are deduped at the app layer.
+            models.UniqueConstraint(
+                fields=["user", "organization", "provider", "external_account_id"],
+                name="uniq_user_org_provider_account",
+            ),
         ]
         ordering = ["provider", "-updated_at"]
 
