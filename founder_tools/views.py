@@ -25,6 +25,7 @@ from .services import (
     domain_is_available_to,
     ensure_company_organization,
     get_or_create_founder_profile,
+    offboard_company,
     set_active_company,
 )
 from vibe_raising.registration import (
@@ -193,6 +194,27 @@ class FounderToolsCompanyView(APIView):
         company.refresh_from_db()
 
         return Response(FounderCompanySerializer(company).data, status=status.HTTP_200_OK)
+
+
+class FounderToolsCompanyDetailView(APIView):
+    def delete(self, request, company_id):
+        """Offboard a company: revoke its integrations, purge its data, remove it.
+
+        Ownership is enforced via ``profile.companies`` (a company belonging to
+        another founder 404s). Returns the offboarding summary plus the refreshed
+        profile so the client can re-render the company list and active company.
+        """
+        profile = get_or_create_founder_profile(request.user)
+        company = get_object_or_404(
+            profile.companies.select_related("organization"),
+            pk=company_id,
+        )
+        summary = offboard_company(company)
+        profile.refresh_from_db()
+        return Response(
+            {"offboarding": summary, "profile": FounderProfileSerializer(profile).data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class FounderToolsActiveCompanyView(APIView):
