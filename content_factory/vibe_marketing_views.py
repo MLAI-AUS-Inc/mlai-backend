@@ -90,10 +90,14 @@ from content_factory.topic_feedback import (
 from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
+    CompanyDomainChangeBlocked,
+    DomainOwnershipError,
     DuplicateCompanyDomainError,
+    apply_company_domain_change,
     apply_shared_startup_details,
     actor_ids_for_user,
     assert_company_domain_available,
+    domain_is_available_to,
     ensure_company_organization,
     founder_actor_id_for_user,
     get_founder_company_context,
@@ -11813,6 +11817,32 @@ class VibeMarketingSettingsView(APIView):
             return error_response
 
         domain = normalize_company_domain(request.data.get("domain") or company.domain)
+        if domain:
+            is_admin = bool(
+                getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
+            )
+            try:
+                # Rename the org in place when a domain edit is safe; otherwise a
+                # re-point strands the org's data and needs explicit confirmation.
+                apply_company_domain_change(
+                    company,
+                    domain,
+                    user=None if is_admin else request.user,
+                    confirmed=_request_flag(request, "confirm_domain_change", "confirmDomainChange"),
+                )
+            except CompanyDomainChangeBlocked as exc:
+                return Response(
+                    {
+                        "detail": str(exc),
+                        "code": "company_domain_change_moves_data",
+                        "field": "domain",
+                        "companyId": str(exc.company.id),
+                        "currentDomain": exc.current_domain,
+                        "newDomain": exc.new_domain,
+                        "data": exc.data_summary,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
         company_name = str(request.data.get("company_name") or request.data.get("companyName") or company.name).strip()
         if company_name and company.name != company_name:
             company.name = company_name
@@ -11921,6 +11951,12 @@ class VibeMarketingAutofillView(APIView):
             return Response({"detail": "Company name is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
         if not domain:
             return Response({"detail": "Website domain is required for autofill."}, status=status.HTTP_400_BAD_REQUEST)
+        if not (
+            getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
+        ) and not domain_is_available_to(request.user, domain):
+            # First-claim-wins tenancy: never bind a founder's autofill to a
+            # domain another founder already owns.
+            raise DomainOwnershipError()
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
             domain=domain,
@@ -11993,6 +12029,10 @@ class VibeMarketingAutofillView(APIView):
                 profile.active_company = company
                 profile.save(update_fields=["active_company", "updated_at"])
             else:
+                # The founder confirmed this domain change (or it is unchanged):
+                # rename the org in place when safe so connections/runs/updates
+                # follow; a confirmed re-point is logged as stranding.
+                apply_company_domain_change(company, domain, confirmed=True)
                 company.name = company_name
                 company.domain = domain
                 if "location" in request.data:

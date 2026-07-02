@@ -88,8 +88,10 @@ from startup_updates.services import (
 )
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
+    CompanyDomainChangeBlocked,
     DomainOwnershipError,
     DuplicateCompanyDomainError,
+    apply_company_domain_change,
     assert_company_domain_available,
     domain_is_available_to,
     ensure_company_organization,
@@ -1990,6 +1992,7 @@ class VibeRaisingCompanyView(APIView):
 
         company_id = data.get("companyId")
         create_new = bool(data.get("createNew", False))
+        confirm_domain_change = bool(data.get("confirmDomainChange", False))
 
         try:
             with transaction.atomic():
@@ -2004,6 +2007,13 @@ class VibeRaisingCompanyView(APIView):
                     assert_company_domain_available(
                         profile, data["domain"], exclude_company_id=company.id
                     )
+                    if data.get("domain"):
+                        # Ownership of the target domain was already checked
+                        # above; this renames the org in place when safe, or
+                        # 409s when a re-point would strand the org's data.
+                        apply_company_domain_change(
+                            company, data["domain"], confirmed=confirm_domain_change
+                        )
 
                 company.name = data["name"]
                 if "domain" in data:
@@ -2029,6 +2039,19 @@ class VibeRaisingCompanyView(APIView):
                     "code": "duplicate_company_domain",
                     "field": "domain",
                     "companyId": str(exc.existing_company.id),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        except CompanyDomainChangeBlocked as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "company_domain_change_moves_data",
+                    "field": "domain",
+                    "companyId": str(exc.company.id),
+                    "currentDomain": exc.current_domain,
+                    "newDomain": exc.new_domain,
+                    "data": exc.data_summary,
                 },
                 status=status.HTTP_409_CONFLICT,
             )

@@ -167,6 +167,7 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
     input_aliases = {
         "companyId": ("company_id",),
         "createNew": ("create_new",),
+        "confirmDomainChange": ("confirm_domain_change",),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -174,6 +175,9 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
     # (legacy upsert). createNew opts out of that match so registering a second
     # company can never silently rewrite a same-named sibling.
     createNew = serializers.BooleanField(required=False, default=False)
+    # Acknowledges a domain change that re-points the company to a different
+    # Organization, stranding the old org's data (structured 409 otherwise).
+    confirmDomainChange = serializers.BooleanField(required=False, default=False)
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)

@@ -120,6 +120,51 @@ class AutofillCompanyScopingTests(TestCase):
         self.assertEqual(company.domain, "acme-rebrand.com")
         self.assertEqual(VibeRaisingCompany.objects.count(), 1)
 
+    def test_confirmed_domain_change_renames_the_org_so_data_follows(self):
+        company = self._create_company()
+        original_org_id = company.organization_id
+
+        response = self._post_autofill(
+            {
+                "company_name": "Acme Rebrand",
+                "domain": "acme-rebrand.com",
+                "confirm_domain_change": True,
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        company.refresh_from_db()
+        # Same tenant, renamed in place: connections/runs/updates keep working.
+        self.assertEqual(company.organization_id, original_org_id)
+        self.assertEqual(company.organization.domain, "acme-rebrand.com")
+
+    def test_autofill_never_binds_to_another_founders_domain(self):
+        from organizations.models import Organization
+
+        stranger = User.objects.create_user(
+            email="autofill-stranger@example.com",
+            password="password",
+            first_name="Str",
+            last_name="Anger",
+            role="participant",
+        )
+        stranger_profile = VibeRaisingProfile.objects.create(
+            user=stranger, role=VibeRaisingProfile.ROLE_FOUNDER
+        )
+        VibeRaisingCompany.objects.create(
+            profile=stranger_profile,
+            name="Foreign Co",
+            domain="foreign.example",
+            organization=Organization.objects.create(name="Foreign", domain="foreign.example"),
+        )
+
+        response = self._post_autofill(
+            {"company_name": "Impostor", "domain": "foreign.example", "create_new": True}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already linked", str(response.data["detail"]))
+
     def test_same_domain_update_needs_no_confirmation(self):
         company = self._create_company()
 
@@ -207,6 +252,64 @@ class SettingsCompanyScopingTests(TestCase):
         self.company_a.refresh_from_db()
         self.assertEqual(self.company_b.name, "Beta Renamed")
         self.assertEqual(self.company_a.name, "Acme Inc.")
+
+    def test_settings_domain_edit_renames_the_org_in_place(self):
+        original_org_id = self.company_b.organization_id
+        with patch(f"{_VIEWS}._serialize_bootstrap", return_value={}):
+            response = self.client.put(
+                "/api/v1/vibe-marketing/settings",
+                {
+                    "companyId": str(self.company_b.id),
+                    "companyName": "Beta Corp",
+                    "domain": "beta-rebrand.com",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.company_b.refresh_from_db()
+        self.assertEqual(self.company_b.organization_id, original_org_id)
+        self.assertEqual(self.company_b.organization.domain, "beta-rebrand.com")
+
+    def test_settings_unsafe_domain_edit_requires_confirmation(self):
+        from integrations.models import GoogleConnection
+        from organizations.models import Organization
+
+        GoogleConnection.objects.create(
+            user=self.user,
+            organization=self.company_b.organization,
+            google_email="beta@example.com",
+            refresh_token="token",
+            scope="",
+        )
+        Organization.objects.create(name="Taken", domain="taken-settings.example")
+
+        with patch(f"{_VIEWS}._serialize_bootstrap", return_value={}):
+            blocked = self.client.put(
+                "/api/v1/vibe-marketing/settings",
+                {
+                    "companyId": str(self.company_b.id),
+                    "companyName": "Beta Corp",
+                    "domain": "taken-settings.example",
+                },
+                format="json",
+            )
+            confirmed = self.client.put(
+                "/api/v1/vibe-marketing/settings",
+                {
+                    "companyId": str(self.company_b.id),
+                    "companyName": "Beta Corp",
+                    "domain": "taken-settings.example",
+                    "confirmDomainChange": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.data["code"], "company_domain_change_moves_data")
+        self.assertEqual(confirmed.status_code, 200)
+        self.company_b.refresh_from_db()
+        self.assertEqual(self.company_b.organization.domain, "taken-settings.example")
 
     def test_settings_save_rejects_a_company_the_user_does_not_own(self):
         stranger = User.objects.create_user(
