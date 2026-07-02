@@ -9,6 +9,7 @@ from typing import Optional
 from uuid import uuid4
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
@@ -1029,17 +1030,45 @@ def _sync_startup_profile(*, startup_profile, organization, company, user):
     )
 
 
-def _get_founder_company_context_or_response(user):
-    profile, error_response = _get_founder_profile_or_response(user)
+def _company_id_from_request(request):
+    return (
+        request.query_params.get("company_id")
+        or request.query_params.get("companyId")
+        or request.data.get("company_id")
+        or request.data.get("companyId")
+    )
+
+
+def _get_founder_company_context_or_response(request):
+    """Resolve the company this request targets.
+
+    An explicit per-request company_id (query param or body) scopes the request
+    to that company — the vibe-marketing pattern — so a multi-startup founder's
+    tabs can't read or write each other's data through the shared, mutable
+    active_company. Without one, falls back to the active company as before.
+    """
+    profile, error_response = _get_founder_profile_or_response(request.user)
     if error_response:
         return None, error_response
 
-    company = _get_active_company(profile)
-    if company is None:
-        return None, Response(
-            {"detail": "No active company found for this founder."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    company_id = _company_id_from_request(request)
+    if company_id:
+        try:
+            # profile.companies enforces ownership; a foreign or unknown id 404s.
+            company = profile.companies.get(pk=company_id)
+        except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
+            return None, Response(
+                {"detail": "Company not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        ensure_company_organization(company)
+    else:
+        company = _get_active_company(profile)
+        if company is None:
+            return None, Response(
+                {"detail": "No active company found for this founder."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     domain = normalize_domain(company.domain or "")
     return {
@@ -1424,7 +1453,7 @@ def _get_manual_document_company_context_or_response(request):
             "binding": binding,
         }, None
 
-    context, error_response = _get_founder_company_context_or_response(request.user)
+    context, error_response = _get_founder_company_context_or_response(request)
     if error_response:
         return None, error_response
     if not context["domain"]:
@@ -1459,7 +1488,7 @@ def _get_accessible_manual_document_or_response(request, document_id):
     if _is_admin_user(request.user):
         return document, None
 
-    context, error_response = _get_founder_company_context_or_response(request.user)
+    context, error_response = _get_founder_company_context_or_response(request)
     if error_response:
         return None, error_response
     if not _manual_document_access_allowed(request.user, document, active_company=context["company"]):
@@ -2033,7 +2062,7 @@ class VibeRaisingVideoUploadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2075,7 +2104,7 @@ class VibeRaisingVideoUploadSessionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2119,7 +2148,7 @@ class VibeRaisingVideoUploadCompleteView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2316,7 +2345,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2345,7 +2374,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         )
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2430,7 +2459,7 @@ class VibeRaisingStartupUpdateBootstrapView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2467,7 +2496,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2600,7 +2629,7 @@ class VibeRaisingStartupUpdateStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2618,7 +2647,7 @@ class VibeRaisingEmailDraftStartView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2889,7 +2918,7 @@ class VibeRaisingEmailDraftStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id: Optional[str] = None):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2910,7 +2939,7 @@ class VibeRaisingEmailDraftActiveRunView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -2948,7 +2977,7 @@ class VibeRaisingEmailDraftCancelView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, run_id: str):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -3014,7 +3043,7 @@ class VibeRaisingEmailDraftResultsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, run_id: Optional[str] = None):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 
@@ -3038,7 +3067,7 @@ class VibeRaisingEmailDraftLatestView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        context, error_response = _get_founder_company_context_or_response(request.user)
+        context, error_response = _get_founder_company_context_or_response(request)
         if error_response:
             return error_response
 

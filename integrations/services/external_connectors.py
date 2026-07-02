@@ -11,6 +11,7 @@ from typing import Any, Iterable, Optional
 
 from django.conf import settings
 from django.core import signing
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
@@ -566,8 +567,10 @@ def _get_active_vibe_raising_company(user):
     return profile.active_company or profile.companies.first()
 
 
-def resolve_connector_organization(user) -> Optional[Organization]:
-    company = _get_active_vibe_raising_company(user)
+def resolve_connector_organization(user, company=None) -> Optional[Organization]:
+    # An explicit company (validated as the user's own by the caller) pins the
+    # connect flow to that startup; otherwise the active company decides.
+    company = company if company is not None else _get_active_vibe_raising_company(user)
     domain = normalize_domain(getattr(company, "domain", "") or "")
     if domain:
         organization, _startup_profile = resolve_or_create_profile(domain=domain)
@@ -612,6 +615,25 @@ def active_organization_for_user(user) -> Optional[Organization]:
         .first()
     )
     return binding.organization if binding else None
+
+
+def company_for_user_from_request(user, request):
+    """(company, ok) from an explicit ?company_id= on a connect request.
+
+    ok=False means an id was supplied but is not one of the user's own
+    companies (or is malformed) — callers must reject rather than fall back,
+    or a typo would silently connect the wrong startup.
+    """
+    params = getattr(request, "GET", None) or {}
+    company_id = params.get("company_id") or params.get("companyId")
+    if not company_id:
+        return None, True
+    from founder_tools.models import VibeRaisingCompany
+
+    try:
+        return VibeRaisingCompany.objects.get(pk=company_id, profile__user=user), True
+    except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
+        return None, False
 
 
 def _scope_org(user, organization):
@@ -756,7 +778,10 @@ def build_authorization_url(request, provider: str) -> str:
         raise ConnectorConfigurationError(configuration_error)
 
     next_url = normalize_connector_next(request.GET.get("next"))
-    organization = resolve_connector_organization(request.user)
+    company, company_ok = company_for_user_from_request(request.user, request)
+    if not company_ok:
+        raise ConnectorOAuthError("Company not found.")
+    organization = resolve_connector_organization(request.user, company=company)
 
     if provider == ExternalServiceProvider.BANK_FEED:
         return _build_basiq_consent_url(request, next_url=next_url, organization=organization)
@@ -1194,7 +1219,7 @@ def _upsert_connection(
     return connection
 
 
-def connect_luma_connection(user, api_key: str) -> ExternalServiceConnection:
+def connect_luma_connection(user, api_key: str, company=None) -> ExternalServiceConnection:
     """Validate a founder-supplied Luma API key and persist it as a connection.
 
     Luma's public API is API-key based (no OAuth), so founders paste their own
@@ -1220,7 +1245,7 @@ def connect_luma_connection(user, api_key: str) -> ExternalServiceConnection:
             "Could not verify the Luma API key right now. Please try again."
         ) from exc
 
-    organization = resolve_connector_organization(user)
+    organization = resolve_connector_organization(user, company=company)
     external_account_id = str(getattr(user, "email", "") or user.id)
     return _upsert_connection(
         user=user,
@@ -1896,7 +1921,8 @@ def _money_string(value: Any) -> Optional[str]:
     return str(value)
 
 
-def serialize_bank_feed_accounts(user) -> dict[str, Any]:
+def serialize_bank_feed_accounts(user, *, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    organization = _scope_org(user, organization)
     queryset = (
         FinancialAccount.objects.filter(
             user=user,
@@ -1906,6 +1932,8 @@ def serialize_bank_feed_accounts(user) -> dict[str, Any]:
         .select_related("connection")
         .order_by("institution_name", "account_label", "external_account_id")
     )
+    if organization is not None:
+        queryset = queryset.filter(connection__organization=organization)
     accounts = [
         {
             "id": account.id,
@@ -1939,7 +1967,9 @@ def serialize_bank_feed_transactions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 50,
+    organization=_ACTIVE_ORG,
 ) -> dict[str, Any]:
+    organization = _scope_org(user, organization)
     queryset = (
         ExternalFinancialRecord.objects.filter(
             user=user,
@@ -1949,6 +1979,8 @@ def serialize_bank_feed_transactions(
         .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         .select_related("financial_account", "connection")
     )
+    if organization is not None:
+        queryset = queryset.filter(connection__organization=organization)
     if account_id:
         queryset = queryset.filter(
             models_q_financial_account_id_or_external_account_id(account_id)
@@ -2611,8 +2643,9 @@ def serialize_xero_preview(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    organization=_ACTIVE_ORG,
 ) -> dict[str, Any]:
-    connection = _latest_xero_connection(user)
+    connection = _latest_xero_connection(user, organization)
     if not connection:
         return {
             "tenantLabel": None,
@@ -2768,7 +2801,9 @@ def serialize_xero_invoices(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 50,
+    organization=_ACTIVE_ORG,
 ) -> dict[str, Any]:
+    organization = _scope_org(user, organization)
     queryset = (
         ExternalFinancialRecord.objects.filter(
             user=user,
@@ -2778,6 +2813,8 @@ def serialize_xero_invoices(
         .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         .select_related("connection")
     )
+    if organization is not None:
+        queryset = queryset.filter(connection__organization=organization)
     parsed_start_date = parse_date(str(start_date)) if start_date else None
     parsed_end_date = parse_date(str(end_date)) if end_date else None
     if parsed_start_date:
@@ -2867,10 +2904,13 @@ def _serialize_gmail_metadata_preview(metadata: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _gmail_preview_binding(user):
-    # Prefer the active startup's own mailbox so previews never show another
+def _gmail_preview_binding(user, organization=_ACTIVE_ORG):
+    # Prefer the requested startup's own mailbox so previews never show another
     # startup's email.
-    connection = active_google_connection(user)
+    if organization is _ACTIVE_ORG:
+        connection = active_google_connection(user)
+    else:
+        connection = google_connection_for_org(user, organization)
     if connection is None:
         return None
     binding = get_default_gmail_binding(user=user)
@@ -2883,9 +2923,9 @@ def _gmail_preview_binding(user):
     )()
 
 
-def serialize_gmail_preview(user, *, limit: int = 5) -> dict[str, Any]:
+def serialize_gmail_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) -> dict[str, Any]:
     limit = min(max(int(limit or 5), 1), 10)
-    binding = _gmail_preview_binding(user)
+    binding = _gmail_preview_binding(user, organization)
     if not binding or not binding.google_connection:
         return {
             "accountLabel": None,
@@ -3247,8 +3287,8 @@ def _serialize_linear_project_selection(selection: LinearProjectSelection) -> di
     }
 
 
-def serialize_linear_projects(user, *, cursor: Optional[str] = None, limit: int = 100) -> dict[str, Any]:
-    connection = _latest_linear_connection(user)
+def serialize_linear_projects(user, *, cursor: Optional[str] = None, limit: int = 100, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_linear_connection(user, organization)
     if not connection:
         return {
             "accountLabel": None,
@@ -3314,8 +3354,8 @@ def _selected_linear_projects(connection: ExternalServiceConnection):
     ).order_by("project_name", "linear_project_id")
 
 
-def update_linear_project_selections(user, project_ids: Iterable[str]) -> dict[str, Any]:
-    connection = _latest_linear_connection(user)
+def update_linear_project_selections(user, project_ids: Iterable[str], *, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_linear_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Linear is not connected.")
     selected_ids = {
@@ -3783,8 +3823,8 @@ def _serialize_linear_project_artifact(project: LinearProjectArtifact) -> dict[s
     }
 
 
-def serialize_linear_preview(user, *, limit: int = 5) -> dict[str, Any]:
-    connection = _latest_linear_connection(user)
+def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_linear_connection(user, organization)
     if not connection:
         return {
             "accountLabel": None,
@@ -4143,8 +4183,8 @@ def _serialize_slack_channel_selection(selection: SlackChannelSelection) -> dict
     }
 
 
-def serialize_slack_channels(user, *, cursor: Optional[str] = None, limit: int = 200) -> dict[str, Any]:
-    connection = _latest_slack_connection(user)
+def serialize_slack_channels(user, *, cursor: Optional[str] = None, limit: int = 200, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_slack_connection(user, organization)
     if not connection:
         return {
             "accountLabel": None,
@@ -4201,8 +4241,8 @@ def serialize_slack_channels(user, *, cursor: Optional[str] = None, limit: int =
     }
 
 
-def update_slack_channel_selections(user, channel_ids: Iterable[str]) -> dict[str, Any]:
-    connection = _latest_slack_connection(user)
+def update_slack_channel_selections(user, channel_ids: Iterable[str], *, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_slack_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Slack is not connected.")
     selected_ids = {
@@ -4736,8 +4776,8 @@ def sync_slack_connection(
     }
 
 
-def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
-    connection = _latest_slack_connection(user)
+def serialize_slack_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_slack_connection(user, organization)
     if not connection:
         return {
             "accountLabel": None,
@@ -4804,8 +4844,12 @@ def serialize_slack_preview(user, *, limit: int = 5) -> dict[str, Any]:
     }
 
 
-def _serialize_google_source(user) -> dict[str, Any]:
-    connection = active_google_connection(user)
+def _serialize_google_source(user, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    if organization is _ACTIVE_ORG:
+        connection = active_google_connection(user)
+    else:
+        # Explicit scope: strictly that startup's mailbox (no legacy fallback).
+        connection = google_connection_for_org(user, organization)
     configured = is_provider_configured("gmail")
     scope_status = gmail_scope_status_payload(connection)
     if connection and scope_status["hasGmailScope"]:
@@ -4883,8 +4927,8 @@ def _serialize_google_analytics_property_selection(selection: GoogleAnalyticsPro
     }
 
 
-def serialize_google_analytics_properties(user, *, cursor: Optional[str] = None, limit: int = 200) -> dict[str, Any]:
-    connection = _latest_google_analytics_connection(user)
+def serialize_google_analytics_properties(user, *, cursor: Optional[str] = None, limit: int = 200, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_google_analytics_connection(user, organization)
     if not connection:
         return {
             "accountLabel": None,
@@ -4953,8 +4997,8 @@ def _selected_google_analytics_properties(connection: ExternalServiceConnection)
     ).order_by("property_display_name", "property_id")
 
 
-def update_google_analytics_property_selections(user, property_ids: Iterable[str]) -> dict[str, Any]:
-    connection = _latest_google_analytics_connection(user)
+def update_google_analytics_property_selections(user, property_ids: Iterable[str], *, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_google_analytics_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Google Analytics is not connected.")
     selected_ids = {
@@ -5043,8 +5087,8 @@ def _selected_luma_events(connection: ExternalServiceConnection):
     ).order_by("-start_at", "event_name", "event_id")
 
 
-def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
-    connection = _latest_luma_connection(user)
+def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_luma_connection(user, organization)
     available_metrics = _luma_available_metrics()
     if not connection:
         return {
@@ -5114,8 +5158,8 @@ def serialize_luma_events(user, *, cursor: Optional[str] = None, limit: int = 50
     }
 
 
-def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable[str]) -> dict[str, Any]:
-    connection = _latest_luma_connection(user)
+def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable[str], *, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    connection = _latest_luma_connection(user, organization)
     if not connection:
         raise ConnectorConfigurationError("Luma is not connected.")
     selected_ids = {str(event_id).strip() for event_id in (event_ids or []) if str(event_id).strip()}
@@ -5279,11 +5323,12 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
     return payload
 
 
-def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, Any]:
-    organization = active_organization_for_user(user)
+def serialize_source_status(user, *, financial_only: bool = False, organization=_ACTIVE_ORG) -> dict[str, Any]:
+    org_scope = organization
+    organization = _scope_org(user, organization)
     sources = []
     if not financial_only:
-        sources.append(_serialize_google_source(user))
+        sources.append(_serialize_google_source(user, org_scope))
 
     for provider in EXTERNAL_PROVIDER_ORDER:
         definition = CONNECTOR_DEFINITIONS[provider]
@@ -5299,7 +5344,13 @@ def serialize_source_status(user, *, financial_only: bool = False) -> dict[str, 
     }
 
 
-def mark_sources_sync_requested(user, providers: Optional[list[str]] = None, *, financial_only: bool = False) -> dict[str, Any]:
+def mark_sources_sync_requested(
+    user,
+    providers: Optional[list[str]] = None,
+    *,
+    financial_only: bool = False,
+    organization=_ACTIVE_ORG,
+) -> dict[str, Any]:
     provider_filter = []
     if providers:
         normalized_providers = [normalize_provider(provider) for provider in providers]
@@ -5314,9 +5365,9 @@ def mark_sources_sync_requested(user, providers: Optional[list[str]] = None, *, 
         ]
 
     queryset = ExternalServiceConnection.objects.filter(user=user).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    organization = active_organization_for_user(user)
+    organization = _scope_org(user, organization)
     if organization is not None:
-        # Only sync the active startup's connections, never a sibling startup's.
+        # Only sync the requested startup's connections, never a sibling startup's.
         queryset = queryset.filter(organization=organization)
     if provider_filter:
         queryset = queryset.filter(provider__in=provider_filter)

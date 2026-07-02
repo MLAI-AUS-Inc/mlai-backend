@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 
 from core.permissions import HasRooApiKey
 from integrations.services.external_connectors import (
+    _ACTIVE_ORG,
     ConnectorConfigurationError,
     connect_luma_connection,
     disconnect_external_connection,
@@ -125,19 +126,79 @@ def _string_list(raw, *object_keys):
     return []
 
 
+def _company_for_scope(request):
+    """The explicit company on this request, or None.
+
+    Callers run _org_scope_or_response first, so an invalid id has already
+    been rejected by the time this returns.
+    """
+    company_id = (
+        request.query_params.get("company_id")
+        or request.query_params.get("companyId")
+        or request.data.get("company_id")
+        or request.data.get("companyId")
+    )
+    if not company_id:
+        return None
+
+    from founder_tools.models import VibeRaisingCompany
+
+    return VibeRaisingCompany.objects.filter(pk=company_id, profile__user=request.user).first()
+
+
+def _org_scope_or_response(request):
+    """Resolve which startup's connections this request targets.
+
+    An explicit company_id (query param or body) pins the request to that
+    company's organization — validated as the requester's own — so a
+    multi-startup founder's Data Sources tab operates on the company it shows,
+    not whatever active_company another tab last selected. Without one, the
+    _ACTIVE_ORG sentinel preserves the active-company behaviour.
+    """
+    company_id = (
+        request.query_params.get("company_id")
+        or request.query_params.get("companyId")
+        or request.data.get("company_id")
+        or request.data.get("companyId")
+    )
+    if not company_id:
+        return _ACTIVE_ORG, None
+
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    from founder_tools.models import VibeRaisingCompany
+    from founder_tools.services import ensure_company_organization
+
+    try:
+        company = VibeRaisingCompany.objects.select_related("organization").get(
+            pk=company_id, profile__user=request.user
+        )
+    except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
+        return None, Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+    # A domainless company has no organization yet: treated as "no tenant", so
+    # every connector reads as disconnected rather than leaking the active org.
+    return ensure_company_organization(company), None
+
+
 class ConnectorSourcesStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        return Response(serialize_source_status(request.user), status=status.HTTP_200_OK)
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
+        return Response(serialize_source_status(request.user, organization=scope), status=status.HTTP_200_OK)
 
 
 class ConnectorSourcesSyncView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         try:
-            payload = mark_sources_sync_requested(request.user, _requested_providers(request))
+            payload = mark_sources_sync_requested(request.user, _requested_providers(request), organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_202_ACCEPTED)
@@ -165,17 +226,23 @@ class LumaConnectView(APIView):
                 {"detail": "A Luma API key is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         try:
-            connect_luma_connection(request.user, api_key)
+            connect_luma_connection(request.user, api_key, company=_company_for_scope(request))
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serialize_source_status(request.user), status=status.HTTP_200_OK)
+        return Response(serialize_source_status(request.user, organization=scope), status=status.HTTP_200_OK)
 
 
 class LumaEventListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 50
         try:
             limit = int(raw_limit)
@@ -186,6 +253,7 @@ class LumaEventListView(APIView):
                 request.user,
                 cursor=request.query_params.get("cursor") or None,
                 limit=limit,
+                organization=scope,
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -198,6 +266,9 @@ class LumaSelectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         event_ids = _string_list(
             request.data.get("eventIds")
             or request.data.get("event_ids")
@@ -217,7 +288,7 @@ class LumaSelectionView(APIView):
             "metric_key",
         )
         try:
-            payload = update_luma_selections(request.user, event_ids, metric_keys)
+            payload = update_luma_selections(request.user, event_ids, metric_keys, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_200_OK)
@@ -227,18 +298,25 @@ class FinancialSourcesStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        return Response(serialize_source_status(request.user, financial_only=True), status=status.HTTP_200_OK)
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
+        return Response(serialize_source_status(request.user, financial_only=True, organization=scope), status=status.HTTP_200_OK)
 
 
 class FinancialSourcesSyncView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         try:
             payload = mark_sources_sync_requested(
                 request.user,
                 _requested_providers(request),
                 financial_only=True,
+                organization=scope,
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -249,13 +327,19 @@ class BankFeedAccountListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        return Response(serialize_bank_feed_accounts(request.user), status=status.HTTP_200_OK)
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
+        return Response(serialize_bank_feed_accounts(request.user, organization=scope), status=status.HTTP_200_OK)
 
 
 class BankFeedTransactionListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 50
         try:
             limit = int(raw_limit)
@@ -267,6 +351,7 @@ class BankFeedTransactionListView(APIView):
             start_date=request.query_params.get("from") or request.query_params.get("start_date"),
             end_date=request.query_params.get("to") or request.query_params.get("end_date"),
             limit=limit,
+            organization=scope,
         )
         return Response(payload, status=status.HTTP_200_OK)
 
@@ -275,11 +360,15 @@ class XeroPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         try:
             payload = serialize_xero_preview(
                 request.user,
                 start_date=request.query_params.get("from") or request.query_params.get("start_date"),
                 end_date=request.query_params.get("to") or request.query_params.get("end_date"),
+                organization=scope,
             )
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -290,6 +379,9 @@ class XeroInvoiceListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 50
         try:
             limit = int(raw_limit)
@@ -301,6 +393,7 @@ class XeroInvoiceListView(APIView):
                 start_date=request.query_params.get("from") or request.query_params.get("start_date"),
                 end_date=request.query_params.get("to") or request.query_params.get("end_date"),
                 limit=limit,
+                organization=scope,
             )
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -311,13 +404,16 @@ class GmailPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 5
         try:
             limit = int(raw_limit)
         except (TypeError, ValueError):
             limit = 5
         try:
-            payload = serialize_gmail_preview(request.user, limit=limit)
+            payload = serialize_gmail_preview(request.user, limit=limit, organization=scope)
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
@@ -327,13 +423,20 @@ class GmailConnectionDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_delete_derived = request.data.get("deleteDerivedData", request.data.get("delete_derived_data", False))
         delete_derived_data = raw_delete_derived is True or str(raw_delete_derived).strip().lower() in {"1", "true", "yes"}
         reason = str(request.data.get("reason") or "user_request").strip() or "user_request"
+        disconnect_kwargs = {}
+        if scope is not _ACTIVE_ORG:
+            disconnect_kwargs["organization"] = scope
         payload = disconnect_gmail_for_user(
             request.user,
             delete_derived_data=delete_derived_data,
             reason=reason,
+            **disconnect_kwargs,
         )
         return Response(payload, status=status.HTTP_200_OK)
 
@@ -342,6 +445,9 @@ class SlackChannelListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 200
         try:
             limit = int(raw_limit)
@@ -352,6 +458,7 @@ class SlackChannelListView(APIView):
                 request.user,
                 cursor=request.query_params.get("cursor") or None,
                 limit=limit,
+                organization=scope,
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -364,6 +471,9 @@ class SlackChannelSelectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_channel_ids = (
             request.data.get("channelIds")
             or request.data.get("channel_ids")
@@ -381,7 +491,7 @@ class SlackChannelSelectionView(APIView):
         else:
             channel_ids = []
         try:
-            payload = update_slack_channel_selections(request.user, channel_ids)
+            payload = update_slack_channel_selections(request.user, channel_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_200_OK)
@@ -391,13 +501,16 @@ class SlackPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 5
         try:
             limit = int(raw_limit)
         except (TypeError, ValueError):
             limit = 5
         try:
-            payload = serialize_slack_preview(request.user, limit=limit)
+            payload = serialize_slack_preview(request.user, limit=limit, organization=scope)
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
@@ -407,6 +520,9 @@ class LinearProjectListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 100
         try:
             limit = int(raw_limit)
@@ -417,6 +533,7 @@ class LinearProjectListView(APIView):
                 request.user,
                 cursor=request.query_params.get("cursor") or None,
                 limit=limit,
+                organization=scope,
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -429,6 +546,9 @@ class LinearProjectSelectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_project_ids = (
             request.data.get("projectIds")
             or request.data.get("project_ids")
@@ -450,7 +570,7 @@ class LinearProjectSelectionView(APIView):
         else:
             project_ids = []
         try:
-            payload = update_linear_project_selections(request.user, project_ids)
+            payload = update_linear_project_selections(request.user, project_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_200_OK)
@@ -460,6 +580,9 @@ class GoogleAnalyticsPropertyListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 200
         try:
             limit = int(raw_limit)
@@ -470,6 +593,7 @@ class GoogleAnalyticsPropertyListView(APIView):
                 request.user,
                 cursor=request.query_params.get("cursor") or None,
                 limit=limit,
+                organization=scope,
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -482,6 +606,9 @@ class GoogleAnalyticsPropertySelectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_property_ids = (
             request.data.get("propertyIds")
             or request.data.get("property_ids")
@@ -503,7 +630,7 @@ class GoogleAnalyticsPropertySelectionView(APIView):
         else:
             property_ids = []
         try:
-            payload = update_google_analytics_property_selections(request.user, property_ids)
+            payload = update_google_analytics_property_selections(request.user, property_ids, organization=scope)
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(payload, status=status.HTTP_200_OK)
@@ -519,7 +646,7 @@ class LinearPreviewView(APIView):
         except (TypeError, ValueError):
             limit = 5
         try:
-            payload = serialize_linear_preview(request.user, limit=limit)
+            payload = serialize_linear_preview(request.user, limit=limit, organization=scope)
         except DatabaseError:
             return Response(PREVIEW_STORAGE_UNAVAILABLE_PAYLOAD, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(payload, status=status.HTTP_200_OK)
