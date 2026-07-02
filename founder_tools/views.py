@@ -158,6 +158,8 @@ class FounderToolsCompanyView(APIView):
                 set_unverified_company_abn(company, data["abn"])
             if "registered" in data:
                 company.registered = bool(data.get("registered"))
+            if "default_audience_visibility" in data:
+                company.default_audience_visibility = data["default_audience_visibility"]
             company.save()
 
             # Best-effort verification — unlocks perks (e.g. the coworking discount) when

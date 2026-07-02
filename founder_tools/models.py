@@ -3,6 +3,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from vibe_raising.audience_visibility import default_audience_visibility
+
 
 class VibeRaisingProfile(models.Model):
     ROLE_FOUNDER = "founder"
@@ -66,6 +68,7 @@ class VibeRaisingCompany(models.Model):
     abr_verified_at = models.DateTimeField(blank=True, null=True)
     location = models.CharField(max_length=255, blank=True, default="")
     avatar_url = models.URLField(blank=True, null=True)
+    default_audience_visibility = models.JSONField(default=default_audience_visibility, blank=True)
     registered = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

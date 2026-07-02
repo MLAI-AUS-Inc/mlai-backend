@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional, Union
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from integrations import http_client
 from organizations.models import Organization
@@ -56,6 +57,11 @@ from startup_updates.models import (
 )
 from integrations.services.valley_harness import ValleyHarnessResult, notify_valley_run_created
 from integrations.utils import normalize_domain
+from vibe_raising.audience_visibility import (
+    default_audience_visibility,
+    monthly_update_visibility,
+    normalize_audience_visibility,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -2966,6 +2972,8 @@ def build_cancel_backup_for_draft(draft: MonthlyUpdateDraft) -> dict:
         "carry_forward_event_ids": list(draft.carry_forward_event_ids or []),
         "groundedness_notes": draft.groundedness_notes or "",
         "ready_at": _iso_datetime(draft.ready_at),
+        "audience_visibility": list(draft.audience_visibility or []),
+        "published_at": _iso_datetime(draft.published_at),
     }
 
 
@@ -3038,6 +3046,8 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
                 "carry_forward_event_ids": snapshot.get("carry_forward_event_ids") or [],
                 "groundedness_notes": snapshot.get("groundedness_notes", ""),
                 "ready_at": ready_at,
+                "audience_visibility": snapshot.get("audience_visibility") or ["just_me"],
+                "published_at": parse_datetime(snapshot.get("published_at")) if snapshot.get("published_at") else None,
             },
         )
         restored += 1
@@ -3073,6 +3083,58 @@ def _restore_cancelled_run_events(*, organization: Organization, backups: dict) 
         )
         restored += 1
     return restored
+
+
+def _company_matches_organization(company, organization: Organization) -> bool:
+    if company is None or organization is None:
+        return False
+    if getattr(company, "organization_id", None) == organization.id:
+        return True
+    return normalize_domain(getattr(company, "domain", "") or "") == organization.domain
+
+
+def _default_audience_visibility_for_monthly_update(
+    *,
+    organization: Organization,
+    run: Optional[ContentFactoryRun],
+) -> list[str]:
+    if run is None:
+        return default_audience_visibility()
+
+    binding_id = (run.run_request or {}).get("binding_id")
+    if not binding_id:
+        return default_audience_visibility()
+
+    binding = (
+        UserStartupBinding.objects
+        .select_related("user")
+        .filter(id=binding_id, organization=organization)
+        .first()
+    )
+    if binding is None:
+        return default_audience_visibility()
+
+    from founder_tools.models import VibeRaisingProfile
+
+    profile = (
+        VibeRaisingProfile.objects
+        .select_related("active_company")
+        .prefetch_related("companies")
+        .filter(user=binding.user)
+        .first()
+    )
+    if profile is None:
+        return default_audience_visibility()
+
+    active_company = profile.active_company
+    if _company_matches_organization(active_company, organization):
+        return normalize_audience_visibility(active_company.default_audience_visibility)
+
+    for company in profile.companies.all():
+        if _company_matches_organization(company, organization):
+            return normalize_audience_visibility(company.default_audience_visibility)
+
+    return default_audience_visibility()
 
 
 def _restore_cancelled_run_metrics(*, organization: Organization, backups: dict) -> int:
@@ -4232,6 +4294,7 @@ def upsert_monthly_update_draft(
     evidence_metric_ids: Optional[list[int]] = None,
     carry_forward_event_ids: Optional[list[int]] = None,
     groundedness_notes: str = "",
+    audience_visibility: Optional[list[str]] = None,
     replace: bool = False,
 ) -> MonthlyUpdateDraft:
     month_start = _month_start(month)
@@ -4262,6 +4325,16 @@ def upsert_monthly_update_draft(
             merge_stats,
         )
 
+    if audience_visibility is not None:
+        visibility = normalize_audience_visibility(audience_visibility)
+    elif existing_draft is not None:
+        visibility = monthly_update_visibility(existing_draft)
+    else:
+        visibility = _default_audience_visibility_for_monthly_update(
+            organization=organization,
+            run=run,
+        )
+
     rendered_markdown = render_monthly_update_markdown(structured_memo)
     title = str((structured_memo or {}).get("title") or "").strip()
     draft, _ = MonthlyUpdateDraft.objects.update_or_create(
@@ -4279,6 +4352,7 @@ def upsert_monthly_update_draft(
             "evidence_metric_ids": evidence_metric_ids or [],
             "carry_forward_event_ids": carry_forward_event_ids or [],
             "groundedness_notes": groundedness_notes or "",
+            "audience_visibility": visibility,
         },
     )
     return draft

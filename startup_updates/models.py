@@ -3,6 +3,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from vibe_raising.audience_visibility import default_audience_visibility
+
 
 class GmailRelevanceLabel(models.TextChoices):
     PENDING = "pending", "Pending"
@@ -953,7 +955,19 @@ class StartupEvent(models.Model):
         return f"{self.organization.domain}:{self.canonical_key}"
 
 
+class MonthlyUpdateDraftQuerySet(models.QuerySet):
+    def published(self):
+        return self.filter(published_at__isnull=False)
+
+    def visible_to_audience(self, audience):
+        from vibe_raising.audience_visibility import visible_monthly_updates_for_audience
+
+        return visible_monthly_updates_for_audience(self, audience)
+
+
 class MonthlyUpdateDraft(models.Model):
+    objects = MonthlyUpdateDraftQuerySet.as_manager()
+
     organization = models.ForeignKey(
         "organizations.Organization",
         on_delete=models.CASCADE,
@@ -990,6 +1004,8 @@ class MonthlyUpdateDraft(models.Model):
     # and never refreshed, so re-approving an old month's draft cannot renew
     # time-based perks (e.g. the coworking discount window) indefinitely.
     ready_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    audience_visibility = models.JSONField(default=default_audience_visibility, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

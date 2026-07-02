@@ -31,6 +31,7 @@ from startup_updates.services import (
     resolve_or_create_profile,
     upsert_monthly_update_draft,
 )
+from .audience_visibility import monthly_update_visibility, visible_monthly_updates_for_audience
 from .metric_history import build_metric_history, parse_metric_number
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
@@ -217,6 +218,92 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNotNone(profile.active_company_id)
         self.assertEqual(str(profile.active_company_id), response.data["id"])
 
+    def test_founder_can_save_company_default_audience_visibility(self):
+        self.client.force_authenticate(user=self.user)
+        VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/companies/",
+            {
+                "name": "Acme Inc.",
+                "domain": "acme.com",
+                "audienceVisibility": ["investors", "community"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["audienceVisibility"], ["community", "investors"])
+        company = VibeRaisingCompany.objects.get()
+        self.assertEqual(company.default_audience_visibility, ["community", "investors"])
+
+        update_response = self.client.post(
+            "/api/v1/vibe-raising/companies/",
+            {
+                "companyId": str(company.id),
+                "name": "Acme Inc.",
+                "domain": "acme.com",
+                "audienceVisibility": "investor",
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.data["audienceVisibility"], ["investors"])
+        company.refresh_from_db()
+        self.assertEqual(company.default_audience_visibility, ["investors"])
+
+    def test_company_default_audience_visibility_accepts_all_valid_combinations(self):
+        self.client.force_authenticate(user=self.user)
+        VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+
+        cases = [
+            (["just_me"], ["just_me"]),
+            (["community"], ["community"]),
+            (["investors"], ["investors"]),
+            (["investors", "community"], ["community", "investors"]),
+        ]
+        for index, (audience_visibility, expected) in enumerate(cases):
+            with self.subTest(audience_visibility=audience_visibility):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/companies/",
+                    {
+                        "name": f"Company {index}",
+                        "domain": f"company-{index}.example",
+                        "audienceVisibility": audience_visibility,
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data["audienceVisibility"], expected)
+                company = VibeRaisingCompany.objects.get(name=f"Company {index}")
+                self.assertEqual(company.default_audience_visibility, expected)
+
+    def test_company_default_audience_visibility_rejects_invalid_combo(self):
+        self.client.force_authenticate(user=self.user)
+        VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+
+        invalid_combinations = [
+            ["just_me", "community"],
+            ["just_me", "investors"],
+            ["just_me", "community", "investors"],
+        ]
+        for index, audience_visibility in enumerate(invalid_combinations):
+            with self.subTest(audience_visibility=audience_visibility):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/companies/",
+                    {
+                        "name": f"Acme {index}",
+                        "domain": f"acme-{index}.com",
+                        "audienceVisibility": audience_visibility,
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(VibeRaisingCompany.objects.count(), 0)
+
     def test_founder_can_update_owned_company_by_company_id(self):
         self.client.force_authenticate(user=self.user)
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
@@ -314,6 +401,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertIsNone(draft.published_at)
+        self.assertEqual(draft.audience_visibility, ["just_me"])
         self.assertEqual(draft.structured_memo["highlights"], ["Closed two pilots", "Hired first AE"])
         self.assertEqual(draft.structured_memo["lowlights"], ["Longer sales cycle"])
         self.assertEqual(draft.structured_memo["asks"], ["Intros to health system buyers"])
@@ -329,6 +418,9 @@ class VibeRaisingApiTests(TestCase):
             [{"metric_key": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
         )
         self.assertEqual(response.data["update"]["month"], "March 2026")
+        self.assertEqual(response.data["update"]["visibility"], "private")
+        self.assertEqual(response.data["update"]["audienceVisibility"], ["just_me"])
+        self.assertIsNone(response.data["update"]["publishedAt"])
         self.assertEqual(response.data["update"]["summary"], "Strong month with enterprise momentum.")
         self.assertEqual(response.data["update"]["sourceUrl"], "https://example.com/march-update")
         self.assertEqual(response.data["update"]["videoUrl"], "https://storage.example.com/vibe-raising/demo.mp4")
@@ -343,6 +435,447 @@ class VibeRaisingApiTests(TestCase):
             [{"metricKey": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
         )
         self.assertNotIn("ignored", response.data["update"]["metrics"])
+
+    def test_monthly_update_defaults_to_company_visibility_for_new_updates_only(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        company.default_audience_visibility = ["community"]
+        company.save(update_fields=["default_audience_visibility", "updated_at"])
+
+        first = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {"month": "March", "year": 2026, "highlights": "Closed two pilots"},
+            format="json",
+        )
+        self.assertEqual(first.status_code, 201)
+        march = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 3, 1))
+        self.assertEqual(march.audience_visibility, ["community"])
+
+        company.default_audience_visibility = ["investors"]
+        company.save(update_fields=["default_audience_visibility", "updated_at"])
+        edit_existing = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {"month": "March", "year": 2026, "highlights": "Edited March"},
+            format="json",
+        )
+        self.assertEqual(edit_existing.status_code, 200)
+        march.refresh_from_db()
+        self.assertEqual(march.audience_visibility, ["community"])
+
+        future = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {"month": "April", "year": 2026, "highlights": "Started April"},
+            format="json",
+        )
+        self.assertEqual(future.status_code, 201)
+        april = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 4, 1))
+        self.assertEqual(april.audience_visibility, ["investors"])
+
+    def test_monthly_update_accepts_allowed_audience_visibility_combinations(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        cases = [
+            ("January", 1, ["just_me"]),
+            ("February", 2, ["community"]),
+            ("March", 3, ["investors"]),
+            ("April", 4, ["investors", "community"]),
+        ]
+        for month_name, month_number, audience_visibility in cases:
+            with self.subTest(audience_visibility=audience_visibility):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/updates/",
+                    {
+                        "month": month_name,
+                        "year": 2026,
+                        "highlights": f"{month_name} highlight",
+                        "audienceVisibility": audience_visibility,
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(
+                    response.data["update"]["audienceVisibility"],
+                    ["community", "investors"] if len(audience_visibility) == 2 else audience_visibility,
+                )
+                draft = MonthlyUpdateDraft.objects.get(
+                    organization__domain="acme.com",
+                    month=date(2026, month_number, 1),
+                )
+                self.assertEqual(draft.audience_visibility, response.data["update"]["audienceVisibility"])
+
+    def test_monthly_update_rejects_invalid_audience_visibility_combo(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        invalid_combinations = [
+            ("March", ["just_me", "community"]),
+            ("April", ["just_me", "investors"]),
+            ("May", ["just_me", "community", "investors"]),
+        ]
+        for month_name, audience_visibility in invalid_combinations:
+            with self.subTest(audience_visibility=audience_visibility):
+                response = self.client.post(
+                    "/api/v1/vibe-raising/updates/",
+                    {
+                        "month": month_name,
+                        "year": 2026,
+                        "highlights": "Closed two pilots",
+                        "audienceVisibility": audience_visibility,
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, 400)
+        self.assertFalse(MonthlyUpdateDraft.objects.filter(organization__domain="acme.com").exists())
+
+    def test_draft_publish_preserves_audience_visibility(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "June",
+                "year": 2026,
+                "highlights": "Prepared investor and community update",
+                "audienceVisibility": ["investors", "community"],
+                "saveMode": "draft",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        draft = MonthlyUpdateDraft.objects.get(organization__domain="acme.com", month=date(2026, 6, 1))
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
+        self.assertIsNone(draft.published_at)
+        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(response.data["update"]["visibility"], "private")
+
+        updates_response = self.client.get("/api/v1/vibe-raising/updates/")
+        self.assertEqual(updates_response.status_code, 200)
+        self.assertEqual(updates_response.data["updates"][0]["audienceVisibility"], ["community", "investors"])
+        drafts_response = self.client.get("/api/v1/vibe-raising/drafts/")
+        self.assertEqual(drafts_response.status_code, 200)
+        self.assertEqual(len(drafts_response.data["drafts"]), 1)
+
+        publish_response = self.client.post(f"/api/v1/vibe-raising/updates/{draft.id}/publish/")
+
+        self.assertEqual(publish_response.status_code, 200)
+        self.assertEqual(publish_response.data["update"]["visibility"], "published")
+        self.assertEqual(publish_response.data["update"]["audienceVisibility"], ["community", "investors"])
+        self.assertIsNotNone(publish_response.data["update"]["publishedAt"])
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertIsNotNone(draft.published_at)
+        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(self.client.get("/api/v1/vibe-raising/drafts/").data["drafts"], [])
+
+    def test_publish_requires_founder_owner(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 6, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["investors"],
+        )
+        url = f"/api/v1/vibe-raising/updates/{draft.id}/publish/"
+
+        anonymous_response = APIClient().post(url)
+
+        investor = User.objects.create_user(email="investor@example.com", password="password")
+        VibeRaisingProfile.objects.create(user=investor, role=VibeRaisingProfile.ROLE_INVESTOR)
+        self.client.force_authenticate(user=investor)
+        investor_response = self.client.post(url)
+
+        other_user = User.objects.create_user(email="other-founder@example.com", password="password")
+        other_profile = VibeRaisingProfile.objects.create(user=other_user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        other_company = VibeRaisingCompany.objects.create(
+            profile=other_profile,
+            name="Other Acme",
+            domain="acme.com",
+            registered=True,
+        )
+        other_profile.active_company = other_company
+        other_profile.save(update_fields=["active_company", "updated_at"])
+        self.client.force_authenticate(user=other_user)
+        non_owner_response = self.client.post(url)
+
+        self.assertEqual(anonymous_response.status_code, 401)
+        self.assertEqual(investor_response.status_code, 403)
+        self.assertEqual(non_owner_response.status_code, 404)
+        draft.refresh_from_db()
+        self.assertIsNone(draft.published_at)
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
+
+    def test_publish_is_idempotent_and_preserves_existing_visibility(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 6, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["investors"],
+        )
+        url = f"/api/v1/vibe-raising/updates/{draft.id}/publish/"
+
+        first_response = self.client.post(url)
+        draft.refresh_from_db()
+        first_published_at = draft.published_at
+        second_response = self.client.post(url)
+        draft.refresh_from_db()
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertIsNotNone(first_published_at)
+        self.assertEqual(draft.published_at, first_published_at)
+        self.assertEqual(draft.audience_visibility, ["investors"])
+        self.assertEqual(second_response.data["update"]["audienceVisibility"], ["investors"])
+
+    def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
+        published_at = timezone.now()
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 6, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community"],
+            published_at=published_at,
+            structured_memo={"highlights": ["Initial highlight"]},
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-raising/updates/",
+            {
+                "month": "June",
+                "year": 2026,
+                "highlights": "Edited highlight",
+                "saveMode": "draft",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, MonthlyUpdateDraftStatus.READY)
+        self.assertEqual(draft.published_at, published_at)
+        self.assertEqual(draft.audience_visibility, ["community"])
+        self.assertEqual(draft.structured_memo["highlights"], ["Edited highlight"])
+        self.assertEqual(response.data["update"]["visibility"], "published")
+        self.assertEqual(response.data["update"]["audienceVisibility"], ["community"])
+
+    def test_drafts_endpoint_returns_only_unpublished_owner_rows(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.save(update_fields=["organization", "updated_at"])
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 1, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community"],
+            published_at=timezone.now(),
+        )
+        owner_draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["community"],
+        )
+        owner_ready_unpublished = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["investors"],
+        )
+        other_user = User.objects.create_user(email="other@example.com", password="password")
+        other_profile = VibeRaisingProfile.objects.create(user=other_user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        other_organization = Organization.objects.create(name="Other Co", domain="other.example")
+        VibeRaisingCompany.objects.create(
+            profile=other_profile,
+            organization=other_organization,
+            name="Other Co",
+            domain="other.example",
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=other_organization,
+            month=date(2026, 4, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["community"],
+        )
+
+        response = self.client.get("/api/v1/vibe-raising/drafts/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {int(item["id"]) for item in response.data["drafts"]},
+            {owner_draft.id, owner_ready_unpublished.id},
+        )
+
+    def test_audience_visibility_filters_published_community_and_investor_surfaces(self):
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        now = timezone.now()
+        community = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 1, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community"],
+            published_at=now,
+        )
+        investors = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["investors"],
+            published_at=now,
+        )
+        both = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community", "investors"],
+            published_at=now,
+        )
+        private = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 4, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["just_me"],
+            published_at=now,
+        )
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 5, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["community", "investors"],
+        )
+
+        community_ids = set(
+            visible_monthly_updates_for_audience(MonthlyUpdateDraft.objects.all(), "community").values_list("id", flat=True)
+        )
+        investor_ids = set(
+            visible_monthly_updates_for_audience(MonthlyUpdateDraft.objects.all(), "investor").values_list("id", flat=True)
+        )
+        queryset_investor_ids = set(
+            MonthlyUpdateDraft.objects.visible_to_audience("investor").values_list("id", flat=True)
+        )
+
+        self.assertEqual(community_ids, {community.id, both.id})
+        self.assertEqual(investor_ids, {investors.id, both.id})
+        self.assertEqual(queryset_investor_ids, {investors.id, both.id})
+        self.assertNotIn(private.id, community_ids | investor_ids)
+        self.assertNotIn(draft.id, community_ids | investor_ids)
+
+    def test_monthly_updates_get_filters_audience_query_for_founder_preview(self):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        now = timezone.now()
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 1, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community"],
+            published_at=now,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 2, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["investors"],
+            published_at=now,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 3, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community", "investors"],
+            published_at=now,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 4, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["just_me"],
+            published_at=now,
+        )
+        MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 5, 1),
+            status=MonthlyUpdateDraftStatus.DRAFT,
+            audience_visibility=["community", "investors"],
+        )
+
+        founder_response = self.client.get("/api/v1/vibe-raising/updates/?audience=founder")
+        community_response = self.client.get("/api/v1/vibe-raising/updates/?audience=community")
+        investor_response = self.client.get("/api/v1/vibe-raising/updates/?audience=investor")
+        invalid_response = self.client.get("/api/v1/vibe-raising/updates/?audience=just_me")
+
+        self.assertEqual(founder_response.status_code, 200)
+        self.assertEqual(len(founder_response.data["updates"]), 5)
+        self.assertEqual(community_response.status_code, 200)
+        self.assertEqual(
+            [update["isoMonth"] for update in community_response.data["updates"]],
+            ["2026-03-01", "2026-01-01"],
+        )
+        self.assertEqual(investor_response.status_code, 200)
+        self.assertEqual(
+            [update["isoMonth"] for update in investor_response.data["updates"]],
+            ["2026-03-01", "2026-02-01"],
+        )
+        self.assertEqual(invalid_response.status_code, 400)
+
+    def test_startup_update_draft_payloads_include_visibility_fields(self):
+        from startup_updates.api_views import _serialize_draft
+        from startup_updates.serializers import DraftResultsSerializer
+
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        published_at = timezone.now()
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=organization,
+            month=date(2026, 7, 1),
+            status=MonthlyUpdateDraftStatus.READY,
+            audience_visibility=["community", "investors"],
+            published_at=published_at,
+        )
+
+        serialized = _serialize_draft(draft)
+
+        self.assertEqual(serialized["audience_visibility"], ["community", "investors"])
+        self.assertEqual(serialized["audienceVisibility"], ["community", "investors"])
+        self.assertEqual(serialized["published_at"], published_at.isoformat())
+        self.assertEqual(serialized["publishedAt"], published_at.isoformat())
+
+        legacy_draft = MonthlyUpdateDraft(audience_visibility=None)
+        self.assertEqual(monthly_update_visibility(legacy_draft), ["just_me"])
+
+        serializer = DraftResultsSerializer(
+            data={
+                "drafts": [
+                    {
+                        "month": "2026-08-01",
+                        "structured_memo": {"highlights": ["Generated highlight"]},
+                        "audienceVisibility": ["investor"],
+                    }
+                ]
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["drafts"][0]["audience_visibility"], ["investors"])
 
     @patch("vibe_raising.views.upload_file_to_storage")
     def test_founder_can_upload_update_video(self, mock_upload):
@@ -828,6 +1361,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             month=date(2026, 2, 1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
             structured_memo={
                 "highlights": ["Closed a channel partnership", "Shipped onboarding refresh"],
                 "lowlights": ["Sales cycle slipped"],
@@ -967,6 +1501,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             month=date(2026, 1, 1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
             structured_memo={
                 "kpi_snapshot": [
                     {"metric_key": "revenue", "label": "Revenue", "value": "AUD 24,062.91"},
@@ -981,6 +1516,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             month=date(2026, 3, 1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
             structured_memo={
                 "kpi_snapshot": [
                     {"metric_key": "revenue", "label": "Revenue", "value": "AUD 13,684.16"},
@@ -1012,6 +1548,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             month=date(2026, 4, 1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
             structured_memo={
                 "kpi_snapshot": [
                     {"metric_key": "activeUsers", "label": "Active Users", "value": "25"},
@@ -1050,6 +1587,7 @@ class VibeRaisingApiTests(TestCase):
             organization=organization,
             month=date(2026, 2, 1),
             status=MonthlyUpdateDraftStatus.READY,
+            published_at=timezone.now(),
             structured_memo={
                 "kpi_snapshot": [
                     {"metric_key": "websiteVisitors", "label": "Website Visitors", "value": "1200"},
@@ -2286,6 +2824,74 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(replaced.structured_memo.get("highlights"), ["Fresh delta"])
         self.assertNotIn("asks", replaced.structured_memo)
         self.assertNotIn("Stale alpha", str(replaced.structured_memo))
+
+    def test_generated_monthly_update_defaults_to_company_visibility_and_preserves_existing(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.default_audience_visibility = ["community", "investors"]
+        company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
+        google_connection = self._create_google_connection()
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(organization=organization, binding=binding)
+
+        draft = upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=run,
+            structured_memo={"highlights": ["Generated highlight"]},
+            model_name="generated-model",
+        )
+
+        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+
+        company.default_audience_visibility = ["investors"]
+        company.save(update_fields=["default_audience_visibility", "updated_at"])
+        replaced = upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 5, 1),
+            run=run,
+            structured_memo={"highlights": ["Regenerated highlight"]},
+            model_name="generated-model",
+            replace=True,
+        )
+
+        self.assertEqual(replaced.audience_visibility, ["community", "investors"])
+
+    def test_generated_monthly_update_accepts_explicit_audience_visibility(self):
+        self.client.force_authenticate(user=self.user)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        company.organization = organization
+        company.default_audience_visibility = ["community"]
+        company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
+        google_connection = self._create_google_connection()
+        binding = UserStartupBinding.objects.create(
+            user=self.user,
+            organization=organization,
+            google_connection=google_connection,
+            role="founder",
+            is_default_for_gmail=True,
+        )
+        run = create_startup_update_run(organization=organization, binding=binding)
+
+        draft = upsert_monthly_update_draft(
+            organization=organization,
+            month=date(2026, 6, 1),
+            run=run,
+            structured_memo={"highlights": ["Generated highlight"]},
+            model_name="generated-model",
+            audience_visibility=["investor"],
+        )
+
+        self.assertEqual(draft.audience_visibility, ["investors"])
 
     def test_upsert_monthly_update_draft_without_replace_merges_prior_run_draft(self):
         self.client.force_authenticate(user=self.user)

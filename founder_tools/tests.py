@@ -72,6 +72,25 @@ class FounderToolsCompanyApiTests(TestCase):
         self.assertEqual(company.organization.domain, "acme.com")
         self.assertEqual(company.organization.company_linkedin_url, "https://www.linkedin.com/company/acme")
 
+    def test_founder_tools_company_can_save_audience_visibility_default(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/v1/founder-tools/companies/",
+            {
+                "name": "Acme Inc.",
+                "domain": "acme.com",
+                "registered": False,
+                "audienceVisibility": ["community", "investors"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["audienceVisibility"], ["community", "investors"])
+        company = VibeRaisingCompany.objects.get()
+        self.assertEqual(company.default_audience_visibility, ["community", "investors"])
+
     def test_personal_linkedin_url_returns_field_validation_error(self):
         self.client.force_authenticate(user=self.user)
 

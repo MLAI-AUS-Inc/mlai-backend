@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .services import ensure_company_organization, normalize_company_domain, normalize_company_linkedin_url
+from vibe_raising.serializer_fields import AudienceVisibilityField
 
 
 def _blank_to_none(value):
@@ -36,6 +37,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
     monthlyUpdatesEnabled = serializers.SerializerMethodField()
+    audienceVisibility = AudienceVisibilityField(source="default_audience_visibility", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
@@ -49,6 +51,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "avatar_url",
             "avatarUrl",
             "registered",
+            "audienceVisibility",
             "entityTypeName",
             "abrVerifiedAt",
             "organizationId",
@@ -143,6 +146,13 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
         "shortDescription": ("short_description",),
         "problemSolved": ("problem_solved",),
         "targetAudience": ("target_audience",),
+        "audienceVisibility": (
+            "audience_visibility",
+            "defaultAudienceVisibility",
+            "default_audience_visibility",
+            "visibilityPreference",
+            "visibility_preference",
+        ),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -175,6 +185,7 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     articleDeliveryMode = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     dailyDiscoveryEnabled = serializers.BooleanField(required=False)
     defaultTimezone = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    audienceVisibility = AudienceVisibilityField(required=False)
 
     def validate(self, attrs):
         attrs["name"] = attrs["name"].strip()
@@ -195,6 +206,8 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
                 attrs["companyLinkedInUrl"] = normalize_company_linkedin_url(attrs.get("companyLinkedInUrl"))
             except ValueError as exc:
                 raise serializers.ValidationError({"companyLinkedInUrl": str(exc)}) from exc
+        if "audienceVisibility" in attrs:
+            attrs["default_audience_visibility"] = attrs.pop("audienceVisibility")
         return attrs
 
 
