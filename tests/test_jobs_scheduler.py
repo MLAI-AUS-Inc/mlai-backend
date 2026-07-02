@@ -9,13 +9,12 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from jobs.models import JobDisqualifierCandidate, JobFeedback, JobListing, JobRun, SourceRunLog
+from jobs.models import JobListing, JobRun, SourceRunLog
 from jobs.conf import settings as jobs_settings
 from jobs.services import job_pipeline
 from jobs.services.company_metadata import enrich_company_metadata
 from jobs.services.job_scoring import ai_relevance_score, is_target_role_title, rerank_for_relevance, score_job
 from jobs.services.summaries import build_job_summary
-from jobs.services.feedback import parse_feedback_command, prune_old_feedback, record_feedback, update_disqualifier_candidates
 from jobs.services.location_eligibility import apply_disqualification_scan, classify_location_eligibility
 from jobs.services.slack import format_slack_message, post_slack_message
 
@@ -100,10 +99,6 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(payload["blocks"][0]["type"], "header")
         self.assertIn("Job link:", str(payload["blocks"]))
         self.assertIn("Apply now", str(payload["blocks"]))
-        self.assertIn("reply in this thread", payload["text"])
-        self.assertIn("good #2", payload["text"])
-        self.assertIn("bad #5 not AI", payload["text"])
-        self.assertIn("/job-disqualify Remote, USA", payload["text"])
 
     @patch("jobs.services.slack._slack_service")
     def test_slack_post_passes_block_layout_to_slack_service(self, mock_slack_service):
@@ -623,6 +618,58 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(inserted, [])
         self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
 
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_restrictions_win_when_job_also_mentions_australia(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-29",
+            run_id="2026-05-29-australia-negative-location",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        raw_jobs = [
+            {
+                "source_name": "Example Remote Board",
+                "source_type": "remote_board",
+                "source_quality_score": 0.7,
+                "title": "AI Engineer",
+                "company_name": "Example Co",
+                "location": "Remote - worldwide",
+                "description": "Build AI products. Remote role. US only. Not available in Australia.",
+                "job_url": "https://example.com/jobs/ai-engineer-us-only-not-au",
+            }
+        ]
+
+        inserted = job_pipeline.insert_matched_jobs(run, raw_jobs)
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_europe_restriction_wins_when_job_mentions_apac_customers(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-29",
+            run_id="2026-05-29-apac-mentioned-europe-restricted",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        raw_jobs = [
+            {
+                "source_name": "Himalayas",
+                "source_type": "remote_board",
+                "source_quality_score": 0.82,
+                "title": "Machine Learning Engineer",
+                "company_name": "Example Co",
+                "location": "Remote - worldwide",
+                "description": "Build machine learning products for APAC customers. Candidates must be based in Europe.",
+                "job_url": "https://example.com/jobs/ml-engineer-europe-only-apac-customers",
+            }
+        ]
+
+        inserted = job_pipeline.insert_matched_jobs(run, raw_jobs)
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
+
     def test_non_startup_and_seniority_signals_apply_ranking_penalties(self):
         base_job = {
             "title": "AI Engineer",
@@ -654,84 +701,6 @@ class JobsSchedulerTests(TestCase):
         self.assertTrue(any(signal["category"] == "company_stage" for signal in penalized["disqualification_signals"]))
         self.assertIn("Very high years-of-experience requirement", penalized["screening_reasons"])
         self.assertLess(penalized_score, clean_score)
-
-    def test_feedback_commands_are_parsed_and_recorded_against_ranked_job(self):
-        run = JobRun.objects.create(run_date="2026-05-29", run_id="2026-05-29-feedback")
-        job = JobListing.objects.create(
-            run=run,
-            run_date=run.run_date,
-            title="AI Engineer",
-            company_name="Example Co",
-            location="Remote - worldwide",
-            job_url="https://example.com/jobs/ai-engineer",
-            source_name="Example",
-            dedupe_key="ai-engineer|example|remote",
-            is_top_pick=True,
-            rank=4,
-        )
-
-        parsed = parse_feedback_command("bad #4 location")
-        feedback = record_feedback(run_id=run.run_id, text="bad #4 location", slack_user_id="U123")
-
-        self.assertEqual(parsed.feedback_type, "flag")
-        self.assertEqual(parsed.rank, 4)
-        self.assertEqual(feedback.job_id, job.id)
-        self.assertEqual(feedback.reason, "location")
-
-    def test_auto_tuner_promotes_repeated_disqualifier_keywords(self):
-        for index in range(3):
-            record_feedback(run_id=None, text="/job-disqualify crypto casino", slack_user_id=f"U{index}")
-
-        result = update_disqualifier_candidates(min_signals=3)
-        scanned = apply_disqualification_scan(
-            {
-                "title": "AI Engineer",
-                "company_name": "Example Co",
-                "location": "Remote - worldwide",
-                "remote_region": "Global",
-                "source_name": "Example Remote Board",
-                "source_type": "remote_board",
-                "description": "Build AI products for a crypto casino growth team.",
-                "job_url": "https://example.com/jobs/ai-engineer",
-            }
-        )
-
-        self.assertEqual(result["processed"], 3)
-        self.assertEqual(result["promoted"], 1)
-        self.assertEqual(scanned["screening_status"], "penalized")
-        self.assertIn("Community disqualifier: crypto casino", scanned["screening_reasons"])
-
-    def test_feedback_retention_prunes_old_raw_feedback_but_keeps_disqualifier_rules(self):
-        old_feedback = record_feedback(run_id=None, text="bad #5 not AI", slack_user_id="UOLD")
-        old_feedback.created_at = timezone.now() - timedelta(days=91)
-        old_feedback.save(update_fields=["created_at"])
-        recent_feedback = record_feedback(run_id=None, text="bad #4 location restricted", slack_user_id="UNEW")
-        candidate = JobDisqualifierCandidate.objects.create(
-            keyword="remote, usa",
-            category="location",
-            status="active",
-            severity="suppress",
-            signal_count=5,
-            confidence=1.0,
-        )
-
-        pruned = prune_old_feedback(retention_days=90)
-
-        self.assertEqual(pruned, 1)
-        self.assertFalse(JobFeedback.objects.filter(id=old_feedback.id).exists())
-        self.assertTrue(JobFeedback.objects.filter(id=recent_feedback.id).exists())
-        self.assertTrue(JobDisqualifierCandidate.objects.filter(id=candidate.id, status="active").exists())
-
-    def test_tuner_command_prunes_old_feedback_by_default(self):
-        old_feedback = record_feedback(run_id=None, text="bad #5 generic software", slack_user_id="UOLD")
-        old_feedback.created_at = timezone.now() - timedelta(days=91)
-        old_feedback.save(update_fields=["created_at"])
-
-        stdout = io.StringIO()
-        call_command("tune_job_disqualifiers", stdout=stdout)
-
-        self.assertIn('"pruned_feedback": 1', stdout.getvalue())
-        self.assertFalse(JobFeedback.objects.filter(id=old_feedback.id).exists())
 
     @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
     def test_retail_manager_is_filtered_even_when_description_mentions_ai_and_startups(self):

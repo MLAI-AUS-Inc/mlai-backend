@@ -14,8 +14,7 @@ from core.permissions import HasRooApiKey
 
 from .conf import settings
 from .models import JobListing, JobRun
-from .serializers import DailyRunRequestSerializer, JobFeedbackRequestSerializer, JobListingSerializer
-from .services.feedback import record_feedback
+from .serializers import DailyRunRequestSerializer, JobListingSerializer
 from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date
 from .services.slack import format_slack_message
 
@@ -357,27 +356,3 @@ class DailyJobsHtmlView(APIView):
         </html>
         """
         return HttpResponse(html)
-
-
-@method_decorator(csrf_exempt, name="dispatch")
-class JobFeedbackView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        serializer = JobFeedbackRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            feedback = record_feedback(**serializer.validated_data)
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(
-            {
-                "id": feedback.id,
-                "feedback_type": feedback.feedback_type,
-                "rank": feedback.rank,
-                "reason": feedback.reason,
-                "keyword": feedback.keyword,
-                "job_id": feedback.job_id,
-            },
-            status=status.HTTP_201_CREATED,
-        )

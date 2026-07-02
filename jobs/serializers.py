@@ -64,11 +64,3 @@ class JobRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobRun
         fields = "__all__"
-
-
-class JobFeedbackRequestSerializer(serializers.Serializer):
-    run_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    text = serializers.CharField()
-    slack_user_id = serializers.CharField(required=False, allow_blank=True, default="")
-    slack_channel_id = serializers.CharField(required=False, allow_blank=True, default="")
-    slack_message_ts = serializers.CharField(required=False, allow_blank=True, default="")

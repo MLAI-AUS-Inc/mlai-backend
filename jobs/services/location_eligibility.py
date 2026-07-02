@@ -34,6 +34,8 @@ RESTRICTED_PATTERNS: tuple[tuple[re.Pattern[str], str | None, str], ...] = (
     (re.compile(r"\beuropean union\b", re.I), "European Union", "Mentions European Union as the hiring region"),
     (re.compile(r"\bany eu country\b", re.I), "European Union", "Restricted to EU countries"),
     (re.compile(r"\beu\s+only\b", re.I), "European Union", "Restricted to EU only"),
+    (re.compile(r"\bnot (available|open) (in|to|for) australia(ns)?\b", re.I), "Australia", "Explicitly excludes Australian candidates"),
+    (re.compile(r"\baustralia(ns)? (are|is) not eligible\b", re.I), "Australia", "Explicitly excludes Australian candidates"),
     (re.compile(r"\beurope\s+only\b", re.I), "Europe", "Restricted to Europe only"),
     (re.compile(r"\bmust be based in (the )?(eu|europe)\b", re.I), "Europe", "Must be based in Europe"),
     (re.compile(r"\b(us|u\.s\.|united states)\s+only\b", re.I), "United States", "Restricted to United States only"),
@@ -161,18 +163,6 @@ def scan_disqualifying_signals(job: dict[str, Any]) -> list[DisqualificationSign
             signals.append(DisqualificationSignal("non_job", "suppress", reason))
             break
 
-    for candidate in active_community_disqualifiers():
-        keyword = str(candidate.keyword or "").strip().lower()
-        if keyword and keyword in text:
-            signals.append(
-                DisqualificationSignal(
-                    candidate.category or "community",
-                    candidate.severity or "penalize",
-                    f"Community disqualifier: {candidate.keyword}",
-                    float(candidate.penalty or 0.08),
-                )
-            )
-
     return signals
 
 
@@ -201,8 +191,6 @@ def classify_location_eligibility(job: dict[str, Any]) -> LocationEligibility:
 
 
 def classify_with_rules(text: str) -> LocationEligibility | None:
-    if any(pattern.search(text) for pattern, _region, _reason in AUSTRALIA_ELIGIBLE_PATTERNS):
-        return None
     for pattern, region, reason in RESTRICTED_PATTERNS:
         if pattern.search(text):
             return LocationEligibility("restricted_remote", region, reason)
@@ -330,12 +318,3 @@ def _has_positive_startup_signal(value: str) -> bool:
             re.I,
         )
     )
-
-
-def active_community_disqualifiers():
-    try:
-        from jobs.services.feedback import active_disqualifier_candidates
-
-        return active_disqualifier_candidates()
-    except Exception:
-        return []

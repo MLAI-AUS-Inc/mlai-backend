@@ -36,7 +36,7 @@ def format_slack_message(run_date: str, top_jobs: list[JobListing], full_list_ur
         lines.append(f"   {why}")
         lines.append(f"   <{link}|Apply now>")
 
-    lines.extend(["", f"More opportunities: <{full_list_url}|View all matched jobs>", "", feedback_footer()])
+    lines.extend(["", f"More opportunities: <{full_list_url}|View all matched jobs>"])
     return {
         "channel": settings.slack_jobs_channel,
         "text": "\n".join(lines),
@@ -95,7 +95,6 @@ def build_slack_blocks(run_date_label: str, jobs: list[JobListing], full_list_ur
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"*More opportunities:* <{full_list_url}|View all matched jobs>"},
             },
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": feedback_footer()}]},
         ]
     )
     return blocks[:50]
@@ -103,15 +102,6 @@ def build_slack_blocks(run_date_label: str, jobs: list[JobListing], full_list_ur
 
 def slack_escape(value: str) -> str:
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def feedback_footer() -> str:
-    return (
-        "Help Roo improve tomorrow's jobs: reply in this thread with examples like "
-        "`good #2`, `bad #5 not AI`, `bad #4 location restricted`, "
-        "`bad #6 generic software role`, `/job-disqualify Remote, USA`, "
-        "`/job-disqualify PhD scholarship`, or `/job-disqualify EU only`."
-    )
 
 
 def post_slack_message(payload: dict) -> tuple[bool, str | None]:

@@ -5,7 +5,6 @@ from . import views
 
 urlpatterns = [
     path("daily-run", views.DailyRunTriggerView.as_view(), name="jobs_daily_run"),
-    path("feedback", views.JobFeedbackView.as_view(), name="jobs_feedback"),
     path("runs/<str:run_id>", views.JobRunDetailView.as_view(), name="jobs_run_detail"),
     path("runs/<str:run_id>/slack-payload", views.JobRunSlackPayloadView.as_view(), name="jobs_run_slack_payload"),
     path("history/view", views.JobsHistoryHtmlView.as_view(), name="jobs_history_html"),
