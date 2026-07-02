@@ -19,6 +19,7 @@ from xml.etree import ElementTree
 from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import OperationalError, connection, transaction
 from django.db.models import Count, Max, Prefetch
 from django.http import HttpResponse
@@ -430,6 +431,42 @@ def _company_id_from_request(request):
         or request.data.get("company_id")
         or request.data.get("companyId")
     )
+
+
+def _request_flag(request, *keys) -> bool:
+    for key in keys:
+        value = request.data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _resolve_profile_company_or_response(request):
+    """Resolve (profile, company) honouring an explicit per-request company_id.
+
+    Mirrors ``_resolve_context_or_response`` for views that operate on the
+    company row itself (settings/avatar) rather than a full org context, so a
+    multi-startup founder's request lands on the company the UI shows instead
+    of whatever ``active_company`` happens to be.
+    """
+    profile = get_or_create_founder_profile(request.user)
+    company_id = _company_id_from_request(request)
+    if company_id:
+        try:
+            company = profile.companies.get(pk=company_id)
+        except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
+            return profile, None, Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        company = resolve_active_company(profile)
+    if company is None:
+        return profile, None, Response(
+            {"detail": "Create or select a founder company first.", "redirect": "/founder-tools/company-setup"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return profile, company, None
 
 
 def _resolve_context_or_response(request, *, require_domain=True):
@@ -11437,13 +11474,9 @@ class VibeMarketingCompanyAvatarView(APIView):
         if not request.user or not request.user.is_authenticated:
             return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
 
-        profile = get_or_create_founder_profile(request.user)
-        company = resolve_active_company(profile)
-        if company is None:
-            return Response(
-                {"detail": "Create or select a founder company first.", "redirect": "/founder-tools/company-setup"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        _profile, company, error_response = _resolve_profile_company_or_response(request)
+        if error_response:
+            return error_response
 
         avatar_file = request.FILES.get("avatar")
         if not avatar_file:
@@ -11775,13 +11808,9 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
 class VibeMarketingSettingsView(APIView):
     @transaction.atomic
     def put(self, request):
-        profile = get_or_create_founder_profile(request.user)
-        company = resolve_active_company(profile)
-        if company is None:
-            return Response(
-                {"detail": "Create or select a founder company first.", "redirect": "/founder-tools/company-setup"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        _profile, company, error_response = _resolve_profile_company_or_response(request)
+        if error_response:
+            return error_response
 
         domain = normalize_company_domain(request.data.get("domain") or company.domain)
         company_name = str(request.data.get("company_name") or request.data.get("companyName") or company.name).strip()
@@ -11902,13 +11931,41 @@ class VibeMarketingAutofillView(APIView):
 
         with transaction.atomic():
             company_id = _company_id_from_request(request)
+            create_new = _request_flag(request, "create_new", "createNew")
+            confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
             if company_id:
                 try:
                     company = profile.companies.get(pk=company_id)
                 except VibeRaisingCompany.DoesNotExist:
                     return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
+            elif create_new:
+                company = None
             else:
                 company = resolve_active_company(profile)
+
+            # Autofill used to adopt whatever company was active and rewrite its
+            # name/domain in place — so "researching" a second startup destroyed
+            # the first one. Changing an existing company's domain now requires
+            # an explicit confirmation (or create_new to register a sibling).
+            if company is not None:
+                existing_domain = normalize_company_domain(company.domain)
+                if existing_domain and existing_domain != domain and not confirm_domain_change:
+                    return Response(
+                        {
+                            "detail": (
+                                f"{company.name or 'Your current company'} is registered on "
+                                f"'{existing_domain}'. Confirm the domain change, or register "
+                                "this as a new company instead."
+                            ),
+                            "code": "company_domain_change_requires_confirmation",
+                            "field": "domain",
+                            "companyId": str(company.id),
+                            "companyName": company.name,
+                            "existingDomain": existing_domain,
+                            "submittedDomain": domain,
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
             try:
                 assert_company_domain_available(

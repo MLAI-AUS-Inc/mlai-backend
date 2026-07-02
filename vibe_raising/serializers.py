@@ -166,9 +166,14 @@ class VibeRaisingProfileUpsertSerializer(AliasInputSerializer):
 class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
     input_aliases = {
         "companyId": ("company_id",),
+        "createNew": ("create_new",),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
+    # Without companyId, a bare create matches an existing company by name
+    # (legacy upsert). createNew opts out of that match so registering a second
+    # company can never silently rewrite a same-named sibling.
+    createNew = serializers.BooleanField(required=False, default=False)
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)

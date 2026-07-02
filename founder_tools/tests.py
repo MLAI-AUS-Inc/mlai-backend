@@ -222,6 +222,76 @@ class FounderCompanyContextScopingTests(TestCase):
             get_founder_company_context(other_user, company_id=self.company_a.id)
 
 
+class CreateNewCompanyFlagTests(TestCase):
+    """createNew opts a bare create out of the legacy name__iexact upsert.
+
+    Without it, "Register New Company" with a name matching an existing company
+    silently rewrites that company's domain/details instead of creating a
+    second row — one of the ways multi-startup founders "lose" companies.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="create-new@example.com",
+            password="password",
+            first_name="Create",
+            last_name="New",
+            role="participant",
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _create(self, name, domain, create_new=False):
+        body = {"name": name, "domain": domain, "registered": True}
+        if create_new:
+            body["createNew"] = True
+        return self.client.post("/api/v1/founder-tools/companies/", body, format="json")
+
+    def test_create_new_creates_second_company_despite_name_match(self):
+        first = self._create("Acme Inc.", "acme.com")
+        self.assertEqual(first.status_code, 200)
+
+        second = self._create("acme inc.", "acme.io", create_new=True)
+        self.assertEqual(second.status_code, 200)
+        self.assertNotEqual(second.data["id"], first.data["id"])
+
+        profile = VibeRaisingProfile.objects.get(user=self.user)
+        self.assertEqual(profile.companies.count(), 2)
+        original = profile.companies.get(pk=first.data["id"])
+        self.assertEqual(original.domain, "acme.com")
+
+    def test_without_create_new_a_name_match_still_updates_in_place(self):
+        # Legacy behaviour, kept for flag-less clients: same name upserts.
+        first = self._create("Acme Inc.", "acme.com")
+        again = self._create("Acme Inc.", "acme.io")
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.data["id"], first.data["id"])
+        self.assertEqual(VibeRaisingCompany.objects.count(), 1)
+        self.assertEqual(VibeRaisingCompany.objects.get().domain, "acme.io")
+
+    def test_create_new_still_blocks_duplicate_domains(self):
+        first = self._create("Acme Inc.", "acme.com")
+        self.assertEqual(first.status_code, 200)
+
+        conflict = self._create("Beta Corp", "acme.com", create_new=True)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.data["code"], "duplicate_company_domain")
+        self.assertEqual(VibeRaisingCompany.objects.count(), 1)
+
+    def test_create_new_via_vibe_raising_twin_endpoint(self):
+        first = self._create("Acme Inc.", "acme.com")
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(
+            "/api/v1/vibe-raising/companies/",
+            {"name": "Acme Inc.", "domain": "acme.io", "createNew": True},
+            format="json",
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertNotEqual(second.data["id"], first.data["id"])
+        self.assertEqual(VibeRaisingCompany.objects.count(), 2)
+
+
 class DuplicateCompanyDomainGuardTests(TestCase):
     """Phase 3a: a profile cannot register two companies on the same domain."""
 
