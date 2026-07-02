@@ -1960,13 +1960,14 @@ class VibeRaisingCompanyView(APIView):
             raise DomainOwnershipError()
 
         company_id = data.get("companyId")
+        create_new = bool(data.get("createNew", False))
 
         try:
             with transaction.atomic():
                 if company_id:
                     company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
                 else:
-                    company = profile.companies.filter(name__iexact=data["name"]).first()
+                    company = None if create_new else profile.companies.filter(name__iexact=data["name"]).first()
                     if company is None:
                         company = VibeRaisingCompany(profile=profile)
 

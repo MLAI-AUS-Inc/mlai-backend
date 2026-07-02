@@ -106,6 +106,7 @@ class FounderToolsCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
+        create_new = bool(data.pop("createNew", False))
         plain_fields = {
             key: data[key]
             for key in ("name", "domain", "location")
@@ -115,6 +116,8 @@ class FounderToolsCompanyView(APIView):
         try:
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+            elif create_new:
+                company = VibeRaisingCompany(profile=profile)
             else:
                 company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
                     profile=profile
