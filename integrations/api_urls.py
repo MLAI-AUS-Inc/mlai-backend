@@ -152,6 +152,7 @@ urlpatterns = [
     path('startup-updates/run', startup_update_api_views.StartupUpdateRunView.as_view(), name='startup_updates_run'),
     path('startup-updates/active-run', startup_update_api_views.StartupUpdateActiveRunView.as_view(), name='startup_updates_active_run'),
     path('startup-updates/open-runs', startup_update_api_views.StartupUpdateOpenRunsView.as_view(), name='startup_updates_open_runs'),
+    path('startup-updates/monthly-dispatch-targets', startup_update_api_views.MonthlyDispatchTargetsView.as_view(), name='startup_updates_monthly_dispatch_targets'),
     path('startup-updates/runs/<str:run_id>/status', startup_update_api_views.StartupUpdateRunStatusView.as_view(), name='startup_updates_run_status'),
     path('startup-updates/runs/<str:run_id>/ingest-next-page', startup_update_api_views.StartupUpdateIngestNextPageView.as_view(), name='startup_updates_ingest_next_page'),
     path('startup-updates/runs/<str:run_id>/hydration-candidates', startup_update_api_views.StartupUpdateHydrationCandidatesView.as_view(), name='startup_updates_hydration_candidates'),

@@ -230,3 +230,45 @@ class FounderToolsActiveCompanyView(APIView):
         )
         set_active_company(profile, company)
         return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
+
+
+class FounderToolsCompanyMonthlyUpdatesView(APIView):
+    """Toggle automated monthly investor updates for a company (self-serve).
+
+    Sets ``monthly_updates_enabled`` on the founder's (user, organization)
+    binding, which is what the valley scheduler reads from
+    monthly-dispatch-targets — so enabling it here schedules this company for
+    monthly updates without any server-config edit. Ownership is enforced via
+    ``profile.companies``.
+    """
+
+    @transaction.atomic
+    def post(self, request, company_id):
+        profile = get_or_create_founder_profile(request.user)
+        company = get_object_or_404(
+            profile.companies.select_related("organization"),
+            pk=company_id,
+        )
+        if not company.organization_id:
+            return Response(
+                {"detail": "Add a company domain before enabling monthly updates."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw = request.data.get("enabled", True)
+        enabled = raw if isinstance(raw, bool) else str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+        from startup_updates.models import UserStartupBinding
+
+        binding, _created = UserStartupBinding.objects.get_or_create(
+            user=request.user,
+            organization=company.organization,
+        )
+        if binding.monthly_updates_enabled != enabled:
+            binding.monthly_updates_enabled = enabled
+            binding.save(update_fields=["monthly_updates_enabled", "updated_at"])
+
+        return Response(
+            {"companyId": str(company.id), "monthlyUpdatesEnabled": enabled},
+            status=status.HTTP_200_OK,
+        )
