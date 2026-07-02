@@ -803,6 +803,9 @@ class NotificationDelivery(models.Model):
 class ContentFactoryHealingPromotionState(models.TextChoices):
     CANDIDATE = "candidate", "Candidate"
     PROMOTED = "promoted", "Promoted"
+    # Terminal for editorial feedback records: one-off article fixes on acceptance, and learned
+    # rules the founder retracts. Archived records never load as hints or fold into specs.
+    ARCHIVED = "archived", "Archived"
 
 
 class ContentFactoryHealingRecord(models.Model):

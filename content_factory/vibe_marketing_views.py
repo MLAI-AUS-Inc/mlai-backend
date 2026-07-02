@@ -4268,9 +4268,19 @@ def _comment_payload_from_request(data):
     }
 
 
-def _remote_comment_payload(comment):
+def _remote_comment_payload(comment, run=None):
+    # The family key lets the content-factory revision run write distilled editorial learnings
+    # back onto the exact ContentFactoryHealingRecord candidate this comment created.
+    feedback_family_key = ""
+    if run is not None:
+        feedback_family_key = _feedback_family_key(
+            domain=run.domain,
+            github_repo=run.github_repo,
+            comment=comment,
+        )
     return {
         "comment_id": str(comment.id),
+        "feedback_family_key": feedback_family_key,
         "component_id": comment.component_id,
         "component_type": comment.component_type,
         "component_label": comment.component_label,
@@ -4366,6 +4376,7 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
                 "normalized_failure": {
                     "feedback_batch_id": batch_id,
                     "comment_id": str(comment.id),
+                    "feedback_family_key": family_key,
                     "source_run_id": run.run_id,
                     "component_id": comment.component_id,
                     "component_type": comment.component_type,
@@ -4381,6 +4392,7 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
                     "feedback_batch_id": batch_id,
                     "source_run_id": run.run_id,
                     "comment_id": str(comment.id),
+                    "feedback_family_key": family_key,
                     "context": comment.context or {},
                 },
                 "snippet_or_rule": rule,
@@ -4411,32 +4423,61 @@ def _create_editorial_feedback_candidates(*, organization, run, comments, batch_
         )
 
 
+def _editorial_feedback_record_scope(record):
+    """Scope the content-factory revision run distilled onto the record: `one_off` fixes stop at
+    the revision; `durable_preference` rules feed future articles. Records without distilled data
+    (older CF, distillation failed) default to durable — the pre-distillation status quo."""
+    normalized = record.normalized_failure if isinstance(record.normalized_failure, dict) else {}
+    distilled = normalized.get("distilled") if isinstance(normalized.get("distilled"), dict) else {}
+    promoted = record.promoted_payload if isinstance(record.promoted_payload, dict) else {}
+    hint = (
+        promoted.get("article_component_feedback_hint")
+        if isinstance(promoted.get("article_component_feedback_hint"), dict)
+        else {}
+    )
+    scope = str(distilled.get("scope") or hint.get("scope") or promoted.get("scope") or "").strip().lower()
+    if scope in {"one_off", "one-off", "oneoff"}:
+        return "one_off"
+    return "durable_preference"
+
+
 def _promote_editorial_feedback_batch(*, run, batch_id, revision_run_id=""):
+    """Scope-aware promotion after the founder accepts a revision: durable preferences become
+    PROMOTED (loaded as prompt hints and folded into the article-kit specs by content-factory);
+    one-off fixes — already applied by the revision itself — are ARCHIVED so they never pollute
+    future prompts. Returns (promoted_count, archived_count)."""
     if not batch_id:
-        return 0
+        return 0, 0
     records = ContentFactoryHealingRecord.objects.filter(
         domain=normalize_company_domain(run.domain),
         github_repo=run.github_repo or "",
         failure_kind="article_component_feedback",
-    )
+    ).exclude(promotion_state=ContentFactoryHealingPromotionState.ARCHIVED)
     promoted_count = 0
+    archived_count = 0
     now_iso = timezone.now().isoformat()
     for record in records:
         evidence = record.evidence_artifacts if isinstance(record.evidence_artifacts, dict) else {}
         promoted_payload = record.promoted_payload if isinstance(record.promoted_payload, dict) else {}
         if evidence.get("feedback_batch_id") != batch_id and promoted_payload.get("feedback_batch_id") != batch_id:
             continue
+        scope = _editorial_feedback_record_scope(record)
         promoted_payload = {
             **promoted_payload,
             "accepted_at": now_iso,
             "revision_run_id": revision_run_id,
+            "scope": scope,
         }
         record.promoted_payload = promoted_payload
-        record.promotion_state = ContentFactoryHealingPromotionState.PROMOTED
+        if scope == "one_off":
+            record.promotion_state = ContentFactoryHealingPromotionState.ARCHIVED
+            archived_count += 1
+        else:
+            record.promotion_state = ContentFactoryHealingPromotionState.PROMOTED
+            promoted_count += 1
         record.latest_run_id = revision_run_id or run.run_id
         record.save(update_fields=["promoted_payload", "promotion_state", "latest_run_id", "updated_at"])
-        promoted_count += 1
-    return promoted_count
+    return promoted_count, archived_count
 
 
 def _publish_evidence_from_run(run, *, compact=False):
@@ -11005,6 +11046,57 @@ def _call_content_factory_component_revision(*, run_id, payload):
     }
 
 
+def _call_content_factory_editorial_learnings_apply(*, payload):
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        return {"error": _content_factory_unavailable_message(remote_config), "retryable": True}
+
+    try:
+        response = http_client.post(
+            f"{remote_config['base_url']}/api/editorial-learnings/apply",
+            json=payload or {},
+            headers=_content_factory_headers(),
+            timeout=(5, 30),
+        )
+    except http_client.RequestException as exc:
+        return {"error": str(exc), "retryable": True}
+
+    if response.status_code in (200, 202):
+        return response.json() if response.content else {}
+
+    try:
+        response_payload = response.json()
+    except Exception:
+        response_payload = {}
+    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    return {
+        "error": str(detail or f"Content Factory returned {response.status_code}."),
+        "content_factory_status_code": response.status_code,
+        "retryable": response.status_code >= 500,
+    }
+
+
+def _request_editorial_learnings_fold(*, organization, github_repo=""):
+    """Ask content-factory to fold the site's promoted learnings into its article-kit specs and
+    regenerate the UI kit. Best-effort by design: a fold failure must never block accepting a
+    revision or retracting a rule — the promoted records remain the source of truth and re-fold
+    on the next kit-plan regeneration."""
+    try:
+        result = _call_content_factory_editorial_learnings_apply(
+            payload={"domain": organization.domain, "github_repo": github_repo or ""}
+        )
+        if result.get("error"):
+            logger.warning(
+                "editorial_learnings_fold_request_failed domain=%s error=%s",
+                organization.domain,
+                result.get("error"),
+            )
+        return result
+    except Exception:
+        logger.exception("editorial_learnings_fold_request_crashed domain=%s", organization.domain)
+        return {}
+
+
 def _call_content_factory_article_system_revision(*, run_id, payload):
     remote_config = _content_factory_remote_config()
     if not remote_config["enabled"]:
@@ -11624,6 +11716,89 @@ class VibeMarketingTopicFeedbackRestoreView(APIView):
 
         restored = restore_topic_feedback(feedback)
         return Response({**serialize_topic_feedback(restored), "restored": True}, status=status.HTTP_200_OK)
+
+
+def _serialize_learned_rule(record):
+    normalized = record.normalized_failure if isinstance(record.normalized_failure, dict) else {}
+    distilled = normalized.get("distilled") if isinstance(normalized.get("distilled"), dict) else {}
+    promoted = record.promoted_payload if isinstance(record.promoted_payload, dict) else {}
+    hint = (
+        promoted.get("article_component_feedback_hint")
+        if isinstance(promoted.get("article_component_feedback_hint"), dict)
+        else {}
+    )
+    folded = promoted.get("folded_to_spec") if isinstance(promoted.get("folded_to_spec"), dict) else {}
+    return {
+        "id": record.id,
+        "rule": str(distilled.get("rule") or hint.get("rule") or record.snippet_or_rule or "").strip(),
+        "scope": _editorial_feedback_record_scope(record),
+        "status": record.promotion_state,
+        "componentId": str(normalized.get("component_id") or ""),
+        "componentType": str(normalized.get("component_type") or ""),
+        "componentLabel": str(normalized.get("component_label") or ""),
+        "sourceComment": str(normalized.get("comment") or ""),
+        "specAmendment": str(distilled.get("spec_amendment") or ""),
+        "appliesToComponentTypes": [
+            str(item) for item in (distilled.get("applies_to_component_types") or []) if str(item).strip()
+        ],
+        "foldedToSpec": bool(folded.get("ref")),
+        "createdAt": record.created_at.isoformat() if record.created_at else None,
+        "updatedAt": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
+class VibeMarketingLearnedRulesView(APIView):
+    """Editorial rules the content factory has learned for this site from accepted article
+    feedback: candidates (awaiting revision acceptance) and promoted rules that shape every
+    future article."""
+
+    def get(self, request):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        include_archived = str(request.query_params.get("include_archived") or "").strip().lower() in {"1", "true", "yes"}
+        records = ContentFactoryHealingRecord.objects.filter(
+            domain=normalize_company_domain(context.organization.domain),
+            failure_kind="article_component_feedback",
+        ).order_by("-updated_at")
+        if not include_archived:
+            records = records.exclude(promotion_state=ContentFactoryHealingPromotionState.ARCHIVED)
+        return Response(
+            {"rules": [_serialize_learned_rule(record) for record in records[:200]]},
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeMarketingLearnedRuleDetailView(APIView):
+    """Retract (archive) a learned rule so future articles stop applying it."""
+
+    def delete(self, request, rule_id):
+        context, error_response = _resolve_context_or_response(request, require_domain=True)
+        if error_response:
+            return error_response
+
+        record = ContentFactoryHealingRecord.objects.filter(
+            pk=rule_id,
+            domain=normalize_company_domain(context.organization.domain),
+            failure_kind="article_component_feedback",
+        ).first()
+        if not record:
+            return Response({"detail": "Learned rule not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        was_promoted = record.promotion_state == ContentFactoryHealingPromotionState.PROMOTED
+        promoted_payload = record.promoted_payload if isinstance(record.promoted_payload, dict) else {}
+        record.promoted_payload = {**promoted_payload, "retracted_at": timezone.now().isoformat()}
+        record.promotion_state = ContentFactoryHealingPromotionState.ARCHIVED
+        record.save(update_fields=["promoted_payload", "promotion_state", "updated_at"])
+        if was_promoted:
+            # Refold without the retracted rule so specs it was already folded into are scrubbed
+            # and the UI kit regenerates.
+            _request_editorial_learnings_fold(
+                organization=context.organization,
+                github_repo=record.github_repo or "",
+            )
+        return Response({"rule": _serialize_learned_rule(record)}, status=status.HTTP_200_OK)
 
 
 def _written_article_identity_keys_for_article(article):
@@ -13741,7 +13916,7 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
             "source_run_id": source_run.run_id,
             "feedback_batch_id": batch_id,
             "requested_run_id": _component_revision_requested_run_id(source_run.run_id, batch_id),
-            "comments": [_remote_comment_payload(comment) for comment in draft_comments],
+            "comments": [_remote_comment_payload(comment, run=source_run) for comment in draft_comments],
             "request_source": "founder_tools_component_feedback",
         }
         remote_payload.update(billing_payload)
@@ -13833,11 +14008,20 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
         if run.status != ContentFactoryRunStatus.COMPLETED:
             return Response({"detail": "The revised article must be completed before accepting feedback."}, status=status.HTTP_400_BAD_REQUEST)
 
-        promoted_count = _promote_editorial_feedback_batch(run=source_run, batch_id=batch_id, revision_run_id=run.run_id)
+        promoted_count, archived_count = _promote_editorial_feedback_batch(
+            run=source_run, batch_id=batch_id, revision_run_id=run.run_id
+        )
         VibeMarketingComponentComment.objects.filter(run=source_run, batch_id=batch_id).update(
             status=VibeMarketingComponentCommentStatus.APPLIED,
             updated_at=timezone.now(),
         )
+        if promoted_count:
+            # Fold the newly promoted preferences into the site's article-kit specs so the next
+            # article is generated from components that already honour them.
+            _request_editorial_learnings_fold(
+                organization=context.organization,
+                github_repo=source_run.github_repo or "",
+            )
         _persist_article_memory_from_run(organization=context.organization, run=run)
         for target in [source_run, run]:
             target_result = target.result or {}
@@ -13849,6 +14033,7 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
                     "revisionRunId": run.run_id,
                     "status": "accepted",
                     "promotedLearningCount": promoted_count,
+                    "archivedLearningCount": archived_count,
                 }
             target.result = target_result
             target.save(update_fields=["result", "updated_at"])
