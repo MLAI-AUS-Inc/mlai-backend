@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -11,6 +13,8 @@ from integrations.utils import normalize_domain
 from organizations.models import Organization
 
 from .models import VibeRaisingCompany, VibeRaisingProfile
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_company_domain(domain: str | None) -> str:
@@ -111,6 +115,112 @@ def domain_is_available_to(user, domain) -> bool:
     if organization is None:
         return True
     return user_may_use_organization(user, organization)
+
+
+def summarize_organization_data(organization) -> dict:
+    """Counts of the org-keyed assets a founder would lose sight of if their
+    company were re-pointed away from this Organization."""
+    from content_factory.models import OrganizationContentConfig
+
+    config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    return {
+        "connections": organization.external_service_connections.count(),
+        "gmailConnections": organization.google_connections.count(),
+        "articleRuns": organization.content_factory_runs.count(),
+        "monthlyUpdates": organization.monthly_update_drafts.count(),
+        "hasGithubRepo": bool(config and (config.github_repo or "").strip()),
+    }
+
+
+def organization_has_material_data(summary: dict) -> bool:
+    return any(
+        summary.get(key)
+        for key in ("connections", "gmailConnections", "articleRuns", "monthlyUpdates", "hasGithubRepo")
+    )
+
+
+class CompanyDomainChangeBlocked(ValueError):
+    """Re-pointing this company to another Organization would strand its data.
+
+    Organization is the tenant boundary: integrations, Gmail, article runs and
+    monthly updates all hang off it. When a domain edit cannot be satisfied by
+    renaming the org in place, the move detaches the company from that history
+    -- so it needs an explicit confirmation instead of happening silently.
+    """
+
+    def __init__(self, company: "VibeRaisingCompany", current_domain: str, new_domain: str, data_summary: dict):
+        self.company = company
+        self.current_domain = current_domain
+        self.new_domain = new_domain
+        self.data_summary = data_summary
+        super().__init__(
+            f"Changing {company.name or 'this company'}'s website from '{current_domain}' to "
+            f"'{new_domain}' disconnects its existing integrations, article runs and updates. "
+            "Confirm the domain change to continue anyway, or register the new domain as a "
+            "separate company."
+        )
+
+
+def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user=None, confirmed=False) -> str:
+    """Migrate-or-guard a company's move to a new domain.
+
+    Call BEFORE writing the new domain to the company (and before
+    ensure_company_organization re-resolves the org):
+
+    - Renames the existing Organization in place when that is safe (the org is
+      exclusively this company's and no Organization exists on the new domain),
+      so connections/runs/updates follow the company. Returns "renamed".
+    - Otherwise the eventual ensure_company_organization will re-point the
+      company at a different Organization. If the old org holds material data
+      and the caller has not confirmed, raises CompanyDomainChangeBlocked
+      (surfaced as a structured 409). A confirmed stranding is logged so
+      orphaned orgs stay discoverable. Returns "repoint".
+    - No-ops for new companies, blank domains, and unchanged domains.
+
+    ``user`` (when given) is also checked against first-claim-wins domain
+    ownership, mirroring the vibe-raising company endpoint.
+    """
+    organization = company.organization if company.organization_id else None
+    normalized_new = normalize_company_domain(new_domain)
+    if organization is None or not normalized_new:
+        return "noop"
+    if normalize_company_domain(organization.domain) == normalized_new:
+        return "noop"
+
+    if user is not None and not domain_is_available_to(user, normalized_new):
+        raise DomainOwnershipError()
+
+    target_exists = Organization.objects.filter(domain=normalized_new).exclude(pk=organization.pk).exists()
+    exclusive = not (
+        VibeRaisingCompany.objects.filter(organization=organization).exclude(pk=company.pk).exists()
+    )
+
+    if not target_exists and exclusive:
+        old_domain = organization.domain
+        organization.domain = normalized_new
+        organization.save(update_fields=["domain"])
+        logger.info(
+            "company_domain_change_renamed_org company=%s org=%s old_domain=%s new_domain=%s",
+            company.pk,
+            organization.pk,
+            old_domain,
+            normalized_new,
+        )
+        return "renamed"
+
+    summary = summarize_organization_data(organization)
+    if organization_has_material_data(summary):
+        if not confirmed:
+            raise CompanyDomainChangeBlocked(company, organization.domain, normalized_new, summary)
+        logger.warning(
+            "company_domain_change_stranded_org company=%s org=%s old_domain=%s new_domain=%s data=%s",
+            company.pk,
+            organization.pk,
+            organization.domain,
+            normalized_new,
+            summary,
+        )
+    return "repoint"
 
 
 def normalize_company_linkedin_url(value: str | None) -> str:

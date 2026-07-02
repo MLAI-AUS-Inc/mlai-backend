@@ -16,9 +16,13 @@ from .serializers import (
     serialize_founder_bootstrap,
 )
 from .services import (
+    CompanyDomainChangeBlocked,
+    DomainOwnershipError,
     DuplicateCompanyDomainError,
+    apply_company_domain_change,
     apply_shared_startup_details,
     assert_company_domain_available,
+    domain_is_available_to,
     ensure_company_organization,
     get_or_create_founder_profile,
     set_active_company,
@@ -107,6 +111,7 @@ class FounderToolsCompanyView(APIView):
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
         create_new = bool(data.pop("createNew", False))
+        confirm_domain_change = bool(data.pop("confirmDomainChange", False))
         plain_fields = {
             key: data[key]
             for key in ("name", "domain", "location")
@@ -127,6 +132,24 @@ class FounderToolsCompanyView(APIView):
                 assert_company_domain_available(
                     profile, plain_fields["domain"], exclude_company_id=company.id
                 )
+                is_admin = bool(
+                    getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
+                )
+                # First-claim-wins tenancy: a founder may only take a domain that
+                # is unclaimed or already theirs (parity with the vibe-raising
+                # company endpoint).
+                if (
+                    plain_fields["domain"]
+                    and not is_admin
+                    and not domain_is_available_to(request.user, plain_fields["domain"])
+                ):
+                    raise DomainOwnershipError()
+                if plain_fields["domain"]:
+                    # Rename the org in place when safe; otherwise a re-point
+                    # strands the old org's data and needs confirmation.
+                    apply_company_domain_change(
+                        company, plain_fields["domain"], confirmed=confirm_domain_change
+                    )
 
             for field, value in plain_fields.items():
                 setattr(company, field, value)
@@ -146,6 +169,19 @@ class FounderToolsCompanyView(APIView):
                     "code": "duplicate_company_domain",
                     "field": "domain",
                     "companyId": str(exc.existing_company.id),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        except CompanyDomainChangeBlocked as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "company_domain_change_moves_data",
+                    "field": "domain",
+                    "companyId": str(exc.company.id),
+                    "currentDomain": exc.current_domain,
+                    "newDomain": exc.new_domain,
+                    "data": exc.data_summary,
                 },
                 status=status.HTTP_409_CONFLICT,
             )
