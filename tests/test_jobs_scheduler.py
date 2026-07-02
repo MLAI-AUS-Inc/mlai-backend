@@ -728,6 +728,32 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(inserted, [])
         self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
 
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_missing_company_name_can_be_inferred_from_description(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-30",
+            run_id="2026-05-30-company-from-description",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        raw_jobs = [
+            {
+                "source_name": "Workforce Australia",
+                "source_type": "government_board",
+                "source_quality_score": 0.62,
+                "title": "Machine Learning Researcher",
+                "company_name": None,
+                "location": "Sydney, NSW",
+                "description": "Susquehanna is expanding the Machine Learning group and seeking exceptional researchers.",
+                "job_url": "https://www.workforceaustralia.gov.au/individuals/jobs/details/2350786688",
+            }
+        ]
+
+        inserted = job_pipeline.insert_matched_jobs(run, raw_jobs)
+
+        self.assertEqual(len(inserted), 1)
+        self.assertEqual(inserted[0].company_name, "Susquehanna")
+
     def test_target_role_title_gate_accepts_intended_job_families(self):
         self.assertTrue(is_target_role_title("Machine Learning Engineer"))
         self.assertTrue(is_target_role_title("Data Analyst"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -143,6 +144,7 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
     location = clean_text(raw.get("location"))
     location_lower = location.lower()
     is_remote = "remote" in location_lower or "work from home" in location_lower
+    company_name = clean_text(raw.get("company_name")) or infer_company_name_from_description(raw.get("description"))
 
     country = "Australia" if any(
         term in location_lower
@@ -156,9 +158,9 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "run_id": run.run_id,
         "run_date": run.run_date,
         "title": clean_job_title(raw.get("title")),
-        "company_name": clean_text(raw.get("company_name")) or None,
+        "company_name": company_name or None,
         "company_logo_url": logo_url_for_company(
-            clean_text(raw.get("company_name")) or None,
+            company_name or None,
             clean_text(raw.get("company_logo_url")) or None,
         ),
         "company_domain": clean_text(raw.get("company_domain")) or None,
@@ -181,6 +183,42 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "description": clean_text(raw.get("description")) or None,
         "source_quality_score": raw.get("source_quality_score"),
     }
+
+
+def infer_company_name_from_description(description: Any) -> str | None:
+    text = clean_text(description)
+    if not text:
+        return None
+
+    patterns = (
+        r"\bjoin\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:as|to|and|for|with)",
+        r"\b(?:join|joining|work(?:ing)?|role|position|opportunity)\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})",
+        r"\b(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:we|you|as|in|is|are|,|\.)",
+        r"\b([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:is|are)\s+(?:expanding|seeking|looking for|hiring|recruiting)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return clean_inferred_company_name(match.group(1))
+    return None
+
+
+def clean_inferred_company_name(value: str) -> str | None:
+    company = re.split(
+        r"\b(?:in|on|to|as|and|for|with|who|that|where|based|seeking|looking|hiring|recruiting)\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    company = company.strip(" ,.;:-()[]{}")
+    company = re.sub(r"^(?:overview|about us|about)\s+", "", company, flags=re.I).strip(" ,.;:-()[]{}")
+    if not company or len(company) < 2:
+        return None
+    if not company[0].isupper():
+        return None
+    if company.lower() in {"the", "this", "our", "your", "a", "an", "we", "our dynamic team", "dynamic team", "the team"}:
+        return None
+    return company[:255]
 
 
 def normalize_posted_datetime(value: Any) -> datetime | None:
