@@ -25,6 +25,8 @@ from .vibe_marketing_views import (
     VibeMarketingDiscoveryView,
     VibeMarketingGitHubConnectView,
     VibeMarketingGitHubReposView,
+    VibeMarketingLearnedRuleDetailView,
+    VibeMarketingLearnedRulesView,
     VibeMarketingLocationLookupView,
     VibeMarketingRunArtifactsView,
     VibeMarketingRunCommentDetailView,
@@ -87,6 +89,18 @@ urlpatterns = [
         "topic-feedback/<uuid:feedback_id>/restore/",
         VibeMarketingTopicFeedbackRestoreView.as_view(),
         name="vibe-marketing-topic-feedback-restore",
+    ),
+    path("learned-rules", VibeMarketingLearnedRulesView.as_view(), name="vibe-marketing-learned-rules-no-slash"),
+    path("learned-rules/", VibeMarketingLearnedRulesView.as_view(), name="vibe-marketing-learned-rules"),
+    path(
+        "learned-rules/<int:rule_id>",
+        VibeMarketingLearnedRuleDetailView.as_view(),
+        name="vibe-marketing-learned-rule-detail-no-slash",
+    ),
+    path(
+        "learned-rules/<int:rule_id>/",
+        VibeMarketingLearnedRuleDetailView.as_view(),
+        name="vibe-marketing-learned-rule-detail",
     ),
     path(
         "written-articles/<uuid:article_id>/discard",
