@@ -185,13 +185,21 @@ def google_connect(request):
     state = secrets.token_urlsafe(32)
     request.session[GOOGLE_OAUTH_STATE_SESSION_KEY] = state
 
-    # Attach the connection to the founder's active startup so each startup can
-    # hold its own Gmail. resolve_connector_organization also creates the org +
-    # binding if needed. Carry it through the OAuth round-trip via the session.
-    from integrations.services.external_connectors import resolve_connector_organization
+    # Attach the connection to the founder's chosen startup (?company_id=,
+    # validated as their own) or the active one. resolve_connector_organization
+    # also creates the org + binding if needed. Carry it through the OAuth
+    # round-trip via the session.
+    from integrations.services.external_connectors import (
+        company_for_user_from_request,
+        resolve_connector_organization,
+    )
+
+    company, company_ok = company_for_user_from_request(user, request)
+    if not company_ok:
+        return HttpResponseBadRequest("Company not found.")
 
     try:
-        organization = resolve_connector_organization(user)
+        organization = resolve_connector_organization(user, company=company)
     except Exception:  # pragma: no cover - never block connect on org resolution
         organization = None
     if organization is not None:

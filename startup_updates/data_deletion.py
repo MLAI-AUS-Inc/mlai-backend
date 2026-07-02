@@ -561,17 +561,27 @@ def _scrub_runs_with_counts(
     return counts
 
 
+_ACTIVE_MAILBOX = object()
+
+
 def disconnect_gmail_for_user(
     user,
     *,
     delete_derived_data: bool = False,
     reason: str = "user_request",
+    organization=_ACTIVE_MAILBOX,
 ) -> dict[str, Any]:
-    # Disconnect the active startup's mailbox (a founder may have one Gmail per
-    # startup). Falls back to the user's only/legacy connection.
-    from integrations.services.external_connectors import active_google_connection
+    # Disconnect the requested startup's mailbox (a founder may have one Gmail
+    # per startup); without an explicit organization, the active startup's.
+    from integrations.services.external_connectors import (
+        active_google_connection,
+        google_connection_for_org,
+    )
 
-    connection = active_google_connection(user)
+    if organization is _ACTIVE_MAILBOX:
+        connection = active_google_connection(user)
+    else:
+        connection = google_connection_for_org(user, organization)
     if connection is None:
         return {
             "status": "not_connected",
