@@ -110,22 +110,12 @@ class JobsSettings:
         return str(value).strip() if value else None
 
     @property
-    def adzuna_app_id(self) -> str | None:
-        value = getattr(django_settings, "ADZUNA_APP_ID", None)
-        return str(value).strip() if value else None
-
-    @property
-    def adzuna_app_key(self) -> str | None:
-        value = getattr(django_settings, "ADZUNA_APP_KEY", None)
-        return str(value).strip() if value else None
-
-    @property
     def llm_judge_enabled(self) -> bool:
         return bool(getattr(django_settings, "JOBS_LLM_JUDGE_ENABLED", False))
 
     @property
     def llm_judge_api_key(self) -> str | None:
-        value = getattr(django_settings, "JOBS_LLM_JUDGE_API_KEY", None)
+        value = getattr(django_settings, "JOBS_LLM_JUDGE_API_KEY", None) or getattr(django_settings, "OPENAI_API_KEY", None)
         return str(value).strip() if value else None
 
     @property
@@ -135,6 +125,10 @@ class JobsSettings:
     @property
     def llm_judge_model(self) -> str:
         return str(getattr(django_settings, "JOBS_LLM_JUDGE_MODEL", "gpt-4o-mini"))
+
+    @property
+    def llm_location_check_enabled(self) -> bool:
+        return bool(getattr(django_settings, "JOBS_LLM_LOCATION_CHECK_ENABLED", True))
 
 
 settings = JobsSettings()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,7 +13,9 @@ from django.utils.dateparse import parse_datetime as django_parse_datetime
 from jobs.conf import settings
 from jobs.models import JobListing, JobRun, SeekJob, SourceRunLog
 from jobs.services.company_metadata import enrich_company_metadata
-from jobs.services.job_scoring import clean_job_title, clean_text, normalize_url, normalize_words, score_job, why_selected
+from jobs.services.final_screening import apply_publish_screen
+from jobs.services.job_scoring import clean_job_title, clean_text, is_target_role_title, normalize_url, normalize_words, rerank_for_relevance, score_job, why_selected
+from jobs.services.location_eligibility import apply_location_eligibility, should_skip_location_restricted_job
 from jobs.services.llm_judge import judge_top_candidates
 from jobs.services.logos import logo_url_for_company
 from jobs.services.notion import publish_daily_jobs_page
@@ -141,6 +144,7 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
     location = clean_text(raw.get("location"))
     location_lower = location.lower()
     is_remote = "remote" in location_lower or "work from home" in location_lower
+    company_name = clean_text(raw.get("company_name")) or infer_company_name_from_description(raw.get("description"))
 
     country = "Australia" if any(
         term in location_lower
@@ -154,9 +158,9 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "run_id": run.run_id,
         "run_date": run.run_date,
         "title": clean_job_title(raw.get("title")),
-        "company_name": clean_text(raw.get("company_name")) or None,
+        "company_name": company_name or None,
         "company_logo_url": logo_url_for_company(
-            clean_text(raw.get("company_name")) or None,
+            company_name or None,
             clean_text(raw.get("company_logo_url")) or None,
         ),
         "company_domain": clean_text(raw.get("company_domain")) or None,
@@ -165,7 +169,7 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "company_quality_score": raw.get("company_quality_score") or 0.0,
         "location": location or None,
         "is_remote": is_remote,
-        "remote_region": "Global/APAC" if is_remote else None,
+        "remote_region": clean_text(raw.get("remote_region")) or None,
         "remote_eligibility": None,
         "remote_eligibility_score": 0.0,
         "country": country,
@@ -179,6 +183,42 @@ def normalize_raw_job(raw: dict[str, Any], run: JobRun) -> dict[str, Any]:
         "description": clean_text(raw.get("description")) or None,
         "source_quality_score": raw.get("source_quality_score"),
     }
+
+
+def infer_company_name_from_description(description: Any) -> str | None:
+    text = clean_text(description)
+    if not text:
+        return None
+
+    patterns = (
+        r"\bjoin\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:as|to|and|for|with)",
+        r"\b(?:join|joining|work(?:ing)?|role|position|opportunity)\s+(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})",
+        r"\b(?:at|with|for)\s+([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:we|you|as|in|is|are|,|\.)",
+        r"\b([A-Z][A-Za-z0-9&.'’,-]*(?:\s+[A-Z][A-Za-z0-9&.'’,-]*){0,5})\s+(?:is|are)\s+(?:expanding|seeking|looking for|hiring|recruiting)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return clean_inferred_company_name(match.group(1))
+    return None
+
+
+def clean_inferred_company_name(value: str) -> str | None:
+    company = re.split(
+        r"\b(?:in|on|to|as|and|for|with|who|that|where|based|seeking|looking|hiring|recruiting)\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    company = company.strip(" ,.;:-()[]{}")
+    company = re.sub(r"^(?:overview|about us|about)\s+", "", company, flags=re.I).strip(" ,.;:-()[]{}")
+    if not company or len(company) < 2:
+        return None
+    if not company[0].isupper():
+        return None
+    if company.lower() in {"the", "this", "our", "your", "a", "an", "we", "our dynamic team", "dynamic team", "the team"}:
+        return None
+    return company[:255]
 
 
 def normalize_posted_datetime(value: Any) -> datetime | None:
@@ -328,10 +368,15 @@ def insert_matched_jobs(run: JobRun, raw_jobs: list[dict[str, Any]]) -> list[Job
             continue
 
         normalized = normalize_raw_job(raw, run)
+        if not is_target_role_title(normalized.get("title")):
+            continue
         enriched = enrich_company_metadata(normalized)
+        enriched = apply_location_eligibility(enriched)
+        if should_skip_location_restricted_job(enriched):
+            continue
         enriched = infer_remote_eligibility(enriched)
-        scored = score_job(enriched)
-        if not scored.get("bucket"):
+        scored = rerank_for_relevance(score_job(enriched))
+        if scored.get("post_score_status") != "accepted" or not scored.get("bucket"):
             continue
         summary = build_job_summary(scored)
 
@@ -383,24 +428,47 @@ def insert_matched_jobs(run: JobRun, raw_jobs: list[dict[str, Any]]) -> list[Job
 
 def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     limit = limit or settings.jobs_top_pick_limit
+    JobListing.objects.filter(run=run, is_top_pick=True).update(is_top_pick=False, rank=None)
     candidates = list(JobListing.objects.filter(run=run).order_by("-ranking_score", "id"))
-    candidates, llm_reasons = judge_top_candidates(candidates, candidate_limit=10)
+    previous_top_pick_keys = set(
+        JobListing.objects.filter(run_date__lt=run.run_date, is_top_pick=True).values_list("dedupe_key", flat=True)
+    )
+    candidates = [job for job in candidates if apply_publish_screen(job)]
+    for job in candidates:
+        job.save(
+            update_fields=[
+                "ai_score",
+                "startup_score",
+                "australia_score",
+                "remote_score",
+                "recency_score",
+                "source_score",
+                "quality_score",
+                "ranking_score",
+                "bucket",
+                "summary",
+                "why_selected",
+            ]
+        )
+    candidates.sort(key=lambda job: (-job.ranking_score, job.id))
+    unseen_candidates = [job for job in candidates if job.dedupe_key not in previous_top_pick_keys]
+    repeat_candidates = [job for job in candidates if job.dedupe_key in previous_top_pick_keys]
+    unseen_candidates, unseen_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
+    repeat_candidates, repeat_reasons = judge_top_candidates(repeat_candidates, candidate_limit=10)
+    llm_reasons = {**repeat_reasons, **unseen_reasons}
 
     selected: list[JobListing] = []
     companies: set[str] = set()
     title_company_pairs: set[str] = set()
     sources: dict[str, int] = {}
-    buckets: set[str] = set()
-
-    def can_pick(job: JobListing, strict: bool) -> bool:
+    def can_pick(job: JobListing, max_per_source: int | None, allow_same_company: bool) -> bool:
         company = (job.company_name or "").lower()
         pair = f"{normalize_words(job.title)}|{normalize_words(job.company_name)}"
-        if company and company in companies:
+        if not allow_same_company and company and company in companies:
             return False
         if pair in title_company_pairs:
             return False
-        max_per_source = 2 if strict else 3
-        if sources.get(job.source_name, 0) >= max_per_source:
+        if max_per_source is not None and sources.get(job.source_name, 0) >= max_per_source:
             return False
         return True
 
@@ -410,29 +478,47 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
             companies.add(job.company_name.lower())
         title_company_pairs.add(f"{normalize_words(job.title)}|{normalize_words(job.company_name)}")
         sources[job.source_name] = sources.get(job.source_name, 0) + 1
-        if job.bucket:
-            buckets.add(job.bucket)
 
-    for strict in (True, False):
-        for job in candidates:
+    def pick_from(
+        pool: list[JobListing],
+        *,
+        max_per_source: int | None,
+        allow_same_company: bool = False,
+    ) -> None:
+        for job in pool:
             if len(selected) >= limit:
                 break
-            if job in selected or not can_pick(job, strict):
-                continue
-            if strict and len(selected) < 4 and job.bucket in buckets and len(buckets) < 4:
+            if job in selected or not can_pick(job, max_per_source, allow_same_company):
                 continue
             pick(job)
-        if len(selected) >= limit:
-            break
 
-    for job in candidates:
-        if len(selected) >= limit:
-            break
-        company = (job.company_name or "").lower()
-        pair = f"{normalize_words(job.title)}|{normalize_words(job.company_name)}"
-        if job in selected or (company and company in companies) or pair in title_company_pairs:
-            continue
-        pick(job)
+    unseen_ai_candidates = [job for job in unseen_candidates if float(job.ai_score or 0.0) >= 0.35]
+    unseen_startup_fallbacks = [job for job in unseen_candidates if float(job.ai_score or 0.0) < 0.35]
+    repeat_ai_candidates = [job for job in repeat_candidates if float(job.ai_score or 0.0) >= 0.35]
+    repeat_startup_fallbacks = [job for job in repeat_candidates if float(job.ai_score or 0.0) < 0.35]
+
+    # Fresh AI/data/ML roles are the primary digest. Source/company diversity is
+    # softened only after score-first passes fail to fill the seven slots.
+    pick_from(unseen_ai_candidates, max_per_source=2)
+    pick_from(unseen_ai_candidates, max_per_source=3)
+    pick_from(unseen_ai_candidates, max_per_source=None)
+    pick_from(unseen_ai_candidates, max_per_source=None, allow_same_company=True)
+
+    # Startup-only broad roles can still fill the digest, but never ahead of
+    # screened AI-relevant roles.
+    pick_from(unseen_startup_fallbacks, max_per_source=2)
+    pick_from(unseen_startup_fallbacks, max_per_source=3)
+    pick_from(unseen_startup_fallbacks, max_per_source=None)
+    pick_from(unseen_startup_fallbacks, max_per_source=None, allow_same_company=True)
+
+    # A valid repeat is preferable to publishing fewer than seven jobs. Historical
+    # dedupe remains a ranking preference, while role-pair dedupe remains strict.
+    pick_from(repeat_ai_candidates, max_per_source=3)
+    pick_from(repeat_ai_candidates, max_per_source=None)
+    pick_from(repeat_ai_candidates, max_per_source=None, allow_same_company=True)
+    pick_from(repeat_startup_fallbacks, max_per_source=3)
+    pick_from(repeat_startup_fallbacks, max_per_source=None)
+    pick_from(repeat_startup_fallbacks, max_per_source=None, allow_same_company=True)
 
     for index, job in enumerate(selected, start=1):
         job.is_top_pick = True

@@ -24,12 +24,16 @@ def collect_simple_jobs(
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
+    if source_name == "TopStartups.io":
+        return parse_topstartups_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if source_name.startswith("Built In"):
         return parse_builtin_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if source_name == "AI Jobs Australia":
         return parse_aijobs_com_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if source_name == "ai-jobs.com.au":
         return parse_ai_jobs_au_jobs(soup, url, source_name, source_type, source_quality_score, limit)
+    if source_name == "Matchstiq":
+        return parse_matchstiq_jobs(soup, url, source_name, source_type, source_quality_score, limit)
 
     jobs = parse_json_ld_jobs(soup, url, source_name, source_type, source_quality_score, limit)
     if jobs:
@@ -40,6 +44,56 @@ def collect_simple_jobs(
         return jobs[:limit]
 
     return parse_text_jobs(soup, url, source_name, source_type, source_quality_score, limit)
+
+
+def parse_topstartups_jobs(
+    soup: BeautifulSoup,
+    page_url: str,
+    source_name: str,
+    source_type: str,
+    source_quality_score: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    lines = visible_lines(soup)
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for index, line in enumerate(lines):
+        if len(jobs) >= limit:
+            break
+        if not looks_like_title(line):
+            continue
+        if index == 0 or not looks_like_company(lines[index - 1]):
+            continue
+
+        window = lines[index : index + 18]
+        location = infer_location(window)
+        posted = infer_posted(window)
+        apply_url = find_nearby_link(soup, line, page_url)
+        if not location or not posted or not apply_url:
+            continue
+
+        company = lines[index - 1]
+        key = f"{line.lower()}|{company.lower()}|{apply_url}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        jobs.append(
+            job_dict(
+                source_name,
+                source_type,
+                source_quality_score,
+                line,
+                company,
+                location,
+                apply_url,
+                " ".join(window),
+                posted,
+            )
+        )
+
+    return jobs[:limit]
 
 
 def parse_builtin_jobs(
@@ -173,6 +227,60 @@ def parse_ai_jobs_au_jobs(
                 infer_posted(window),
             )
         )
+    return jobs[:limit]
+
+
+def parse_matchstiq_jobs(
+    soup: BeautifulSoup,
+    page_url: str,
+    source_name: str,
+    source_type: str,
+    source_quality_score: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    lines = visible_lines(soup)
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for index, line in enumerate(lines):
+        if len(jobs) >= limit:
+            break
+        title = clean_text(line)
+        if not looks_like_title(title):
+            continue
+        if looks_like_location(title) or infer_posted([title]):
+            continue
+
+        window = lines[index + 1 : index + 7]
+        company = first_company_after_title(window)
+        location = infer_matchstiq_location(window)
+        posted = infer_posted(window)
+        if not company or not posted:
+            continue
+
+        if company.lower() in {"jobs", "companies", "post job"}:
+            continue
+
+        job_url = find_nearby_link(soup, title, page_url) or stable_listing_url(page_url, title, company)
+        key = f"{title.lower()}|{company.lower()}|{location or ''}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        jobs.append(
+            job_dict(
+                source_name,
+                source_type,
+                source_quality_score,
+                title,
+                company,
+                location,
+                job_url,
+                " ".join(window),
+                posted,
+            )
+        )
+
     return jobs[:limit]
 
 
@@ -328,10 +436,74 @@ def following_job_fragments(link, title: str) -> list[str]:
     return fragments
 
 
+def visible_lines(soup: BeautifulSoup) -> list[str]:
+    lines = [clean_text(line) for line in soup.get_text("\n", strip=True).splitlines()]
+    return [line for line in lines if line]
+
+
+def looks_like_company(value: str) -> bool:
+    text = clean_text(value)
+    if not 2 <= len(text) <= 80:
+        return False
+    if len(text) > 45 or text.endswith("."):
+        return False
+    if looks_like_location(text) or infer_posted([text]):
+        return False
+    blocked = {"apply", "apply now", "learn more", "quick facts", "take action", "view job", "what they do"}
+    return text.lower().strip(":") not in blocked
+
+
+def find_nearby_link(soup: BeautifulSoup, title: str, page_url: str) -> str | None:
+    title_link = None
+    for link in soup.find_all("a", href=True):
+        text = clean_text(link.get_text(" ", strip=True))
+        if text == title:
+            title_link = link
+            break
+    if title_link:
+        href = title_link["href"]
+        if href and href != "#":
+            return urljoin(page_url, href)
+
+    for link in soup.find_all("a", href=True):
+        text = clean_text(link.get_text(" ", strip=True)).lower()
+        href = link["href"]
+        if text == "apply" and href and href != "#":
+            return urljoin(page_url, href)
+    for link in soup.find_all("a", href=True):
+        text = clean_text(link.get_text(" ", strip=True)).lower()
+        href = link["href"]
+        if text in {"view job", "read more"} and looks_like_job_href(href):
+            return urljoin(page_url, href)
+    return None
+
+
+def first_company_after_title(fragments: list[str]) -> str | None:
+    for value in fragments:
+        if looks_like_company(value):
+            return value
+    return None
+
+
+def infer_matchstiq_location(fragments: list[str]) -> str | None:
+    for value in fragments[1:]:
+        text = clean_text(value)
+        if len(text) > 80 or text.endswith("..."):
+            continue
+        if looks_like_location(text):
+            return text
+    return infer_location(fragments)
+
+
+def stable_listing_url(page_url: str, title: str, company: str | None) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{company or 'company'}-{title}".lower()).strip("-")
+    return f"{page_url.rstrip('/')}?job={slug}"
+
+
 def parse_company_location(value: str | None) -> tuple[str | None, str | None]:
     if not value:
         return None, None
-    parts = [clean_text(part) for part in re.split(r"\s*[•|]\s*", value, maxsplit=1)]
+    parts = [clean_text(part) for part in re.split(r"\s*(?:•|\|)\s*", value, maxsplit=1)]
     if len(parts) == 2:
         return parts[0] or None, parts[1] or None
     return clean_text(value), None
@@ -389,6 +561,7 @@ def looks_like_title(value: str) -> bool:
         "ml",
         "ops",
         "manager",
+        "coordinator",
         "lead",
         "founding",
         "research",

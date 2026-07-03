@@ -11,7 +11,6 @@ STAGE_TERMS = (
     ("series a", "Series A"),
     ("series b", "Series B"),
     ("series c", "Series C+"),
-    ("growth", "Growth"),
     ("venture-backed", "Venture-backed"),
     ("venture backed", "Venture-backed"),
     ("scaleup", "Scaleup"),
