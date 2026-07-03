@@ -171,6 +171,9 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
         "domain": domain,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         "notification_context": notification_context_for_run(run),
+        # Daily reminders present three topics; content-factory defaults to 4
+        # when unset. Must match the WhatsApp topic template's title slots.
+        "requested_topic_count": 3,
     }
     slack_route_id = ""
     if channel.channel_type == NotificationChannelType.SLACK:

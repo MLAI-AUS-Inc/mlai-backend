@@ -286,18 +286,22 @@ def _topic_email_message_data(
     }
 
 
+WHATSAPP_TOPIC_TITLE_SLOTS = 3
+
+
 def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
     """ContentVariables for the approved daily-topics utility template.
 
-    Template contract: {{1}} domain, {{2}}-{{5}} topic titles. Twilio rejects
-    sends with missing declared variables, so absent options are padded with "-".
+    Template contract: {{1}} domain, {{2}}-{{4}} topic titles (daily runs
+    request 3 topics). Twilio rejects sends with missing declared variables,
+    so absent options are padded with "-"; extras beyond the slots are cut.
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
     titles = [_option_title(option) for option in _topic_options(data)]
-    while len(titles) < 4:
+    while len(titles) < WHATSAPP_TOPIC_TITLE_SLOTS:
         titles.append("-")
     variables = {"1": domain}
-    for index, title in enumerate(titles[:4], start=2):
+    for index, title in enumerate(titles[:WHATSAPP_TOPIC_TITLE_SLOTS], start=2):
         variables[str(index)] = title or "-"
     return variables
 
@@ -352,15 +356,30 @@ def _delivery_mode_text(run: AutomationRun, data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _founder_tools_run_url(run_id: str) -> str:
+    """Review page for a content-factory run: founder-tools resolves :runId
+    to the same id the callbacks carry as job_id/run_id."""
+    run_id = str(run_id or "").strip()
+    base_url = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
+    if not run_id or not base_url:
+        return ""
+    return f"{base_url}/founder-tools/marketing/runs/{run_id}"
+
+
 def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
     domain = data.get("domain") or run.automation.organization.domain
     title = data.get("title") or data.get("topic") or "Article"
-    pr_url = data.get("pr_url") or data.get("publish_pr_url") or ""
+    # publish_pr_url is a relative content-factory API path, not a browsable
+    # link — only render pull-request lines for absolute URLs.
+    pr_url = str(data.get("pr_url") or data.get("publish_pr_url") or "")
     preview_url = data.get("preview_url") or data.get("primary_review_url") or ""
+    review_url = _founder_tools_run_url(run.article_content_factory_run_id or _callback_job_id(data))
     lines = [f"{title} is ready for {domain}."]
+    if review_url:
+        lines.append(f"Review and approve: {review_url}")
     if preview_url:
         lines.append(f"Preview: {preview_url}")
-    if pr_url:
+    if pr_url.startswith("http"):
         lines.append(f"Pull request: {pr_url}")
     return "\n".join(lines)
 
@@ -719,6 +738,10 @@ def send_delivery_mode_required(data: dict[str, Any]) -> list[NotificationDelive
     run = resolve_automation_run(data.get("notification_context"))
     if not run:
         return []
+    if run.selected_delivery_mode and run.status == AutomationRunStatus.GENERATING:
+        # A delivery mode was already selected (approval auto-resolves it), so
+        # this prompt raced the selection and is stale — don't message anyone.
+        return []
     job_id = _callback_job_id(data)
     if job_id:
         run.article_content_factory_run_id = job_id
@@ -758,6 +781,36 @@ def send_content_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
         build_kwargs=lambda channel: {
             "text": text,
             "subject": f"Article ready for {run.automation.organization.domain}",
+            "html_body": html.escape(text).replace("\n", "<br>"),
+        },
+    )
+
+
+def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
+    """Fan out the review link when a generated article awaits human review.
+
+    Fires for article_review_ready and generation_pr_opened — the terminal
+    reviewable outcomes of review_draft/publish_code deliveries, which
+    otherwise notify nobody (content_ready only covers content_only runs).
+    """
+    run = resolve_automation_run(data.get("notification_context"))
+    if not run:
+        return []
+    job_id = _callback_job_id(data)
+    if job_id:
+        run.article_content_factory_run_id = job_id
+    run.callback_payload = data
+    run.status = AutomationRunStatus.COMPLETED
+    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
+
+    text = _content_ready_text(run, data)
+    return _fan_out_event(
+        run=run,
+        event_type="review_ready",
+        request_payload={"event_type": "review_ready", "job_id": job_id},
+        build_kwargs=lambda channel: {
+            "text": text,
+            "subject": f"Article ready to review for {run.automation.organization.domain}",
             "html_body": html.escape(text).replace("\n", "<br>"),
         },
     )
@@ -841,6 +894,20 @@ def approve_topic_for_run(
     if child_job_id:
         run.article_content_factory_run_id = child_job_id
     result_status = str(result.get("status") or "").strip()
+    if result_status == "awaiting_delivery_mode" and not delivery_mode and child_job_id:
+        # Don't bounce a second "choose delivery mode" prompt through the
+        # channels: resolve the org default (review_draft unless configured)
+        # and continue. On failure the existing prompt flow still applies.
+        try:
+            auto_result = set_article_delivery_mode(child_job_id)
+        except Exception as exc:
+            logger.warning("Auto delivery-mode selection failed for %s: %s", child_job_id, exc)
+        else:
+            resolved_mode = str(auto_result.get("delivery_mode") or "").strip()
+            if resolved_mode:
+                run.selected_delivery_mode = resolved_mode
+            result_status = str(auto_result.get("status") or "").strip() or "queued"
+            result = {**result, "status": result_status, "delivery_mode_autoselected": True}
     run.status = (
         AutomationRunStatus.DELIVERY_MODE_REQUIRED
         if result_status == "awaiting_delivery_mode"
@@ -1002,7 +1069,7 @@ def _handle_whatsapp_inbound_message(message: dict[str, Any]) -> dict[str, int]:
         return {}
 
     if not re.fullmatch(r"[1-4]", text):
-        send_whatsapp_text(sender, "Reply 1-4 to pick a topic when one is pending, or STOP to opt out.")
+        send_whatsapp_text(sender, "Reply 1-3 to pick a topic when one is pending, or STOP to opt out.")
         return {"replied": 1}
 
     option_index = int(text) - 1
