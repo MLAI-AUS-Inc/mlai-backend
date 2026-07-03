@@ -102,12 +102,25 @@ def collect_verified_google_metrics(
 
     measured_sources = [value for value in source_status.values() if value == "measured"]
     if not measured_sources:
-        metrics["status"] = "needs_connection" if "needs_connection" in source_status.values() else "error"
-        metrics["message"] = (
-            gsc.get("message")
-            or metrics.get("googleAnalytics", {}).get("message")
-            or "No verified Google traffic source returned data for this baseline."
-        )
+        # Search Console is the primary source, so its outcome decides the
+        # traffic status. The GA4 leg is usually "needs_connection" (no property
+        # configured) and must not mask a real Search Console failure — the user
+        # would see a "Connect" prompt forever instead of the actual error.
+        gsc_status = source_status.get("googleSearchConsole")
+        if gsc_status == "error":
+            metrics["status"] = "error"
+            metrics["message"] = gsc.get("message") or "Search Console lookup failed."
+        elif gsc_status == "needs_connection":
+            metrics["status"] = "needs_connection"
+            metrics["message"] = gsc.get("message") or "Connect Google Search Console to verify traffic."
+        else:
+            metrics["status"] = "error" if "error" in source_status.values() else "needs_connection"
+            metrics["message"] = (
+                gsc.get("message")
+                or metrics.get("googleAnalytics", {}).get("message")
+                or "No verified Google traffic source returned data for this baseline."
+            )
+        metrics["verified"] = False
     else:
         metrics["message"] = "Verified Google traffic data was added to this baseline."
     metrics["sourceStatus"] = source_status
