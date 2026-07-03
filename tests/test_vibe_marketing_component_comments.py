@@ -2341,6 +2341,52 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(article_response.status_code, 409)
         self.assertEqual(article_response.data["code"], "article_system_setup_blocked")
 
+    def test_code_review_ready_setup_moves_wizard_to_review_step(self):
+        # Server-rendered stacks get no hosted preview; the run parks in
+        # code_review_ready (content-factory#599). The wizard must advance to
+        # the review step with a link to the run page — previously this status
+        # fell through to the else branch and the wizard sat on "Build setup
+        # page" forever with no review affordance (arb-gen.com run ad1ea21b).
+        config = self._prepare_articles_setup_gate(status="code_review_ready")
+        article_system = dict(config.article_system)
+        pending = dict(article_system["pending_article_system_setup"])
+        for key in ("preview_url", "previewUrl", "pr_url", "prUrl"):
+            pending.pop(key, None)
+        pending["approveUrl"] = "/api/runs/setup-gate-run/approve"
+        pending["previewRuntimeUnsupported"] = True
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = article_system
+        config.save(update_fields=["article_system", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="setup-gate-run",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "status": "code_review_ready",
+                "setup_run_id": "setup-gate-run",
+                "preview_url": "",
+                "approve_url": "/api/runs/setup-gate-run/approve",
+                "preview_runtime_unsupported": True,
+                "article_system_setup": {"status": "code_review_ready", "setup_run_id": "setup-gate-run"},
+            },
+        )
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertTrue(scaffold["setupBlocked"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["generate"]["status"], "complete")
+        self.assertEqual(steps["review"]["status"], "needs_action")
+        self.assertEqual(steps["review"]["primaryAction"]["label"], "Review setup changes")
+        self.assertIn("setup-gate-run", steps["review"]["primaryAction"]["href"])
+
     def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
         self._prepare_articles_setup_gate(status="preview_failed")
         ContentFactoryRun.objects.create(
