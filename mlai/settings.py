@@ -578,6 +578,10 @@ GOOGLE_WEBSITE_BASELINE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+# Google PageSpeed Insights key for website-baseline Lighthouse/Core Web Vitals.
+# Managed here and handed to the content-factory producer via
+# GET /api/content-factory/service/config so the key lives in one place.
+PAGESPEED_API_KEY = os.environ.get("PAGESPEED_API_KEY", "")
 ABR_LOOKUP_AUTHENTICATION_GUID = os.environ.get("ABR_LOOKUP_AUTHENTICATION_GUID", "")
 # When true, the vibe-raising registration gate skips the live ABR lookup (used when no
 # ABR credential is configured) but still enforces the ABN and ACN checksums and derives

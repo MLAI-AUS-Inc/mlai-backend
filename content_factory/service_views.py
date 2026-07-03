@@ -3171,10 +3171,32 @@ class ContentFactoryGitHubWebhookView(APIView):
         return Response({"ok": True, **summary})
 
 
+class ContentFactoryServiceConfigView(APIView):
+    """
+    Hands centrally managed credentials to the content-factory producer.
+
+    GET /api/content-factory/service/config
+
+    Keys live in this repo's environment (one place to set and rotate); the
+    producer fetches them over the same authenticated service channel it uses
+    for callbacks instead of keeping its own copies.
+    """
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        return Response(
+            {
+                "pagespeedApiKey": str(getattr(settings, "PAGESPEED_API_KEY", "") or ""),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class ContentFactoryCallbackView(APIView):
     """
     Receives callbacks from content-factory for various pipeline events.
-    
+
     POST /api/content-factory/callback
     
     Event types:
