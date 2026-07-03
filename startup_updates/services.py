@@ -2965,6 +2965,7 @@ def build_cancel_backup_for_draft(draft: MonthlyUpdateDraft) -> dict:
         "evidence_metric_ids": list(draft.evidence_metric_ids or []),
         "carry_forward_event_ids": list(draft.carry_forward_event_ids or []),
         "groundedness_notes": draft.groundedness_notes or "",
+        "ready_at": _iso_datetime(draft.ready_at),
     }
 
 
@@ -3017,6 +3018,10 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
     for snapshot in (backups or {}).values():
         month_value = date.fromisoformat(str(snapshot["month"]))
         previous_run = ContentFactoryRun.objects.filter(run_id=snapshot.get("run_id") or "").first()
+        # Preserve the original first-ready stamp across cancel/restore so the
+        # restore doesn't re-stamp (and thereby extend) time-based perks.
+        ready_at_raw = snapshot.get("ready_at")
+        ready_at = datetime.fromisoformat(str(ready_at_raw)) if ready_at_raw else None
         MonthlyUpdateDraft.objects.update_or_create(
             organization=organization,
             month=month_value,
@@ -3032,6 +3037,7 @@ def _restore_cancelled_run_drafts(*, organization: Organization, backups: dict) 
                 "evidence_metric_ids": snapshot.get("evidence_metric_ids") or [],
                 "carry_forward_event_ids": snapshot.get("carry_forward_event_ids") or [],
                 "groundedness_notes": snapshot.get("groundedness_notes", ""),
+                "ready_at": ready_at,
             },
         )
         restored += 1

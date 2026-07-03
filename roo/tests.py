@@ -593,8 +593,8 @@ class CoworkingServiceTests(TestCase):
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
     """The coworking cost drops to 4 when the user's startup is an ABR-verified
-    Australian company (registered + ACN + ABR-verified stamp) AND has a 'ready'
-    monthly update for the booking's month or the month before; otherwise it is
+    Australian company (registered + ACN + ABR-verified stamp) AND has a
+    monthly update that became 'ready' within the last 28 days; otherwise it is
     the standard 8."""
 
     VALID_ABN = '89000000019'
@@ -640,13 +640,21 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             abr_verified_at=timezone.now() if verified else None,
         )
 
-    def _make_update(self, booking_date, status):
+    def _make_update(self, booking_date, status, ready_days_ago=None):
+        """Create a draft. READY drafts auto-stamp ready_at=now in save();
+        pass ``ready_days_ago`` to backdate the stamp for window tests."""
         from startup_updates.models import MonthlyUpdateDraft
-        return MonthlyUpdateDraft.objects.create(
+        draft = MonthlyUpdateDraft.objects.create(
             organization=self.org,
             month=booking_date.replace(day=1),
             status=status,
         )
+        if ready_days_ago is not None:
+            MonthlyUpdateDraft.objects.filter(pk=draft.pk).update(
+                ready_at=timezone.now() - timedelta(days=ready_days_ago)
+            )
+            draft.refresh_from_db()
+        return draft
 
     def test_standard_cost_without_binding(self):
         from organizations.models import Organization
@@ -692,28 +700,72 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             4,
         )
 
-    def test_ready_update_for_previous_month_discounts(self):
-        # Founders write a month's update during/after that month, so the
-        # previous month's ready update still qualifies (no start-of-month cliff).
+    def test_update_ready_within_window_discounts_across_month_boundary(self):
+        # The window is time-based: a previous-month update that became ready
+        # 20 days ago still discounts a booking today (no start-of-month cliff).
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today().replace(day=3)
+        today = date.today()
         previous_month = today.replace(day=1) - timedelta(days=1)
-        self._make_update(previous_month, MonthlyUpdateDraftStatus.READY)
+        self._make_update(previous_month, MonthlyUpdateDraftStatus.READY, ready_days_ago=20)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             4,
         )
 
-    def test_ready_update_two_months_old_does_not_discount(self):
+    def test_update_ready_exactly_28_days_ago_discounts(self):
         from startup_updates.models import MonthlyUpdateDraftStatus
-        today = date.today().replace(day=15)
-        # 'ready' update exists, but it is two months stale.
-        two_months_ago = (today.replace(day=1) - timedelta(days=1)).replace(day=1) - timedelta(days=1)
-        self._make_update(two_months_ago, MonthlyUpdateDraftStatus.READY)
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=28)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
+    def test_update_ready_29_days_ago_does_not_discount(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=29)
         self.assertEqual(
             CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
             8,
         )
+
+    def test_future_booking_uses_booking_date_for_window(self):
+        # An update ready 25 days ago discounts today but not a booking 7 days
+        # out (32 days after the stamp).
+        from startup_updates.models import MonthlyUpdateDraftStatus
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY, ready_days_ago=25)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(
+                user=self.user, booking_date=today + timedelta(days=7)
+            ),
+            8,
+        )
+
+    def test_ready_at_stamped_once_on_first_ready_transition(self):
+        # ready_at is set when a draft first becomes ready and is never
+        # refreshed, so re-approving an old draft can't renew the window.
+        from startup_updates.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
+        today = date.today()
+        draft = self._make_update(today, MonthlyUpdateDraftStatus.DRAFT)
+        self.assertIsNone(draft.ready_at)
+
+        draft.status = MonthlyUpdateDraftStatus.READY
+        draft.save()
+        first_stamp = draft.ready_at
+        self.assertIsNotNone(first_stamp)
+
+        draft.status = MonthlyUpdateDraftStatus.NEEDS_REVIEW
+        draft.save()
+        draft.status = MonthlyUpdateDraftStatus.READY
+        draft.save()
+        draft.refresh_from_db()
+        self.assertEqual(draft.ready_at, first_stamp)
 
     def test_ready_update_in_any_bound_org_discounts(self):
         from organizations.models import Organization

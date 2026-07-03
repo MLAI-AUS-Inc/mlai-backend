@@ -663,24 +663,27 @@ class CoworkingService:
         except RewardsCatalog.DoesNotExist:
             return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
 
+    # A 'ready' monthly update grants the coworking discount for this many days
+    # from the moment it first became ready.
+    MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 28
+
     @staticmethod
     def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
         """
         Return whether any ABR-verified Australian company the user is bound to
-        has a monthly update in the 'ready' status for the month of
-        ``booking_date`` or the month before it.
+        has a monthly update that is 'ready' and became ready within the last
+        28 days (relative to ``booking_date``).
 
         The coworking discount rewards founders who run a verified registered
         Australian company and keep their monthly update current. Company
         eligibility mirrors ``vibe_raising.registration.company_is_verified``:
         ``registered`` with an ACN and an ABR-verified stamp.
 
-        Accepting the previous month's update avoids a start-of-month cliff:
-        founders typically write a month's update during or just after that
-        month, so early-month bookings would otherwise never qualify.
-
-        ``MonthlyUpdateDraft.month`` is normalised to the first day of the
-        month, so we match against ``booking_date`` collapsed to day 1.
+        The window is time-based rather than calendar-month based: an update
+        that reaches 'ready' grants the discount for the next 28 days
+        regardless of month boundaries, so there is no start-of-month cliff.
+        ``ready_at`` is stamped once, the first time a draft becomes ready, so
+        re-approving an old draft cannot renew the window.
         """
         # Imported lazily to avoid a hard import dependency between the roo and
         # startup_updates / founder_tools apps at module load time.
@@ -714,12 +717,14 @@ class CoworkingService:
         if not eligible_org_ids:
             return False
 
-        month_start = booking_date.replace(day=1)
-        previous_month_start = (month_start - timedelta(days=1)).replace(day=1)
+        window_start = booking_date - timedelta(
+            days=CoworkingService.MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS
+        )
         return MonthlyUpdateDraft.objects.filter(
             organization_id__in=eligible_org_ids,
-            month__in=[month_start, previous_month_start],
             status=MonthlyUpdateDraftStatus.READY,
+            ready_at__isnull=False,
+            ready_at__date__gte=window_start,
         ).exists()
 
     @staticmethod
@@ -732,9 +737,9 @@ class CoworkingService:
 
         Defaults to the standard cost (from catalog/settings). When both
         ``user`` and ``booking_date`` are supplied and the user's ABR-verified
-        startup has a 'ready' monthly update for the booking's month (or the
-        month before), the discounted cost applies instead — rewarding founders
-        who keep their monthly update current.
+        startup has a monthly update that became 'ready' within the last 28
+        days, the discounted cost applies instead — rewarding founders who keep
+        their monthly update current.
         """
         standard = CoworkingService.get_standard_coworking_cost()
         if user is not None and booking_date is not None:
