@@ -2263,6 +2263,14 @@ def _update_pending_article_system_setup_for_domain(domain: str, **updates) -> N
             "error",
             "errorCode",
             "error_code",
+            "approveUrl",
+            "approve_url",
+            "denyUrl",
+            "deny_url",
+            "previewRuntimeUnsupported",
+            "preview_runtime_unsupported",
+            "previewUnsupportedReason",
+            "preview_unsupported_reason",
             "livePreview",
             "live_preview",
             "stale",
@@ -2822,6 +2830,40 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = "preview_failed"
         error = preview_error
+    elif event_type == "article_system_setup_code_review_ready":
+        # Server-rendered stacks (FastAPI/Django/Rails/...) have no hosted preview
+        # shape, so Content Factory hands review to the setup branch diff instead.
+        # Unlike a URL-less preview_ready (which means "still building"), this state
+        # is reviewable NOW: approval affordances must survive.
+        setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
+        setup_payload["status"] = "code_review_ready"
+        setup_payload["setup_run_id"] = run_id
+        setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
+        setup_payload["live_preview_url"] = live_preview_url_value
+        setup_payload["preview_url"] = ""
+        setup_payload["preview_runtime_unsupported"] = True
+        setup_payload["preview_unsupported_reason"] = str(
+            data.get("preview_unsupported_reason") or setup_payload.get("preview_unsupported_reason") or ""
+        )
+        setup_payload["approve_url"] = str(data.get("approve_url") or setup_payload.get("approve_url") or "")
+        setup_payload["deny_url"] = str(data.get("deny_url") or setup_payload.get("deny_url") or "")
+        for key in ARTICLE_SYSTEM_SETUP_FAILURE_METADATA_KEYS:
+            result.pop(key, None)
+            setup_payload.pop(key, None)
+        result["status"] = "code_review_ready"
+        result["preview_url"] = ""
+        result["approve_url"] = setup_payload["approve_url"]
+        result["deny_url"] = setup_payload["deny_url"]
+        result["preview_runtime_unsupported"] = True
+        result["preview_unsupported_reason"] = setup_payload["preview_unsupported_reason"]
+        result["article_system_setup"] = setup_payload
+        result["livePreview"] = live_preview
+        result["live_preview"] = live_preview
+        run_status = ContentFactoryRunStatus.AWAITING_APPROVAL
+        approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        current_step = "await_review"
+        error = ""
     elif event_type == "article_system_setup_preview_ready" and not preview_url_value:
         setup_payload = dict(setup_payload)
         setup_payload.update(common_fields)
@@ -3049,6 +3091,14 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         live_preview_url=result.get("live_preview_url"),
         mergeStatus=result.get("merge_status"),
         merge_status=result.get("merge_status"),
+        approveUrl=result.get("approve_url"),
+        approve_url=result.get("approve_url"),
+        denyUrl=result.get("deny_url"),
+        deny_url=result.get("deny_url"),
+        previewRuntimeUnsupported=result.get("preview_runtime_unsupported"),
+        preview_runtime_unsupported=result.get("preview_runtime_unsupported"),
+        previewUnsupportedReason=result.get("preview_unsupported_reason"),
+        preview_unsupported_reason=result.get("preview_unsupported_reason"),
     )
     if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
         _mark_article_system_setup_generation_ready_for_domain(
@@ -3288,6 +3338,7 @@ class ContentFactoryCallbackView(APIView):
         elif event_type in {
             'article_system_setup_progress',
             'article_system_setup_preview_ready',
+            'article_system_setup_code_review_ready',
             'article_system_setup_preview_fallback_ready',
             'article_system_setup_revision_ready',
             'article_system_setup_progress',

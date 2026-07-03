@@ -1388,6 +1388,72 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(pending["livePreviewUrl"], "/api/runs/setup-run-building/live-preview")
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_code_review_ready_awaits_approval_without_preview(self, mock_send_dm):
+        # Server-rendered stacks (e.g. arb-gen.com's FastAPI app) get no hosted
+        # preview; Content Factory hands review to the setup branch diff. Unlike a
+        # URL-less preview_ready (still building), this state is approvable NOW.
+        organization = Organization.objects.create(name="ArbGen", domain="arb-gen.com")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="dantsnowden-ship-it/arb-report-automation",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-run-code-review",
+                }
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_code_review_ready",
+                "job_id": "setup-run-code-review",
+                "run_id": "setup-run-code-review",
+                "workflow": "article_system_setup",
+                "domain": "arb-gen.com",
+                "github_repo": "dantsnowden-ship-it/arb-report-automation",
+                "preview_url": "",
+                "approve_url": "/api/runs/setup-run-code-review/approve",
+                "deny_url": "/api/runs/setup-run-code-review/deny",
+                "preview_runtime_unsupported": True,
+                "preview_unsupported_reason": (
+                    "Hosted preview is not yet supported for server-rendered python apps."
+                ),
+                "live_preview": {
+                    "available": False,
+                    "status": "unavailable",
+                    "platformStatus": "unsupported_runtime",
+                    "previewUrl": "",
+                    "error": "",
+                },
+                "live_preview_url": "/api/runs/setup-run-code-review/live-preview",
+                "article_system_setup": {
+                    "status": "code_review_ready",
+                    "setup_run_id": "setup-run-code-review",
+                    "branch_name": "feature/articles-publish-route-abc",
+                    "live_preview_url": "/api/runs/setup-run-code-review/live-preview",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-run-code-review")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.APPROVAL_REQUIRED)
+        self.assertEqual(setup_run.result["status"], "code_review_ready")
+        self.assertEqual(setup_run.result["approve_url"], "/api/runs/setup-run-code-review/approve")
+        self.assertTrue(setup_run.result["preview_runtime_unsupported"])
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertEqual(pending["status"], "code_review_ready")
+        self.assertEqual(pending["approveUrl"], "/api/runs/setup-run-code-review/approve")
+        self.assertTrue(pending["previewRuntimeUnsupported"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_progress_callback_replaces_stale_failure(self, mock_send_dm):
         ContentFactoryRun.objects.create(
             run_id="setup-run-retry-progress",
