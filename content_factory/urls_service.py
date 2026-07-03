@@ -3,6 +3,8 @@ from django.urls import path
 from . import service_views as views
 
 urlpatterns = [
+    path('service/config/', views.ContentFactoryServiceConfigView.as_view(), name='content_factory_service_config'),
+    path('service/config', views.ContentFactoryServiceConfigView.as_view(), name='content_factory_service_config_no_slash'),
     path('org/config/', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config'),
     path('org/config', views.ContentFactoryOrgConfigView.as_view(), name='content_factory_org_config_no_slash'),
     path('healing-records/', views.ContentFactoryHealingRecordView.as_view(), name='content_factory_healing_records'),
