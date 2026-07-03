@@ -663,26 +663,31 @@ class CoworkingService:
         except RewardsCatalog.DoesNotExist:
             return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
 
+    # A 'ready' monthly update grants the coworking discount for this many days
+    # from the moment it first became ready.
+    MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 28
+
     @staticmethod
     def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
         """
-        Return whether any registered company the user is bound to — one with a
-        structurally valid ABN — has a monthly update in the 'ready' status for
-        the month of ``booking_date``.
+        Return whether any ABR-verified Australian company the user is bound to
+        has a monthly update that is 'ready' and became ready within the last
+        28 days (relative to ``booking_date``).
 
-        The coworking discount rewards founders who run a real registered
-        business and keep their monthly update current. We require a registered
-        company with a checksum-valid ABN (a genuine business identifier) but
-        deliberately do *not* require full ACN/ABR verification — founders with
-        valid-but-not-fully-verified companies still qualify.
+        The coworking discount rewards founders who run a verified registered
+        Australian company and keep their monthly update current. Company
+        eligibility mirrors ``vibe_raising.registration.company_is_verified``:
+        ``registered`` with an ACN and an ABR-verified stamp.
 
-        ``MonthlyUpdateDraft.month`` is normalised to the first day of the
-        month, so we match against ``booking_date`` collapsed to day 1.
+        The window is time-based rather than calendar-month based: an update
+        that reaches 'ready' grants the discount for the next 28 days
+        regardless of month boundaries, so there is no start-of-month cliff.
+        ``ready_at`` is stamped once, the first time a draft becomes ready, so
+        re-approving an old draft cannot renew the window.
         """
         # Imported lazily to avoid a hard import dependency between the roo and
         # startup_updates / founder_tools apps at module load time.
         from founder_tools.models import VibeRaisingCompany
-        from vibe_raising.validators import validate_abn_checksum
         from startup_updates.models import (
             MonthlyUpdateDraft,
             MonthlyUpdateDraftStatus,
@@ -697,28 +702,29 @@ class CoworkingService:
         if not org_ids:
             return False
 
-        # Only organisations backed by a registered company with a valid ABN
-        # qualify. The ABN checksum can't be expressed in SQL, so validate the
-        # candidates in Python (there are only a handful per user).
-        eligible_org_ids = {
-            org_id
-            for org_id, abn in VibeRaisingCompany.objects.filter(
+        # Only organisations backed by an ABR-verified company qualify. This is
+        # the ORM form of vibe_raising.registration.company_is_verified().
+        eligible_org_ids = set(
+            VibeRaisingCompany.objects.filter(
                 organization_id__in=org_ids,
                 registered=True,
+                abr_verified_at__isnull=False,
             )
-            .exclude(abn__isnull=True)
-            .exclude(abn='')
-            .values_list('organization_id', 'abn')
-            if validate_abn_checksum(abn)
-        }
+            .exclude(acn__isnull=True)
+            .exclude(acn='')
+            .values_list('organization_id', flat=True)
+        )
         if not eligible_org_ids:
             return False
 
-        month_start = booking_date.replace(day=1)
+        window_start = booking_date - timedelta(
+            days=CoworkingService.MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS
+        )
         return MonthlyUpdateDraft.objects.filter(
             organization_id__in=eligible_org_ids,
-            month=month_start,
             status=MonthlyUpdateDraftStatus.READY,
+            ready_at__isnull=False,
+            ready_at__date__gte=window_start,
         ).exists()
 
     @staticmethod
@@ -730,9 +736,10 @@ class CoworkingService:
         Get the cost for a coworking day.
 
         Defaults to the standard cost (from catalog/settings). When both
-        ``user`` and ``booking_date`` are supplied and the user's startup has a
-        'ready' monthly update for that month, the discounted cost applies
-        instead — rewarding founders who keep their monthly update current.
+        ``user`` and ``booking_date`` are supplied and the user's ABR-verified
+        startup has a monthly update that became 'ready' within the last 28
+        days, the discounted cost applies instead — rewarding founders who keep
+        their monthly update current.
         """
         standard = CoworkingService.get_standard_coworking_cost()
         if user is not None and booking_date is not None:

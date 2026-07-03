@@ -979,6 +979,10 @@ class MonthlyUpdateDraft(models.Model):
     evidence_metric_ids = models.JSONField(default=list, blank=True)
     carry_forward_event_ids = models.JSONField(default=list, blank=True)
     groundedness_notes = models.TextField(blank=True, default="")
+    # When the draft first reached the 'ready' status. Stamped once in save()
+    # and never refreshed, so re-approving an old month's draft cannot renew
+    # time-based perks (e.g. the coworking discount window) indefinitely.
+    ready_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -988,6 +992,18 @@ class MonthlyUpdateDraft(models.Model):
         indexes = [
             models.Index(fields=["organization", "status", "month"], name="monthly_draft_org_status_idx"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.status == MonthlyUpdateDraftStatus.READY and self.ready_at is None:
+            from django.utils import timezone
+
+            self.ready_at = timezone.now()
+            # Keep partial saves consistent: if the caller restricted the
+            # columns being written, make sure the stamp is included.
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None and "ready_at" not in update_fields:
+                kwargs["update_fields"] = list(update_fields) + ["ready_at"]
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
