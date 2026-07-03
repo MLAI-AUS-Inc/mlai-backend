@@ -47,9 +47,10 @@ class _Response:
 
 
 WHATSAPP_SETTINGS = dict(
-    WHATSAPP_CLOUD_API_TOKEN="wa-token",
-    WHATSAPP_PHONE_NUMBER_ID="12345",
-    WHATSAPP_OTP_TEMPLATE_NAME="roo_verification_code",
+    TWILIO_ACCOUNT_SID="AC-test",
+    TWILIO_AUTH_TOKEN="twilio-auth-token",
+    TWILIO_WHATSAPP_FROM="+61480000000",
+    TWILIO_WHATSAPP_OTP_CONTENT_SID="HX-otp",
 )
 
 
@@ -73,7 +74,7 @@ class WhatsAppOtpTests(TestCase):
     @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_send_otp_stores_hash_and_sends_auth_template(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         send_whatsapp_otp(channel)
 
@@ -83,19 +84,21 @@ class WhatsAppOtpTests(TestCase):
         self.assertIsNotNone(channel.verification_expires_at)
         self.assertEqual(channel.verification_send_count, 1)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["type"], "template")
-        self.assertEqual(payload["template"]["name"], "roo_verification_code")
-        body = payload["template"]["components"][0]
-        self.assertEqual(body["parameters"][0]["text"], "123456")
-        button = payload["template"]["components"][1]
-        self.assertEqual(button["sub_type"], "url")
+        url = mock_post.call_args.args[0]
+        self.assertIn("api.twilio.com", url)
+        self.assertIn("AC-test", url)
+        self.assertEqual(mock_post.call_args.kwargs["auth"], ("AC-test", "twilio-auth-token"))
+        payload = mock_post.call_args.kwargs["data"]
+        self.assertEqual(payload["From"], "whatsapp:+61480000000")
+        self.assertEqual(payload["To"], "whatsapp:+61400000000")
+        self.assertEqual(payload["ContentSid"], "HX-otp")
+        self.assertEqual(json.loads(payload["ContentVariables"]), {"1": "123456"})
 
     @override_settings(**WHATSAPP_SETTINGS)
     @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_verify_happy_path_activates_channel(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         send_whatsapp_otp(channel)
 
@@ -110,7 +113,7 @@ class WhatsAppOtpTests(TestCase):
     @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_wrong_code_attempts_then_lockout(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         send_whatsapp_otp(channel)
 
@@ -134,7 +137,7 @@ class WhatsAppOtpTests(TestCase):
     @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_expired_code_rejected(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         send_whatsapp_otp(channel)
         NotificationChannel.objects.filter(pk=channel.pk).update(
@@ -149,7 +152,7 @@ class WhatsAppOtpTests(TestCase):
     @override_settings(**WHATSAPP_SETTINGS)
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_resend_cooldown_and_invalidates_previous_code(self, mock_post):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         with patch(
             "integrations.services.notification_channels._generate_otp", return_value="111111"
@@ -181,7 +184,7 @@ class WhatsAppOtpTests(TestCase):
     @patch("integrations.services.notification_channels._generate_otp", return_value="123456")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_send_cap_per_rolling_day(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         channel = self._channel()
         channel.verification_send_count = 8
         channel.verification_last_sent_at = timezone.now() - timedelta(minutes=5)
@@ -528,7 +531,7 @@ class NotificationChannelEndpointTests(TestCase):
     @patch("integrations.services.notification_channels._generate_otp", return_value="654321")
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_whatsapp_create_then_verify_endpoint(self, mock_post, _mock_otp):
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(201, {"sid": "SM-1"})
         create = self.client.post(
             reverse("vibe-marketing-notification-channels"),
             {"channelType": "whatsapp", "routeId": "+61 400 111 222"},

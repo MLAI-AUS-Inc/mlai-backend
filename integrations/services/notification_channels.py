@@ -2,7 +2,7 @@
 
 Owns connect/verify/disable flows for the three channel types:
 - email: signed magic-link sent via Resend
-- whatsapp: 6-digit OTP sent via an approved Meta authentication template
+- whatsapp: 6-digit OTP sent via an approved Twilio authentication Content template
 - slack: auto-linked from the signed-in user (login already proves the email)
 
 Depends one-directionally on notification_adapters for transport.
@@ -333,9 +333,9 @@ def initiate_whatsapp_channel(*, organization, user, phone: str) -> Notification
 
 
 def send_whatsapp_otp(channel: NotificationChannel) -> dict[str, Any]:
-    template_name = str(getattr(settings, "WHATSAPP_OTP_TEMPLATE_NAME", "") or "").strip()
-    if not template_name:
-        # An approved Meta authentication template is mandatory: free-form
+    content_sid = str(getattr(settings, "TWILIO_WHATSAPP_OTP_CONTENT_SID", "") or "").strip()
+    if not content_sid:
+        # An approved WhatsApp authentication template is mandatory: free-form
         # text never delivers without an open 24h service window.
         raise ChannelActionError(
             "whatsapp_not_configured",
@@ -352,21 +352,12 @@ def send_whatsapp_otp(channel: NotificationChannel) -> dict[str, Any]:
     channel.verification_send_count = int(channel.verification_send_count or 0) + 1
     channel.save(update_fields=VERIFICATION_FIELDS + ["updated_at"])
 
-    # Meta authentication template contract: one body param (the code) and a
-    # copy-code URL button that takes the code again.
-    components = [
-        {"type": "body", "parameters": [{"type": "text", "text": code}]},
-        {
-            "type": "button",
-            "sub_type": "url",
-            "index": "0",
-            "parameters": [{"type": "text", "text": code}],
-        },
-    ]
+    # Twilio authentication Content template contract: one variable (the code);
+    # the copy-code button reuses the same variable server-side.
     success, _provider_id, response_payload = send_whatsapp_template(
         channel.route_id,
-        template_name=template_name,
-        template_components=components,
+        content_sid=content_sid,
+        content_variables={"1": code},
     )
     if not success:
         channel.verification_code_hash = ""

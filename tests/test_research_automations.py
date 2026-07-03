@@ -1,3 +1,4 @@
+import base64
 import hmac
 import hashlib
 import json
@@ -222,7 +223,7 @@ class ResearchAutomationCallbackTests(TestCase):
         self.assertEqual(kwargs["notification_context"], notification_context_for_run(self.run))
 
 
-@override_settings(WHATSAPP_APP_SECRET="test-secret")
+@override_settings(TWILIO_AUTH_TOKEN="twilio-auth-token", DEFAULT_BACKEND_URL="https://api.test")
 class WhatsAppAutomationWebhookTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -235,28 +236,22 @@ class WhatsAppAutomationWebhookTests(TestCase):
         )
 
     def _post_message(self, body_text, sender="61400000000"):
-        payload = {
-            "entry": [
-                {
-                    "changes": [
-                        {
-                            "value": {
-                                "messages": [
-                                    {"from": sender, "text": {"body": body_text}},
-                                ]
-                            }
-                        }
-                    ]
-                }
-            ]
+        params = {
+            "MessageSid": "SM-inbound-1",
+            "From": f"whatsapp:+{sender}",
+            "WaId": sender,
+            "Body": body_text,
         }
-        body = json.dumps(payload).encode()
-        signature = "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+        # Twilio signs the configured URL plus form params in key-sorted order.
+        signed = "https://api.test" + reverse("content_factory_whatsapp_webhook")
+        signed += "".join(key + params[key] for key in sorted(params))
+        signature = base64.b64encode(
+            hmac.new(b"twilio-auth-token", signed.encode(), hashlib.sha1).digest()
+        ).decode()
         return self.client.post(
             reverse("content_factory_whatsapp_webhook"),
-            data=body,
-            content_type="application/json",
-            HTTP_X_HUB_SIGNATURE_256=signature,
+            data=params,
+            HTTP_X_TWILIO_SIGNATURE=signature,
         )
 
     def test_stop_reply_opts_out_channel_with_signature_verification(self):
@@ -265,6 +260,17 @@ class WhatsAppAutomationWebhookTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.channel.refresh_from_db()
         self.assertEqual(self.channel.consent_state, NotificationConsentState.OPTED_OUT)
+
+    def test_bad_signature_rejected(self):
+        response = self.client.post(
+            reverse("content_factory_whatsapp_webhook"),
+            data={"From": "whatsapp:+61400000000", "WaId": "61400000000", "Body": "STOP"},
+            HTTP_X_TWILIO_SIGNATURE="not-a-real-signature",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.channel.refresh_from_db()
+        self.assertEqual(self.channel.consent_state, NotificationConsentState.ACTIVE)
 
     def test_stop_pauses_automation_when_last_active_channel(self):
         automation = ResearchAutomation.objects.create(
@@ -360,9 +366,10 @@ class WhatsAppAutomationWebhookTests(TestCase):
     DEFAULT_BACKEND_URL="https://api.test",
     RESEND_API_KEY="resend-key",
     CUSTOMERIO_API_KEY="",
-    WHATSAPP_CLOUD_API_TOKEN="wa-token",
-    WHATSAPP_PHONE_NUMBER_ID="12345",
-    WHATSAPP_TOPIC_TEMPLATE_NAME="roo_daily_topics",
+    TWILIO_ACCOUNT_SID="AC-test",
+    TWILIO_AUTH_TOKEN="twilio-auth-token",
+    TWILIO_WHATSAPP_FROM="+61480000000",
+    TWILIO_WHATSAPP_TOPIC_CONTENT_SID="HX-topic",
 )
 class FanOutDeliveryTests(TestCase):
     def setUp(self):
@@ -415,7 +422,7 @@ class FanOutDeliveryTests(TestCase):
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_topic_selection_fans_out_to_all_active_channels(self, mock_post, mock_dm):
-        mock_post.return_value = _Response(200, {"id": "email-1", "messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
 
         deliveries = send_topic_selection(self.callback_data)
 
@@ -435,16 +442,19 @@ class FanOutDeliveryTests(TestCase):
         urls = [call.args[0] for call in mock_post.call_args_list]
         self.assertTrue(any("resend.com" in url for url in urls))
         whatsapp_calls = [
-            call for call in mock_post.call_args_list if "graph.facebook.com" in call.args[0]
+            call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
         ]
         self.assertEqual(len(whatsapp_calls), 1)
-        template = whatsapp_calls[0].kwargs["json"]["template"]
-        self.assertEqual(template["name"], "roo_daily_topics")
-        params = template["components"][0]["parameters"]
-        self.assertEqual(len(params), 5)
-        self.assertEqual(params[0]["text"], "fanout.example.com")
-        self.assertEqual(params[1]["text"], "Topic One")
-        self.assertEqual(params[4]["text"], "-")
+        self.assertEqual(whatsapp_calls[0].kwargs["auth"], ("AC-test", "twilio-auth-token"))
+        payload = whatsapp_calls[0].kwargs["data"]
+        self.assertEqual(payload["From"], "whatsapp:+61480000000")
+        self.assertEqual(payload["To"], "whatsapp:+61400000000")
+        self.assertEqual(payload["ContentSid"], "HX-topic")
+        variables = json.loads(payload["ContentVariables"])
+        self.assertEqual(
+            variables,
+            {"1": "fanout.example.com", "2": "Topic One", "3": "Topic Two", "4": "-", "5": "-"},
+        )
 
         # Re-delivering the same callback sends nothing new.
         repeat = send_topic_selection(self.callback_data)
@@ -459,7 +469,7 @@ class FanOutDeliveryTests(TestCase):
     def test_topic_email_routes_via_customerio_when_configured(self, mock_post, mock_cio, mock_dm):
         from unittest.mock import MagicMock
 
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(200, {"sid": "SM-1"})
         client = MagicMock()
         client.send_email.return_value = {"delivery_id": "dl-9"}
         mock_cio.return_value = client
@@ -485,7 +495,7 @@ class FanOutDeliveryTests(TestCase):
     def test_topic_email_renders_through_customerio_template(self, mock_post, mock_cio, mock_dm):
         from unittest.mock import MagicMock
 
-        mock_post.return_value = _Response(200, {"messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(200, {"sid": "SM-1"})
         client = MagicMock()
         client.send_email.return_value = {"delivery_id": "dl-template"}
         mock_cio.return_value = client
@@ -519,7 +529,7 @@ class FanOutDeliveryTests(TestCase):
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_opted_out_channel_is_skipped(self, mock_post, mock_dm):
-        mock_post.return_value = _Response(200, {"id": "email-1", "messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
         self.whatsapp.consent_state = NotificationConsentState.OPTED_OUT
         self.whatsapp.save(update_fields=["consent_state"])
 
@@ -533,7 +543,7 @@ class FanOutDeliveryTests(TestCase):
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_per_channel_unsubscribe_only_opts_out_that_channel(self, mock_post, mock_dm):
-        mock_post.return_value = _Response(200, {"id": "email-1", "messages": [{"id": "wamid-1"}]})
+        mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
         send_topic_selection(self.callback_data)
 
         client = APIClient()
