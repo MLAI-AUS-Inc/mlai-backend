@@ -6122,6 +6122,26 @@ def _baseline_score_coverage(snapshot):
     return _calculate_baseline_overall(snapshot.metrics or {})["coverage"]
 
 
+def _serialize_baseline_history_point(snapshot):
+    metric_scores = {}
+    for key, metric in (snapshot.metrics or {}).items():
+        score = None
+        if isinstance(metric, dict) and metric.get("status") == "measured":
+            raw_score = metric.get("score")
+            if isinstance(raw_score, (int, float)):
+                score = round(float(raw_score))
+        metric_scores[key] = score
+    return {
+        "id": snapshot.id,
+        "runId": snapshot.run_id,
+        "status": snapshot.status,
+        "collectedAt": snapshot.collected_at.isoformat(),
+        "overallScore": snapshot.overall_score,
+        "scoreCoverage": _baseline_score_coverage(snapshot),
+        "metricScores": metric_scores,
+    }
+
+
 # Metric payload fields the baseline cards render in compact (summary) views. Keep
 # in sync with mlai-au VibeMarketingStartupBaselineSetup (BaselineMetricCard,
 # MetricVisual, findAiPlatformPayload).
@@ -6235,7 +6255,7 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
     return snapshot
 
 
-def _google_baseline_connect_url(request):
+def _google_baseline_connect_url(request, context=None):
     if request is None:
         return ""
     for setting_name in ("FOUNDER_TOOLS_URL", "VIBE_RAISING_URL", "DEFAULT_FRONTEND_URL"):
@@ -6245,10 +6265,26 @@ def _google_baseline_connect_url(request):
             break
     else:
         frontend_base_url = "http://localhost:5173" if getattr(settings, "DEBUG", False) else "https://mlai.au"
+    # Pin the connect to the company being viewed: google_connect binds the
+    # GoogleConnection to ?company_id, and the return URL must reopen the same
+    # company's baseline page — otherwise a multi-startup founder connects the
+    # wrong startup and the card stays "Needs connection" forever.
+    company_id = ""
+    if context is not None and getattr(context, "company", None) is not None:
+        company_id = str(context.company.id)
     next_path = "/founder-tools/marketing/create?step=baseline&googleBaseline=refresh"
+    if company_id:
+        next_path = f"{next_path}&company_id={company_id}"
     next_url = f"{frontend_base_url}{next_path}"
-    query = urlencode({"scope": "website_baseline", "next": next_url})
-    return request.build_absolute_uri(f"/integrations/connect/google?{query}")
+    query = {"scope": "website_baseline", "next": next_url}
+    if company_id:
+        query["company_id"] = company_id
+    user = getattr(request, "user", None)
+    if getattr(user, "is_authenticated", False):
+        from integrations.views import mint_google_connect_ticket
+
+        query["ticket"] = mint_google_connect_ticket(user)
+    return request.build_absolute_uri(f"/integrations/connect/google?{urlencode(query)}")
 
 
 def _serialize_startup_profile(organization):
@@ -9262,8 +9298,8 @@ def _overlay_live_bootstrap_fields(payload, *, context, request):
     if not isinstance(payload, dict):
         return payload
     try:
-        google_status = google_baseline_connection_status(context.profile.user)
-        google_status["connectUrl"] = _google_baseline_connect_url(request)
+        google_status = google_baseline_connection_status(context.profile.user, context.organization)
+        google_status["connectUrl"] = _google_baseline_connect_url(request, context)
         payload["googleBaselineConnection"] = google_status
     except Exception:
         logger.exception(
@@ -9378,8 +9414,8 @@ def _compute_bootstrap_payload(context, request=None, *, view="full", config=Non
             _serialize_run(run, context=context, latest_runs=latest_runs, checks=checks, mode=run_mode),
         )
     latest_article_run = _latest_run_matching(latest_runs, ARTICLE_WORKFLOWS)
-    google_status = google_baseline_connection_status(context.profile.user)
-    google_status["connectUrl"] = _google_baseline_connect_url(request)
+    google_status = google_baseline_connection_status(context.profile.user, context.organization)
+    google_status["connectUrl"] = _google_baseline_connect_url(request, context)
     has_completed_article_flow = _has_completed_article_flow(context.organization, latest_runs, config=config)
     topic_picker_ready = _bootstrap_topic_picker_ready(
         checks=checks,
@@ -12472,10 +12508,35 @@ class VibeMarketingBaselineGoogleRefreshView(APIView):
         google_metrics = collect_verified_google_metrics(
             user=request.user,
             domain=context.organization.domain,
+            organization=context.organization,
             ga4_property_id=request.data.get("ga4_property_id") or request.data.get("ga4PropertyId"),
         )
         snapshot = _merge_google_metrics_into_baseline(snapshot, google_metrics)
         return Response({"websiteBaseline": _serialize_baseline_snapshot(snapshot, _get_config(context.organization))}, status=status.HTTP_200_OK)
+
+
+class VibeMarketingBaselineHistoryView(APIView):
+    """Chronological baseline snapshots so the UI can chart real trends.
+
+    Snapshots already accumulate one row per collection run; this is the read
+    surface the compare-over-time product promise was missing.
+    """
+
+    MAX_POINTS = 24
+
+    def get(self, request):
+        context, error_response = _resolve_context_or_response(request)
+        if error_response:
+            return error_response
+        snapshots = list(
+            WebsiteBaselineSnapshot.objects.filter(organization=context.organization)
+            .order_by("-collected_at", "-created_at")[: self.MAX_POINTS]
+        )
+        snapshots.reverse()
+        return Response(
+            {"snapshots": [_serialize_baseline_history_point(snapshot) for snapshot in snapshots]},
+            status=status.HTTP_200_OK,
+        )
 
 
 class VibeMarketingGitHubConnectView(APIView):

@@ -32,8 +32,39 @@ GOOGLE_OAUTH_STATE_SESSION_KEY = "google_oauth_state"
 GOOGLE_OAUTH_NEXT_SESSION_KEY = "google_oauth_next"
 GOOGLE_OAUTH_ORG_SESSION_KEY = "google_oauth_org_id"
 GOOGLE_OAUTH_SUCCESS_PATH = "/settings?gmail_connected=true"
+# Signed short-lived ticket that lets a top-level browser navigation to
+# /integrations/connect/google authenticate without an API-host session or JWT
+# cookie. Minted inside authenticated API responses (the vibe-marketing
+# bootstrap connect URL); without it, a founder whose token cookie has expired
+# is bounced to login and the OAuth attempt is silently dropped.
+GOOGLE_CONNECT_TICKET_SALT = "integrations.google-connect-ticket"
+GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS = 900
 
 logger = logging.getLogger(__name__)
+
+
+def mint_google_connect_ticket(user) -> str:
+    from django.core import signing
+
+    return signing.dumps({"uid": user.pk}, salt=GOOGLE_CONNECT_TICKET_SALT, compress=True)
+
+
+def _user_from_connect_ticket(ticket: Optional[str]):
+    if not ticket:
+        return None
+    from django.core import signing
+
+    try:
+        payload = signing.loads(
+            ticket,
+            salt=GOOGLE_CONNECT_TICKET_SALT,
+            max_age=GOOGLE_CONNECT_TICKET_MAX_AGE_SECONDS,
+        )
+    except signing.BadSignature:
+        return None
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.filter(pk=payload.get("uid"), is_active=True).first()
 
 
 def _origin_from_url(url: Optional[str]) -> str:
@@ -177,6 +208,13 @@ def google_connect(request):
     Initiates the Google OAuth flow.
     """
     user = _resolve_google_oauth_user(request)
+    if user is None:
+        # Top-level navigation from the frontend carries no Authorization
+        # header; a signed ticket in the URL keeps the flow alive when the
+        # API-host session/JWT cookie is missing or expired.
+        user = _user_from_connect_ticket(request.GET.get("ticket"))
+        if user is not None:
+            request.user = user
     if user is None:
         return redirect(_vibe_raising_login_url(request.GET.get("next")))
 
