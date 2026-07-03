@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import html
 import hmac
 import hashlib
+import json
 import logging
 import re
 from datetime import timedelta
@@ -284,20 +286,20 @@ def _topic_email_message_data(
     }
 
 
-def _whatsapp_topic_components(run: AutomationRun, data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Body parameters for the approved daily-topics utility template.
+def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
+    """ContentVariables for the approved daily-topics utility template.
 
-    Template contract: 5 body params — {{1}} domain, {{2}}-{{5}} topic titles.
-    Meta rejects empty params, so missing options are padded with "-".
+    Template contract: {{1}} domain, {{2}}-{{5}} topic titles. Twilio rejects
+    sends with missing declared variables, so absent options are padded with "-".
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
     titles = [_option_title(option) for option in _topic_options(data)]
     while len(titles) < 4:
         titles.append("-")
-    parameters = [{"type": "text", "text": domain}] + [
-        {"type": "text", "text": title or "-"} for title in titles[:4]
-    ]
-    return [{"type": "body", "parameters": parameters}]
+    variables = {"1": domain}
+    for index, title in enumerate(titles[:4], start=2):
+        variables[str(index)] = title or "-"
+    return variables
 
 
 def _topic_slack_blocks(run: AutomationRun, data: dict[str, Any], channel: Optional[NotificationChannel] = None) -> list[dict[str, Any]]:
@@ -494,15 +496,27 @@ def _send_email(
     return False, "", {"error": "email_not_configured"}
 
 
+def _whatsapp_address(number: str) -> str:
+    """Twilio WhatsApp addressing: whatsapp:+E164 (route_ids are stored as +E164)."""
+    text = str(number or "").strip()
+    if not text:
+        return ""
+    if text.startswith("whatsapp:"):
+        return text
+    if not text.startswith("+"):
+        text = "+" + text
+    return f"whatsapp:{text}"
+
+
 def _post_whatsapp_message(payload: dict[str, Any]) -> tuple[bool, str, dict]:
-    token = str(getattr(settings, "WHATSAPP_CLOUD_API_TOKEN", "") or "").strip()
-    phone_number_id = str(getattr(settings, "WHATSAPP_PHONE_NUMBER_ID", "") or "").strip()
-    if not token or not phone_number_id:
-        return False, "", {"error": "WhatsApp Cloud API credentials are not configured"}
+    account_sid = str(getattr(settings, "TWILIO_ACCOUNT_SID", "") or "").strip()
+    auth_token = str(getattr(settings, "TWILIO_AUTH_TOKEN", "") or "").strip()
+    if not account_sid or not auth_token:
+        return False, "", {"error": "Twilio WhatsApp credentials are not configured"}
     response = http_client.post(
-        f"https://graph.facebook.com/v20.0/{phone_number_id}/messages",
-        json=payload,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+        data=payload,
+        auth=(account_sid, auth_token),
         timeout=(3, 8),
     )
     try:
@@ -511,19 +525,16 @@ def _post_whatsapp_message(payload: dict[str, Any]) -> tuple[bool, str, dict]:
         response_payload = {"text": response.text}
     if response.status_code >= 300:
         return False, "", response_payload
-    messages = response_payload.get("messages") if isinstance(response_payload.get("messages"), list) else []
-    provider_id = str((messages[0] or {}).get("id") if messages else "")
-    return True, provider_id, response_payload
+    return True, str(response_payload.get("sid") or ""), response_payload
 
 
 def send_whatsapp_text(to_number: str, text: str) -> tuple[bool, str, dict]:
     """Send a free-form WhatsApp text (delivers inside a 24h service window)."""
     return _post_whatsapp_message(
         {
-            "messaging_product": "whatsapp",
-            "to": str(to_number or "").strip().lstrip("+"),
-            "type": "text",
-            "text": {"body": text},
+            "From": _whatsapp_address(str(getattr(settings, "TWILIO_WHATSAPP_FROM", "") or "")),
+            "To": _whatsapp_address(to_number),
+            "Body": text,
         }
     )
 
@@ -531,38 +542,32 @@ def send_whatsapp_text(to_number: str, text: str) -> tuple[bool, str, dict]:
 def send_whatsapp_template(
     to_number: str,
     *,
-    template_name: str,
-    template_components: Optional[list] = None,
+    content_sid: str,
+    content_variables: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str, dict]:
-    """Send an approved WhatsApp template message (works outside the 24h window)."""
-    template: dict[str, Any] = {
-        "name": template_name,
-        "language": {"code": str(getattr(settings, "WHATSAPP_TEMPLATE_LANGUAGE", "en_US"))},
+    """Send an approved WhatsApp Content template (works outside the 24h window)."""
+    payload = {
+        "From": _whatsapp_address(str(getattr(settings, "TWILIO_WHATSAPP_FROM", "") or "")),
+        "To": _whatsapp_address(to_number),
+        "ContentSid": content_sid,
     }
-    if template_components:
-        template["components"] = template_components
-    return _post_whatsapp_message(
-        {
-            "messaging_product": "whatsapp",
-            "to": str(to_number or "").strip().lstrip("+"),
-            "type": "template",
-            "template": template,
-        }
-    )
+    if content_variables:
+        payload["ContentVariables"] = json.dumps(content_variables)
+    return _post_whatsapp_message(payload)
 
 
 def _send_whatsapp(
     channel: NotificationChannel,
     *,
     text: str,
-    template_name: str = "",
-    template_components: Optional[list] = None,
+    content_sid: str = "",
+    content_variables: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str, dict]:
-    if template_name:
+    if content_sid:
         return send_whatsapp_template(
             channel.route_id,
-            template_name=template_name,
-            template_components=template_components,
+            content_sid=content_sid,
+            content_variables=content_variables,
         )
     return send_whatsapp_text(channel.route_id, f"{text}\n\nReply STOP to opt out.")
 
@@ -577,7 +582,7 @@ def _send_channel_delivery(
     subject: Optional[str] = None,
     blocks: Optional[list] = None,
     html_body: Optional[str] = None,
-    whatsapp_components: Optional[list] = None,
+    whatsapp_variables: Optional[dict[str, str]] = None,
     email_message_data: Optional[dict[str, Any]] = None,
     email_transactional_message_id: str = "",
 ) -> NotificationDelivery:
@@ -602,21 +607,21 @@ def _send_channel_delivery(
                 transactional_message_id=email_transactional_message_id,
             )
         elif channel.channel_type == NotificationChannelType.WHATSAPP:
-            template_name = str(channel.provider_metadata.get(f"{event_type}_template") or "").strip()
-            if not template_name and event_type == "topic_selection":
-                template_name = str(getattr(settings, "WHATSAPP_TOPIC_TEMPLATE_NAME", "") or "").strip()
-                if not template_name:
+            content_sid = str(channel.provider_metadata.get(f"{event_type}_content_sid") or "").strip()
+            if not content_sid and event_type == "topic_selection":
+                content_sid = str(getattr(settings, "TWILIO_WHATSAPP_TOPIC_CONTENT_SID", "") or "").strip()
+                if not content_sid:
                     # Business-initiated sends outside a 24h service window need an
                     # approved template; plain text only delivers inside a window.
                     logger.warning(
-                        "WhatsApp topic template is not configured; attempting plain text for run %s",
+                        "WhatsApp topic Content template is not configured; attempting plain text for run %s",
                         run.id,
                     )
             success, provider_id, response_payload = _send_whatsapp(
                 channel,
                 text=text,
-                template_name=template_name,
-                template_components=whatsapp_components if template_name else None,
+                content_sid=content_sid,
+                content_variables=whatsapp_variables if content_sid else None,
             )
         else:
             success, provider_id, response_payload = False, "", {"error": f"Unsupported channel {channel.channel_type}"}
@@ -653,7 +658,7 @@ def _fan_out_event(
     """Deliver one automation event to every active channel, idempotently per channel.
 
     build_kwargs(channel) returns the _send_channel_delivery content kwargs
-    (text/subject/blocks/html_body/whatsapp_components) for that channel.
+    (text/subject/blocks/html_body/whatsapp_variables) for that channel.
     """
     deliveries: list[NotificationDelivery] = []
     for channel in _active_channels_for_run(run):
@@ -701,7 +706,7 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
             # Raw-HTML fallback used when no Customer.io template id is configured
             # (or when email goes via Resend).
             "html_body": _topic_email_html(run, data, channel),
-            "whatsapp_components": _whatsapp_topic_components(run, data),
+            "whatsapp_variables": _whatsapp_topic_variables(run, data),
             "email_message_data": _topic_email_message_data(run, data, channel),
             "email_transactional_message_id": str(
                 getattr(settings, "CUSTOMERIO_TOPIC_TEMPLATE_ID", "") or ""
@@ -937,11 +942,19 @@ def handle_automation_action_token(token: str) -> dict[str, Any]:
     raise ValueError(f"Unsupported automation action: {action}")
 
 
-def verify_whatsapp_webhook_signature(*, body: bytes, signature: str) -> bool:
-    app_secret = str(getattr(settings, "WHATSAPP_APP_SECRET", "") or "").strip()
-    if not app_secret:
+def verify_whatsapp_webhook_signature(*, url: str, params: dict[str, Any], signature: str) -> bool:
+    """Validate Twilio's X-Twilio-Signature.
+
+    Twilio signs the full public webhook URL with every POST param appended as
+    key+value in key-sorted order, HMAC-SHA1 keyed by the auth token, base64.
+    An unset auth token accepts everything (local/dev parity with sends).
+    """
+    auth_token = str(getattr(settings, "TWILIO_AUTH_TOKEN", "") or "").strip()
+    if not auth_token:
         return True
-    expected = "sha256=" + hmac.new(app_secret.encode(), body, hashlib.sha256).hexdigest()
+    signed = str(url or "") + "".join(key + str(params[key]) for key in sorted(params.keys()))
+    digest = hmac.new(auth_token.encode(), signed.encode(), hashlib.sha1).digest()
+    expected = base64.b64encode(digest).decode()
     return hmac.compare_digest(expected, str(signature or "").strip())
 
 
@@ -1031,35 +1044,24 @@ def _handle_whatsapp_inbound_message(message: dict[str, Any]) -> dict[str, int]:
 
 
 def handle_whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    opted_out = 0
-    status_updates = 0
-    approved = 0
-    replied = 0
-    entries = payload.get("entry") if isinstance(payload.get("entry"), list) else []
-    for entry in entries:
-        changes = entry.get("changes") if isinstance(entry, dict) and isinstance(entry.get("changes"), list) else []
-        for change in changes:
-            value = change.get("value") if isinstance(change, dict) else {}
-            if not isinstance(value, dict):
-                continue
-            statuses = value.get("statuses") if isinstance(value.get("statuses"), list) else []
-            status_updates += len(statuses)
-            messages = value.get("messages") if isinstance(value.get("messages"), list) else []
-            for message in messages:
-                # Meta retries the whole batch on non-200, so one bad message
-                # must never fail the webhook.
-                try:
-                    result = _handle_whatsapp_inbound_message(message)
-                except Exception as exc:
-                    logger.warning("Failed handling WhatsApp inbound message: %s", exc)
-                    continue
-                opted_out += result.get("opted_out", 0)
-                approved += result.get("approved", 0)
-                replied += result.get("replied", 0)
+    """Handle one Twilio inbound-message POST (flat form fields, one message).
+
+    Delivery receipts go to a separately configured status-callback URL, so only
+    user messages arrive here. A bad message must never fail the webhook —
+    Twilio retries on non-2xx and would replay opt-outs/approvals.
+    """
+    sender = str(payload.get("WaId") or "").strip()
+    if not sender:
+        sender = str(payload.get("From") or "").strip().removeprefix("whatsapp:").lstrip("+")
+    message = {"from": sender, "text": {"body": str(payload.get("Body") or "")}}
+    try:
+        result = _handle_whatsapp_inbound_message(message)
+    except Exception as exc:
+        logger.warning("Failed handling WhatsApp inbound message: %s", exc)
+        result = {}
     return {
         "status": "received",
-        "opted_out": opted_out,
-        "status_updates": status_updates,
-        "approved": approved,
-        "replied": replied,
+        "opted_out": result.get("opted_out", 0),
+        "approved": result.get("approved", 0),
+        "replied": result.get("replied", 0),
     }

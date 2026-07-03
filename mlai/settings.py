@@ -450,17 +450,19 @@ CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.
 CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '')
-WHATSAPP_CLOUD_API_TOKEN = os.getenv('WHATSAPP_CLOUD_API_TOKEN', '')
-WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID', '')
-WHATSAPP_TEMPLATE_LANGUAGE = os.getenv('WHATSAPP_TEMPLATE_LANGUAGE', 'en_US')
-WHATSAPP_APP_SECRET = os.getenv('WHATSAPP_APP_SECRET', '')
-WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv('WHATSAPP_WEBHOOK_VERIFY_TOKEN', '')
-# Approved Meta authentication template used to deliver channel-verification OTPs.
-WHATSAPP_OTP_TEMPLATE_NAME = os.getenv('WHATSAPP_OTP_TEMPLATE_NAME', '')
-# Approved Meta utility template for the daily topic message (5 body params:
-# domain + 4 topic titles). Without it, topic sends fall back to plain text and
-# only deliver inside an open 24h service window.
-WHATSAPP_TOPIC_TEMPLATE_NAME = os.getenv('WHATSAPP_TOPIC_TEMPLATE_NAME', '')
+# Twilio credentials drive WhatsApp sends (Messages API) and inbound webhook
+# validation (X-Twilio-Signature is HMAC-SHA1 keyed by the auth token).
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN', '')
+# WhatsApp-enabled Twilio number in E.164 (no whatsapp: prefix).
+TWILIO_WHATSAPP_FROM = os.getenv('TWILIO_WHATSAPP_FROM', '')
+# Approved WhatsApp Content template SID (HX...) used to deliver
+# channel-verification OTPs; must be an AUTHENTICATION template.
+TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '')
+# Approved utility Content template for the daily topic message (variables:
+# {{1}} domain, {{2}}-{{5}} topic titles). Without it, topic sends fall back to
+# plain text and only deliver inside an open 24h service window.
+TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )

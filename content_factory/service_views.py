@@ -1420,19 +1420,10 @@ class NotificationChannelEmailVerifyView(APIView):
 
 
 class ResearchAutomationWhatsAppWebhookView(APIView):
-    """Meta WhatsApp Cloud API webhook for statuses and STOP opt-outs."""
+    """Twilio WhatsApp inbound-message webhook (topic replies and STOP opt-outs)."""
 
     authentication_classes = []
     permission_classes = []
-
-    def get(self, request):
-        verify_token = str(getattr(settings, "WHATSAPP_WEBHOOK_VERIFY_TOKEN", "") or "").strip()
-        mode = request.query_params.get("hub.mode")
-        token = request.query_params.get("hub.verify_token")
-        challenge = request.query_params.get("hub.challenge")
-        if mode == "subscribe" and verify_token and token == verify_token:
-            return HttpResponse(challenge or "", status=200)
-        return Response({"error": "Invalid verification token"}, status=status.HTTP_403_FORBIDDEN)
 
     def post(self, request):
         from integrations.services.notification_adapters import (
@@ -1440,10 +1431,16 @@ class ResearchAutomationWhatsAppWebhookView(APIView):
             verify_whatsapp_webhook_signature,
         )
 
-        signature = request.headers.get("X-Hub-Signature-256", "")
-        if not verify_whatsapp_webhook_signature(body=request.body, signature=signature):
+        # Twilio signs the URL it was configured with. Rebuild it from
+        # DEFAULT_BACKEND_URL rather than build_absolute_uri(): behind the
+        # reverse proxy the request reassembles as http:// and every
+        # signature check would fail.
+        base_url = str(getattr(settings, "DEFAULT_BACKEND_URL", "") or "").rstrip("/")
+        url = f"{base_url}{request.get_full_path()}" if base_url else request.build_absolute_uri()
+        signature = request.headers.get("X-Twilio-Signature", "")
+        if not verify_whatsapp_webhook_signature(url=url, params=request.POST, signature=signature):
             return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
-        result = handle_whatsapp_webhook(request.data if isinstance(request.data, dict) else {})
+        result = handle_whatsapp_webhook(request.POST.dict())
         return Response(result, status=status.HTTP_200_OK)
 
 
