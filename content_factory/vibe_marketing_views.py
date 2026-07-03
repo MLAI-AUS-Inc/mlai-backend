@@ -358,6 +358,7 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "processing",
     "preview_building",
     "preview_ready",
+    "code_review_ready",
     "revision_ready",
     "awaiting_approval",
     "awaiting_confirmation",
@@ -8425,12 +8426,18 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["review"] = "complete"
             status_by_id["publish"] = "running"
             summary_by_id["publish"] = "The merged articles directory is being verified in the background."
-        elif setup_status in {"preview_ready", "revision_ready", "awaiting_approval", "approval_required", "await_review"}:
+        elif setup_status in {"preview_ready", "code_review_ready", "revision_ready", "awaiting_approval", "approval_required", "await_review"}:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "needs_action"
             status_by_id["publish"] = "locked"
-            summary_by_id["review"] = "Review the hosted setup preview and approve the setup PR when ready."
-            action_by_id["review"] = _workflow_step_action("Review articles setup preview", href=setup_run_url)
+            if setup_status == "code_review_ready":
+                # Server-rendered stacks get no hosted preview; the reviewable
+                # surface is the setup branch diff on the run page.
+                summary_by_id["review"] = "A hosted preview isn't supported for this stack — review the setup code changes and approve the setup PR."
+                action_by_id["review"] = _workflow_step_action("Review setup changes", href=setup_run_url)
+            else:
+                summary_by_id["review"] = "Review the hosted setup preview and approve the setup PR when ready."
+                action_by_id["review"] = _workflow_step_action("Review articles setup preview", href=setup_run_url)
         elif setup_status == "fallback_ready":
             status_by_id["generate"] = "blocked"
             status_by_id["review"] = "needs_action"
