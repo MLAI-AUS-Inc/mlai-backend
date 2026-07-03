@@ -6162,6 +6162,9 @@ _COMPACT_BASELINE_METRIC_FIELDS = {
     "googleAnalytics",
     "displayRows",
     "providers",
+    "articleCitations",
+    "citedPages",
+    "aiQuotes",
 }
 
 # Per-provider fields the AI-visibility card renders; drops prompt transcripts,
@@ -12441,6 +12444,38 @@ class VibeMarketingAutofillView(APIView):
         return _autofill_start_response(run, reused_active_run=False)
 
 
+def _baseline_published_articles(organization, *, limit=8):
+    """Publicly reachable articles we wrote, for AI-citation checks.
+
+    Only articles an AI assistant could actually cite qualify: a
+    sitemap-confirmed live_url, or a merged/live article_url.
+    """
+    from django.db.models import Q
+
+    articles = []
+    rows = (
+        WrittenArticle.objects.filter(organization=organization)
+        .filter(
+            Q(live_url__isnull=False) & ~Q(live_url="")
+            | Q(
+                publish_status__in=[ArticlePublishStatus.MERGED, ArticlePublishStatus.LIVE],
+                article_url__isnull=False,
+            )
+        )
+        .order_by("-pr_merged_at", "-created_at")[: limit * 2]
+    )
+    seen = set()
+    for row in rows:
+        url = (row.live_url or "").strip() or (row.article_url or "").strip()
+        if not url.startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        articles.append({"url": url, "title": row.title, "keyword": row.primary_keyword})
+        if len(articles) >= limit:
+            break
+    return articles
+
+
 class VibeMarketingBaselineView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -12463,6 +12498,7 @@ class VibeMarketingBaselineView(APIView):
             "brand_name": config.brand_name or context.organization.name,
             "seed_keywords": list(context.organization.seed_keywords or []),
             "competitors": list(context.organization.competitors or []),
+            "published_articles": _baseline_published_articles(context.organization),
             "slack_user_id": founder_actor_id_for_user(request.user),
             "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
