@@ -6060,14 +6060,108 @@ def _baseline_requirement_satisfied(config, snapshot) -> bool:
     return bool(config.baseline_skipped_at or _baseline_is_fresh(snapshot))
 
 
+# Mirror of calculate_overall_score in content-factory backend/website_baseline.py.
+# The producer computes the score at collection time; Django must recompute it when
+# the Google traffic merge changes a metric after the fact, so keep the two in sync.
+BASELINE_SCORE_WEIGHTS = {
+    "technicalHealth": 40,
+    "lighthouse": 25,
+    "authority": 10,
+    "organicSearch": 10,
+    "aiVisibility": 10,
+    "traffic": 5,
+}
+
+
+def _calculate_baseline_overall(metrics):
+    weighted_total = 0.0
+    used_weight = 0
+    for key, weight in BASELINE_SCORE_WEIGHTS.items():
+        metric = (metrics or {}).get(key)
+        if not isinstance(metric, dict) or metric.get("status") != "measured":
+            continue
+        try:
+            score = float(metric.get("score"))
+        except (TypeError, ValueError):
+            continue
+        weighted_total += score * weight
+        used_weight += weight
+    if used_weight <= 0:
+        return {"score": None, "coverage": 0}
+    total_weight = sum(BASELINE_SCORE_WEIGHTS.values())
+    return {
+        "score": int(round(min(100.0, max(0.0, weighted_total / used_weight)))),
+        "coverage": int(round(min(100.0, max(0.0, used_weight / total_weight * 100)))),
+    }
+
+
+def _baseline_summary_payload(score, source_status):
+    # Bands match the frontend scorecard legend (80+/50+) and the producer's
+    # summary text in content-factory backend/tasks.py.
+    if score is None:
+        text = "Website baseline could not compute a score yet."
+    elif score >= 80:
+        text = "Website baseline is strong."
+    elif score >= 50:
+        text = "Website baseline is fair — on the right track with room to grow."
+    else:
+        text = "Website baseline needs work."
+    missing = [key for key in BASELINE_SCORE_WEIGHTS if (source_status or {}).get(key) != "measured"]
+    if score is not None and missing:
+        text = f"{text} {len(missing)} data source(s) still need connection or configuration."
+    return {"text": text}
+
+
+def _baseline_score_coverage(snapshot):
+    raw = (snapshot.raw_payload or {}).get("scoreCoverage")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return _calculate_baseline_overall(snapshot.metrics or {})["coverage"]
+
+
+# Metric payload fields the baseline cards render in compact (summary) views. Keep
+# in sync with mlai-au VibeMarketingStartupBaselineSetup (BaselineMetricCard,
+# MetricVisual, findAiPlatformPayload).
+_COMPACT_BASELINE_METRIC_FIELDS = {
+    "status",
+    "score",
+    "message",
+    "verified",
+    "reasonCode",
+    "retryAfterSeconds",
+    "metricLabel",
+    "authorityScore",
+    "backlinks",
+    "referringDomains",
+    "last28Days",
+    "last90Days",
+    "googleSearchConsole",
+    "googleAnalytics",
+    "displayRows",
+    "providers",
+}
+
+# Per-provider fields the AI-visibility card renders; drops prompt transcripts,
+# which dominate the payload size.
+_COMPACT_BASELINE_PROVIDER_FIELDS = ("key", "label", "score", "status", "source")
+
+
 def _compact_baseline_metric(metric):
     if not isinstance(metric, dict):
         return metric
-    return {
-        key: value
-        for key, value in metric.items()
-        if key in {"status", "score", "message", "verified", "last28Days", "last90Days"}
-    }
+    compacted = {key: value for key, value in metric.items() if key in _COMPACT_BASELINE_METRIC_FIELDS}
+    providers = compacted.get("providers")
+    if isinstance(providers, list):
+        compacted["providers"] = [
+            {field: provider.get(field) for field in _COMPACT_BASELINE_PROVIDER_FIELDS if field in provider}
+            if isinstance(provider, dict)
+            else provider
+            for provider in providers
+        ]
+    return compacted
 
 
 def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
@@ -6085,7 +6179,6 @@ def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
         metrics = {
             key: _compact_baseline_metric(value)
             for key, value in (snapshot.metrics or {}).items()
-            if key in {"technical", "content", "authority", "traffic"}
         }
         recommendations = list(snapshot.recommendations or [])[:3]
     return {
@@ -6097,6 +6190,7 @@ def _serialize_baseline_snapshot(snapshot, config=None, *, compact=False):
         "stale": not _baseline_is_fresh(snapshot),
         "collectedAt": snapshot.collected_at.isoformat(),
         "overallScore": snapshot.overall_score,
+        "scoreCoverage": _baseline_score_coverage(snapshot),
         "summary": snapshot.summary,
         "metrics": metrics,
         "sourceStatus": snapshot.source_status,
@@ -6121,10 +6215,23 @@ def _merge_google_metrics_into_baseline(snapshot, google_metrics):
     payload["metrics"] = metrics
     payload["sourceStatus"] = source_status
     payload["googleEnrichedAt"] = timezone.now().isoformat()
+    # The merge changes the traffic metric, so the collection-time score and
+    # summary are stale — recompute them with the producer's weights.
+    overall = _calculate_baseline_overall(metrics)
+    if overall["score"] is not None:
+        snapshot.overall_score = overall["score"]
+        payload["overallScore"] = overall["score"]
+    payload["scoreCoverage"] = overall["coverage"]
+    summary = _baseline_summary_payload(
+        overall["score"] if overall["score"] is not None else snapshot.overall_score,
+        source_status,
+    )
+    snapshot.summary = summary
+    payload["summary"] = summary["text"]
     snapshot.metrics = metrics
     snapshot.source_status = source_status
     snapshot.raw_payload = payload
-    snapshot.save(update_fields=["metrics", "source_status", "raw_payload", "updated_at"])
+    snapshot.save(update_fields=["overall_score", "summary", "metrics", "source_status", "raw_payload", "updated_at"])
     return snapshot
 
 
