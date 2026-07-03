@@ -92,6 +92,7 @@ class ResearchAutomationSchedulerTests(TestCase):
         payload = mock_post.call_args.kwargs["payload"]
         self.assertEqual(payload["domain"], "automation.example.com")
         self.assertEqual(payload["user_email"], "writer@example.com")
+        self.assertEqual(payload["requested_topic_count"], 3)
         self.assertNotIn("slack_user_id", payload)
         self.assertEqual(payload["notification_context"]["automation_id"], str(automation.id))
         self.assertEqual(payload["notification_context"]["automation_run_id"], str(run.id))
@@ -104,6 +105,7 @@ class ResearchAutomationSchedulerTests(TestCase):
     RESEND_API_KEY="resend-key",
     RESEND_FROM_EMAIL="Roo <roo@example.com>",
     CUSTOMERIO_API_KEY="",
+    FOUNDER_TOOLS_URL="https://app.test",
 )
 class ResearchAutomationCallbackTests(TestCase):
     def setUp(self):
@@ -221,6 +223,111 @@ class ResearchAutomationCallbackTests(TestCase):
         self.assertEqual(kwargs["confirmed_keyword"], "second topic")
         self.assertEqual(kwargs["source_run_id"], "discovery-run-1")
         self.assertEqual(kwargs["notification_context"], notification_context_for_run(self.run))
+
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_article_review_ready_callback_fans_out_review_link(self, mock_post):
+        mock_post.return_value = _Response(200, {"id": "email-2"})
+
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "article_review_ready",
+                "job_id": "article-run-1",
+                "domain": "callback.example.com",
+                "title": "First Topic",
+                "preview_url": "https://preview.test/run/article-run-1",
+                "notification_context": notification_context_for_run(self.run),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+        self.assertEqual(self.run.article_content_factory_run_id, "article-run-1")
+        delivery = NotificationDelivery.objects.get(automation_run=self.run, event_type="review_ready")
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        email_payload = mock_post.call_args.kwargs["json"]
+        self.assertIn(
+            "https://app.test/founder-tools/marketing/runs/article-run-1",
+            email_payload["text"],
+        )
+        self.assertIn("https://preview.test/run/article-run-1", email_payload["text"])
+
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_content_ready_includes_review_link_and_skips_relative_pr_path(self, mock_post):
+        mock_post.return_value = _Response(200, {"id": "email-3"})
+        from integrations.services.notification_adapters import send_content_ready
+
+        deliveries = send_content_ready(
+            {
+                "event_type": "content_ready",
+                "job_id": "article-run-2",
+                "domain": "callback.example.com",
+                "title": "First Topic",
+                "publish_pr_url": "/api/runs/article-run-2/publish-pr",
+                "notification_context": notification_context_for_run(self.run),
+            }
+        )
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0].status, NotificationDeliveryStatus.SENT)
+        text = mock_post.call_args.kwargs["json"]["text"]
+        self.assertIn("https://app.test/founder-tools/marketing/runs/article-run-2", text)
+        self.assertNotIn("Pull request", text)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+
+    @patch("integrations.services.notification_adapters.set_article_delivery_mode")
+    @patch("integrations.services.notification_adapters.confirm_topic")
+    def test_approval_auto_resolves_delivery_mode_when_awaiting(self, mock_confirm, mock_set_mode):
+        mock_confirm.return_value = {"run_id": "article-run-7", "status": "awaiting_delivery_mode"}
+        mock_set_mode.return_value = {"status": "queued", "delivery_mode": "review_draft"}
+        self.run.callback_payload = {
+            "job_id": "discovery-run-1",
+            "domain": "callback.example.com",
+            "selection": {
+                "options": [
+                    {"keyword": "first topic", "suggested_title": "First Topic"},
+                ]
+            },
+        }
+        self.run.save(update_fields=["callback_payload"])
+        token = parse_qs(urlparse(build_action_url(self.run, "approve_topic", option_index=0)).query)["token"][0]
+
+        response = self.client.get(reverse("content_factory_automation_action"), {"token": token})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_set_mode.assert_called_once_with("article-run-7")
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.GENERATING)
+        self.assertEqual(self.run.selected_delivery_mode, "review_draft")
+        self.assertEqual(self.run.article_content_factory_run_id, "article-run-7")
+
+    def test_stale_delivery_mode_prompt_is_suppressed(self):
+        from integrations.services.notification_adapters import send_delivery_mode_required
+
+        self.run.selected_delivery_mode = "review_draft"
+        self.run.status = AutomationRunStatus.GENERATING
+        self.run.save(update_fields=["selected_delivery_mode", "status"])
+
+        deliveries = send_delivery_mode_required(
+            {
+                "event_type": "delivery_mode_required",
+                "job_id": "article-run-1",
+                "domain": "callback.example.com",
+                "notification_context": notification_context_for_run(self.run),
+            }
+        )
+
+        self.assertEqual(deliveries, [])
+        self.assertFalse(
+            NotificationDelivery.objects.filter(
+                automation_run=self.run, event_type="delivery_mode_required"
+            ).exists()
+        )
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.GENERATING)
 
 
 @override_settings(TWILIO_AUTH_TOKEN="twilio-auth-token", DEFAULT_BACKEND_URL="https://api.test")
@@ -351,7 +458,7 @@ class WhatsAppAutomationWebhookTests(TestCase):
         response = self._post_message("hello?")
 
         self.assertEqual(response.data["replied"], 1)
-        self.assertIn("Reply 1-4", mock_send_text.call_args.args[1])
+        self.assertIn("Reply 1-3", mock_send_text.call_args.args[1])
 
     @patch("integrations.services.notification_adapters.send_whatsapp_text")
     def test_unknown_sender_gets_no_reply(self, mock_send_text):
@@ -453,7 +560,7 @@ class FanOutDeliveryTests(TestCase):
         variables = json.loads(payload["ContentVariables"])
         self.assertEqual(
             variables,
-            {"1": "fanout.example.com", "2": "Topic One", "3": "Topic Two", "4": "-", "5": "-"},
+            {"1": "fanout.example.com", "2": "Topic One", "3": "Topic Two", "4": "-"},
         )
 
         # Re-delivering the same callback sends nothing new.

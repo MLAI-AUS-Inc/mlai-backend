@@ -506,7 +506,7 @@ TWILIO_WHATSAPP_FROM = os.getenv('TWILIO_WHATSAPP_FROM', '')
 # channel-verification OTPs; must be an AUTHENTICATION template.
 TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '')
 # Approved utility Content template for the daily topic message (variables:
-# {{1}} domain, {{2}}-{{5}} topic titles). Without it, topic sends fall back to
+# {{1}} domain, {{2}}-{{4}} topic titles). Without it, topic sends fall back to
 # plain text and only deliver inside an open 24h service window.
 TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(

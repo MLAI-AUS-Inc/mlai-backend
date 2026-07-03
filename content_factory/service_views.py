@@ -4250,8 +4250,17 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_review_ready,
+        )
+
         slack_sent = False
-        if pr_url:
+        if normalize_notification_context(data.get('notification_context')):
+            # Automation-driven runs route through notification channels; the
+            # Slack job-thread message below is the legacy manual-run path.
+            send_review_ready(data)
+        elif pr_url:
             blocks = build_draft_pr_created_blocks(
                 domain=domain,
                 pr_url=pr_url,
@@ -4682,6 +4691,16 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_article_review_ready(self, data):
+        from integrations.services.notification_adapters import (
+            normalize_notification_context,
+            send_review_ready,
+        )
+
+        # Keep the pre-enrichment payload for channel fan-out: this event only
+        # fires after the hosted preview passed the exact-ready gate, but the
+        # enrichment pass doesn't know that surface kind and would demote the
+        # verified preview_url to an unlinkable "candidate".
+        raw_payload = dict(data or {})
         data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -4708,6 +4727,11 @@ class ContentFactoryCallbackView(APIView):
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
+
+        if normalize_notification_context(raw_payload.get('notification_context')):
+            # Automation-driven runs notify their channels with the review
+            # link; without this, review-draft articles complete silently.
+            send_review_ready(raw_payload)
 
         logger.info("Article review draft ready for job %s (%s)", job_id, domain)
         return Response(
