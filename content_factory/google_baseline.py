@@ -15,11 +15,26 @@ GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 BASELINE_GOOGLE_SCOPES = [GSC_SCOPE]
 
 
-def google_connection_for_user(user):
-    # Resolve the active startup's Gmail connection (baseline runs in the
-    # context of the active company).
-    from integrations.services.external_connectors import active_google_connection
+def google_connection_for_user(user, organization=None):
+    # Resolve the Google connection for the startup being viewed. Baseline
+    # requests are company-pinned via ?company_id, so a multi-startup founder
+    # must not read a sibling startup's connection; fall back only to a legacy
+    # org-less connection, never to another org's. Without an organization,
+    # keep the active-startup behaviour.
+    from integrations.services.external_connectors import (
+        active_google_connection,
+        google_connection_for_org,
+    )
 
+    if organization is not None:
+        connection = google_connection_for_org(user, organization)
+        if connection is not None:
+            return connection
+        return (
+            GoogleConnection.objects.filter(user=user, organization__isnull=True)
+            .order_by("-updated_at", "-id")
+            .first()
+        )
     return active_google_connection(user)
 
 
@@ -34,8 +49,8 @@ def google_connection_has_scope(connection: Optional[GoogleConnection], scope: s
     return scope in scopes
 
 
-def google_baseline_connection_status(user) -> Dict[str, Any]:
-    connection = google_connection_for_user(user)
+def google_baseline_connection_status(user, organization=None) -> Dict[str, Any]:
+    connection = google_connection_for_user(user, organization)
     if not connection:
         return {
             "connected": False,
@@ -56,10 +71,11 @@ def collect_verified_google_metrics(
     *,
     user,
     domain: str,
+    organization=None,
     ga4_property_id: Optional[str] = None,
     now=None,
 ) -> Dict[str, Any]:
-    connection = google_connection_for_user(user)
+    connection = google_connection_for_user(user, organization)
     if not connection:
         return _needs_connection("Connect Google Search Console to verify traffic.")
     if not google_connection_has_baseline_scope(connection):
