@@ -299,29 +299,67 @@ class ContentFactoryOrgConfigView(APIView):
             except Exception as e:
                 logger.warning(f"Error looking up owned domains for slack_user_id {slack_user_id}: {e}")
 
-        # 1. Try lookup by github_repo if provided
-        if github_repo and not org:
+        # 1. Resolve by domain FIRST — it is the authoritative tenant key.
+        #    (github_repo used to be tried first, so a stale scan hint or a repo
+        #    shared across two of a founder's companies could silently bind a run
+        #    to a DIFFERENT company's org, including its GitHub token + publish
+        #    target.)
+        domain_org = None
+        if domain and not org:
+            normalized_domain = self._normalize_domain(domain)
+            domain_org = Organization.objects.filter(domain=normalized_domain).first()
+
+        # 2. Collect the org(s) this github_repo is configured for. A repo can be
+        #    shared by several of a founder's companies (a monorepo), so this is a
+        #    set, not a single org.
+        repo_org_ids = set()
+        repo_org = None
+        if github_repo:
             try:
-                # Find the config that matches this repo
-                config_qs = OrganizationContentConfig.objects.filter(github_repo=github_repo)
+                repo_qs = OrganizationContentConfig.objects.filter(github_repo=github_repo)
                 if slack_user_id:
-                    config_qs = config_qs.filter(
+                    scoped = repo_qs.filter(
                         Q(connected_slack_user_id=slack_user_id)
                         | Q(connected_slack_user_id__isnull=True)
                     )
-                config = config_qs.first()
-                if config:
-                    org = config.organization
+                    repo_qs = scoped if scoped.exists() else repo_qs
+                repo_org_ids = set(repo_qs.values_list("organization_id", flat=True))
+                # Deterministic pick for the repo-only case (no domain given).
+                repo_config = (
+                    repo_qs.select_related("organization")
+                    .order_by("organization__domain", "organization_id")
+                    .first()
+                )
+                repo_org = repo_config.organization if repo_config else None
             except Exception as e:
                 logger.warning(f"Error looking up org by repo {github_repo}: {e}")
 
-        # 2. Try lookup by domain if no org found yet
-        if not org and domain:
-            normalized_domain = self._normalize_domain(domain)
-            try:
-                org = Organization.objects.get(domain=normalized_domain)
-            except Organization.DoesNotExist:
-                pass
+        # 3. Reconcile. Domain wins. A github_repo that is registered ONLY to other
+        #    companies (its org set excludes the domain's org) is a setup conflict
+        #    — a stale scan hint or a mistaken repo link — surfaced as a structured
+        #    409 instead of silently switching tenants. When the domain's org is
+        #    among the repo's orgs (including a legitimately shared monorepo), the
+        #    domain wins with no conflict. Repo-only still resolves for scan/preflight.
+        if org is None:
+            if domain_org is not None:
+                if repo_org_ids and domain_org.id not in repo_org_ids:
+                    return Response(
+                        {
+                            'error': (
+                                "This GitHub repository is registered to a different "
+                                "company. Reconnect the repository for this website, or "
+                                "switch to the company that owns it."
+                            ),
+                            'code': 'repo_domain_org_conflict',
+                            'domain': domain_org.domain,
+                            'github_repo': github_repo,
+                            'repo_org_domain': repo_org.domain if repo_org else None,
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                org = domain_org
+            elif repo_org is not None:
+                org = repo_org
 
         if not org:
             return Response(
@@ -7452,9 +7490,16 @@ class SEODashboardView(APIView):
 
 class ContentFactoryOrgDomainsView(APIView):
     """
-    Return all known organization domains for fuzzy matching.
+    Return known organization domains for fuzzy matching.
 
     GET /api/content-factory/orgs/domains
+    GET /api/content-factory/orgs/domains?slack_user_id=<id>
+
+    With ``slack_user_id``, returns ONLY the domains that user owns (via their
+    connected org configs). content-factory scopes its fuzzy domain matching to
+    this set so a typo/variant of one founder's domain can never resolve to a
+    DIFFERENT tenant's org (and its GitHub repo/token). Without the hint the
+    global list is returned for backwards compatibility.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -7462,6 +7507,16 @@ class ContentFactoryOrgDomainsView(APIView):
     def get(self, request):
         from django.core.cache import cache
         from integrations.utils import normalize_domain
+
+        slack_user_id = str(request.query_params.get('slack_user_id') or '').strip()
+        if slack_user_id:
+            owned = get_owned_org_configs(slack_user_id)
+            domains = sorted({
+                normalize_domain(cfg.organization.domain)
+                for cfg in owned
+                if cfg.organization and cfg.organization.domain
+            })
+            return Response(domains, status=status.HTTP_200_OK)
 
         cache_key = "content_factory_org_domains"
         domains = cache.get(cache_key)
