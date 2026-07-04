@@ -122,6 +122,12 @@ class UserStartupBinding(models.Model):
     )
     role = models.CharField(max_length=64, blank=True, default="")
     is_default_for_gmail = models.BooleanField(default=False)
+    # Opt-in for automated monthly investor-update generation. When set, this
+    # (user, organization) becomes a scheduled monthly-dispatch target — the
+    # valley scheduler reads it from the monthly-dispatch-targets endpoint
+    # instead of an ops-managed env allowlist, so a founder self-serves
+    # scheduling per company.
+    monthly_updates_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -130,6 +136,7 @@ class UserStartupBinding(models.Model):
         unique_together = [("user", "organization")]
         indexes = [
             models.Index(fields=["user", "is_default_for_gmail"], name="startup_bind_user_default_idx"),
+            models.Index(fields=["monthly_updates_enabled"], name="startup_bind_monthly_idx"),
         ]
 
     def __str__(self):

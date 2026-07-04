@@ -50,6 +50,7 @@ from startup_updates.models import (
     MonthlyUpdateDraft,
     StartupMetricObservation,
     StartupEvent,
+    UserStartupBinding,
 )
 from startup_updates.metric_catalog import (
     startup_update_metric_key,
@@ -3801,3 +3802,41 @@ class StartupUpdateOpenRunsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class MonthlyDispatchTargetsView(APIView):
+    """The companies that have opted in to automated monthly investor updates.
+
+    Replaces the ops-managed ``MONTHLY_DISPATCH_BINDINGS`` env allowlist on the
+    valley droplet as the source of truth for the monthly scheduler. Each target
+    is a ``UserStartupBinding`` with ``monthly_updates_enabled=True`` whose
+    organization has a domain — a founder self-serves scheduling per company by
+    toggling the flag in-app, and a newly added startup is picked up on the next
+    cycle without anyone editing server config.
+
+    Service-key authenticated (valley uses the shared key). The shape mirrors an
+    env binding (``user_id`` + ``domain``) plus ``organization_id`` /
+    ``binding_id`` so valley can dedupe by the tenant key.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        bindings = (
+            UserStartupBinding.objects.select_related("organization")
+            .filter(monthly_updates_enabled=True)
+            .exclude(organization__domain__isnull=True)
+            .exclude(organization__domain="")
+            .order_by("organization__domain", "user_id")
+        )
+        targets = [
+            {
+                "user_id": binding.user_id,
+                "domain": binding.organization.domain,
+                "organization_id": binding.organization_id,
+                "binding_id": binding.id,
+            }
+            for binding in bindings
+        ]
+        return Response({"count": len(targets), "targets": targets}, status=status.HTTP_200_OK)

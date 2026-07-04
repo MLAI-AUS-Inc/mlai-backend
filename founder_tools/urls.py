@@ -4,6 +4,7 @@ from .views import (
     FounderToolsActiveCompanyView,
     FounderToolsBootstrapView,
     FounderToolsCompanyDetailView,
+    FounderToolsCompanyMonthlyUpdatesView,
     FounderToolsCompanyView,
     FounderToolsProfileView,
 )
@@ -17,6 +18,11 @@ urlpatterns = [
         "companies/<uuid:company_id>/",
         FounderToolsCompanyDetailView.as_view(),
         name="founder-tools-company-detail",
+    ),
+    path(
+        "companies/<uuid:company_id>/monthly-updates/",
+        FounderToolsCompanyMonthlyUpdatesView.as_view(),
+        name="founder-tools-company-monthly-updates",
     ),
     path("active-company/", FounderToolsActiveCompanyView.as_view(), name="founder-tools-active-company"),
 ]
