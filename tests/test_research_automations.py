@@ -342,13 +342,14 @@ class WhatsAppAutomationWebhookTests(TestCase):
             consent_state=NotificationConsentState.ACTIVE,
         )
 
-    def _post_message(self, body_text, sender="61400000000"):
+    def _post_message(self, body_text, sender="61400000000", extra_params=None):
         params = {
             "MessageSid": "SM-inbound-1",
             "From": f"whatsapp:+{sender}",
             "WaId": sender,
             "Body": body_text,
         }
+        params.update(extra_params or {})
         # Twilio signs the configured URL plus form params in key-sorted order.
         signed = "https://api.test" + reverse("content_factory_whatsapp_webhook")
         signed += "".join(key + params[key] for key in sorted(params))
@@ -443,6 +444,22 @@ class WhatsAppAutomationWebhookTests(TestCase):
         followup = self._post_message("2")
         self.assertEqual(followup.data["approved"], 0)
         self.assertEqual(mock_confirm.call_count, 1)
+
+    @patch("integrations.services.notification_adapters.send_whatsapp_text", return_value=(True, "SM-out", {}))
+    @patch("integrations.services.notification_adapters.confirm_topic")
+    def test_quick_reply_button_tap_approves_topic(self, mock_confirm, mock_send_text):
+        mock_confirm.return_value = {"run_id": "article-run-10", "status": "queued"}
+        run = self._automation_with_pending_run()
+
+        # A quick-reply tap sends the visible title as Body and the button id
+        # as ButtonPayload; the payload must win over the non-numeric title.
+        response = self._post_message("Topic 2", extra_params={"ButtonPayload": "2", "ButtonText": "Topic 2"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["approved"], 1)
+        run.refresh_from_db()
+        self.assertEqual(run.article_content_factory_run_id, "article-run-10")
+        self.assertEqual(mock_confirm.call_args.kwargs["confirmed_keyword"], "second topic")
 
     @patch("integrations.services.notification_adapters.send_whatsapp_text", return_value=(True, "wamid", {}))
     def test_numeric_reply_without_pending_run_gets_polite_reply(self, mock_send_text):

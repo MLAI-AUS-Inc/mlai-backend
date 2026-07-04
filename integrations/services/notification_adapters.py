@@ -1120,7 +1120,11 @@ def handle_whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     sender = str(payload.get("WaId") or "").strip()
     if not sender:
         sender = str(payload.get("From") or "").strip().removeprefix("whatsapp:").lstrip("+")
-    message = {"from": sender, "text": {"body": str(payload.get("Body") or "")}}
+    # Quick-reply button taps deliver the visible title as Body and the
+    # developer-defined id as ButtonPayload; the topic template sets ids
+    # "1"-"3", so prefer the payload and fall back to typed text.
+    body = str(payload.get("ButtonPayload") or "").strip() or str(payload.get("Body") or "")
+    message = {"from": sender, "text": {"body": body}}
     try:
         result = _handle_whatsapp_inbound_message(message)
     except Exception as exc:
