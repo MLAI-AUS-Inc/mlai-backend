@@ -9,7 +9,7 @@ class UserAdmin(BaseUserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     model = User
-    list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'avatar_preview')
+    list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'date_joined', 'updated', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
     search_fields = ('email', 'first_name', 'last_name', 'slack_id')
     ordering = ('email',)
@@ -18,7 +18,7 @@ class UserAdmin(BaseUserAdmin):
         (None, {'fields': ('email', 'password')}),
         ('Personal info', {'fields': ('first_name', 'last_name', 'avatar_url', 'avatar_preview')}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
-        ('Important dates', {'fields': ('last_login', 'date_joined')}),
+        ('Important dates', {'fields': ('last_login', 'date_joined', 'updated_at')}),
         ('Other', {'fields': ('slack_id',)}),
     )
     
@@ -29,14 +29,20 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
     
-    readonly_fields = ('avatar_preview',)
+    readonly_fields = ('avatar_preview', 'updated_at')
 
     def avatar_preview(self, obj):
         if obj.avatar_url:
             return format_html('<img src="{}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;" />', obj.avatar_url)
         return "No Avatar"
-    
+
     avatar_preview.short_description = 'Avatar'
+
+    def updated(self, obj):
+        return obj.updated_at
+
+    updated.short_description = 'updated'
+    updated.admin_order_field = 'updated_at'
 
 @admin.register(GlobalSettings)
 class GlobalSettingsAdmin(admin.ModelAdmin):
