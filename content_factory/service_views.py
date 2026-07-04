@@ -433,6 +433,7 @@ class ContentFactoryOrgConfigView(APIView):
             ),
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
+            'scan_artifact_cache': (config.scan_artifact_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
             # Opt-in gate read by content-factory (_component_library_enabled) to import + compose the
             # real component library for articles instead of inlining generic helpers.
@@ -454,6 +455,33 @@ class ContentFactoryOrgConfigView(APIView):
         # authors + default_author_name/default_author_profile: content-factory re-fetches this
         # per run and the renderer seeds its inline author byline from the default profile.
         response_data.update(org_config_author_payload(config))
+
+        # Opt-in heavy payload for the scan hydration path ONLY: the full stored component
+        # rows (including source code), so a re-scan at an unchanged repo SHA can replay the
+        # prior generation instead of regenerating ~29 components. Kept off the default
+        # response — article runs fetch this config too and must stay lean — and kept off
+        # `generated_components`, whose dormant render-pipeline consumers must not activate
+        # (see the article_component_library note above).
+        include_component_reuse = str(
+            request.query_params.get('include_component_reuse') or ''
+        ).strip().lower() in {'1', 'true', 'yes'}
+        if include_component_reuse and config is not None:
+            response_data['component_reuse_inventory'] = [
+                {
+                    'name': comp.name,
+                    'content': comp.content,
+                    'source': comp.source,
+                    'original_path': comp.original_path,
+                    'similarity_score': comp.similarity_score,
+                    'matched_component': comp.matched_component,
+                    'adaptation_notes': comp.adaptation_notes,
+                    'import_statement': comp.import_statement or '',
+                    'metadata': comp.metadata if isinstance(comp.metadata, dict) else {},
+                }
+                for comp in GeneratedComponent.objects.filter(
+                    organization_id=config.organization_id
+                ).order_by('name')
+            ]
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -595,6 +623,7 @@ class ContentFactoryOrgConfigView(APIView):
             # regenerating all ~29 on every scan.
             'scan_request_fingerprint',
             'article_system_setup_cache',
+            'scan_artifact_cache',
             'framework_component_specs',
             # Opt-in gate for component-library article assembly (default off, enable per org).
             'use_component_library',
