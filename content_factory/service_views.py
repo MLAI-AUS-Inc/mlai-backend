@@ -595,8 +595,17 @@ class ContentFactoryOrgConfigView(APIView):
             defaults['daily_discovery_priority'] = resulting_priority
 
         if 'article_system' in data:
-            current_article_system = resolve_article_system(getattr(org, 'content_config', None))
-            defaults['article_system'] = merge_article_system(current_article_system, data.get('article_system'))
+            existing_config = getattr(org, 'content_config', None)
+            raw_article_system = getattr(existing_config, 'article_system', None)
+            raw_article_system = raw_article_system if isinstance(raw_article_system, dict) else {}
+            current_article_system = resolve_article_system(existing_config)
+            # An article-setup reset must survive the org-config PUT every scan issues:
+            # merge/normalize drop the reset watermark + tombstones, silently un-resetting
+            # the wizard (the reset keys only live on the RAW stored dict).
+            defaults['article_system'] = carry_reset_markers(
+                raw_article_system,
+                merge_article_system(current_article_system, data.get('article_system')),
+            )
             if scan_head_sha:
                 scan_default_branch = str(data.get('default_branch') or data.get('defaultBranch') or '').strip()
                 scan_state = {
@@ -6004,7 +6013,9 @@ class ContentFactoryCallbackView(APIView):
                         'source': existing_system.get('source') or 'scan',
                     }
                 )
-                next_article_system = normalize_article_system(existing_system)
+                next_article_system = carry_reset_markers(
+                    article_system_payload, normalize_article_system(existing_system)
+                )
                 next_article_system.pop('pending_article_system_setup', None)
                 config.article_system = next_article_system
                 config.articles_scaffolded = True

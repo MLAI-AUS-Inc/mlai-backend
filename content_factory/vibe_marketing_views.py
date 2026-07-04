@@ -343,6 +343,15 @@ ARTICLE_SYSTEM_PUBLISHED_STATES = {
     "registry_driven_seo_ready",
     "article_system_ready",
 }
+# "existing"/"detected" are detection verdicts, not readiness verdicts: a scan can
+# report an article surface while explicitly failing to confirm anywhere to publish
+# into ("Detected article surface at ..., but no safe publish target could be
+# confirmed"). Those states only count as published when a usable publish path
+# exists; the other states are explicit readiness verdicts and keep their meaning.
+ARTICLE_SYSTEM_DETECTION_ONLY_STATES = {
+    "existing",
+    "detected",
+}
 ARTICLE_SYSTEM_SETUP_MERGED_STATUSES = {
     "merged",
     "merged_verifying",
@@ -7816,9 +7825,19 @@ def _verification_scan_for_setup(latest_runs, *, rescan_run_id: str = ""):
     )
 
 
+def _article_system_has_publish_path(config, article_system: dict) -> bool:
+    if bool(getattr(config, "publish_targets", None)):
+        return True
+    if not isinstance(article_system, dict):
+        return False
+    return bool(article_system.get("publish_mutation_target") or article_system.get("registry"))
+
+
 def _article_system_is_published(config, article_system: dict) -> bool:
     state = str(article_system.get("state") or "").strip()
     if state in ARTICLE_SYSTEM_PUBLISHED_STATES:
+        if state in ARTICLE_SYSTEM_DETECTION_ONLY_STATES:
+            return _article_system_has_publish_path(config, article_system)
         return True
     if state == "roo_scaffolded" and bool(getattr(config, "articles_scaffolded", False)):
         return True

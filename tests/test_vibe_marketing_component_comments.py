@@ -483,7 +483,10 @@ class VibeMarketingComponentCommentTests(TestCase):
     def test_bootstrap_allows_mlai_article_system_when_featured_catalog_present(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.article_system = {"state": "existing", "confidence": "high"}
-        config.save(update_fields=["article_system", "updated_at"])
+        # A detected-only state needs a publish path to count as ready (the subject
+        # of this test is the featured-component catalog gate, not detection).
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(update_fields=["article_system", "publish_targets", "updated_at"])
         for name in (
             "ArticleDisclaimer",
             "ArticleHeroHeader",

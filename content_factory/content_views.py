@@ -1264,6 +1264,7 @@ class ArticleSystemDecisionView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request):
+        from content_factory.article_setup_reset import carry_reset_markers
         from content_factory.article_system import normalize_article_system, resolve_article_system
         from organizations.models import Organization
         from integrations.services.github import scaffold_articles_directory, trigger_scan_async
@@ -1290,6 +1291,7 @@ class ArticleSystemDecisionView(APIView):
             return Response({"error": f"No content config found for {normalized_domain}"}, status=status.HTTP_404_NOT_FOUND)
 
         if decision == 'use_detected':
+            raw_article_system = config.article_system if isinstance(config.article_system, dict) else {}
             article_system = resolve_article_system(config)
             article_system.update(
                 {
@@ -1298,7 +1300,9 @@ class ArticleSystemDecisionView(APIView):
                     'reason': article_system.get('reason') or 'User manually confirmed the detected article system',
                 }
             )
-            config.article_system = normalize_article_system(article_system)
+            config.article_system = carry_reset_markers(
+                raw_article_system, normalize_article_system(article_system)
+            )
             config.save(update_fields=['article_system', 'updated_at'])
             resumed = _resume_pending_article_intent(slack_user_id, normalized_domain)
             return Response(
