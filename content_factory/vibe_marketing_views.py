@@ -359,6 +359,19 @@ ARTICLE_SYSTEM_SETUP_MERGED_STATUSES = {
     "published",
     "verified",
 }
+# Statuses where a pending setup is parked waiting for the founder to review or
+# approve. While one of these is active the setup wizard must keep ownership of
+# the workflow even if the org already looks generation-ready — the user has to
+# act (approve/deny) before anything else can move.
+ARTICLE_SYSTEM_SETUP_REVIEWABLE_STATUSES = {
+    "preview_ready",
+    "code_review_ready",
+    "revision_ready",
+    "awaiting_approval",
+    "approval_required",
+    "await_review",
+    "fallback_ready",
+}
 ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "pending",
     "pending_generation",
@@ -7841,7 +7854,21 @@ def _article_system_is_published(config, article_system: dict) -> bool:
         return True
     if state == "roo_scaffolded" and bool(getattr(config, "articles_scaffolded", False)):
         return True
-    return bool(getattr(config, "publish_targets", None))
+    targets = [
+        target
+        for target in (getattr(config, "publish_targets", None) or [])
+        if isinstance(target, dict)
+    ]
+    if not targets:
+        return False
+    if bool(getattr(config, "articles_scaffolded", False)):
+        return True
+    # Content Factory registers a publish target synthesized from the scaffold's
+    # setup cache while the setup run is still awaiting approval (the target's
+    # surface doesn't exist on the default branch until the setup PR merges).
+    # Those targets must not count as a published article system on their own;
+    # approval/merge sets articles_scaffolded, which re-enables the fallback.
+    return any(str(target.get("source") or "") != "scaffold_cache" for target in targets)
 
 
 def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dict:
@@ -8019,7 +8046,12 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
         published = _article_system_is_published(config, article_system)
     if setup_merged:
         setup_blocked = False
-    if generation_ready:
+    if generation_ready and setup_status not in ARTICLE_SYSTEM_SETUP_REVIEWABLE_STATUSES:
+        # generation_ready normally releases the wizard (an org with a working
+        # article system shouldn't be re-locked by an optional re-setup), but a
+        # setup parked at review/approval still needs the founder to act — a
+        # premature "published" signal must not hide the review step (arb-gen:
+        # scaffold publish target registered before the setup PR existed).
         setup_blocked = False
     if verification_published:
         setup_blocked = False
@@ -8564,6 +8596,12 @@ COMPACT_RUN_RESULT_KEYS = {
     "setup_requested_action",
     "setup_run_id",
     "setupRunId",
+    # The wizard's status poller resolves the child setup status from these
+    # top-level result keys (stringResultValue in create.tsx); without them a
+    # code_review_ready run reads as its current_step ("await_review") and the
+    # review CTA never renders.
+    "setup_status",
+    "setupStatus",
     "stale",
     "stale_reason",
     "url",
