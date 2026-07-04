@@ -126,6 +126,10 @@ class OrganizationContentConfig(models.Model):
         default=dict, blank=True,
         help_text="Self-contained component-reuse cache (inventory, managed files, context fingerprint) from the last scan.",
     )
+    scan_artifact_cache = models.JSONField(
+        default=dict, blank=True,
+        help_text="Scan context fingerprint cache from the last scan; lets a same-SHA re-scan prove its generation inputs are unchanged before replaying stored components.",
+    )
     framework_component_specs = models.JSONField(
         default=dict, blank=True,
         help_text="Framework-adapted component spec docs from the last scan, reused to skip regeneration.",
