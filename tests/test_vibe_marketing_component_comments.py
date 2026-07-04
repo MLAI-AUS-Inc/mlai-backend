@@ -2390,6 +2390,99 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["review"]["primaryAction"]["label"], "Review setup changes")
         self.assertIn("setup-gate-run", steps["review"]["primaryAction"]["href"])
 
+    def _create_code_review_ready_run(self):
+        return ContentFactoryRun.objects.create(
+            run_id="setup-gate-run",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            result={
+                "setup_status": "code_review_ready",
+                "setup_run_id": "setup-gate-run",
+                "preview_url": "",
+                "approve_url": "/api/runs/setup-gate-run/approve",
+                "preview_runtime_unsupported": True,
+                "article_system_setup": {"status": "code_review_ready", "setup_run_id": "setup-gate-run"},
+            },
+        )
+
+    def test_code_review_ready_wizard_survives_premature_publish_target(self):
+        # arb-gen.com: Content Factory registered a publish target synthesized
+        # from the scaffold's setup cache while the setup run was still awaiting
+        # approval. The org then computed generation_ready via "published",
+        # which force-cleared setupBlocked — so the wizard never surfaced the
+        # review step even though the founder had to approve the setup PR.
+        config = self._prepare_articles_setup_gate(status="code_review_ready")
+        article_system = dict(config.article_system)
+        article_system["state"] = "roo_scaffolded"
+        article_system["source"] = "scaffold"
+        pending = dict(article_system["pending_article_system_setup"])
+        for key in ("preview_url", "previewUrl", "pr_url", "prUrl"):
+            pending.pop(key, None)
+        pending["approveUrl"] = "/api/runs/setup-gate-run/approve"
+        pending["previewRuntimeUnsupported"] = True
+        article_system["pending_article_system_setup"] = pending
+        config.article_system = article_system
+        config.publish_targets = [
+            {
+                "target_id": "stack_native_collection_data_articles_json_python",
+                "kind": "stack_native_collection",
+                "source": "scaffold_cache",
+                "content_path_pattern": "data/articles.json",
+            }
+        ]
+        config.save(update_fields=["article_system", "publish_targets", "updated_at"])
+        self._create_code_review_ready_run()
+
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            response = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+
+        self.assertEqual(response.status_code, 200)
+        scaffold = response.data["checks"]["scaffold"]
+        self.assertFalse(scaffold["published"])
+        self.assertTrue(scaffold["setupBlocked"])
+        steps = {step["id"]: step for step in response.data["workflowProgress"]["steps"]}
+        self.assertEqual(steps["review"]["status"], "needs_action")
+        self.assertEqual(steps["review"]["primaryAction"]["label"], "Review setup changes")
+
+    def test_status_view_result_includes_setup_status(self):
+        # The wizard's poller reads runs/<id>/?view=status (compact serializer)
+        # and resolves the child status from result.setup_status. The compact
+        # whitelist used to drop it, so a code_review_ready run read as its
+        # current_step ("await_review") and the review CTA never rendered.
+        self._prepare_articles_setup_gate(status="code_review_ready")
+        self._create_code_review_ready_run()
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_status",
+            return_value={},
+        ):
+            response = self.client.get("/api/v1/vibe-marketing/runs/setup-gate-run/?view=status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result"].get("setup_status"), "code_review_ready")
+
+    def test_scaffold_cache_publish_target_alone_is_not_published(self):
+        from content_factory.vibe_marketing_views import _article_system_is_published
+
+        config = SimpleNamespace(
+            publish_targets=[{"kind": "stack_native_collection", "source": "scaffold_cache"}],
+            articles_scaffolded=False,
+        )
+        self.assertFalse(_article_system_is_published(config, {"state": "roo_scaffolded"}))
+        # Accepting/merging the scaffold sets articles_scaffolded — then the
+        # same target counts again.
+        config.articles_scaffolded = True
+        self.assertTrue(_article_system_is_published(config, {"state": "roo_scaffolded"}))
+        # Targets registered from a scan of a live article system still count
+        # without the scaffolded flag.
+        config.articles_scaffolded = False
+        config.publish_targets = [{"kind": "react_article_system", "source": "scan"}]
+        self.assertTrue(_article_system_is_published(config, {"state": "missing"}))
+
     def test_first_time_articles_setup_preview_failed_shows_review_diagnostics(self):
         self._prepare_articles_setup_gate(status="preview_failed")
         ContentFactoryRun.objects.create(
