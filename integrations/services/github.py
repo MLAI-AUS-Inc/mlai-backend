@@ -15,6 +15,7 @@ from content_factory.contract import (
 )
 from integrations.utils import normalize_domain
 from integrations.services.github_connections import build_github_oauth_url
+from content_factory.article_setup_reset import carry_reset_markers
 from content_factory.article_system import merge_article_system, resolve_article_system
 from content_factory.models import GeneratedComponent, ComponentMapping
 
@@ -705,10 +706,15 @@ def scan_github_project(
         elif 'pillar_strategy' in cf_config:
             config.pillar_strategy = cf_config['pillar_strategy']
 
-        if 'article_system' in cf_data:
-            config.article_system = merge_article_system(resolve_article_system(config), cf_data['article_system'])
-        elif 'article_system' in cf_config:
-            config.article_system = merge_article_system(resolve_article_system(config), cf_config['article_system'])
+        if 'article_system' in cf_data or 'article_system' in cf_config:
+            raw_article_system = config.article_system if isinstance(config.article_system, dict) else {}
+            incoming_article_system = cf_data['article_system'] if 'article_system' in cf_data else cf_config['article_system']
+            # An article-setup reset must survive scan syncs: merge/normalize drop the
+            # reset watermark + tombstones, which only live on the raw stored dict.
+            config.article_system = carry_reset_markers(
+                raw_article_system,
+                merge_article_system(resolve_article_system(config), incoming_article_system),
+            )
 
         # Save additional metadata if present
         if 'article_path_pattern' in cf_data:
