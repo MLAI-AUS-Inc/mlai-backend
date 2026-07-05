@@ -1,9 +1,11 @@
 # app/urls.py
 from django.urls import path
 from . import views
+from . import world_views
 
 
 urlpatterns = [
+    path('world/', world_views.WorldStateView.as_view(), name='hospital-world'),
     path('teams/', views.TeamListView.as_view(), name='hospital-team-list'),
     path('teams/join/', views.JoinTeamView.as_view(), name='hospital-team-join'),
     path('submissions/', views.SubmissionListCreateView.as_view(), name='hospital-submissions'),
