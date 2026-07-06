@@ -4,6 +4,7 @@ from . import api_views_bridge
 from . import api_views_connectors
 from . import api_views_finance
 from . import api_views_luma
+from . import api_views_reconciliation
 from startup_updates import api_views as startup_update_api_views
 
 urlpatterns = [
@@ -17,7 +18,8 @@ urlpatterns = [
     path('github/scaffold', api_views.GithubScaffoldView.as_view(), name='github_scaffold'),
     path('github/scaffold/decision', api_views.GithubScaffoldDecisionView.as_view(), name='github_scaffold_decision'),
     path('luma/attendee-report', api_views_luma.LumaAttendeeReportView.as_view(), name='luma_attendee_report'),
-    
+    path('reconciliation/report', api_views_reconciliation.ReconciliationReportView.as_view(), name='reconciliation_report'),
+
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save
     path('pending-intent/<str:slack_user_id>/', api_views.IntentView.as_view(), name='pending_intent_detail'), # DELETE clear
