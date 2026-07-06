@@ -71,27 +71,29 @@ class ReconciliationReportView(APIView):
         """
         now = datetime.now(timezone.utc)
 
-        since_raw = params.get("since")
-        until_raw = params.get("until")
-
-        until, err = self._parse_date_end(until_raw, default=now)
+        # Validate `days` unconditionally so a malformed value is a clear 400 even
+        # when since/until take precedence over it.
+        days, err = self._parse_days(params.get("days"))
         if err:
             return None, err
-        since, err = self._parse_date_start(since_raw, default=None)
+
+        until, err = self._parse_date_end(params.get("until"), default=now)
+        if err:
+            return None, err
+        since, err = self._parse_date_start(params.get("since"), default=None)
         if err:
             return None, err
 
         if since is None:
-            days, err = self._parse_days(params.get("days"))
-            if err:
-                return None, err
             since = until - timedelta(days=days)
 
         if since >= until:
             return None, Response(
                 {"error": "since must be before until"}, status=status.HTTP_400_BAD_REQUEST
             )
-        if (until - since) > timedelta(days=MAX_WINDOW_DAYS):
+        # Compare on calendar days: an explicit end date is inflated to end-of-day,
+        # so a raw timedelta would spuriously reject an exactly-MAX_WINDOW_DAYS span.
+        if (until.date() - since.date()).days > MAX_WINDOW_DAYS:
             return None, Response(
                 {"error": f"window too large; max {MAX_WINDOW_DAYS} days"},
                 status=status.HTTP_400_BAD_REQUEST,

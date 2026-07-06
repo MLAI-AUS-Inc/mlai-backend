@@ -15,8 +15,35 @@ from rest_framework.test import APITestCase
 from integrations.services.reconciliation import (
     ReconciliationReportService,
     StripeAPIError,
+    _dollars,
 )
 from roo.models import PointsAdmin
+
+
+def _sum_split_amounts(brief: str) -> float:
+    """Sum the Amount column of every split-table data row across the brief."""
+    total = 0.0
+    in_split = False
+    for line in brief.splitlines():
+        if line.startswith("| What (account) |"):
+            in_split = True
+            continue
+        if not in_split:
+            continue
+        if line.startswith("|---") or line.startswith("| ---"):
+            continue
+        if "TOTAL" in line:
+            in_split = False
+            continue
+        if line.startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 4:
+                amt = cells[3].replace("**", "").replace(",", "").replace("$", "")
+                try:
+                    total += float(amt)
+                except ValueError:
+                    pass
+    return round(total, 2)
 
 
 class FakeResponse:
@@ -219,6 +246,152 @@ class ReconciliationServiceTests(SimpleTestCase):
         self.assertEqual(seen["bt_params"]["expand[]"], "data.source")
         self.assertEqual(seen["bt_params"]["payout"], "po_z")
 
+    def test_brief_split_lines_sum_to_deposit(self):
+        # two events + a refund: split lines (gross x2, -fee, -refund) must total the deposit
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_S", "amount": 6225, "currency": "aud", "arrival_date": 1_780_600_000, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [
+                    _charge("bt1", 5000, 175, "evt-1", "a@x.com", "Workshop"),
+                    _charge("bt2", 2000, 100, "evt-2", "b@x.com", "Mixer"),
+                    {"id": "btref", "type": "refund", "amount": -500, "net": -500, "currency": "aud", "description": "refund"},
+                    {"id": "btpo", "type": "payout", "amount": -6225, "net": -6225, "currency": "aud"},
+                ], "has_more": False}
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=False)
+        p = report["payouts"][0]
+        self.assertEqual(p["deposit_cents"], 6225)  # 4825 + 1900 - 500
+        brief = base64.b64decode(report["brief"]["content_base64"]).decode("utf-8")
+        self.assertAlmostEqual(_sum_split_amounts(brief), _dollars(p["deposit_cents"]), places=2)
+
+    def test_standalone_stripe_fee_folds_into_fee_not_refund(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_F", "amount": 4795, "currency": "aud", "arrival_date": 1, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [
+                    _charge("bt1", 5000, 175, "evt-1", "a@x.com", "Workshop"),
+                    {"id": "btfee", "type": "stripe_fee", "amount": -30, "net": -30, "currency": "aud", "description": "monthly fee"},
+                    {"id": "btpo", "type": "payout", "amount": -4795, "net": -4795, "currency": "aud"},
+                ], "has_more": False}
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=False)
+        p = report["payouts"][0]
+        self.assertEqual(p["stripe_fee_cents"], 205)  # 175 charge fee + 30 standalone
+        self.assertEqual(p["refunds"], [])  # not listed as a refund
+        self.assertEqual(p["deposit_cents"], 4795)
+        brief = base64.b64decode(report["brief"]["content_base64"]).decode("utf-8")
+        self.assertAlmostEqual(_sum_split_amounts(brief), _dollars(p["deposit_cents"]), places=2)
+
+    def test_workbook_has_expected_sheets_and_values(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_W", "amount": 4825, "currency": "aud", "arrival_date": 1_780_600_000, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [_charge("bt1", 5000, 175, "evt-1", "a@x.com", "Workshop")], "has_more": False}
+            raise AssertionError(path)
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=True)
+        wb = load_workbook(BytesIO(base64.b64decode(report["workbook"]["content_base64"])))
+        self.assertEqual(wb.sheetnames, ["Sales detail", "Payout summary"])
+        summary = wb["Payout summary"]
+        headers = [c.value for c in summary[1]]
+        self.assertIn("Bank deposit", headers)
+        deposit_col = headers.index("Bank deposit")
+        self.assertEqual(summary[2][deposit_col].value, _dollars(report["payouts"][0]["deposit_cents"]))
+
+    def test_injection_is_sanitized_in_brief_and_workbook(self):
+        evil = '=HYPERLINK("http://evil")|pipe\nsecond'
+
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_X", "amount": 4825, "currency": "aud", "arrival_date": 1, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [_charge("bt1", 5000, 175, "evt-1", "=cmd@x.com", evil)], "has_more": False}
+            raise AssertionError(path)
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=True)
+
+        brief = base64.b64decode(report["brief"]["content_base64"]).decode("utf-8")
+        self.assertIn("\\|pipe", brief)  # pipe escaped in markdown
+        # no brief table row contains a raw newline splitting the event name
+        self.assertNotIn("|pipe\nsecond", brief)
+
+        wb = load_workbook(BytesIO(base64.b64decode(report["workbook"]["content_base64"])))
+        ws = wb["Sales detail"]
+        headers = [c.value for c in ws[1]]
+        event_cell = ws[2][headers.index("Event")].value
+        buyer_cell = ws[2][headers.index("Buyer")].value
+        self.assertTrue(event_cell.startswith("'="))  # formula neutralised
+        self.assertTrue(buyer_cell.startswith("'="))
+
+    def test_control_char_does_not_crash_workbook(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_C", "amount": 4825, "currency": "aud", "arrival_date": 1, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [_charge("bt1", 5000, 175, "evt-1", "a@x.com", "Bad\x07Bell\x0bVtab")], "has_more": False}
+            raise AssertionError(path)
+
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=True)
+        self.assertIn("workbook", report)  # produced, not degraded/crashed
+        wb = load_workbook(BytesIO(base64.b64decode(report["workbook"]["content_base64"])))
+        ws = wb["Sales detail"]
+        headers = [c.value for c in ws[1]]
+        self.assertEqual(ws[2][headers.index("Event")].value, "BadBellVtab")  # control chars stripped
+
+    def test_multi_currency_is_not_cross_summed(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [
+                    {"id": "po_aud", "amount": 4825, "currency": "aud", "arrival_date": 1, "status": "paid"},
+                    {"id": "po_usd", "amount": 1900, "currency": "usd", "arrival_date": 2, "status": "paid"},
+                ], "has_more": False}
+            if path == "/v1/balance_transactions":
+                if params["payout"] == "po_aud":
+                    return {"data": [_charge("b1", 5000, 175, "evt-1", "a@x.com", "A")], "has_more": False}
+                return {"data": [_charge("b2", 2000, 100, "evt-2", "b@x.com", "B")], "has_more": False}
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=False)
+        self.assertEqual(report["currency_totals"]["AUD"]["deposit"], 48.25)
+        self.assertEqual(report["currency_totals"]["USD"]["deposit"], 19.00)
+
+    def test_unmatched_charges_get_separate_buckets(self):
+        def handler(path, params):
+            if path == "/v1/payouts":
+                return {"data": [{"id": "po_U", "amount": 4800, "currency": "aud", "arrival_date": 1, "status": "paid"}], "has_more": False}
+            if path == "/v1/balance_transactions":
+                return {"data": [
+                    _charge("bt1", 2500, 100, "", "a@x.com", "Mystery A"),
+                    _charge("bt2", 2500, 100, "", "b@x.com", "Mystery B"),
+                ], "has_more": False}
+            raise AssertionError(path)
+
+        since, until = self._window()
+        report = self._service(handler).build_report(since=since, until=until, include_workbook=False)
+        p = report["payouts"][0]
+        self.assertEqual(len(p["events"]), 2)  # not collapsed into one __unknown__ bucket
+        self.assertEqual(report["unmatched_charge_count"], 2)
+
 
 class ReconciliationReportViewTests(APITestCase):
     def setUp(self):
@@ -328,3 +501,27 @@ class ReconciliationReportViewTests(APITestCase):
         with patch("integrations.api_views_reconciliation.ReconciliationReportService", return_value=Bad()):
             resp = self.client.get(self.url, {"slack_user_id": self.admin})
             self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_malformed_days_is_rejected_even_with_since(self, _perm):
+        # days is validated unconditionally, so a bad value 400s even when since wins
+        resp = self.client.get(
+            self.url,
+            {"slack_user_id": self.admin, "since": "2026-06-01", "until": "2026-06-10", "days": "abc"},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_exactly_max_window_is_allowed(self, _perm):
+        # 2026-04-01 .. 2026-07-02 is exactly 92 calendar days; must not 400
+        captured = []
+
+        class FakeService:
+            def build_report(self, **kwargs):
+                captured.append(kwargs)
+                return {"payouts": []}
+
+        with patch("integrations.api_views_reconciliation.ReconciliationReportService", return_value=FakeService()):
+            resp = self.client.get(self.url, {"slack_user_id": self.admin, "since": "2026-04-01", "until": "2026-07-02"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual((captured[0]["until"].date() - captured[0]["since"].date()).days, 92)

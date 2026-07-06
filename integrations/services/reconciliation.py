@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,15 @@ from django.conf import settings
 
 
 STRIPE_API_BASE_URL = "https://api.stripe.com"
+
+# Stripe balance-transaction types that represent processing fees (folded into
+# the Stripe Fees line rather than listed as refunds/adjustments).
+STRIPE_FEE_TYPES = {"stripe_fee", "application_fee", "tax_fee"}
+REFUND_TYPES = {"refund", "payment_refund"}
+
+# openpyxl rejects most C0 control chars (it allows tab \x09, LF \x0a, CR \x0d).
+_ILLEGAL_XLSX_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 # Xero mapping labels used in the Cowork brief. The concrete Xero account codes
 # and tracking-category options are wired up in Phase 2 (see the build plan);
@@ -57,6 +67,33 @@ class StripeAPIError(RuntimeError):
 
 def _dollars(cents: int) -> float:
     return round((cents or 0) / 100.0, 2)
+
+
+def _clean(value: Any) -> str:
+    """Drop xlsx-illegal control chars from a string value."""
+    return _ILLEGAL_XLSX_CHARS.sub("", "" if value is None else str(value))
+
+
+def _safe_cell(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection for string cells.
+
+    Buyer-controlled text (event name from Stripe description, buyer email from
+    metadata) is written into the audit xlsx. A value starting with = + - @
+    (or tab/CR/LF) would be interpreted as a live formula when the workbook is
+    opened, so prefix it with a single quote. Non-strings pass through.
+    """
+    if not isinstance(value, str):
+        return value
+    s = _clean(value)
+    if s[:1] in _FORMULA_PREFIXES:
+        return "'" + s
+    return s
+
+
+def _md_cell(value: Any) -> str:
+    """Escape a value for safe interpolation into a markdown table cell."""
+    s = _clean(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+    return s
 
 
 class ReconciliationReportService:
@@ -231,7 +268,10 @@ class ReconciliationReportService:
                 }
                 sales_rows.append(row)
 
-                key = event_api_id or "__unknown__"
+                # Group by Luma event. Unmatched charges (no event_api_id) must
+                # NOT collapse into one bucket — key them per charge so each gets
+                # its own split line the human can assign.
+                key = event_api_id or ("charge:" + row["charge_id"])
                 bucket = events.setdefault(
                     key,
                     {
@@ -241,10 +281,19 @@ class ReconciliationReportService:
                         "gross_cents": 0,
                     },
                 )
+                # Upgrade a placeholder name if a later charge carries the real one.
+                if bucket["event_name"] in ("", "(no event name)") and event_name not in ("", "(no event name)"):
+                    bucket["event_name"] = event_name
                 bucket["ticket_count"] += 1
                 bucket["gross_cents"] += row_gross
 
-            elif ttype in ("refund", "payment_refund"):
+            elif ttype in STRIPE_FEE_TYPES or txn.get("reporting_category") == "fee":
+                # Standalone Stripe fee (not tied to a charge) — fold into the
+                # Stripe Fees total so gross/fee/deposit stay consistent. net is
+                # negative (a cost); add its magnitude to fee_cents.
+                fee_cents += -int(txn.get("net") or 0)
+
+            elif ttype in REFUND_TYPES:
                 source = txn.get("source") if isinstance(txn.get("source"), dict) else {}
                 refunds.append(
                     {
@@ -379,7 +428,7 @@ class ReconciliationReportService:
         L.append("| Payout | Arrived | Bank deposit | Events | Charges |")
         L.append("|---|---|---|---|---|")
         for p in payouts:
-            evs = ", ".join(e["event_name"] for e in p["events"]) or "—"
+            evs = ", ".join(_md_cell(e["event_name"]) for e in p["events"]) or "—"
             L.append(
                 f"| `{p['payout_id']}` | {p['arrival_date']} | "
                 f"{p['currency']} {_dollars(p['deposit_cents']):,.2f} | {evs} | {p['charge_count']} |"
@@ -404,7 +453,7 @@ class ReconciliationReportService:
             )
             L.append("")
             L.append("- **Who:** Stripe Payments")
-            events_list = ", ".join(e["event_name"] for e in p["events"]) or "—"
+            events_list = ", ".join(_md_cell(e["event_name"]) for e in p["events"]) or "—"
             L.append(f"- **Why:** Luma tickets — {events_list} — {p['charge_count']} charge(s) — payout {p['payout_id']}")
             L.append("")
             L.append("**Create → Add details (split lines):**")
@@ -412,7 +461,8 @@ class ReconciliationReportService:
             L.append("| What (account) | Event Name | Project Name | Amount | Tax Rate |")
             L.append("|---|---|---|---|---|")
             for e in p["events"]:
-                label = e["event_name"] if e["event_api_id"] else f"⚠ pick — {e['event_name']}"
+                name = _md_cell(e["event_name"])
+                label = name if e["event_api_id"] else f"⚠ pick — {name}"
                 L.append(
                     f"| {TICKET_INCOME_ACCOUNT} | {label} | (set if used) | "
                     f"{_dollars(e['gross_cents']):,.2f} | {TAX_RATE_LABEL} |"
@@ -423,7 +473,7 @@ class ReconciliationReportService:
                     f"-{_dollars(p['stripe_fee_cents']):,.2f} | {TAX_RATE_LABEL} |"
                 )
             for r in p["refunds"]:
-                desc = r.get("description") or r.get("type") or "refund/adjustment"
+                desc = _md_cell(r.get("description") or r.get("type") or "refund/adjustment")
                 L.append(
                     f"| Refund/adjustment — {desc} | — | — | "
                     f"{_dollars(r.get('net_cents', 0)):,.2f} | {TAX_RATE_LABEL} |"
@@ -441,7 +491,7 @@ class ReconciliationReportService:
             L.append("")
             for c in p["charges"]:
                 L.append(
-                    f"- {c['buyer_email'] or '(no email)'} — {c['event_name']} — "
+                    f"- {_md_cell(c['buyer_email'] or '(no email)')} — {_md_cell(c['event_name'])} — "
                     f"{ccy} {_dollars(c['gross_cents']):,.2f} — {c['created']}"
                 )
             L.append("")
@@ -462,6 +512,18 @@ class ReconciliationReportService:
         except ImportError:
             return None
 
+        try:
+            return self._build_workbook_bytes(
+                Workbook, Alignment, Font, PatternFill, get_column_letter, sales_rows, payouts
+            )
+        except Exception:
+            # Workbook is documented as optional — degrade to the workbook_error
+            # path rather than 500-ing the whole report on a rendering fault.
+            return None
+
+    def _build_workbook_bytes(
+        self, Workbook, Alignment, Font, PatternFill, get_column_letter, sales_rows, payouts
+    ) -> bytes:
         head_fill = PatternFill("solid", fgColor="1F3864")
         head_font = Font(bold=True, color="FFFFFF")
 
@@ -474,11 +536,11 @@ class ReconciliationReportService:
                 cell.fill, cell.font = head_fill, head_font
                 cell.alignment = Alignment(horizontal="center")
             for record in data:
-                ws.append([fn(record) for _, _, fn in columns])
-            for col_idx, (_, label, _) in enumerate(columns, start=1):
+                ws.append([_safe_cell(fn(record)) for _, _, fn in columns])
+            for col_idx, (_, label, fn) in enumerate(columns, start=1):
                 letter = get_column_letter(col_idx)
-                width = max([len(str(label))] + [len(str(fn(r))) for _, _, fn in [columns[col_idx - 1]] for r in data]) if data else len(str(label))
-                ws.column_dimensions[letter].width = min(max(width + 3, 11), 42)
+                values = [len(str(label))] + [len(str(fn(r))) for r in data]
+                ws.column_dimensions[letter].width = min(max(max(values) + 3, 11), 42)
             ws.freeze_panes = "A2"
 
         sales_cols = [
