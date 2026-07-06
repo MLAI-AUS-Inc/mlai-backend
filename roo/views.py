@@ -27,7 +27,7 @@ from .models import (
 )
 
 from .services import (
-    PointsService, PointsPurchaseService, CoworkingService,
+    PointsService, PointsPurchaseService, CoworkingService, CoworkingBatchBookingError,
     TaskService, RewardsService,
 )
 from .permissions import (
@@ -1332,6 +1332,145 @@ class CoworkingViewSet(viewsets.ViewSet):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except InsufficientBalanceError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='book-many')
+    def book_many(self, request):
+        """Admin-only atomic coworking booking for one or more tagged users."""
+        admin_slack_user_id = clean_slack_id(
+            request.data.get('admin_slack_user_id') or request.data.get('slack_user_id')
+        )
+        raw_target_ids = request.data.get('target_slack_user_ids')
+        booking_date_str = request.data.get('date')
+        slack_channel_id = request.data.get('slack_channel_id')
+
+        if not admin_slack_user_id or not booking_date_str:
+            return Response(
+                {'error': 'admin_slack_user_id and date are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not is_points_admin(admin_slack_user_id):
+            return Response(
+                {'error': 'Only Roo Points Admins can book coworking for other users'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if raw_target_ids is None:
+            return Response(
+                {'error': 'target_slack_user_ids is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if isinstance(raw_target_ids, str):
+            raw_target_ids = [raw_target_ids]
+        if not isinstance(raw_target_ids, list):
+            return Response(
+                {'error': 'target_slack_user_ids must be a list of Slack user IDs'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        target_slack_ids = []
+        for raw_target_id in raw_target_ids:
+            cleaned = clean_slack_id(raw_target_id)
+            if cleaned and cleaned not in target_slack_ids:
+                target_slack_ids.append(cleaned)
+
+        if not target_slack_ids:
+            return Response(
+                {'error': 'At least one target Slack user ID is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            booking_date = date.fromisoformat(booking_date_str)
+        except ValueError:
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        today = timezone.now().date()
+        max_date = today + timedelta(days=7)
+
+        if booking_date < today:
+            return Response(
+                {'error': f'Cannot book dates in the past. Today is {today.isoformat()}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if booking_date > max_date:
+            return Response(
+                {'error': f'Cannot book for more than 7 days in advance. Max date is {max_date.isoformat()}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        users_by_slack_id = {
+            user.slack_id: user
+            for user in User.objects.filter(slack_id__in=target_slack_ids)
+        }
+        missing_target_ids = [
+            slack_id for slack_id in target_slack_ids if slack_id not in users_by_slack_id
+        ]
+        if missing_target_ids:
+            return Response(
+                {
+                    'error': 'One or more target users need to link their Slack account first',
+                    'errors': [
+                        {
+                            'slack_user_id': slack_id,
+                            'error': 'Please link your Slack account first',
+                        }
+                        for slack_id in missing_target_ids
+                    ],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        target_users = [users_by_slack_id[slack_id] for slack_id in target_slack_ids]
+
+        try:
+            booking_results = CoworkingService.book_many(
+                target_users=target_users,
+                booking_date=booking_date,
+                created_by_slack_id=admin_slack_user_id,
+                slack_channel_id=slack_channel_id,
+            )
+        except CoworkingBatchBookingError as e:
+            return Response(
+                {'error': str(e), 'errors': e.errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except InsufficientBalanceError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        standard_cost = CoworkingService.get_standard_coworking_cost()
+        results = []
+        created_count = 0
+        for booking, created in booking_results:
+            created_count += 1 if created else 0
+            results.append({
+                'slack_user_id': booking.user.slack_id,
+                'created': created,
+                'already_booked': not created,
+                'booking': CoworkingBookingSerializer(booking).data,
+                'points_cost': booking.points_cost,
+                'standard_points_cost': standard_cost,
+                'monthly_update_discount_applied': booking.points_cost < standard_cost,
+            })
+
+        return Response(
+            {
+                'date': booking_date.isoformat(),
+                'admin_slack_user_id': admin_slack_user_id,
+                'target_count': len(results),
+                'created_count': created_count,
+                'already_booked_count': len(results) - created_count,
+                'standard_points_cost': standard_cost,
+                'results': results,
+            },
+            status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=['post'])
     def cancel(self, request):

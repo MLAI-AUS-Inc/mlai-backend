@@ -14,6 +14,7 @@ from rest_framework.test import APIClient, APITestCase
 from .models import (
     ChannelFirstPost,
     CoworkingBooking,
+    CoworkingDayCapacity,
     Ledger,
     PointsAccount,
     PointsAdmin,
@@ -1742,9 +1743,27 @@ class TaskViewSetTests(APITestCase):
 class CoworkingViewSetTests(APITestCase):
     def setUp(self):
         self.url = reverse('coworking-book')
+        self.batch_url = reverse('coworking-book-many')
+        self.admin_slack_id = 'UCOADMIN'
+        self.partner_slack_id = 'UCOPARTNER'
+        self.non_admin_slack_id = 'UCONOTADMIN'
         self.user = User.objects.create_user(
             email='coworking@example.com',
             slack_id='UCOBOOK',
+        )
+        self.admin_user = User.objects.create_user(
+            email='coworking-admin@example.com',
+            slack_id=self.admin_slack_id,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id=self.admin_slack_id,
+            role='admin',
+            is_active=True,
+        )
+        PointsAdmin.objects.create(
+            slack_user_id=self.partner_slack_id,
+            role='partner',
+            is_active=True,
         )
         PointsService.award(
             user=self.user,
@@ -1753,6 +1772,34 @@ class CoworkingViewSetTests(APITestCase):
             description='Coworking setup',
             created_by_slack_id='UADMIN',
             idempotency_key='coworking_api_setup',
+        )
+
+    def _create_member_with_points(self, slack_id, email=None, balance=10):
+        user = User.objects.create_user(
+            email=email or f'{slack_id.lower()}@example.com',
+            slack_id=slack_id,
+        )
+        if balance:
+            PointsService.award(
+                user=user,
+                delta=balance,
+                source='MANUAL',
+                description='Coworking batch setup',
+                created_by_slack_id=self.admin_slack_id,
+                idempotency_key=f'coworking_batch_setup:{slack_id}',
+            )
+        return user
+
+    def _post_batch(self, target_slack_ids, booking_date=None, admin_slack_id=None):
+        return self.client.post(
+            self.batch_url,
+            {
+                'admin_slack_user_id': admin_slack_id or self.admin_slack_id,
+                'target_slack_user_ids': target_slack_ids,
+                'date': (booking_date or (date.today() + timedelta(days=1))).isoformat(),
+                'slack_channel_id': 'C123',
+            },
+            format='json',
         )
 
     def _verify_company_for(self, org):
@@ -1874,6 +1921,185 @@ class CoworkingViewSetTests(APITestCase):
             1,
         )
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 2)  # charged once at the standard 8
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_admin_can_batch_book_multiple_users_without_charging_admin(self, mock_permission):
+        target_1 = self._create_member_with_points('UCOBATCH1', balance=10)
+        target_2 = self._create_member_with_points('UCOBATCH2', balance=10)
+        PointsService.award(
+            user=self.admin_user,
+            delta=30,
+            source='MANUAL',
+            description='Admin balance should not be charged',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='coworking_admin_balance_setup',
+        )
+        booking_date = date.today() + timedelta(days=1)
+
+        response = self._post_batch([target_1.slack_id, target_2.slack_id], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['created_count'], 2)
+        self.assertEqual(response.data['already_booked_count'], 0)
+        self.assertEqual(
+            set(row['slack_user_id'] for row in response.data['results']),
+            {target_1.slack_id, target_2.slack_id},
+        )
+        self.assertEqual(PointsAccount.objects.get(user=target_1).balance, 2)
+        self.assertEqual(PointsAccount.objects.get(user=target_2).balance, 2)
+        self.assertEqual(PointsAccount.objects.get(user=self.admin_user).balance, 30)
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            2,
+        )
+        ledger_entries = Ledger.objects.filter(
+            user__in=[target_1, target_2],
+            source='COWORKING',
+            kind='SPEND',
+        )
+        self.assertEqual(ledger_entries.count(), 2)
+        self.assertTrue(
+            all(entry.created_by_slack_id == self.admin_slack_id for entry in ledger_entries)
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_rejects_partner_and_non_admin(self, mock_permission):
+        target = self._create_member_with_points('UCOBATCHDENY', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+
+        partner_response = self._post_batch(
+            [target.slack_id],
+            booking_date,
+            admin_slack_id=self.partner_slack_id,
+        )
+        non_admin_response = self._post_batch(
+            [target.slack_id],
+            booking_date,
+            admin_slack_id=self.non_admin_slack_id,
+        )
+
+        self.assertEqual(partner_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(non_admin_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(
+            CoworkingBooking.objects.filter(user=target, date=booking_date).exists()
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_dedupes_target_ids(self, mock_permission):
+        target_1 = self._create_member_with_points('UCODEDUPE1', balance=10)
+        target_2 = self._create_member_with_points('UCODEDUPE2', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+
+        response = self._post_batch(
+            [target_1.slack_id, target_1.slack_id, f'<@{target_2.slack_id}>'],
+            booking_date,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['target_count'], 2)
+        self.assertEqual(response.data['created_count'], 2)
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            2,
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_treats_existing_booking_as_idempotent(self, mock_permission):
+        existing_user = self._create_member_with_points('UCOEXISTING', balance=10)
+        new_user = self._create_member_with_points('UCONEWBOOK', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+        CoworkingBooking.objects.create(
+            user=existing_user,
+            date=booking_date,
+            status='booked',
+            points_cost=8,
+        )
+
+        response = self._post_batch([existing_user.slack_id, new_user.slack_id], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['created_count'], 1)
+        self.assertEqual(response.data['already_booked_count'], 1)
+        by_slack_id = {row['slack_user_id']: row for row in response.data['results']}
+        self.assertTrue(by_slack_id[existing_user.slack_id]['already_booked'])
+        self.assertFalse(by_slack_id[new_user.slack_id]['already_booked'])
+        self.assertEqual(PointsAccount.objects.get(user=existing_user).balance, 10)
+        self.assertEqual(PointsAccount.objects.get(user=new_user).balance, 2)
+        self.assertEqual(
+            Ledger.objects.filter(user=existing_user, source='COWORKING').count(),
+            0,
+        )
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            2,
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_is_all_or_nothing_for_insufficient_balance(self, mock_permission):
+        enough_user = self._create_member_with_points('UCOENOUGH', balance=10)
+        short_user = self._create_member_with_points('UCOSHORT', balance=4)
+        booking_date = date.today() + timedelta(days=1)
+
+        response = self._post_batch([enough_user.slack_id, short_user.slack_id], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('insufficient', response.data['error'].lower())
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            0,
+        )
+        self.assertEqual(PointsAccount.objects.get(user=enough_user).balance, 10)
+        self.assertEqual(PointsAccount.objects.get(user=short_user).balance, 4)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_is_all_or_nothing_for_unlinked_target(self, mock_permission):
+        target = self._create_member_with_points('UCOLINKED', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+
+        response = self._post_batch([target.slack_id, 'UCONOTLINKED'], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('link', response.data['error'].lower())
+        self.assertEqual(response.data['errors'][0]['slack_user_id'], 'UCONOTLINKED')
+        self.assertFalse(
+            CoworkingBooking.objects.filter(user=target, date=booking_date).exists()
+        )
+        self.assertEqual(PointsAccount.objects.get(user=target).balance, 10)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_is_all_or_nothing_for_insufficient_capacity(self, mock_permission):
+        target_1 = self._create_member_with_points('UCOCAP1', balance=10)
+        target_2 = self._create_member_with_points('UCOCAP2', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+        CoworkingDayCapacity.objects.create(date=booking_date, capacity=1)
+
+        response = self._post_batch([target_1.slack_id, target_2.slack_id], booking_date)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('availability', response.data['error'].lower())
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            0,
+        )
+        self.assertEqual(PointsAccount.objects.get(user=target_1).balance, 10)
+        self.assertEqual(PointsAccount.objects.get(user=target_2).balance, 10)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_rejects_invalid_date_range(self, mock_permission):
+        target = self._create_member_with_points('UCODATE', balance=10)
+
+        past_response = self._post_batch(
+            [target.slack_id],
+            booking_date=date.today() - timedelta(days=1),
+        )
+        too_far_response = self._post_batch(
+            [target.slack_id],
+            booking_date=date.today() + timedelta(days=8),
+        )
+
+        self.assertEqual(past_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(too_far_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CoworkingBooking.objects.filter(user=target).exists())
 
 
 class CoworkingReportViewSetTests(APITestCase):
