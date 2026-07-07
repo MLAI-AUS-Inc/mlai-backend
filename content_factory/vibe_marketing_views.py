@@ -1117,6 +1117,55 @@ def _connect_with_existing_github_credentials(config, *, domain: str, actor_id: 
     }
 
 
+def _connect_with_registry_installation(config, *, user, requested_repo: str):
+    """Bind a repo from the founder's shared GitHub installations — no re-auth.
+
+    When the founder already authorized an installation (possibly while setting up
+    a *different* company) that can serve ``requested_repo`` — or the repo already
+    recorded on this company — bind it to this company's config and report
+    'connected'. Returns None when nothing can be bound, so the caller falls back
+    to the GitHub install/OAuth flow. Returning without an ``auth_url`` is the
+    signal the frontend uses to proceed instead of re-authorizing.
+    """
+    target_repo = _clean_github_repo(requested_repo) or _clean_github_repo(config.github_repo)
+    if not target_repo:
+        return None
+    try:
+        from integrations.services.github_installations import installation_for_repo
+
+        inst = installation_for_repo(user, target_repo)
+    except Exception:
+        logger.exception("github_registry_connect_resolve_failed repo=%s", target_repo)
+        return None
+    if inst is None:
+        return None
+
+    update_fields = []
+    if _clean_github_repo(config.github_repo) != target_repo:
+        config.github_repo = target_repo
+        update_fields.append("github_repo")
+    resolved_installation_id = str(inst.installation_id or "").strip()
+    if resolved_installation_id and str(config.github_installation_id or "").strip() != resolved_installation_id:
+        config.github_installation_id = resolved_installation_id
+        update_fields.append("github_installation_id")
+    login = (inst.account_login or inst.github_user_name or "").strip()
+    if login and (config.github_user_name or "") != login:
+        config.github_user_name = login
+        update_fields.append("github_user_name")
+    if update_fields:
+        update_fields.append("updated_at")
+        config.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    return {
+        "status": "connected",
+        "connection_state": "connected",
+        "github_repo": config.github_repo,
+        "github_user_name": config.github_user_name,
+        "installation_id": resolved_installation_id,
+        "credential_source": "user_registry",
+    }
+
+
 def _run_belongs_to_context(run, context) -> bool:
     # Prefer the exact organization FK (populated from the unique domain on save).
     # Fall back to the normalized-domain compare for runs created before an
@@ -3963,6 +4012,33 @@ def _article_preview_should_refresh(run):
     return preview_status in {"running", "starting"}
 
 
+def _resolve_installation_id_for_repo(config, repo: str) -> str:
+    """Installation id to mint a token for ``repo``.
+
+    Prefer the founder's shared GitHub registry — any of their installations that
+    contains this repo — so a repo authorized while setting up one company works
+    from another. Fall back to the per-org installation id when the registry can't
+    resolve it (empty registry, unresolved owner), preserving legacy behavior.
+    """
+    repo = str(repo or "").strip()
+    try:
+        from integrations.services.github_installations import (
+            installation_for_repo,
+            resolve_user_for_actor_id,
+        )
+
+        owner_user = resolve_user_for_actor_id(getattr(config, "connected_slack_user_id", ""))
+        if owner_user is not None:
+            inst = installation_for_repo(owner_user, repo)
+            if inst is not None:
+                resolved = str(inst.installation_id or "").strip()
+                if resolved:
+                    return resolved
+    except Exception:
+        logger.exception("github_registry_installation_resolve_failed repo=%s", repo)
+    return str(getattr(config, "github_installation_id", "") or "").strip()
+
+
 def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permission_mode: str = "write") -> dict:
     normalized_domain = normalize_company_domain(domain or "")
     repo = str(github_repo or "").strip()
@@ -3973,7 +4049,7 @@ def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permi
         config = _get_config(organization)
     except Organization.DoesNotExist:
         return {}
-    installation_id = str(config.github_installation_id or "").strip()
+    installation_id = _resolve_installation_id_for_repo(config, repo)
     if not installation_id:
         return {}
     token = create_installation_access_token(
@@ -12667,6 +12743,17 @@ class VibeMarketingGitHubConnectView(APIView):
             if existing_connection:
                 return Response(existing_connection, status=status.HTTP_200_OK)
 
+            # Founder-scoped reuse: bind a repo from an installation the founder
+            # already authorized (e.g. while setting up another company) without a
+            # fresh GitHub OAuth. No auth_url in the response => frontend proceeds.
+            registry_connection = _connect_with_registry_installation(
+                config,
+                user=request.user,
+                requested_repo=requested_repo,
+            )
+            if registry_connection:
+                return Response(registry_connection, status=status.HTTP_200_OK)
+
         return_url = str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None
         try:
             auth_url = build_github_auth_url(
@@ -12708,6 +12795,54 @@ class VibeMarketingGitHubReposView(APIView):
 
         config = _get_config(context.organization)
         actor_id = founder_actor_id_for_user(request.user)
+
+        # Founder-scoped GitHub: when the user has installations, list the UNION of
+        # repos across all of them (shared across every company). Only short-circuit
+        # when it yields repos, so a working legacy per-org path never regresses.
+        try:
+            from integrations.services.github_installations import (
+                installation_for_repo,
+                list_user_repos,
+                user_github_installations,
+            )
+
+            if user_github_installations(request.user):
+                union_repos = list_user_repos(request.user)
+                if union_repos:
+                    selected_repo = str(config.github_repo or "").strip()
+                    if not selected_repo and len(union_repos) == 1:
+                        selected_repo = str(union_repos[0].get("fullName") or "").strip()
+                    resolved_installation_id = str(config.github_installation_id or "").strip()
+                    if selected_repo:
+                        inst = installation_for_repo(request.user, selected_repo)
+                        if inst is not None:
+                            resolved_installation_id = (
+                                str(inst.installation_id or "").strip() or resolved_installation_id
+                            )
+                    return Response(
+                        {
+                            "status": "connected",
+                            "connectionState": "connected",
+                            "connection_state": "connected",
+                            "credentialSource": "user_registry",
+                            "credential_source": "user_registry",
+                            "githubRepo": config.github_repo,
+                            "github_repo": config.github_repo,
+                            "selectedRepo": selected_repo,
+                            "selected_repo": selected_repo,
+                            "installationId": resolved_installation_id,
+                            "installation_id": resolved_installation_id,
+                            "repos": union_repos,
+                            "repositories": union_repos,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+        except Exception:
+            logger.exception(
+                "vibe_marketing_github_repo_union_failed domain=%s",
+                context.organization.domain,
+            )
+
         token = ""
         installation_id = str(config.github_installation_id or "").strip()
         credential_source = "none"

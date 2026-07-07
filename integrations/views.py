@@ -539,6 +539,38 @@ def github_callback(request):
     repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
     selected_repo = repo_names[0] if len(repo_names) == 1 else None
 
+    # Record this installation in the founder-scoped registry so every company of
+    # the same founder can list + publish to it (GitHub access is per-founder, not
+    # per-startup). Best-effort — never block the OAuth callback on registry writes.
+    try:
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+            upsert_github_installation,
+        )
+
+        registry_user = resolve_user_for_actor_id(slack_user_id)
+        registry_account_login = ""
+        registry_account_type = ""
+        if repos:
+            first_owner = repos[0].get("owner") if isinstance(repos[0].get("owner"), dict) else {}
+            registry_account_login = str(first_owner.get("login") or "").strip()
+            registry_account_type = str(first_owner.get("type") or "").strip()
+        upsert_github_installation(
+            user=registry_user,
+            installation_id=installation_id,
+            account_login=registry_account_login or github_login or "",
+            account_type=registry_account_type,
+            github_user_name=github_login or "",
+            user_token=access_token,
+            refresh_token=refresh_token,
+            token_expires_at=token_expires_at,
+            scopes=[],
+        )
+    except Exception:
+        logger.exception(
+            "github_installation_registry_upsert_failed installation_id=%s", installation_id
+        )
+
     retried = False
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
