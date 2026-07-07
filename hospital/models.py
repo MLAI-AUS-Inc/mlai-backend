@@ -136,3 +136,67 @@ class MedHackWinner(models.Model):
     def __str__(self):
         first = " (FIRST!)" if self.is_first_solver else ""
         return f"{self.slack_user_id} won Case #{self.case_id}{first}"
+
+
+class SimDiagnosisGuess(models.Model):
+    """
+    One web-game diagnosis guess per anonymous browser client per case.
+
+    Web ward contest only — deliberately NOT related to the Slack medhack
+    tables (MedHackCase/Guess/Winner). case_id mirrors roo cases.yaml ids.
+    Correctness is adjudicated by Roo (same fuzzy matcher as the Slack game);
+    the backend records the verdict and owns the prize state.
+    """
+    OUTCOME_PENDING_CLAIM = 'pending_claim'
+    OUTCOME_INCORRECT = 'incorrect'
+    OUTCOME_TICKET = 'ticket'
+    OUTCOME_DISCOUNT = 'discount'
+    OUTCOME_CHOICES = [
+        (OUTCOME_PENDING_CLAIM, 'Correct — awaiting email'),
+        (OUTCOME_INCORRECT, 'Incorrect'),
+        (OUTCOME_TICKET, 'Free ticket (winner)'),
+        (OUTCOME_DISCOUNT, '30% discount'),
+    ]
+
+    case_id = models.PositiveIntegerField(db_index=True, help_text="Case ID from roo cases.yaml")
+    client_id = models.CharField(max_length=64, help_text="Anonymous browser UUID")
+    guess_text = models.CharField(max_length=300)
+    is_correct = models.BooleanField()
+    outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES)
+    email = models.EmailField(blank=True, default="", help_text="Set at claim time")
+    created_at = models.DateTimeField(auto_now_add=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Sim Diagnosis Guess"
+        verbose_name_plural = "Sim Diagnosis Guesses"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['case_id', 'client_id'],
+                name='uniq_sim_guess_case_client',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.client_id[:8]}… on case {self.case_id}: {self.outcome}"
+
+
+class SimCaseWinner(models.Model):
+    """
+    The single free-ticket winner per web-contest case.
+    unique=True on case_id IS the contest lock — the winner slot is claimed
+    by inserting this row inside a transaction; the loser of a claim race
+    hits IntegrityError and falls through to the discount outcome.
+    """
+    case_id = models.PositiveIntegerField(unique=True)
+    guess = models.OneToOneField(SimDiagnosisGuess, on_delete=models.PROTECT, related_name='win')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Sim Case Winner"
+        verbose_name_plural = "Sim Case Winners"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Case {self.case_id} won by {self.guess.email or self.guess.client_id[:8]}"

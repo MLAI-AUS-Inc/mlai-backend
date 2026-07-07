@@ -1,7 +1,10 @@
 import json
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import Team, Submission, Announcement, MedHackCase, MedHackGuess, MedHackWinner
+from .models import (
+    Team, Submission, Announcement, MedHackCase, MedHackGuess, MedHackWinner,
+    SimDiagnosisGuess, SimCaseWinner,
+)
 
 class TeamAdmin(admin.ModelAdmin):
     list_display = ('team_id', 'team_name', 'member_list', 'member_count')
@@ -56,3 +59,20 @@ class MedHackWinnerAdmin(admin.ModelAdmin):
     search_fields = ('slack_user_id',)
     readonly_fields = ('won_at',)
     ordering = ('-won_at',)
+
+
+@admin.register(SimDiagnosisGuess)
+class SimDiagnosisGuessAdmin(admin.ModelAdmin):
+    """Organizer export surface for the web ward contest (emails + outcomes)."""
+    list_display = ('id', 'case_id', 'client_id', 'guess_text', 'is_correct', 'outcome', 'email', 'created_at', 'claimed_at')
+    list_filter = ('case_id', 'outcome', 'is_correct')
+    search_fields = ('email', 'client_id', 'guess_text')
+    readonly_fields = ('created_at', 'claimed_at')
+    ordering = ('-created_at',)
+
+
+@admin.register(SimCaseWinner)
+class SimCaseWinnerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'case_id', 'guess', 'created_at')
+    readonly_fields = ('created_at',)
+    ordering = ('-created_at',)
