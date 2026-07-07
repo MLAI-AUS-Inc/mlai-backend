@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timezone as dt_timezone
+from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,13 +18,22 @@ from content_factory.models import (
     ResearchAutomation,
     ResearchAutomationStatus,
 )
+from content_factory.billing import get_content_factory_ai_agent_required_points
 from integrations.services.article_generation import (
+    CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
     CONTENT_FACTORY_REQUEST_SOURCE,
+    InsufficientRooPointsError,
     _build_content_factory_headers,
+    _content_factory_authorization_payload,
     _get_content_factory_base_url,
     _post_content_factory_queue_request,
+    _require_content_factory_ai_agent_points,
+    _store_job_tracking_record,
 )
-from integrations.services.notification_adapters import notification_context_for_run
+from integrations.services.notification_adapters import (
+    automation_billing_actor_slack_id,
+    notification_context_for_run,
+)
 from integrations.utils import normalize_domain
 from organizations.models import Organization
 
@@ -34,6 +43,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_RESEARCH_AUTOMATION_TIMES = ["08:00"]
 DEFAULT_RESEARCH_AUTOMATION_TWICE_DAILY_TIMES = ["08:00", "15:30"]
 SCHEDULE_LOOKAHEAD_LIMIT = 500
+# Runs wait on content-factory callbacks (discovery ~minutes, article ~tens of
+# minutes). A lost callback — e.g. the web container recreated mid-flight, as
+# happened on 2026-07-07 — leaves a run wedged in QUEUED/GENERATING forever with
+# no retry. Fail anything in a machine-waiting state past this window. Excludes
+# TOPIC_SELECTION_SENT / DELIVERY_MODE_REQUIRED, which legitimately wait on a human.
+STUCK_RUN_TIMEOUT_SECONDS = 3 * 60 * 60
 
 
 def _coerce_timezone(value: str) -> str:
@@ -175,6 +190,13 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
         # when unset. Must match the WhatsApp topic template's title slots.
         "requested_topic_count": 3,
     }
+    actor_slack_id = automation_billing_actor_slack_id(run.automation)
+    if actor_slack_id:
+        # Roo-points billing actor (wallet owner). Distinct from the Slack
+        # *delivery* route below: a WhatsApp/email automation still bills the
+        # founder's wallet. content-factory resolves the actor as
+        # requested_by_slack_user_id -> slack_user_id.
+        payload["requested_by_slack_user_id"] = actor_slack_id
     slack_route_id = ""
     if channel.channel_type == NotificationChannelType.SLACK:
         slack_route_id = channel.route_id
@@ -223,14 +245,54 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
         run.save(update_fields=["status", "last_error", "updated_at"])
 
     payload = _discovery_payload_for_run(run)
+    domain = payload.get("domain") or ""
+    # Browsing topics is free; the Roo-points charge is deferred to topic
+    # approval (confirm_topic -> _charge_deferred_discovery_job_if_needed).
+    # Free-listed domains skip billing entirely and keep the bare-dispatch path.
+    paying_domain = get_content_factory_ai_agent_required_points(domain) > 0
     endpoint = f"{_get_content_factory_base_url().rstrip('/')}/api/runs/discovery"
     try:
+        if paying_domain:
+            actor_slack_id = str(payload.get("requested_by_slack_user_id") or "").strip()
+            if not actor_slack_id:
+                # No wallet owner on the channel: fail with a clear reason rather
+                # than let content-factory return an opaque ROO_POINTS_UNAVAILABLE.
+                AutomationRun.objects.filter(pk=run.id).update(
+                    status=AutomationRunStatus.FAILED,
+                    last_error=(
+                        "billing_identity_missing: no Slack-linked user on the "
+                        "automation channel; cannot charge Roo points for a paid domain."
+                    ),
+                )
+                return {
+                    "status": "failed",
+                    "automation_run_id": str(run.id),
+                    "error": "billing_identity_missing",
+                }
+            # Gate on balance (raises InsufficientRooPointsError below), then stamp
+            # a deferred authorization so content-factory admits the discovery.
+            _gated_user, gated_balance = _require_content_factory_ai_agent_points(
+                slack_user_id=actor_slack_id,
+                article_request=payload,
+                resolved_domain=domain,
+                action="topic_discovery",
+            )
+            payload.update(
+                _content_factory_authorization_payload(
+                    resolved_domain=domain,
+                    action="topic_discovery",
+                    cost_points=0,
+                    billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+                    current_balance=gated_balance,
+                )
+            )
+
         response = _post_content_factory_queue_request(
             endpoint,
             payload=payload,
             headers=_build_content_factory_headers(),
             operation="queue_research_automation_discovery",
-            domain=payload.get("domain"),
+            domain=domain,
         )
         if response.status_code not in {200, 202}:
             error = f"Content Factory returned {response.status_code}: {response.text}"
@@ -241,6 +303,21 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
             return {"status": "failed", "automation_run_id": str(run.id), "error": error}
         data = response.json()
         content_factory_run_id = str(data.get("job_id") or data.get("run_id") or data.get("task_id") or "").strip()
+        if paying_domain and content_factory_run_id:
+            # Track the discovery job with a deferred hold so topic approval can
+            # charge the founder's wallet. The actor rides in request_meta
+            # (requested_by_slack_user_id) for _charge_deferred_discovery_job.
+            _store_job_tracking_record(
+                content_factory_run_id,
+                domain=domain,
+                slack_user_id="",
+                request_meta=payload,
+                default_status="queued",
+                client_request_id=run.idempotency_key,
+                billing_source_job_id=content_factory_run_id,
+                billing_amount=0,
+                billing_status=CONTENT_FACTORY_BILLING_STATUS_DEFERRED,
+            )
         AutomationRun.objects.filter(pk=run.id).update(
             status=AutomationRunStatus.QUEUED,
             content_factory_run_id=content_factory_run_id,
@@ -253,6 +330,13 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
             "automation_run_id": str(run.id),
             "content_factory_run_id": content_factory_run_id,
         }
+    except InsufficientRooPointsError as exc:
+        logger.info("Research automation run %s blocked on Roo points: %s", run.id, exc)
+        AutomationRun.objects.filter(pk=run.id).update(
+            status=AutomationRunStatus.FAILED,
+            last_error=f"insufficient_roo_points: {exc}"[:1000],
+        )
+        return {"status": "failed", "automation_run_id": str(run.id), "error": "insufficient_roo_points"}
     except Exception as exc:
         logger.warning("Failed to dispatch research automation run %s: %s", run.id, exc)
         AutomationRun.objects.filter(pk=run.id).update(
@@ -275,16 +359,46 @@ def dispatch_due_automation_runs(*, now: Optional[datetime] = None, limit: int =
     return [dispatch_automation_run(str(run_id)) for run_id in due_ids]
 
 
+def fail_stuck_automation_runs(
+    *,
+    now: Optional[datetime] = None,
+    timeout_seconds: int = STUCK_RUN_TIMEOUT_SECONDS,
+) -> int:
+    """Fail runs wedged in a machine-waiting state past the timeout.
+
+    QUEUED (awaiting the discovery callback) and GENERATING (awaiting the article
+    callback) advance only when content-factory calls back. A dropped callback
+    strands them with no retry, so they keep an automation looking busy forever.
+    Flip them to FAILED so watchers/operators can see them and the automation is
+    free to schedule its next slot. User-waiting states are intentionally left
+    alone — a founder may approve a topic hours later.
+    """
+    current = now or timezone.now()
+    cutoff = current - timedelta(seconds=max(60, timeout_seconds))
+    return (
+        AutomationRun.objects.filter(
+            status__in=[AutomationRunStatus.QUEUED, AutomationRunStatus.GENERATING],
+            updated_at__lt=cutoff,
+        ).update(
+            status=AutomationRunStatus.FAILED,
+            last_error="content_factory_timeout: no terminal callback within the timeout window",
+            updated_at=current,
+        )
+    )
+
+
 def run_research_automation_scheduler(*, now: Optional[datetime] = None, limit: int = 20) -> dict[str, Any]:
     current = now or timezone.now()
     ensured = ensure_due_automation_runs(now=current)
     results = dispatch_due_automation_runs(now=current, limit=limit)
+    failed_stuck = fail_stuck_automation_runs(now=current)
     return {
         "status": "ok",
         "ensured": len(ensured),
         "queued": sum(1 for result in results if result.get("status") == "queued"),
         "failed": sum(1 for result in results if result.get("status") == "failed"),
         "skipped": sum(1 for result in results if result.get("status") == "skipped"),
+        "failed_stuck": failed_stuck,
         "results": results,
     }
 
