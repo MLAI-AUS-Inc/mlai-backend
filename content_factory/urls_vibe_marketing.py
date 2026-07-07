@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .notification_channel_views import (
+    VibeMarketingNotificationChannelDeliveryView,
     VibeMarketingNotificationChannelDetailView,
     VibeMarketingNotificationChannelResendView,
     VibeMarketingNotificationChannelVerifyView,
@@ -145,6 +146,8 @@ urlpatterns = [
     path("daily/replay/", VibeMarketingDailyReplayView.as_view(), name="vibe-marketing-daily-replay"),
     path("notifications/channels", VibeMarketingNotificationChannelsView.as_view(), name="vibe-marketing-notification-channels-no-slash"),
     path("notifications/channels/", VibeMarketingNotificationChannelsView.as_view(), name="vibe-marketing-notification-channels"),
+    path("notifications/channels/delivery", VibeMarketingNotificationChannelDeliveryView.as_view(), name="vibe-marketing-notification-channel-delivery-no-slash"),
+    path("notifications/channels/delivery/", VibeMarketingNotificationChannelDeliveryView.as_view(), name="vibe-marketing-notification-channel-delivery"),
     path("notifications/channels/<uuid:channel_id>/verify", VibeMarketingNotificationChannelVerifyView.as_view(), name="vibe-marketing-notification-channel-verify-no-slash"),
     path("notifications/channels/<uuid:channel_id>/verify/", VibeMarketingNotificationChannelVerifyView.as_view(), name="vibe-marketing-notification-channel-verify"),
     path("notifications/channels/<uuid:channel_id>/resend", VibeMarketingNotificationChannelResendView.as_view(), name="vibe-marketing-notification-channel-resend-no-slash"),

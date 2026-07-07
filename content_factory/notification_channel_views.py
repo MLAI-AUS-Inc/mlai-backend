@@ -281,6 +281,142 @@ class VibeMarketingNotificationChannelDetailView(APIView):
         )
 
 
+class VibeMarketingNotificationChannelDeliveryView(APIView):
+    """Turn daily-reminder delivery on/off for a whole channel TYPE.
+
+    Unlike the id-based toggle (which needs an already-connected channel), this
+    connects on first enable where the method allows it: Slack links instantly,
+    Email sends a verification link (delivery starts once confirmed), and WhatsApp
+    still needs its number + OTP setup first. Disable flips delivery_enabled off
+    for the type's active channels, keeping the connection intact.
+    """
+
+    _TYPES = frozenset(
+        {
+            NotificationChannelType.SLACK,
+            NotificationChannelType.EMAIL,
+            NotificationChannelType.WHATSAPP,
+        }
+    )
+
+    def post(self, request):
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
+        organization = context.organization
+        channel_type = str(
+            request.data.get("channelType") or request.data.get("channel_type") or ""
+        ).strip().lower()
+        if channel_type not in self._TYPES:
+            return Response(
+                {"detail": "channelType must be slack, whatsapp, or email.", "code": "invalid_channel_type"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw = request.data.get("enabled")
+        if raw is None:
+            return Response(
+                {"detail": "enabled is required.", "code": "missing_enabled"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        enabled = str(raw).strip().lower() not in {"false", "0", "no", "off", ""}
+        if enabled:
+            return self._enable(request, organization, channel_type)
+        return self._disable(organization, channel_type)
+
+    def _enable(self, request, organization, channel_type):
+        active = list(
+            NotificationChannel.objects.filter(
+                organization=organization,
+                channel_type=channel_type,
+                consent_state=NotificationConsentState.ACTIVE,
+            )
+        )
+        if active:
+            for channel in active:
+                if not channel.delivery_enabled:
+                    channel.delivery_enabled = True
+                    channel.save(update_fields=["delivery_enabled", "updated_at"])
+            return self._payload(organization, "active")
+
+        # No active channel of this type yet — connect where the method allows it.
+        try:
+            if channel_type == NotificationChannelType.SLACK:
+                link_slack_channel(
+                    organization=organization,
+                    user=request.user,
+                    config=_get_config(organization),
+                )
+                result_status = "active"
+            elif channel_type == NotificationChannelType.EMAIL:
+                channel = initiate_email_channel(
+                    organization=organization,
+                    user=request.user,
+                    route_id=str(request.data.get("routeId") or request.data.get("route_id") or ""),
+                )
+                if channel.consent_state == NotificationConsentState.ACTIVE:
+                    result_status = "active"
+                else:
+                    send_email_verification(channel)
+                    result_status = "verification_sent"
+            else:  # whatsapp needs the number + OTP setup flow first
+                return Response(
+                    {
+                        "detail": "Add a WhatsApp number first to receive daily reminders there.",
+                        "code": "whatsapp_setup_required",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except ChannelActionError as exc:
+            return _channel_error_response(exc)
+        return self._payload(organization, result_status)
+
+    def _disable(self, organization, channel_type):
+        active_enabled = list(
+            NotificationChannel.objects.filter(
+                organization=organization,
+                channel_type=channel_type,
+                consent_state=NotificationConsentState.ACTIVE,
+                delivery_enabled=True,
+            )
+        )
+        if not active_enabled:
+            return self._payload(organization, "disabled")  # already off / not connected
+
+        # Last-channel guard: never drop the org to zero delivery targets via a
+        # checkbox. At least one active+enabled channel of another type must remain.
+        others_enabled = (
+            NotificationChannel.objects.filter(
+                organization=organization,
+                consent_state=NotificationConsentState.ACTIVE,
+                delivery_enabled=True,
+            )
+            .exclude(channel_type=channel_type)
+            .exists()
+        )
+        if not others_enabled:
+            return Response(
+                {
+                    "detail": (
+                        "Keep at least one channel on, or turn the daily reminder "
+                        "off with the Enabled toggle."
+                    ),
+                    "code": "last_delivery_channel",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        for channel in active_enabled:
+            channel.delivery_enabled = False
+            channel.save(update_fields=["delivery_enabled", "updated_at"])
+        return self._payload(organization, "disabled")
+
+    @staticmethod
+    def _payload(organization, result_status):
+        return Response(
+            {**_channels_payload(organization), "status": result_status},
+            status=status.HTTP_200_OK,
+        )
+
+
 class VibeMarketingResearchAutomationView(APIView):
     def get(self, request):
         context, error = _resolve_context_or_response(request)
