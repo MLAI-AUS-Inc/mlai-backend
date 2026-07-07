@@ -671,27 +671,26 @@ class CoworkingService:
         except RewardsCatalog.DoesNotExist:
             return getattr(settings, 'COWORKING_DAY_COST_POINTS', 8)
 
-    # A 'ready' monthly update grants the coworking discount for this many days
-    # from the moment it first became ready.
+    # A monthly update grants the coworking discount for this many days from
+    # recent activity, even if the update is not ready yet.
     MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 28
 
     @staticmethod
-    def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
+    def _has_discount_eligible_monthly_update(user: User, booking_date: date) -> bool:
         """
         Return whether any ABR-verified Australian company the user is bound to
-        has a monthly update that is 'ready' and became ready within the last
-        28 days (relative to ``booking_date``).
+        has a monthly update that qualifies for the coworking discount.
 
         The coworking discount rewards founders who run a verified registered
         Australian company and keep their monthly update current. Company
         eligibility mirrors ``vibe_raising.registration.company_is_verified``:
         ``registered`` with an ACN and an ABR-verified stamp.
 
-        The window is time-based rather than calendar-month based: an update
-        that reaches 'ready' grants the discount for the next 28 days
-        regardless of month boundaries, so there is no start-of-month cliff.
-        ``ready_at`` is stamped once, the first time a draft becomes ready, so
-        re-approving an old draft cannot renew the window.
+        DRAFT, NEEDS_REVIEW, and READY monthly updates qualify. ERROR updates do
+        not. The discount applies when the update is for the booking month, or
+        when the update has recent activity within the rolling discount window.
+        MonthlyUpdateDraft has no submitted_at timestamp, so updated_at is the
+        best available proxy for "submitted/recently worked on".
         """
         # Imported lazily to avoid a hard import dependency between the roo and
         # startup_updates / founder_tools apps at module load time.
@@ -725,14 +724,21 @@ class CoworkingService:
         if not eligible_org_ids:
             return False
 
-        window_start = booking_date - timedelta(
+        window_start = timezone.now().date() - timedelta(
             days=CoworkingService.MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS
         )
+        booking_month = booking_date.replace(day=1)
+        qualifying_statuses = [
+            MonthlyUpdateDraftStatus.DRAFT,
+            MonthlyUpdateDraftStatus.NEEDS_REVIEW,
+            MonthlyUpdateDraftStatus.READY,
+        ]
         return MonthlyUpdateDraft.objects.filter(
             organization_id__in=eligible_org_ids,
-            status=MonthlyUpdateDraftStatus.READY,
-            ready_at__isnull=False,
-            ready_at__date__gte=window_start,
+            status__in=qualifying_statuses,
+        ).filter(
+            models.Q(month=booking_month)
+            | models.Q(updated_at__date__gte=window_start)
         ).exists()
 
     @staticmethod
@@ -745,13 +751,13 @@ class CoworkingService:
 
         Defaults to the standard cost (from catalog/settings). When both
         ``user`` and ``booking_date`` are supplied and the user's ABR-verified
-        startup has a monthly update that became 'ready' within the last 28
-        days, the discounted cost applies instead — rewarding founders who keep
-        their monthly update current.
+        startup has a discount-eligible monthly update, the discounted cost
+        applies instead — rewarding founders who keep their monthly update
+        current.
         """
         standard = CoworkingService.get_standard_coworking_cost()
         if user is not None and booking_date is not None:
-            if CoworkingService._has_ready_monthly_update(user, booking_date):
+            if CoworkingService._has_discount_eligible_monthly_update(user, booking_date):
                 return getattr(settings, 'COWORKING_DAY_DISCOUNT_COST_POINTS', 4)
         return standard
     

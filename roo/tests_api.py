@@ -1802,19 +1802,46 @@ class CoworkingViewSetTests(APITestCase):
             format='json',
         )
 
-    def _verify_company_for(self, org):
+    def _verify_company_for(self, org, user=None):
         """Attach an ABR-verified company to ``org`` (required for the discount)."""
         from django.utils import timezone as dj_timezone
         from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 
+        profile_user = user or self.user
         profile, _ = VibeRaisingProfile.objects.get_or_create(
-            user=self.user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
+            user=profile_user, defaults={'role': VibeRaisingProfile.ROLE_FOUNDER}
         )
         VibeRaisingCompany.objects.create(
             profile=profile, organization=org, name='Acme Pty Ltd',
             registered=True, abn='89000000019', acn='000000019',
             abr_verified_at=dj_timezone.now(),
         )
+
+    def _create_monthly_update_for_user(
+        self,
+        user,
+        booking_date,
+        update_status,
+        domain,
+        updated_days_ago=None,
+    ):
+        from organizations.models import Organization
+        from startup_updates.models import MonthlyUpdateDraft, UserStartupBinding
+
+        org = Organization.objects.create(name=f'{user.slack_id} Co', domain=domain)
+        UserStartupBinding.objects.create(user=user, organization=org)
+        self._verify_company_for(org, user=user)
+        draft = MonthlyUpdateDraft.objects.create(
+            organization=org,
+            month=booking_date.replace(day=1),
+            status=update_status,
+        )
+        if updated_days_ago is not None:
+            MonthlyUpdateDraft.objects.filter(pk=draft.pk).update(
+                updated_at=timezone.now() - timedelta(days=updated_days_ago)
+            )
+            draft.refresh_from_db()
+        return draft
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_availability_quotes_standard_cost_without_user(self, mock_permission):
@@ -1890,6 +1917,38 @@ class CoworkingViewSetTests(APITestCase):
         self.assertTrue(response.data['monthly_update_discount_applied'])
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_book_response_flags_discount_for_draft_and_review_updates(self, mock_permission):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+
+        statuses = [
+            MonthlyUpdateDraftStatus.DRAFT,
+            MonthlyUpdateDraftStatus.NEEDS_REVIEW,
+            MonthlyUpdateDraftStatus.READY,
+        ]
+        for index, update_status in enumerate(statuses, start=1):
+            with self.subTest(status=update_status):
+                user = self._create_member_with_points(f'UCODISCOUNT{index}', balance=4)
+                booking_date = date.today() + timedelta(days=index)
+                self._create_monthly_update_for_user(
+                    user,
+                    booking_date,
+                    update_status,
+                    f'discount-{index}.book.example',
+                )
+
+                response = self.client.post(
+                    self.url,
+                    {'slack_user_id': user.slack_id, 'date': booking_date.isoformat()},
+                    format='json',
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.data['points_cost'], 4)
+                self.assertEqual(response.data['standard_points_cost'], 8)
+                self.assertTrue(response.data['monthly_update_discount_applied'])
+                self.assertEqual(PointsAccount.objects.get(user=user).balance, 0)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_book_endpoint_is_idempotent_for_existing_booking(self, mock_permission):
         booking_date = (date.today() + timedelta(days=1)).isoformat()
 
@@ -1961,6 +2020,67 @@ class CoworkingViewSetTests(APITestCase):
         self.assertTrue(
             all(entry.created_by_slack_id == self.admin_slack_id for entry in ledger_entries)
         )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_uses_each_targets_discounted_or_standard_cost(self, mock_permission):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+
+        discounted_target = self._create_member_with_points('UCODISCBATCH', balance=4)
+        standard_target = self._create_member_with_points('UCOSTDBATCH', balance=8)
+        booking_date = date.today() + timedelta(days=1)
+        self._create_monthly_update_for_user(
+            discounted_target,
+            booking_date,
+            MonthlyUpdateDraftStatus.NEEDS_REVIEW,
+            'discounted-batch.book.example',
+        )
+
+        response = self._post_batch(
+            [discounted_target.slack_id, standard_target.slack_id],
+            booking_date,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['created_count'], 2)
+        by_slack_id = {row['slack_user_id']: row for row in response.data['results']}
+        self.assertEqual(by_slack_id[discounted_target.slack_id]['points_cost'], 4)
+        self.assertTrue(
+            by_slack_id[discounted_target.slack_id]['monthly_update_discount_applied']
+        )
+        self.assertEqual(by_slack_id[standard_target.slack_id]['points_cost'], 8)
+        self.assertFalse(
+            by_slack_id[standard_target.slack_id]['monthly_update_discount_applied']
+        )
+        self.assertEqual(PointsAccount.objects.get(user=discounted_target).balance, 0)
+        self.assertEqual(PointsAccount.objects.get(user=standard_target).balance, 0)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_batch_book_mixed_cost_preflight_is_all_or_nothing(self, mock_permission):
+        from startup_updates.models import MonthlyUpdateDraftStatus
+
+        discounted_target = self._create_member_with_points('UCOMIXDISC', balance=4)
+        short_standard_target = self._create_member_with_points('UCOMIXSHORT', balance=4)
+        booking_date = date.today() + timedelta(days=1)
+        self._create_monthly_update_for_user(
+            discounted_target,
+            booking_date,
+            MonthlyUpdateDraftStatus.DRAFT,
+            'mixed-discount.book.example',
+        )
+
+        response = self._post_batch(
+            [discounted_target.slack_id, short_standard_target.slack_id],
+            booking_date,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('insufficient', response.data['error'].lower())
+        self.assertEqual(
+            CoworkingBooking.objects.filter(date=booking_date, status='booked').count(),
+            0,
+        )
+        self.assertEqual(PointsAccount.objects.get(user=discounted_target).balance, 4)
+        self.assertEqual(PointsAccount.objects.get(user=short_standard_target).balance, 4)
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_batch_book_rejects_partner_and_non_admin(self, mock_permission):
