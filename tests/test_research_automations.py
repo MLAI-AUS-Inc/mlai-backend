@@ -99,6 +99,43 @@ class ResearchAutomationSchedulerTests(TestCase):
         self.assertEqual(payload["notification_context"]["channel_type"], "email")
         self.assertEqual(payload["notification_context"]["channel_route_id"], str(automation.notification_channel_id))
 
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_scheduler_dispatches_run_without_user(self, mock_post):
+        # Mirrors the "approved WhatsApp number" path where the channel has no
+        # attached user, so automation.user and notification_channel.user are
+        # both NULL and the dispatch query's select_related spans nullable FKs.
+        # Guards the select_for_update(of=("self",)) fix: an unqualified
+        # FOR UPDATE raises NotSupportedError on Postgres ("cannot be applied to
+        # the nullable side of an outer join") the moment a run is dispatchable.
+        mock_post.return_value = _Response(202, {"run_id": "discovery-run-2"})
+        automation = create_or_update_research_automation(
+            domain="automation.example.com",
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61401099433",
+            user=None,
+            timezone_name="Australia/Melbourne",
+            frequency_per_day=1,
+            local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.assertIsNone(automation.user_id)
+        self.assertIsNone(automation.notification_channel.user_id)
+
+        now = datetime(2026, 3, 23, 21, 5, tzinfo=dt_timezone.utc)
+        result = run_research_automation_scheduler(now=now)
+
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["queued"], 1)
+        run = AutomationRun.objects.get(automation=automation)
+        self.assertEqual(run.status, AutomationRunStatus.QUEUED)
+        self.assertEqual(run.content_factory_run_id, "discovery-run-2")
+        payload = mock_post.call_args.kwargs["payload"]
+        self.assertEqual(payload["domain"], "automation.example.com")
+        self.assertNotIn("user_email", payload)
+        self.assertNotIn("recipient_user_id", payload)
+        self.assertNotIn("slack_user_id", payload)
+        self.assertEqual(payload["notification_context"]["channel_type"], "whatsapp")
+
 
 @override_settings(
     DEFAULT_BACKEND_URL="https://api.test",

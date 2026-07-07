@@ -200,8 +200,13 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
 
 def dispatch_automation_run(run_id: str) -> dict[str, Any]:
     with transaction.atomic():
+        # of=("self",) locks only the AutomationRun row. The nullable
+        # select_related hops (automation.user, notification_channel.user)
+        # render as LEFT OUTER JOINs, and Postgres rejects FOR UPDATE on the
+        # nullable side of an outer join — an unqualified select_for_update()
+        # raises NotSupportedError the moment a run becomes dispatchable.
         run = (
-            AutomationRun.objects.select_for_update()
+            AutomationRun.objects.select_for_update(of=("self",))
             .select_related(
                 "automation",
                 "automation__organization",
