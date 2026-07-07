@@ -181,3 +181,81 @@ def create_installation_access_token(
     if use_cache:
         cache.set(key, result.as_content_factory_payload(), timeout=_token_ttl_seconds(expires_at))
     return result
+
+
+def _request_installation_access_token(
+    installation_id: str,
+    *,
+    permissions: Optional[dict] = None,
+    repositories: Optional[list] = None,
+) -> dict:
+    """Mint an installation token via the App JWT and return the raw payload.
+
+    Unlike ``create_installation_access_token`` (which restricts to a single repo
+    for write ops), this accepts an optional ``repositories``/``permissions`` scope
+    so callers can request an installation-wide, metadata-read token for listing.
+    """
+    normalized_installation_id = str(installation_id or "").strip()
+    if not normalized_installation_id:
+        raise GitHubAppTokenError("GitHub installation id is missing.")
+    body: dict = {}
+    if repositories:
+        body["repositories"] = list(repositories)
+    if permissions:
+        body["permissions"] = dict(permissions)
+    response = http_requests.post(
+        f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
+        headers={
+            "Authorization": f"Bearer {_github_app_jwt()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json=body,
+        timeout=(3, 20),
+    )
+    if response.status_code not in {200, 201}:
+        raise GitHubAppTokenError(
+            f"Could not mint GitHub App installation token for installation "
+            f"{normalized_installation_id}: GitHub returned {response.status_code}."
+        )
+    payload = response.json()
+    if not str(payload.get("token") or "").strip():
+        raise GitHubAppTokenError("GitHub App installation token response did not include a token.")
+    return payload
+
+
+def list_installation_repositories_via_app(installation_id: str) -> list[dict]:
+    """Every repo an installation can access, using only the App key (no user token).
+
+    Mints a metadata-read installation token spanning all repos in the
+    installation, then pages ``/installation/repositories``. Returns raw GitHub
+    repo dicts (caller normalizes). Durable: unaffected by an expired user token.
+    """
+    normalized_installation_id = str(installation_id or "").strip()
+    if not normalized_installation_id:
+        return []
+    payload = _request_installation_access_token(
+        normalized_installation_id, permissions={"metadata": "read"}
+    )
+    token = str(payload.get("token") or "").strip()
+    repos: list[dict] = []
+    page = 1
+    while page <= 20:  # hard cap 20*100 = 2000 repos
+        response = http_requests.get(
+            f"https://api.github.com/installation/repositories?per_page=100&page={page}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=(3, 20),
+        )
+        if response.status_code != 200:
+            break
+        data = response.json() if response.content else {}
+        batch = data.get("repositories", []) if isinstance(data, dict) else []
+        repos.extend(repo for repo in batch if isinstance(repo, dict))
+        if len(batch) < 100:
+            break
+        page += 1
+    return repos

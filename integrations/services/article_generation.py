@@ -1732,6 +1732,54 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
         except TokenRefreshError as e:
             raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
 
+    # 3. Founder-scoped registry: mint a GitHub App installation token for the
+    # domain's selected repo from any installation the founder authorized (shared
+    # across all their companies). Covers a company that picked a repo from the
+    # shared pool but has no per-org OAuth token of its own.
+    if normalized_domain:
+        try:
+            from integrations.services.github_app import GitHubAppTokenError
+            from integrations.services.github_installations import (
+                mint_user_repo_token,
+                resolve_user_for_actor_id,
+            )
+
+            org = Organization.objects.filter(domain=normalized_domain).first()
+            config = getattr(org, "content_config", None) if org else None
+            repo = str(getattr(config, "github_repo", "") or "").strip()
+            owner_user = resolve_user_for_actor_id(slack_user_id) if slack_user_id else None
+            if owner_user is None and config is not None:
+                owner_user = resolve_user_for_actor_id(
+                    getattr(config, "connected_slack_user_id", "")
+                )
+            if repo and owner_user is not None:
+                try:
+                    minted = mint_user_repo_token(owner_user, repo, permission_mode="write")
+                except GitHubAppTokenError as e:
+                    minted = None
+                    logger.warning(
+                        "Founder-registry token mint failed for %s (repo=%s): %s",
+                        normalized_domain,
+                        repo,
+                        e,
+                    )
+                if minted is not None:
+                    logger.info(
+                        "Using founder-registry GitHub App token for %s (repo=%s)",
+                        normalized_domain,
+                        repo,
+                    )
+                    return {
+                        "token": minted.token,
+                        "repo": repo,
+                        "source": "app_installation",
+                        "config": config,
+                    }
+        except Exception:
+            logger.exception(
+                "Founder-registry credential resolution failed for %s", normalized_domain
+            )
+
     oauth_url = build_github_oauth_url(domain, slack_user_id or '')
     raise ArticleGenerationError(
         f"No GitHub credentials found for domain '{domain}'. "

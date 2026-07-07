@@ -292,6 +292,58 @@ class UserIntegration(models.Model):
         return f"UserIntegration ({self.slack_user_id})"
 
 
+class GitHubInstallation(models.Model):
+    """A founder's GitHub App installation, shared across all their companies.
+
+    GitHub access is intentionally per-founder — the inverse of Gmail / financial
+    connectors (which are isolated per startup). A founder keeps their startups'
+    repos under one or a few GitHub accounts, so an installation authorized while
+    setting up one company is reused by every other company of the same user.
+    One row per (user, installation); a founder may connect several (e.g. a
+    personal account plus a GitHub org).
+
+    Real repo operations mint short-lived GitHub App *installation* tokens from
+    ``installation_id`` alone (``github_app.create_installation_access_token``),
+    so the stored user token here is only for repo listing / fallback, not the
+    source of truth for write access.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="github_installations",
+    )
+    installation_id = models.CharField(max_length=50, db_index=True)
+    account_login = models.CharField(max_length=255, blank=True, default="")
+    account_type = models.CharField(max_length=32, blank=True, default="")
+    github_user_name = models.TextField(blank=True, default="")
+    github_user_token_encrypted = EncryptedTextField(null=True, blank=True)
+    github_refresh_token_encrypted = EncryptedTextField(null=True, blank=True)
+    github_token_expires_at = models.DateTimeField(null=True, blank=True)
+    github_scopes = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            # One row per (founder, installation). A founder may hold several
+            # installations (multiple GitHub accounts/orgs); resolve the union
+            # with integrations.services.github_installations.
+            models.UniqueConstraint(
+                fields=["user", "installation_id"],
+                name="uniq_github_installation_user_install",
+            ),
+        ]
+        ordering = ["user_id", "account_login", "installation_id"]
+
+    def __str__(self):
+        return (
+            f"GitHubInstallation({self.installation_id} / "
+            f"{self.account_login or self.github_user_name}) for user {self.user_id}"
+        )
+
+
 from startup_updates.models import (
     ArtifactProcessingStatus,
     GmailAttachmentArtifact,
