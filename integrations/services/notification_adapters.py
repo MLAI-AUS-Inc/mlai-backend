@@ -148,6 +148,25 @@ def _active_channels_for_run(run: AutomationRun) -> list[NotificationChannel]:
     return channels
 
 
+def automation_billing_actor_slack_id(automation) -> str:
+    """Slack id of the wallet owner for Roo-points billing on this automation.
+
+    Roo-points wallets are keyed by Slack id. The channel owner (the founder who
+    verified the number/email) is the payer; fall back to the automation owner.
+    Returns "" when neither has a linked Slack id — harmless for free-listed
+    domains, and surfaced as a clear failure for paying ones at dispatch.
+    """
+    candidates = (
+        getattr(automation.notification_channel, "user", None),
+        getattr(automation, "user", None),
+    )
+    for user in candidates:
+        slack_id = str(getattr(user, "slack_id", "") or "").strip()
+        if slack_id:
+            return slack_id
+    return ""
+
+
 def _delivery_for_event(
     *,
     run: AutomationRun,
