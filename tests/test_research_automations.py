@@ -2,7 +2,7 @@ import base64
 import hmac
 import hashlib
 import json
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
@@ -31,9 +31,12 @@ from integrations.services.notification_adapters import (
     notification_context_for_run,
     send_topic_selection,
 )
+from integrations.services.article_generation import InsufficientRooPointsError
 from integrations.services.research_automations import (
+    STUCK_RUN_TIMEOUT_SECONDS,
     create_or_update_research_automation,
     ensure_due_automation_runs,
+    fail_stuck_automation_runs,
     run_research_automation_scheduler,
 )
 from organizations.models import Organization
@@ -62,10 +65,20 @@ class ResearchAutomationSchedulerTests(TestCase):
             competitors=["competitor.example.com"],
             seed_keywords=["automation keyword"],
         )
+        # mlai.au is the only free-listed domain (billing skipped entirely).
+        self.free_org = Organization.objects.create(
+            name="MLAI",
+            domain="mlai.au",
+            competitors=["competitor.example.com"],
+            seed_keywords=["automation keyword"],
+        )
         self.user = User.objects.create_user(email="writer@example.com")
+        self.user.slack_id = "U_WRITER"
+        self.user.save(update_fields=["slack_id"])
 
+    @patch("integrations.services.research_automations._require_content_factory_ai_agent_points", return_value=(None, 10))
     @patch("integrations.services.research_automations._post_content_factory_queue_request")
-    def test_scheduler_dispatches_due_email_run_with_notification_context_once(self, mock_post):
+    def test_scheduler_dispatches_due_email_run_with_notification_context_once(self, mock_post, mock_gate):
         mock_post.return_value = _Response(202, {"run_id": "discovery-run-1"})
         automation = create_or_update_research_automation(
             domain="automation.example.com",
@@ -93,23 +106,30 @@ class ResearchAutomationSchedulerTests(TestCase):
         self.assertEqual(payload["domain"], "automation.example.com")
         self.assertEqual(payload["user_email"], "writer@example.com")
         self.assertEqual(payload["requested_topic_count"], 3)
+        # Billing actor (wallet owner) threaded as requested_by, NOT as the Slack
+        # delivery route. A deferred hold is recorded so topic approval can charge.
+        self.assertEqual(payload["requested_by_slack_user_id"], "U_WRITER")
         self.assertNotIn("slack_user_id", payload)
+        self.assertEqual(mock_gate.call_args.kwargs["resolved_domain"], "automation.example.com")
+        self.assertTrue(
+            ContentFactoryJob.objects.filter(job_id="discovery-run-1", billing_status="deferred").exists()
+        )
         self.assertEqual(payload["notification_context"]["automation_id"], str(automation.id))
         self.assertEqual(payload["notification_context"]["automation_run_id"], str(run.id))
         self.assertEqual(payload["notification_context"]["channel_type"], "email")
         self.assertEqual(payload["notification_context"]["channel_route_id"], str(automation.notification_channel_id))
 
     @patch("integrations.services.research_automations._post_content_factory_queue_request")
-    def test_scheduler_dispatches_run_without_user(self, mock_post):
-        # Mirrors the "approved WhatsApp number" path where the channel has no
-        # attached user, so automation.user and notification_channel.user are
-        # both NULL and the dispatch query's select_related spans nullable FKs.
-        # Guards the select_for_update(of=("self",)) fix: an unqualified
-        # FOR UPDATE raises NotSupportedError on Postgres ("cannot be applied to
-        # the nullable side of an outer join") the moment a run is dispatchable.
-        mock_post.return_value = _Response(202, {"run_id": "discovery-run-2"})
+    def test_scheduler_dispatches_free_domain_run_without_user(self, mock_post):
+        # mlai.au is free-listed, so billing is skipped and a channel with no
+        # attached user still dispatches. Also guards the
+        # select_for_update(of=("self",)) fix: automation.user and
+        # notification_channel.user are both NULL, so the dispatch query's
+        # select_related spans nullable FKs and an unqualified FOR UPDATE would
+        # raise NotSupportedError on Postgres the moment a run is dispatchable.
+        mock_post.return_value = _Response(202, {"run_id": "discovery-free-1"})
         automation = create_or_update_research_automation(
-            domain="automation.example.com",
+            domain="mlai.au",
             channel_type=NotificationChannelType.WHATSAPP,
             route_id="+61401099433",
             user=None,
@@ -128,13 +148,117 @@ class ResearchAutomationSchedulerTests(TestCase):
         self.assertEqual(result["queued"], 1)
         run = AutomationRun.objects.get(automation=automation)
         self.assertEqual(run.status, AutomationRunStatus.QUEUED)
-        self.assertEqual(run.content_factory_run_id, "discovery-run-2")
+        self.assertEqual(run.content_factory_run_id, "discovery-free-1")
         payload = mock_post.call_args.kwargs["payload"]
-        self.assertEqual(payload["domain"], "automation.example.com")
+        self.assertEqual(payload["domain"], "mlai.au")
+        # Free path: no billing actor required and no deferred hold recorded.
+        self.assertNotIn("requested_by_slack_user_id", payload)
         self.assertNotIn("user_email", payload)
-        self.assertNotIn("recipient_user_id", payload)
         self.assertNotIn("slack_user_id", payload)
+        self.assertFalse(ContentFactoryJob.objects.filter(job_id="discovery-free-1").exists())
         self.assertEqual(payload["notification_context"]["channel_type"], "whatsapp")
+
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_paying_domain_without_billing_identity_fails(self, mock_post):
+        # Paying domain + a channel with no Slack-linked user => no wallet owner.
+        # Fail fast with a clear reason instead of letting content-factory return
+        # an opaque ROO_POINTS_UNAVAILABLE. This is the theproductbus.com case.
+        automation = create_or_update_research_automation(
+            domain="automation.example.com",
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61466255612",
+            user=None,
+            timezone_name="Australia/Melbourne",
+            frequency_per_day=1,
+            local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+
+        now = datetime(2026, 3, 23, 21, 5, tzinfo=dt_timezone.utc)
+        result = run_research_automation_scheduler(now=now)
+
+        self.assertEqual(result["queued"], 0)
+        self.assertEqual(result["failed"], 1)
+        mock_post.assert_not_called()
+        run = AutomationRun.objects.get(automation=automation)
+        self.assertEqual(run.status, AutomationRunStatus.FAILED)
+        self.assertIn("billing_identity_missing", run.last_error)
+
+    @patch(
+        "integrations.services.research_automations._require_content_factory_ai_agent_points",
+        side_effect=InsufficientRooPointsError({"message": "This user does not have enough Roo points."}),
+    )
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_paying_domain_insufficient_points_fails(self, mock_post, mock_gate):
+        automation = create_or_update_research_automation(
+            domain="automation.example.com",
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61466255612",
+            user=self.user,
+            timezone_name="Australia/Melbourne",
+            frequency_per_day=1,
+            local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+
+        now = datetime(2026, 3, 23, 21, 5, tzinfo=dt_timezone.utc)
+        result = run_research_automation_scheduler(now=now)
+
+        self.assertEqual(result["queued"], 0)
+        self.assertEqual(result["failed"], 1)
+        # Gate rejects before the discovery POST; no CF request is made.
+        mock_post.assert_not_called()
+        run = AutomationRun.objects.get(automation=automation)
+        self.assertEqual(run.status, AutomationRunStatus.FAILED)
+        self.assertIn("insufficient_roo_points", run.last_error)
+
+    def test_watchdog_fails_stuck_machine_waiting_runs_only(self):
+        # A dropped content-factory callback strands a run in QUEUED/GENERATING
+        # forever (this happened in prod when the web container was recreated
+        # mid-flight). The watchdog fails those, but leaves user-waiting states
+        # (a founder may approve a topic hours later) and fresh in-flight runs.
+        automation = create_or_update_research_automation(
+            domain="mlai.au",
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61401099433",
+            user=None,
+            timezone_name="Australia/Melbourne",
+            frequency_per_day=1,
+            local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        now = datetime(2026, 3, 23, 12, 0, tzinfo=dt_timezone.utc)
+        stale = now - timedelta(seconds=STUCK_RUN_TIMEOUT_SECONDS + 60)
+        fresh = now - timedelta(seconds=60)
+
+        def _make_run(status, updated_at, slot):
+            run = AutomationRun.objects.create(
+                automation=automation,
+                scheduled_for_at=stale,
+                local_date=stale.date(),
+                slot_index=slot,
+                status=status,
+                idempotency_key=f"watchdog:{slot}",
+            )
+            # updated_at is auto_now; .update() bypasses it to backdate the row.
+            AutomationRun.objects.filter(pk=run.pk).update(updated_at=updated_at)
+            return run
+
+        stuck_queued = _make_run(AutomationRunStatus.QUEUED, stale, 1)
+        stuck_generating = _make_run(AutomationRunStatus.GENERATING, stale, 2)
+        fresh_queued = _make_run(AutomationRunStatus.QUEUED, fresh, 3)
+        user_waiting = _make_run(AutomationRunStatus.TOPIC_SELECTION_SENT, stale, 4)
+
+        failed_count = fail_stuck_automation_runs(now=now)
+
+        self.assertEqual(failed_count, 2)
+        for run in (stuck_queued, stuck_generating, fresh_queued, user_waiting):
+            run.refresh_from_db()
+        self.assertEqual(stuck_queued.status, AutomationRunStatus.FAILED)
+        self.assertIn("content_factory_timeout", stuck_queued.last_error)
+        self.assertEqual(stuck_generating.status, AutomationRunStatus.FAILED)
+        self.assertEqual(fresh_queued.status, AutomationRunStatus.QUEUED)
+        self.assertEqual(user_waiting.status, AutomationRunStatus.TOPIC_SELECTION_SENT)
 
 
 @override_settings(
