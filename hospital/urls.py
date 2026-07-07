@@ -2,10 +2,13 @@
 from django.urls import path
 from . import views
 from . import world_views
+from . import sim_contest_views
 
 
 urlpatterns = [
     path('world/', world_views.WorldStateView.as_view(), name='hospital-world'),
+    path('sim-guess/record/', sim_contest_views.SimGuessRecordView.as_view(), name='hospital-sim-guess-record'),
+    path('sim-guess/claim/', sim_contest_views.SimGuessClaimView.as_view(), name='hospital-sim-guess-claim'),
     path('teams/', views.TeamListView.as_view(), name='hospital-team-list'),
     path('teams/join/', views.JoinTeamView.as_view(), name='hospital-team-join'),
     path('submissions/', views.SubmissionListCreateView.as_view(), name='hospital-submissions'),

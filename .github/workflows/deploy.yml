@@ -69,6 +69,7 @@ jobs:
           tests.test_new_endpoints.ContentFactoryCallbackTests \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
+          hospital.test_sim_contest \
           --verbosity 2
 
   deploy:
