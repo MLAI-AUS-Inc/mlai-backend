@@ -708,6 +708,91 @@ class NotificationChannelEndpointTests(TestCase):
         response = self.client.patch(self._detail_url(foreign), {"deliveryEnabled": False}, format="json")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    # --- type-based delivery endpoint (connect-on-enable) -------------------
+
+    def _delivery_url(self):
+        return reverse("vibe-marketing-notification-channel-delivery")
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    def test_delivery_enable_slack_connects_and_enables(self, _mock_dm):
+        self.user.slack_id = "U1"
+        self.user.save(update_fields=["slack_id"])
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "active")
+        slack = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.SLACK)
+        self.assertEqual(slack.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(slack.delivery_enabled)
+
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_delivery_enable_email_sends_verification(self, mock_post):
+        mock_post.return_value = _Response(200, {"id": "email-1"})
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "verification_sent")
+        email = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.EMAIL)
+        self.assertEqual(email.consent_state, NotificationConsentState.PENDING)
+
+    def test_delivery_enable_email_when_active_enables_delivery(self):
+        email = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="founder@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=False,
+        )
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "active")
+        email.refresh_from_db()
+        self.assertTrue(email.delivery_enabled)
+
+    def test_delivery_disable_keeps_connection_and_needs_another_channel(self):
+        slack = self._active_channel(NotificationChannelType.SLACK, "U1")
+        self._active_channel(NotificationChannelType.EMAIL, "founder@example.com")  # keeps guard satisfied
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "disabled")
+        slack.refresh_from_db()
+        self.assertFalse(slack.delivery_enabled)
+        # Connection preserved (consent untouched), so re-enabling needs no reconnect.
+        self.assertEqual(slack.consent_state, NotificationConsentState.ACTIVE)
+
+    def test_delivery_disable_last_channel_blocked(self):
+        slack = self._active_channel(NotificationChannelType.SLACK, "U1")
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "last_delivery_channel")
+        slack.refresh_from_db()
+        self.assertTrue(slack.delivery_enabled)
+
+    def test_delivery_enable_whatsapp_without_channel_requires_setup(self):
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "whatsapp", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "whatsapp_setup_required")
+
+    def test_delivery_invalid_type_and_missing_enabled(self):
+        bad_type = self.client.post(
+            self._delivery_url(), {"channelType": "carrier-pigeon", "enabled": True}, format="json"
+        )
+        self.assertEqual(bad_type.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bad_type.data["code"], "invalid_channel_type")
+        missing = self.client.post(self._delivery_url(), {"channelType": "slack"}, format="json")
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.data["code"], "missing_enabled")
+
 
 class ActiveChannelsForRunTests(TestCase):
     """Fan-out targeting honours delivery_enabled (the single delivery seam)."""
