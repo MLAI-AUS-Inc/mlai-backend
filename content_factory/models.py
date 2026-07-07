@@ -631,6 +631,16 @@ class NotificationChannel(models.Model):
         default=NotificationConsentState.PENDING,
         db_index=True,
     )
+    delivery_enabled = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text=(
+            "Whether this channel receives the daily research reminder and topic "
+            "buttons. Independent of consent_state: unchecking it excludes the "
+            "channel from delivery without revoking consent (so re-enabling needs "
+            "no re-verification)."
+        ),
+    )
     provider_connection = models.ForeignKey(
         "integrations.ExternalServiceConnection",
         on_delete=models.SET_NULL,

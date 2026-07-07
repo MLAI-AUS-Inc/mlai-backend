@@ -132,16 +132,19 @@ def build_action_url(run: AutomationRun, action: str, **kwargs: Any) -> str:
 
 
 def _active_channels_for_run(run: AutomationRun) -> list[NotificationChannel]:
-    """All ACTIVE channels for the automation's organization, primary first.
+    """ACTIVE, delivery-enabled channels for the automation's org, primary first.
 
-    This is the single seam for delivery targeting: if automations later need
-    an explicit channel selection, only this helper has to change.
+    This is the single seam for delivery targeting. A channel is a delivery
+    target only when it is both consented (consent_state=ACTIVE) and selected by
+    the user (delivery_enabled=True); unchecking a channel in the UI clears
+    delivery_enabled without touching consent, so it drops out here.
     """
     primary_id = run.automation.notification_channel_id
     channels = list(
         NotificationChannel.objects.filter(
             organization_id=run.automation.organization_id,
             consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=True,
         )
     )
     channels.sort(key=lambda channel: (channel.id != primary_id, str(channel.channel_type), str(channel.route_id)))

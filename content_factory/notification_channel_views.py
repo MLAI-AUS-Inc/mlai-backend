@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from content_factory.models import (
+    NotificationChannel,
     NotificationChannelType,
     NotificationConsentState,
     ResearchAutomation,
@@ -199,6 +200,72 @@ class VibeMarketingNotificationChannelResendView(APIView):
 
 
 class VibeMarketingNotificationChannelDetailView(APIView):
+    def patch(self, request, channel_id):
+        """Toggle whether this channel receives the daily research reminder.
+
+        Flips delivery_enabled without touching consent_state, so unchecking a
+        channel excludes it from delivery while keeping its verification intact.
+        """
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
+        organization = context.organization
+        channel = _channel_or_none(organization, channel_id)
+        if channel is None:
+            return Response({"detail": "Channel not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        raw = request.data.get("deliveryEnabled")
+        if raw is None:
+            raw = request.data.get("delivery_enabled")
+        if raw is None:
+            return Response(
+                {"detail": "deliveryEnabled is required.", "code": "missing_delivery_enabled"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        enabled = str(raw).strip().lower() not in {"false", "0", "no", "off", ""}
+
+        # Only a consented, verified channel can be a delivery target. Pending or
+        # revoked channels use the connect/verify flow instead of this toggle.
+        if channel.consent_state != NotificationConsentState.ACTIVE:
+            return Response(
+                {
+                    "detail": "Connect and verify this channel before choosing it for delivery.",
+                    "code": "channel_not_active",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Last-channel guard: a checkbox must never silently drop the org to zero
+        # delivery targets — the daily run would fan out to nobody yet still spend a
+        # discovery. Turning the reminder off entirely is the separate Enabled toggle.
+        if not enabled and channel.delivery_enabled:
+            others_enabled = (
+                NotificationChannel.objects.filter(
+                    organization=organization,
+                    consent_state=NotificationConsentState.ACTIVE,
+                    delivery_enabled=True,
+                )
+                .exclude(pk=channel.pk)
+                .exists()
+            )
+            if not others_enabled:
+                return Response(
+                    {
+                        "detail": (
+                            "Keep at least one channel on, or turn the daily reminder "
+                            "off with the Enabled toggle."
+                        ),
+                        "code": "last_delivery_channel",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        if channel.delivery_enabled != enabled:
+            channel.delivery_enabled = enabled
+            channel.save(update_fields=["delivery_enabled", "updated_at"])
+
+        return Response(_channels_payload(organization), status=status.HTTP_200_OK)
+
     def delete(self, request, channel_id):
         context, error = _resolve_context_or_response(request)
         if error:

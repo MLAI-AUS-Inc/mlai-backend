@@ -634,3 +634,132 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertFalse(disable.data["automation"]["enabled"])
         config.refresh_from_db()
         self.assertFalse(config.daily_discovery_enabled)
+
+    def _active_channel(self, channel_type=NotificationChannelType.EMAIL, route_id="founder@example.com"):
+        return NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=channel_type,
+            route_id=route_id,
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+
+    def _detail_url(self, channel):
+        return reverse("vibe-marketing-notification-channel-detail", kwargs={"channel_id": channel.id})
+
+    def test_channels_serialize_delivery_enabled_default_true(self):
+        self._active_channel()
+        response = self.client.get(reverse("vibe-marketing-notification-channels"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["channels"][0]["deliveryEnabled"])
+
+    def test_toggle_delivery_off_then_on_preserves_consent(self):
+        # Two active channels so the guard permits turning one off.
+        self._active_channel()
+        whatsapp = self._active_channel(NotificationChannelType.WHATSAPP, "+61400000000")
+        url = self._detail_url(whatsapp)
+
+        off = self.client.patch(url, {"deliveryEnabled": False}, format="json")
+        self.assertEqual(off.status_code, status.HTTP_200_OK)
+        wa = next(c for c in off.data["channels"] if c["id"] == str(whatsapp.id))
+        self.assertFalse(wa["deliveryEnabled"])
+        whatsapp.refresh_from_db()
+        self.assertFalse(whatsapp.delivery_enabled)
+        # Consent is untouched, so re-enabling needs no re-verification.
+        self.assertEqual(whatsapp.consent_state, NotificationConsentState.ACTIVE)
+
+        on = self.client.patch(url, {"deliveryEnabled": True}, format="json")
+        self.assertEqual(on.status_code, status.HTTP_200_OK)
+        wa = next(c for c in on.data["channels"] if c["id"] == str(whatsapp.id))
+        self.assertTrue(wa["deliveryEnabled"])
+
+    def test_toggle_pending_channel_rejected(self):
+        pending = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.PENDING,
+        )
+        response = self.client.patch(self._detail_url(pending), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "channel_not_active")
+
+    def test_toggle_last_delivery_channel_blocked(self):
+        email = self._active_channel()
+        response = self.client.patch(self._detail_url(email), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "last_delivery_channel")
+        email.refresh_from_db()
+        self.assertTrue(email.delivery_enabled)  # left unchanged
+
+    def test_toggle_missing_field_returns_400(self):
+        email = self._active_channel()
+        response = self.client.patch(self._detail_url(email), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "missing_delivery_enabled")
+
+    def test_toggle_scoped_to_org(self):
+        other_org = Organization.objects.create(name="Other", domain="other.example.com")
+        foreign = NotificationChannel.objects.create(
+            organization=other_org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="other@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        response = self.client.patch(self._detail_url(foreign), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ActiveChannelsForRunTests(TestCase):
+    """Fan-out targeting honours delivery_enabled (the single delivery seam)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Fanout Co", domain="fanout.example.com")
+        self.primary = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="founder@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=self.primary,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+
+    def _run(self):
+        from content_factory.models import AutomationRun
+
+        return AutomationRun.objects.create(
+            automation=self.automation,
+            scheduled_for_at=timezone.now(),
+            local_date=timezone.now().date(),
+            idempotency_key="fanout-run",
+        )
+
+    def test_excludes_delivery_disabled_channel(self):
+        from integrations.services.notification_adapters import _active_channels_for_run
+
+        muted = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=False,
+        )
+        ids = {channel.id for channel in _active_channels_for_run(self._run())}
+        self.assertIn(self.primary.id, ids)
+        self.assertNotIn(muted.id, ids)
+
+    def test_includes_delivery_enabled_channel(self):
+        from integrations.services.notification_adapters import _active_channels_for_run
+
+        whatsapp = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=True,
+        )
+        ids = {channel.id for channel in _active_channels_for_run(self._run())}
+        self.assertIn(self.primary.id, ids)
+        self.assertIn(whatsapp.id, ids)

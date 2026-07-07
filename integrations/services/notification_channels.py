@@ -104,6 +104,7 @@ def serialize_channel(
         "routeId": channel.route_id,
         "displayName": channel.display_name,
         "consentState": channel.consent_state,
+        "deliveryEnabled": bool(channel.delivery_enabled),
         "verifiedAt": channel.verified_at.isoformat() if channel.verified_at else None,
         "isPrimary": primary_channel_id is not None and channel.id == primary_channel_id,
         "pendingVerification": pending,
@@ -141,6 +142,10 @@ def _active_org_channels(organization) -> list[NotificationChannel]:
 
 def _activate_channel(channel: NotificationChannel) -> NotificationChannel:
     channel.consent_state = NotificationConsentState.ACTIVE
+    # A freshly (re)connected channel opts back into delivery. This is the only
+    # transition into ACTIVE, so it also resets a channel that was unchecked and
+    # then removed/re-added — it comes back selected rather than silently muted.
+    channel.delivery_enabled = True
     channel.verified_at = timezone.now()
     channel.opted_out_at = None
     channel.verification_code_hash = ""
@@ -149,6 +154,7 @@ def _activate_channel(channel: NotificationChannel) -> NotificationChannel:
     channel.save(
         update_fields=[
             "consent_state",
+            "delivery_enabled",
             "verified_at",
             "opted_out_at",
             "verification_code_hash",
