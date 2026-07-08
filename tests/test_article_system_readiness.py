@@ -96,6 +96,95 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         self.assertTrue(_article_system_is_published(self.config, article_system))
         self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
+    def test_detected_surface_with_only_bundle_only_target_is_not_ready(self):
+        """talathrive.com's shape: reset + rescan re-detects the repo's own /stories
+        JSON system and emits a bundle_only fallback target whose unsupported_reason
+        literally says direct publish is NOT configured. That target must not flip
+        the wizard to "Publishing surface live" / hide the Build button."""
+        self._set_article_system(
+            reason=(
+                "Detected article surface at app/stories/page.tsx, "
+                "but no safe publish target could be confirmed."
+            )
+        )
+        self.config.publish_targets = [
+            {
+                "target_id": "bundle_only_article_directory_content_stories_json_json",
+                "kind": "bundle_only_article_directory",
+                "delivery_adapter": "hook_bundle",
+                "publish_capability": "bundle_only",
+                "source": "scan",
+                "unsupported_reason": (
+                    "Detected a json article directory at `content/stories.json`, but direct "
+                    "publish is not configured for this runtime."
+                ),
+            }
+        ]
+        self.config.save(update_fields=["publish_targets", "updated_at"])
+
+        article_system = resolve_article_system(self.config)
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+
+        readiness = compute_article_readiness(self.org, self.config, [])
+        self.assertFalse(readiness["generation_ready"])
+        self.assertFalse(readiness["proofs"]["article_system_published"])
+
+        scaffold = _profile_checks(self.org, self.config, latest_runs=[])["scaffold"]
+        self.assertFalse(scaffold["passed"])
+        self.assertFalse(scaffold["generationReady"])
+        self.assertFalse(scaffold["published"])
+
+    def test_detected_surface_with_hook_target_stays_ready(self):
+        # A hook target is a configured, automated publish route — unlike the
+        # bundle_only fallback it must keep counting as a publish path.
+        self._set_article_system()
+        self.config.publish_targets = [
+            {
+                "target_id": "hook_articles",
+                "kind": "hook_publish_target",
+                "publish_capability": "hook",
+                "source": "scan",
+            }
+        ]
+        self.config.save(update_fields=["publish_targets", "updated_at"])
+
+        article_system = resolve_article_system(self.config)
+        self.assertTrue(_article_system_is_published(self.config, article_system))
+        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+
+    def test_missing_state_with_only_bundle_only_target_is_not_published(self):
+        # Same false positive through the non-detection branch (state "missing"
+        # + a scan-sourced bundle_only fallback, birdpsychology's prod shape).
+        self._set_article_system(state="missing", reason="")
+        self.config.publish_targets = [
+            {
+                "target_id": "bundle_only_article_directory_content_articles_md",
+                "kind": "bundle_only_article_directory",
+                "publish_capability": "bundle_only",
+                "source": "scan",
+                "unsupported_reason": "direct publish is not configured for this runtime.",
+            }
+        ]
+        self.config.save(update_fields=["publish_targets", "updated_at"])
+
+        article_system = resolve_article_system(self.config)
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+
+    def test_missing_state_with_scan_sourced_direct_target_stays_published(self):
+        self._set_article_system(state="missing", reason="")
+        self.config.publish_targets = [
+            {
+                "target_id": "articles",
+                "kind": "react_article_system",
+                "publish_capability": "direct",
+                "source": "scan",
+            }
+        ]
+        self.config.save(update_fields=["publish_targets", "updated_at"])
+
+        article_system = resolve_article_system(self.config)
+        self.assertTrue(_article_system_is_published(self.config, article_system))
+
     def test_roo_scaffolded_org_stays_ready(self):
         self._set_article_system(state="roo_scaffolded")
         self.config.articles_scaffolded = True

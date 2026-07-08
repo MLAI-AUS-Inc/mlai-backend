@@ -43,6 +43,7 @@ from content_factory.article_setup_reset import (
 from content_factory.article_system import (
     PUBLISH_DISCONNECTED_KEY,
     article_system_ready,
+    is_bundle_only_fallback_target,
     is_directly_publishable_target,
     react_article_system_target_from_setup_cache,
     resolve_article_system,
@@ -7915,7 +7916,18 @@ def _verification_scan_for_setup(latest_runs, *, rescan_run_id: str = ""):
 
 
 def _article_system_has_publish_path(config, article_system: dict) -> bool:
-    if bool(getattr(config, "publish_targets", None)):
+    # A bundle_only fallback target is what the scan emits when it detects an
+    # article-shaped directory but explicitly could NOT confirm a safe publish
+    # route ("manual publish commands still need to be configured") — counting
+    # it here made a detection-only state read as "Publishing surface live" and
+    # hid the wizard's Build button after every reset+rescan. Real routes
+    # (direct file-drop, hook publish, publish-ready registry) still count.
+    targets = [
+        target
+        for target in (getattr(config, "publish_targets", None) or [])
+        if isinstance(target, dict)
+    ]
+    if any(not is_bundle_only_fallback_target(target) for target in targets):
         return True
     if not isinstance(article_system, dict):
         return False
@@ -7944,7 +7956,13 @@ def _article_system_is_published(config, article_system: dict) -> bool:
     # surface doesn't exist on the default branch until the setup PR merges).
     # Those targets must not count as a published article system on their own;
     # approval/merge sets articles_scaffolded, which re-enables the fallback.
-    return any(str(target.get("source") or "") != "scaffold_cache" for target in targets)
+    # Bundle-only fallbacks don't count either — same reasoning as
+    # _article_system_has_publish_path: they mean publish is NOT configured.
+    return any(
+        str(target.get("source") or "") != "scaffold_cache"
+        and not is_bundle_only_fallback_target(target)
+        for target in targets
+    )
 
 
 def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dict:
