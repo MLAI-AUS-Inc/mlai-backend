@@ -2053,6 +2053,57 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(captured["payload"]["comments"][0]["selector"], '[data-cf-component-id="article-system-hero"]')
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_revision_surfaces_retryable_content_factory_failure(self):
+        # A Content Factory 5xx is retryable; the view must NOT report it as a 202 (which the
+        # frontend would treat as a successful send and silently redirect), but as a 502 while
+        # still persisting the batch as submitted/retryable so "Retry revision comments" works.
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-cf-500",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+            result={},
+        )
+        comment = VibeMarketingComponentComment.objects.create(
+            run=setup_run,
+            actor=self.user,
+            component_id="article-system-boundary-main",
+            component_type="section",
+            component_label="Articles listing",
+            selector='[data-cf-component-id="article-system-boundary-main"]',
+            body="Match the dark forest chrome from arb-gen.com.",
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(
+                status_code=500,
+                payload={"detail": "No active attempt for step 'await_review'"},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/article-system-revisions",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertTrue(response.data.get("retryable"))
+        self.assertIn("await_review", response.data.get("detail", ""))
+        # The batch is preserved as retryable so the reviewer can retry once CF recovers.
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "submitted")
+        setup_run.refresh_from_db()
+        batch = setup_run.result["component_feedback_latest_batch"]
+        self.assertEqual(batch["status"], "submitted")
+        self.assertTrue(batch["retryable"])
+        # The run must NOT be flipped to RUNNING/building on a failed send.
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_retries_latest_submitted_batch(self):
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
