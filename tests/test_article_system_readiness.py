@@ -18,6 +18,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from content_factory.article_setup_reset import (
+    article_setup_reset_marker,
     carry_reset_markers,
     reset_article_setup_config,
 )
@@ -35,6 +36,37 @@ SKEDY_DETECTION_REASON = (
     "Detected article surface at app/(public)/resources/guides/page.tsx, "
     "but no safe publish target could be confirmed."
 )
+
+# Tala Thrive prod shape (org 30): the scan found an article directory but could NOT
+# confirm a safe publish route, so it emitted this manual-bundle fallback. Its own
+# unsupported_reason says direct publish is not configured — it must never read as a
+# live publishing surface.
+TALA_DETECTION_REASON = (
+    "Detected article surface at app/stories/page.tsx, "
+    "but no safe publish target could be confirmed."
+)
+TALA_BUNDLE_ONLY_TARGET = {
+    "kind": "bundle_only_article_directory",
+    "source": "scan",
+    "target_id": "bundle_only_article_directory_content_stories_json_json",
+    "publish_capability": "bundle_only",
+    "input_format": "content_bundle_v1",
+    "delivery_adapter": "hook_bundle",
+    "route_template": "/stories/{slug}",
+    "content_path_pattern": "content/stories.json",
+    "verification": {"mode": "bundle_only", "confidence": "medium", "preview_capable": False},
+    "registration_strategy": {"type": "manual_bundle_delivery"},
+    "unsupported_reason": (
+        "Detected a json article directory at `content/stories.json`, but direct publish "
+        "is not configured for this runtime. Add `.content-factory/target.yml` to enable "
+        "hook-driven publish or use the generated bundle manually."
+    ),
+}
+DIRECT_TARGET = {
+    "target_id": "articles",
+    "kind": "react_article_system",
+    "publish_capability": "direct",
+}
 
 
 class ArticleSystemDetectionReadinessTests(TestCase):
@@ -194,6 +226,16 @@ class ArticleSystemDetectionReadinessTests(TestCase):
         self.assertTrue(_article_system_is_published(self.config, article_system))
         self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
 
+    def test_detected_surface_with_bundle_only_and_direct_targets_stays_ready(self):
+        # A real direct target alongside the bundle-only fallback IS a publish path.
+        self._set_article_system(reason=TALA_DETECTION_REASON)
+        self.config.publish_targets = [dict(TALA_BUNDLE_ONLY_TARGET), dict(DIRECT_TARGET)]
+        self.config.save(update_fields=["publish_targets", "updated_at"])
+
+        article_system = resolve_article_system(self.config)
+        self.assertTrue(_article_system_is_published(self.config, article_system))
+        self.assertTrue(compute_article_readiness(self.org, self.config, [])["generation_ready"])
+
 
 class ArticleSetupResetMarkerDurabilityTests(TestCase):
     """The reset watermark + tombstones must survive scan-driven org-config writes."""
@@ -257,3 +299,129 @@ class ArticleSetupResetMarkerDurabilityTests(TestCase):
         # An explicit incoming stamp wins; missing keys are filled from the store.
         self.assertEqual(merged["article_setup_reset_at"], "2026-07-04T00:00:00+00:00")
         self.assertEqual(merged["article_setup_reset"], {"resetAt": "2026-07-01T00:00:00+00:00"})
+
+
+RESET_AT = "2026-07-08T14:28:17+00:00"
+
+
+class ArticleSetupResetMarkerSuppressionTests(TestCase):
+    """After a reset, a detection verdict alone must not re-complete the wizard: even
+    if a rescan re-detects a genuinely direct-publishable surface, the reset watermark
+    suppresses "published" until the founder explicitly builds or adopts. The
+    articles_scaffolded guard exempts an org they already rebuilt, and the suppression
+    is detection-only (explicit readiness verdicts keep their meaning)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(domain="talathrive.com", name="Tala Thrive")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="Gshah810/tala-main-website",
+        )
+
+    def _apply(self, article_system, *, publish_targets=None, articles_scaffolded=False):
+        self.config.article_system = article_system
+        self.config.publish_targets = publish_targets or []
+        self.config.articles_scaffolded = articles_scaffolded
+        self.config.save(
+            update_fields=[
+                "article_system",
+                "publish_targets",
+                "articles_scaffolded",
+                "updated_at",
+            ]
+        )
+
+    def test_reset_marker_suppresses_detection_only_published(self):
+        self._apply(
+            {
+                "state": "existing",
+                "source": "scan",
+                "reason": TALA_DETECTION_REASON,
+                "article_setup_reset_at": RESET_AT,
+                "articleSetupResetAt": RESET_AT,
+            },
+            publish_targets=[dict(DIRECT_TARGET)],
+        )
+        article_system = resolve_article_system(self.config)
+        self.assertFalse(_article_system_is_published(self.config, article_system))
+
+    def test_reset_marker_does_not_suppress_scaffolded_org(self):
+        self._apply(
+            {
+                "state": "existing",
+                "source": "scan",
+                "article_setup_reset_at": RESET_AT,
+            },
+            publish_targets=[dict(DIRECT_TARGET)],
+            articles_scaffolded=True,
+        )
+        article_system = resolve_article_system(self.config)
+        self.assertTrue(_article_system_is_published(self.config, article_system))
+
+    def test_reset_marker_ignores_explicit_ready_states(self):
+        # A non-detection published state (e.g. registry_driven_seo_ready) is an
+        # explicit readiness verdict — the reset marker must not suppress it.
+        article_system = {
+            "state": "registry_driven_seo_ready",
+            "source": "scan",
+            "article_setup_reset_at": RESET_AT,
+        }
+        self._apply(article_system, publish_targets=[dict(DIRECT_TARGET)])
+        # Pass the raw dict (normalize would coerce this state to "missing").
+        self.assertTrue(_article_system_is_published(self.config, article_system))
+
+
+class UseDetectedClearsResetMarkersTests(TestCase):
+    """Adopting the detected system ("use_detected") is an explicit exit from a reset:
+    it clears the watermark so the surface reads published again."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.api_key = "test_roo_key"
+        os.environ["ROO_API_KEY"] = self.api_key
+        os.environ["INTERNAL_API_KEY"] = self.api_key
+
+        from django.conf import settings
+
+        settings.ROO_API_KEY = self.api_key
+        settings.INTERNAL_API_KEY = self.api_key
+        self.client.credentials(HTTP_X_API_KEY=self.api_key)
+
+        self.org = Organization.objects.create(domain="talathrive.com", name="Tala Thrive")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="Gshah810/tala-main-website",
+        )
+
+    def test_use_detected_clears_reset_markers(self):
+        # Reset stamps the watermark; a later rescan re-detects a direct-publishable
+        # surface but the marker keeps it suppressed until the founder chooses.
+        reset_article_setup_config(self.config, github_repo="Gshah810/tala-main-website")
+        self.config.refresh_from_db()
+        re_detected = dict(self.config.article_system)
+        re_detected.update({"state": "existing", "source": "scan", "reason": TALA_DETECTION_REASON})
+        self.config.article_system = re_detected
+        self.config.publish_targets = [dict(DIRECT_TARGET)]
+        self.config.save(update_fields=["article_system", "publish_targets", "updated_at"])
+
+        self.assertTrue(article_setup_reset_marker(self.config.article_system))
+        self.assertFalse(
+            _article_system_is_published(self.config, resolve_article_system(self.config))
+        )
+
+        response = self.client.post(
+            "/api/v1/content/article-system/decision",
+            {
+                "domain": "talathrive.com",
+                "slack_user_id": "no-such-user",
+                "decision": "use_detected",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        self.config.refresh_from_db()
+        self.assertFalse(article_setup_reset_marker(self.config.article_system))
+        self.assertTrue(
+            _article_system_is_published(self.config, resolve_article_system(self.config))
+        )
