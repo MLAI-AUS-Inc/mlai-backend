@@ -214,7 +214,7 @@ class JobsSchedulerTests(TestCase):
         self.assertIn("1. AI Engineer", payload["text"])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
-    def test_previous_top_pick_is_not_repeated_but_updated_url_is_eligible(self, _mock_judge):
+    def test_previous_top_pick_is_not_repeated_even_when_url_changes(self, _mock_judge):
         previous_run = JobRun.objects.create(run_date="2026-05-30", run_id="2026-05-30-history")
         current_run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-history")
         common = {
@@ -244,7 +244,7 @@ class JobsSchedulerTests(TestCase):
             dedupe_key="ai-engineer|example-ai|old-url",
             **common,
         )
-        updated = JobListing.objects.create(
+        JobListing.objects.create(
             run=current_run,
             job_url="https://example.com/jobs/ai-engineer-v2",
             dedupe_key="ai-engineer|example-ai|new-url",
@@ -253,7 +253,58 @@ class JobsSchedulerTests(TestCase):
 
         selected = job_pipeline.select_top_jobs(current_run)
 
-        self.assertEqual(selected, [updated])
+        self.assertEqual(selected, [])
+
+    @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
+    def test_top_jobs_prefers_fewer_than_seven_over_repeating_history(self, _mock_judge):
+        previous_run = JobRun.objects.create(run_date="2026-05-30", run_id="2026-05-30-repeat-history")
+        current_run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-repeat-history")
+
+        for index in range(7):
+            JobListing.objects.create(
+                run=previous_run,
+                run_date=previous_run.run_date,
+                title=f"AI Engineer {index + 1}",
+                company_name=f"Example AI Company {index + 1}",
+                location="Melbourne, Australia",
+                description="Build artificial intelligence systems.",
+                job_url=f"https://example.com/jobs/old-ai-engineer-{index + 1}",
+                source_name="SEEK",
+                dedupe_key=f"old-ai-engineer-{index + 1}|example",
+                is_top_pick=True,
+                rank=index + 1,
+            )
+            JobListing.objects.create(
+                run=current_run,
+                run_date=current_run.run_date,
+                title=f"AI Engineer {index + 1}",
+                company_name=f"Example AI Company {index + 1}",
+                location="Melbourne, Australia",
+                description="Build artificial intelligence systems.",
+                job_url=f"https://example.com/jobs/new-ai-engineer-{index + 1}",
+                source_name="SEEK",
+                dedupe_key=f"new-ai-engineer-{index + 1}|example",
+                ai_score=1.0,
+                ranking_score=0.9 - index / 100,
+            )
+
+        fresh = JobListing.objects.create(
+            run=current_run,
+            run_date=current_run.run_date,
+            title="Machine Learning Engineer",
+            company_name="New AI Company",
+            location="Sydney, Australia",
+            description="Build machine learning systems.",
+            job_url="https://example.com/jobs/new-ml-engineer",
+            source_name="SEEK",
+            dedupe_key="new-ml-engineer|new-ai-company",
+            ai_score=1.0,
+            ranking_score=0.7,
+        )
+
+        selected = job_pipeline.select_top_jobs(current_run)
+
+        self.assertEqual(selected, [fresh])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
     def test_top_jobs_fills_seven_slots_from_screened_candidates_when_source_mix_is_limited(self, _mock_judge):
@@ -662,6 +713,58 @@ class JobsSchedulerTests(TestCase):
                 "location": "Remote - worldwide",
                 "description": "Build machine learning products for APAC customers. Candidates must be based in Europe.",
                 "job_url": "https://example.com/jobs/ml-engineer-europe-only-apac-customers",
+            }
+        ]
+
+        inserted = job_pipeline.insert_matched_jobs(run, raw_jobs)
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_remote_not_apac_is_filtered(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-29",
+            run_id="2026-05-29-not-apac",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        raw_jobs = [
+            {
+                "source_name": "Example Remote Board",
+                "source_type": "remote_board",
+                "source_quality_score": 0.7,
+                "title": "AI Engineer",
+                "company_name": "Example Co",
+                "location": "Remote - worldwide",
+                "description": "Build AI products. Remote, not APAC.",
+                "job_url": "https://example.com/jobs/ai-engineer-not-apac",
+            }
+        ]
+
+        inserted = job_pipeline.insert_matched_jobs(run, raw_jobs)
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_remote_only_from_europe_is_filtered(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-29",
+            run_id="2026-05-29-only-from-europe",
+            post_to_notion=False,
+            post_to_slack=False,
+        )
+        raw_jobs = [
+            {
+                "source_name": "Example Remote Board",
+                "source_type": "remote_board",
+                "source_quality_score": 0.7,
+                "title": "Machine Learning Engineer",
+                "company_name": "Example Co",
+                "location": "Remote - worldwide",
+                "description": "Build machine learning products. Remote, only from Europe.",
+                "job_url": "https://example.com/jobs/ml-engineer-only-from-europe",
             }
         ]
 

@@ -433,6 +433,13 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     previous_top_pick_keys = set(
         JobListing.objects.filter(run_date__lt=run.run_date, is_top_pick=True).values_list("dedupe_key", flat=True)
     )
+    previous_top_pick_pairs = {
+        f"{normalize_words(title)}|{normalize_words(company)}"
+        for title, company in JobListing.objects.filter(run_date__lt=run.run_date, is_top_pick=True).values_list(
+            "title",
+            "company_name",
+        )
+    }
     candidates = [job for job in candidates if apply_publish_screen(job)]
     for job in candidates:
         job.save(
@@ -451,8 +458,13 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
             ]
         )
     candidates.sort(key=lambda job: (-job.ranking_score, job.id))
-    unseen_candidates = [job for job in candidates if job.dedupe_key not in previous_top_pick_keys]
-    repeat_candidates = [job for job in candidates if job.dedupe_key in previous_top_pick_keys]
+    unseen_candidates = [
+        job
+        for job in candidates
+        if job.dedupe_key not in previous_top_pick_keys
+        and f"{normalize_words(job.title)}|{normalize_words(job.company_name)}" not in previous_top_pick_pairs
+    ]
+    repeat_candidates = [job for job in candidates if job not in unseen_candidates]
     unseen_candidates, unseen_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
     repeat_candidates, repeat_reasons = judge_top_candidates(repeat_candidates, candidate_limit=10)
     llm_reasons = {**repeat_reasons, **unseen_reasons}
@@ -510,15 +522,6 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     pick_from(unseen_startup_fallbacks, max_per_source=3)
     pick_from(unseen_startup_fallbacks, max_per_source=None)
     pick_from(unseen_startup_fallbacks, max_per_source=None, allow_same_company=True)
-
-    # A valid repeat is preferable to publishing fewer than seven jobs. Historical
-    # dedupe remains a ranking preference, while role-pair dedupe remains strict.
-    pick_from(repeat_ai_candidates, max_per_source=3)
-    pick_from(repeat_ai_candidates, max_per_source=None)
-    pick_from(repeat_ai_candidates, max_per_source=None, allow_same_company=True)
-    pick_from(repeat_startup_fallbacks, max_per_source=3)
-    pick_from(repeat_startup_fallbacks, max_per_source=None)
-    pick_from(repeat_startup_fallbacks, max_per_source=None, allow_same_company=True)
 
     for index, job in enumerate(selected, start=1):
         job.is_top_pick = True
