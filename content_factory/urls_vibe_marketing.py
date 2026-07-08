@@ -6,6 +6,8 @@ from .notification_channel_views import (
     VibeMarketingNotificationChannelResendView,
     VibeMarketingNotificationChannelVerifyView,
     VibeMarketingNotificationChannelsView,
+    VibeMarketingResearchAutomationRunNowView,
+    VibeMarketingResearchAutomationRunStatusView,
     VibeMarketingResearchAutomationView,
 )
 from .vibe_marketing_views import (
@@ -154,6 +156,10 @@ urlpatterns = [
     path("notifications/channels/<uuid:channel_id>/resend/", VibeMarketingNotificationChannelResendView.as_view(), name="vibe-marketing-notification-channel-resend"),
     path("notifications/channels/<uuid:channel_id>", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail-no-slash"),
     path("notifications/channels/<uuid:channel_id>/", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail"),
+    path("notifications/automation/run-now", VibeMarketingResearchAutomationRunNowView.as_view(), name="vibe-marketing-notification-automation-run-now-no-slash"),
+    path("notifications/automation/run-now/", VibeMarketingResearchAutomationRunNowView.as_view(), name="vibe-marketing-notification-automation-run-now"),
+    path("notifications/automation/runs/<uuid:automation_run_id>", VibeMarketingResearchAutomationRunStatusView.as_view(), name="vibe-marketing-notification-automation-run-status-no-slash"),
+    path("notifications/automation/runs/<uuid:automation_run_id>/", VibeMarketingResearchAutomationRunStatusView.as_view(), name="vibe-marketing-notification-automation-run-status"),
     path("notifications/automation", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation-no-slash"),
     path("notifications/automation/", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation"),
 ]

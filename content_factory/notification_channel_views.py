@@ -12,13 +12,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from content_factory.models import (
+    AutomationRun,
+    AutomationRunStatus,
     NotificationChannel,
     NotificationChannelType,
     NotificationConsentState,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
     ResearchAutomation,
     ResearchAutomationStatus,
 )
 from integrations.services.notification_adapters import pause_automations_if_no_active_channels
+from integrations.services.research_automations import start_manual_automation_run
 from integrations.services.notification_channels import (
     ChannelActionError,
     deactivate_channel,
@@ -484,3 +489,144 @@ class VibeMarketingResearchAutomationView(APIView):
         if update_fields:
             config.save(update_fields=update_fields + ["updated_at"])
         return Response(_channels_payload(organization), status=status.HTTP_200_OK)
+
+
+_RUN_NOW_ERROR_DETAIL = {
+    "insufficient_roo_points": "You don't have enough Roo points to research topics right now.",
+    "billing_identity_missing": "Link a Slack account to bill Roo points for this domain.",
+}
+
+
+def _run_now_error_detail(code: str) -> str:
+    return _RUN_NOW_ERROR_DETAIL.get(
+        code, "We couldn't start your research run. Please try again in a moment."
+    )
+
+
+def serialize_manual_run_status(run: AutomationRun) -> dict:
+    """Status of a 'Run today now' AutomationRun for the inline poller.
+
+    phase collapses the run/delivery machine into three UI states:
+    researching (discovery in flight) -> sent (topics delivered) -> failed.
+    """
+    delivery_objs = list(
+        NotificationDelivery.objects.filter(automation_run=run, event_type="topic_selection")
+        .select_related("channel")
+        .order_by("created_at")
+    )
+    deliveries = [
+        {
+            "channelType": delivery.channel.channel_type,
+            "routeId": delivery.channel.route_id,
+            "status": delivery.status,
+            "deliveredAt": delivery.delivered_at.isoformat() if delivery.delivered_at else None,
+        }
+        for delivery in delivery_objs
+    ]
+    any_sent = any(d.status == NotificationDeliveryStatus.SENT for d in delivery_objs)
+    topics_dispatched = run.status in {
+        AutomationRunStatus.TOPIC_SELECTION_SENT,
+        AutomationRunStatus.DELIVERY_MODE_REQUIRED,
+        AutomationRunStatus.GENERATING,
+        AutomationRunStatus.COMPLETED,
+    }
+    all_failed = bool(delivery_objs) and all(
+        d.status
+        in {
+            NotificationDeliveryStatus.FAILED,
+            NotificationDeliveryStatus.BOUNCED,
+            NotificationDeliveryStatus.OPTED_OUT,
+        }
+        for d in delivery_objs
+    )
+    if any_sent:
+        phase = "sent"
+    elif run.status in {AutomationRunStatus.FAILED, AutomationRunStatus.CANCELLED}:
+        phase = "failed"
+    elif topics_dispatched and all_failed:
+        # Topics fanned out but every channel send failed.
+        phase = "failed"
+    else:
+        phase = "researching"
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "phase": phase,
+        "lastError": run.last_error or "",
+        "deliveries": deliveries,
+    }
+
+
+class VibeMarketingResearchAutomationRunNowView(APIView):
+    """POST: start an on-demand daily-research run and dispatch it immediately.
+
+    Same pipeline as the 8am send (top-3 topics; WhatsApp/Slack/email fan-out to the
+    enabled channels; tappable buttons). Returns a run id to poll — delivery is
+    asynchronous because the discovery research takes minutes.
+    """
+
+    def post(self, request):
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
+        result = start_manual_automation_run(
+            context.organization, requested_by_user_id=getattr(request.user, "id", None)
+        )
+        result_status = result.get("status")
+        if result_status == "no_automation":
+            return Response(
+                {"detail": "Turn on the daily reminder first.", "code": "automation_not_enabled"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if result_status == "no_delivery_channels":
+            return Response(
+                {
+                    "detail": "Turn on at least one channel to receive your topics.",
+                    "code": "no_delivery_channels",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if result_status == "failed":
+            code = result.get("error") or "dispatch_failed"
+            http_status = (
+                status.HTTP_402_PAYMENT_REQUIRED
+                if code == "insufficient_roo_points"
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            return Response(
+                {
+                    "detail": _run_now_error_detail(code),
+                    "code": code,
+                    "automationRunId": result.get("automation_run_id"),
+                },
+                status=http_status,
+            )
+        # queued / reused / skipped -> accepted; the client polls the status endpoint.
+        return Response(
+            {
+                "automationRunId": result.get("automation_run_id"),
+                "status": result_status,
+                "reused": result_status == "reused",
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class VibeMarketingResearchAutomationRunStatusView(APIView):
+    """GET: poll a manual run's status + per-channel delivery for the inline UI."""
+
+    def get(self, request, automation_run_id):
+        context, error = _resolve_context_or_response(request)
+        if error:
+            return error
+        run = (
+            AutomationRun.objects.filter(
+                id=automation_run_id,
+                automation__organization=context.organization,
+            )
+            .select_related("automation")
+            .first()
+        )
+        if run is None:
+            return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(serialize_manual_run_status(run), status=status.HTTP_200_OK)

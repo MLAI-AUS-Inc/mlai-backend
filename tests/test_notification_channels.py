@@ -11,9 +11,13 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from content_factory.models import (
+    AutomationRun,
+    AutomationRunStatus,
     NotificationChannel,
     NotificationChannelType,
     NotificationConsentState,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
     OrganizationContentConfig,
     ResearchAutomation,
     ResearchAutomationStatus,
@@ -792,6 +796,109 @@ class NotificationChannelEndpointTests(TestCase):
         missing = self.client.post(self._delivery_url(), {"channelType": "slack"}, format="json")
         self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(missing.data["code"], "missing_enabled")
+
+    # --- Run today now (manual run) -----------------------------------------
+
+    def _run_now_url(self):
+        return reverse("vibe-marketing-notification-automation-run-now")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_accepts_and_returns_run_id(self, mock_start):
+        mock_start.return_value = {"status": "queued", "automation_run_id": "run-1"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data["automationRunId"], "run-1")
+        self.assertFalse(response.data["reused"])
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_reused_flag(self, mock_start):
+        mock_start.return_value = {"status": "reused", "automation_run_id": "run-1", "run_status": "queued"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertTrue(response.data["reused"])
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_no_automation_400(self, mock_start):
+        mock_start.return_value = {"status": "no_automation"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "automation_not_enabled")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_no_channels_400(self, mock_start):
+        mock_start.return_value = {"status": "no_delivery_channels"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "no_delivery_channels")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_insufficient_points_402(self, mock_start):
+        mock_start.return_value = {
+            "status": "failed",
+            "error": "insufficient_roo_points",
+            "automation_run_id": "run-1",
+        }
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertEqual(response.data["code"], "insufficient_roo_points")
+
+    def _manual_run(self, *, organization, run_status):
+        channel = NotificationChannel.objects.create(
+            organization=organization,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        automation = ResearchAutomation.objects.create(
+            organization=organization,
+            notification_channel=channel,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        run = AutomationRun.objects.create(
+            automation=automation,
+            local_date=timezone.now().date(),
+            slot_index=100,
+            scheduled_for_at=timezone.now(),
+            status=run_status,
+            idempotency_key=f"manual-{organization.id}",
+        )
+        return run, channel
+
+    def _run_status_url(self, run):
+        return reverse(
+            "vibe-marketing-notification-automation-run-status",
+            kwargs={"automation_run_id": run.id},
+        )
+
+    def test_run_status_sent_with_deliveries(self):
+        run, channel = self._manual_run(
+            organization=self.org, run_status=AutomationRunStatus.TOPIC_SELECTION_SENT
+        )
+        NotificationDelivery.objects.create(
+            automation_run=run,
+            channel=channel,
+            event_type="topic_selection",
+            status=NotificationDeliveryStatus.SENT,
+            idempotency_key=f"{run.id}:whatsapp:topic_selection",
+            delivered_at=timezone.now(),
+        )
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["phase"], "sent")
+        self.assertEqual(response.data["deliveries"][0]["channelType"], "whatsapp")
+        self.assertEqual(response.data["deliveries"][0]["status"], "sent")
+
+    def test_run_status_researching_when_queued(self):
+        run, _ = self._manual_run(organization=self.org, run_status=AutomationRunStatus.QUEUED)
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["phase"], "researching")
+
+    def test_run_status_org_scoped_404(self):
+        other = Organization.objects.create(name="Other", domain="other2.example.com")
+        run, _ = self._manual_run(organization=other, run_status=AutomationRunStatus.QUEUED)
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 
 class ActiveChannelsForRunTests(TestCase):
