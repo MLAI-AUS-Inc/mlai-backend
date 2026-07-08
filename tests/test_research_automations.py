@@ -33,11 +33,13 @@ from integrations.services.notification_adapters import (
 )
 from integrations.services.article_generation import InsufficientRooPointsError
 from integrations.services.research_automations import (
+    MANUAL_SLOT_BASE,
     STUCK_RUN_TIMEOUT_SECONDS,
     create_or_update_research_automation,
     ensure_due_automation_runs,
     fail_stuck_automation_runs,
     run_research_automation_scheduler,
+    start_manual_automation_run,
 )
 from organizations.models import Organization
 
@@ -948,3 +950,101 @@ class LegacyDailyDiscoveryGateTests(TestCase):
         targets, stats = _eligible_daily_discovery_targets()
         self.assertEqual(stats["skipped_active_automation"], 0)
         self.assertIn("legacy.example.com", [target.domain for target in targets])
+
+
+@override_settings(
+    CONTENT_FACTORY_URL="https://content-factory.test",
+    CONTENT_FACTORY_API_KEY="cf-key",
+    DEFAULT_BACKEND_URL="https://api.test",
+)
+class ManualRunNowTests(TestCase):
+    def setUp(self):
+        # mlai.au is free-listed, so dispatch skips billing (no gate mock needed).
+        self.org = Organization.objects.create(
+            name="MLAI",
+            domain="mlai.au",
+            competitors=["competitor.example.com"],
+            seed_keywords=["automation keyword"],
+        )
+        self.user = User.objects.create_user(email="founder@mlai.au")
+
+    def _automation_with_channel(self, *, delivery_enabled=True):
+        channel = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=delivery_enabled,
+            user=self.user,
+        )
+        automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=channel,
+            user=self.user,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        return automation, channel
+
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_run_now_creates_manual_slot_and_dispatches(self, mock_post):
+        mock_post.return_value = _Response(202, {"run_id": "cf-manual-1"})
+        automation, _ = self._automation_with_channel()
+
+        result = start_manual_automation_run(self.org, requested_by_user_id=self.user.id)
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(mock_post.call_count, 1)
+        run = AutomationRun.objects.get(automation=automation)
+        self.assertGreaterEqual(run.slot_index, MANUAL_SLOT_BASE)
+        self.assertEqual(run.status, AutomationRunStatus.QUEUED)
+        self.assertEqual(run.content_factory_run_id, "cf-manual-1")
+        # Same pipeline as 8am → top-3 topics requested.
+        self.assertEqual(mock_post.call_args.kwargs["payload"]["requested_topic_count"], 3)
+
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_run_now_reuses_in_flight_run(self, mock_post):
+        mock_post.return_value = _Response(202, {"run_id": "cf-manual-1"})
+        self._automation_with_channel()
+
+        first = start_manual_automation_run(self.org, requested_by_user_id=self.user.id)
+        second = start_manual_automation_run(self.org, requested_by_user_id=self.user.id)
+
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "reused")
+        self.assertEqual(second["automation_run_id"], first["automation_run_id"])
+        self.assertEqual(mock_post.call_count, 1)  # no second content-factory discovery
+        self.assertEqual(
+            AutomationRun.objects.filter(slot_index__gte=MANUAL_SLOT_BASE).count(), 1
+        )
+
+    def test_run_now_without_automation_returns_sentinel(self):
+        self.assertEqual(start_manual_automation_run(self.org)["status"], "no_automation")
+
+    def test_run_now_without_enabled_channel_returns_sentinel(self):
+        self._automation_with_channel(delivery_enabled=False)
+        self.assertEqual(
+            start_manual_automation_run(self.org)["status"], "no_delivery_channels"
+        )
+
+    @patch("integrations.services.research_automations._post_content_factory_queue_request")
+    def test_run_now_independent_of_consumed_scheduled_slot(self, mock_post):
+        mock_post.return_value = _Response(202, {"run_id": "cf-manual-1"})
+        automation, _ = self._automation_with_channel()
+        # Today's 8am scheduled slot (index 0) already ran and completed.
+        AutomationRun.objects.create(
+            automation=automation,
+            local_date=timezone.now().date(),
+            slot_index=0,
+            scheduled_for_at=timezone.now(),
+            status=AutomationRunStatus.COMPLETED,
+            idempotency_key="scheduled-slot-0",
+        )
+
+        result = start_manual_automation_run(self.org)
+
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(
+            AutomationRun.objects.filter(
+                automation=automation, slot_index__gte=MANUAL_SLOT_BASE
+            ).exists()
+        )
