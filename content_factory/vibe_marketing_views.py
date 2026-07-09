@@ -625,10 +625,16 @@ def _charge_roo_points_for_article(request, *, context, payload: dict):
 def _charge_roo_points_for_content_island_topic_generation(request, *, context, payload: dict):
     domain = context.organization.domain
     content_island_slug = str(payload.get("content_island_slug") or "").strip()
+    # Bound the slug embedded in the generated id: it lands in Ledger.reference_id AND
+    # ContentFactoryJob.client_request_id, both CharField(max_length=100). A long island
+    # slug (e.g. "australian-standards-aligned-arboricultural-documentation") pushed the
+    # id past 100 and 500'd the charge with StringDataRightTruncation (arb-gen.com,
+    # 2026-07-09). The trailing uuid keeps it unique; the slug is only a trace.
+    _island_trace = (content_island_slug or "unknown")[:24]
     client_request_id = str(
         payload.get("client_request_id")
         or _request_value(request.data, "client_request_id", "clientRequestId", default="")
-        or f"vibe-content-island-topics:{context.organization.id}:{content_island_slug or 'unknown'}:{uuid.uuid4().hex}"
+        or f"vibe-content-island-topics:{context.organization.id}:{_island_trace}:{uuid.uuid4().hex}"
     ).strip()
     payload["client_request_id"] = client_request_id
     actor_id = founder_actor_id_for_user(request.user)

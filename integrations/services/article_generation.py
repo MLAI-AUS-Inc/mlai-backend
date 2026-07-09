@@ -493,6 +493,26 @@ def _get_client_request_id(article_request: dict) -> str:
     return client_request_id
 
 
+# roo.Ledger.reference_id is CharField(max_length=100). A content-island topic
+# request's client_request_id embeds the (long) island slug, so it can exceed 100 and
+# blow the INSERT with StringDataRightTruncation (arb-gen.com POST /discovery 500,
+# 2026-07-09). reference_id is trace/display only — nothing queries Ledger by it
+# (idempotency uses idempotency_key, max_length=255) — so a long id is compacted to a
+# readable prefix + stable sha1 tail. Deterministic: the same id always maps to the
+# same reference, so a charge and its later refund stay linked.
+_LEDGER_REFERENCE_ID_MAX = 100
+
+
+def _ledger_reference_id(client_request_id: str) -> str:
+    cid = str(client_request_id or "")
+    if len(cid) <= _LEDGER_REFERENCE_ID_MAX:
+        return cid
+    import hashlib
+
+    digest = hashlib.sha1(cid.encode("utf-8")).hexdigest()[:40]
+    return f"{cid[: _LEDGER_REFERENCE_ID_MAX - 41]}:{digest}"
+
+
 def _resolve_requested_by_slack_user_id(
     slack_user_id: Optional[str],
     article_request: Optional[dict],
@@ -687,7 +707,7 @@ def _charge_content_factory_user(
             created_by_slack_id=created_by_slack_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
-            reference_id=client_request_id,
+            reference_id=_ledger_reference_id(client_request_id),
         )
     except InsufficientBalanceError:
         raise InsufficientRooPointsError(
@@ -758,7 +778,7 @@ def charge_content_factory_topic_generation_for_user(
             created_by_slack_id=actor_id,
             idempotency_key=f"content_factory:topic_generation:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
-            reference_id=client_request_id,
+            reference_id=_ledger_reference_id(client_request_id),
         )
     except InsufficientBalanceError:
         raise InsufficientRooPointsError(
@@ -799,7 +819,7 @@ def _refund_content_factory_request(
         created_by_slack_id=requested_by_slack_user_id,
         idempotency_key=f"content_factory:refund:{client_request_id}",
         reference_type="CONTENT_FACTORY",
-        reference_id=client_request_id,
+        reference_id=_ledger_reference_id(client_request_id),
     )
     ContentFactoryJob.objects.filter(client_request_id=client_request_id).update(
         billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
@@ -849,7 +869,7 @@ def refund_content_factory_topic_generation_for_user(
         created_by_slack_id=actor_id,
         idempotency_key=f"content_factory:topic_generation:refund:{client_request_id}",
         reference_type="CONTENT_FACTORY",
-        reference_id=client_request_id,
+        reference_id=_ledger_reference_id(client_request_id),
     )
     return ledger
 
