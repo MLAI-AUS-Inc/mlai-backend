@@ -431,9 +431,44 @@ def _stored_article_delivery_mode(config) -> str:
     return mode if mode in ARTICLE_DELIVERY_MODES else ""
 
 
+def _github_repo_operable(config) -> bool:
+    """True when the platform holds a usable credential for the org's repo.
+
+    Repo work (scan, scaffold, publish PR, live preview) authenticates through the
+    content-factory token service, which serves the **GitHub App installation** token
+    from ``config.github_installation_id`` first and only falls back to the org's user
+    OAuth token (``ensure_valid_org_token``). This DB-only check mirrors what that
+    service can mint from, without the network calls ``_resolve_installation_id_for_repo``'s
+    user path makes:
+
+    - a stamped GitHub App installation while server app credentials are configured, OR
+    - a live user OAuth token (``github_connection_state == "connected"``), OR
+    - a refreshable user token: a stored access token whose expiry ``ensure_valid_org_token``
+      renews from a stored refresh token. (A still-valid token is already "connected"; this
+      leg is the *expired-but-refreshable* case, which the token service still mints from,
+      so the gate must not block it. An expired token with NO refresh token is correctly
+      not operable — the token service raises TokenRefreshError.)
+
+    A revoked installation or a dead refresh token still passes this gate and fails at
+    mint time inside the run — the same actionable failure mode scan/scaffold surface.
+    Note the modern OAuth callback co-stamps an installation id, so the pure
+    refreshable-token-without-installation cohort is legacy-only.
+    """
+    if not config or not str(getattr(config, "github_repo", "") or "").strip():
+        return False
+    if config.github_connection_state == "connected":
+        return True
+    if github_app_credentials_configured() and str(getattr(config, "github_installation_id", "") or "").strip():
+        return True
+    return bool(
+        str(getattr(config, "github_token_encrypted", "") or "").strip()
+        and str(getattr(config, "github_refresh_token_encrypted", "") or "").strip()
+    )
+
+
 def _article_repo_is_review_capable(config, *, github_ready=None, article_ready=None) -> bool:
     if github_ready is None:
-        github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
+        github_ready = _github_repo_operable(config)
     if article_ready is None:
         article_system = resolve_article_system(config)
         article_ready = article_system_ready(article_system) or bool(config.publish_targets)
@@ -7270,7 +7305,9 @@ def _run_can_promote_package(run, config=None):
         return True
     delivery_mode = _run_delivery_mode(run)
     if delivery_mode in {"content_only", "review_draft"} or run.workflow == "article_revision":
-        return bool(config and config.github_connection_state == "connected" and config.github_repo)
+        # Promote/publish writes to the repo via the App installation (or user token),
+        # so honor either credential — the same operability the generation gate uses.
+        return _github_repo_operable(config)
     return False
 
 
@@ -8234,6 +8271,13 @@ def compute_article_readiness(
         )
     )
 
+    # Whether a repo is connected at all — used only to word the github-required blocker
+    # below (repo present but credential lost => "reconnect", vs no repo => "connect").
+    # Readiness itself stays a function of the article SURFACE: the credential is a
+    # separate wizard check (the `github` check, operable-aware) and the ultimate
+    # authority is the generate-time gate, so it is not folded in here.
+    github_repo_set = bool(str(getattr(config, "github_repo", "") or "").strip()) if config else False
+
     generation_ready = bool(
         setup_gate.get("generationReady")
         or (config and _article_generation_ready_for_config(config, latest_runs, article_system))
@@ -8266,13 +8310,20 @@ def compute_article_readiness(
         }
 
     # Not ready: classify the blocker in wizard order so the UI can point at the next step.
-    github_ready = bool(config and config.github_connection_state == "connected" and config.github_repo)
+    github_ready = bool(config and _github_repo_operable(config))
     scan_ready = bool(
         config
         and (config.last_scanned_at or config.scan_summary or config.article_system or config.publish_targets)
     )
     if not github_ready:
-        reason_code, reason = "github_required", "Connect a GitHub repository before generating articles."
+        if github_repo_set:
+            reason_code, reason = (
+                "github_required",
+                "Reconnect GitHub — the platform no longer has access to this repository "
+                "(the GitHub App installation is missing or revoked and any saved token has expired).",
+            )
+        else:
+            reason_code, reason = "github_required", "Connect a GitHub repository before generating articles."
     elif setup_gate.get("setupBlocked"):
         reason_code, reason = (
             "setup_pr_unmerged",
@@ -9224,7 +9275,7 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     context_ok = bool(str(config.company_context or "").strip()) or bool(str(config.brand_name or "").strip())
     keywords_ok = bool(organization.competitors or organization.seed_keywords)
     baseline_ready = _baseline_requirement_satisfied(config, baseline_snapshot)
-    github_ready = config.github_connection_state == "connected" and bool(config.github_repo)
+    github_ready = _github_repo_operable(config)
     article_system = resolve_article_system(config)
     setup_gate = _article_system_setup_gate(config, latest_runs, article_system)
     # Single source of truth for "can this org generate?" + why-not. The reset-safety
@@ -9827,7 +9878,10 @@ def _timed_vibe_response(payload, *, started_at, metric_name, view=None, respons
 
 
 def _setup_blocked_response_for_generation(context, config):
-    if not (config and config.github_connection_state == "connected" and config.github_repo):
+    # Operability (user token OR App installation) mirrors the generation gate: an
+    # App-installation org with an unmerged setup PR should get the clear "merge the
+    # setup PR" block here rather than a generic location message downstream.
+    if not _github_repo_operable(config):
         return None
     latest_runs = _latest_runs_for_org(context.organization)
     _refreshed_setup_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, config=config, latest_runs=latest_runs)
@@ -13837,16 +13891,34 @@ class VibeMarketingArticleView(APIView):
                 default=False,
             )
         )
-        github_ready = bool(
-            config.github_repo
-            and (
-                config.github_connection_state == "connected"
-                or config.github_token_encrypted
-            )
-        )
+        # "Operable" repo = the platform can actually reach the repo: a live user OAuth
+        # token OR a stamped GitHub App installation (the credential every scan/scaffold/
+        # publish/live-preview operation authenticates with). The prior check only honored
+        # the user token, so a fully-scaffolded org running on an App installation (the
+        # fleet norm) 409-ed here with a misleading "connect the article location" message.
+        github_ready = _github_repo_operable(config)
+        article_ready = article_system_ready(resolve_article_system(config)) or bool(config.publish_targets)
         has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
-        repo_review_capable = _article_repo_is_review_capable(config, github_ready=github_ready)
+        repo_review_capable = bool(github_ready and article_ready)
         if not delivery_mode_explicit and has_repo_setup_intent and not repo_review_capable:
+            if not github_ready:
+                # Credential leg failed — the article surface may be perfectly set up; the
+                # honest ask is to reconnect GitHub, not to re-verify the article location.
+                return Response(
+                    {
+                        "status": "setup_required",
+                        "nextRequiredStep": "connect_github",
+                        "next_required_step": "connect_github",
+                        "detail": (
+                            "Reconnect GitHub before generating an exact preview article — the "
+                            "platform no longer has access to this repository (the GitHub App "
+                            "installation is missing or revoked and any saved token has expired)."
+                        ),
+                        "fallbackReason": "github_auth_required",
+                        "fallback_reason": "github_auth_required",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             return Response(
                 {
                     "status": "setup_required",
