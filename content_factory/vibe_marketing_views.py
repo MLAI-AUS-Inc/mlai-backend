@@ -14138,6 +14138,23 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
         )
         remote_data = _call_content_factory_article_system_revision(run_id=run.run_id, payload=remote_payload)
         if remote_data.get("error") and int(remote_data.get("content_factory_status_code") or 0) in {400, 404, 409, 422}:
+            # Content Factory definitively rejected this batch (4xx). Roll the pins THIS request
+            # flipped to SUBMITTED (the draft_comments branch above) back to DRAFT so they reappear
+            # in the wizard overlay (which renders drafts only) and the "still pinned — try again"
+            # affordance is truthful. Scope tightly to our batch's still-SUBMITTED rows so a
+            # concurrent resubmit or an already-applied row is never clobbered; the retry/explicit/
+            # body paths flipped nothing (draft_comments is falsy there) and are never touched.
+            # Retryable (5xx) failures deliberately KEEP the submitted batch for the retry path below.
+            if draft_comments:
+                VibeMarketingComponentComment.objects.filter(
+                    id__in=[comment.id for comment in draft_comments],
+                    status=VibeMarketingComponentCommentStatus.SUBMITTED,
+                    batch_id=feedback_batch_id,
+                ).update(
+                    status=VibeMarketingComponentCommentStatus.DRAFT,
+                    batch_id="",
+                    updated_at=timezone.now(),
+                )
             result = dict(run.result or {})
             result["latest_article_system_revision_response"] = remote_data
             result["component_feedback_latest_batch"] = {

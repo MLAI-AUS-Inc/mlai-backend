@@ -2021,6 +2021,81 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(response.data["livePreview"]["inspectorMode"], "comment")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_revision_rolls_pins_back_to_draft_on_definitive_cf_rejection(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-4xx",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+        )
+        comment = VibeMarketingComponentComment.objects.create(
+            run=setup_run,
+            actor=self.user,
+            component_id="category-navigation",
+            component_label="Category navigation",
+            selector='[data-cf-component-id="category-navigation"]',
+            body="Put each topic in its own toggle pill.",
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(
+                status_code=409,
+                payload={"detail": "Article system setup run is not accepting review comments (status=failed)."},
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/article-system-revisions",
+                {},
+                format="json",
+            )
+
+        # The wizard receives the real cf reason (not a generic error), and the pin is restored to
+        # DRAFT with an empty batch so it reappears in the drafts-only overlay instead of vanishing.
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("not accepting review comments", response.data["detail"])
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "draft")
+        self.assertEqual(comment.batch_id, "")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_article_system_revision_keeps_pins_submitted_on_retryable_cf_failure(self):
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="article-system-setup-5xx",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.AWAITING_APPROVAL,
+            current_step="await_review",
+        )
+        comment = VibeMarketingComponentComment.objects.create(
+            run=setup_run,
+            actor=self.user,
+            component_id="category-navigation",
+            component_label="Category navigation",
+            body="Put each topic in its own toggle pill.",
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=502, payload={"detail": "upstream unavailable"})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/article-system-revisions",
+                {},
+                format="json",
+            )
+
+        # A retryable (5xx) failure keeps the batch SUBMITTED for the retry path — pins are NOT
+        # rolled back (only definitive 4xx rejections restore drafts).
+        self.assertEqual(response.status_code, 202)
+        comment.refresh_from_db()
+        self.assertEqual(comment.status, "submitted")
+        self.assertNotEqual(comment.batch_id, "")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_article_system_revision_keeps_freeform_body_compatibility(self):
         setup_run = ContentFactoryRun.objects.create(
             run_id="article-system-setup-freeform",
