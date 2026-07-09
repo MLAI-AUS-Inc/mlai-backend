@@ -79,11 +79,55 @@ NON_JOB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bvolunteer role\b|\bunpaid internship\b|\bunpaid role\b", re.I), "Unpaid or volunteer listing"),
 )
 
+# Matched against the whole (trimmed) company_name field, not free text, so a real
+# company would have to be named exactly "Confidential" etc. to trip these.
+GENERIC_COMPANY_NAME_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^our (other )?(client|company|business)s?$", re.I),
+    re.compile(r"^(a |the )?confidential( client| company| employer)?$", re.I),
+    re.compile(r"^(undisclosed|anonymous|private) (client|company|employer)$", re.I),
+    re.compile(r"^(leading|major|large|reputable) (company|employer|business|organisation|organization)$", re.I),
+    re.compile(r"^(my |a )?client( company)?$", re.I),
+    re.compile(r"^unknown( company| employer)?$", re.I),
+    re.compile(r"^(name withheld|not disclosed|n/a|tba|tbc|na)$", re.I),
+)
+
+
+def is_generic_company_name(company_name: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", (company_name or "").strip())
+    if not normalized:
+        return False
+    return any(pattern.match(normalized) for pattern in GENERIC_COMPANY_NAME_PATTERNS)
+
 AUSTRALIA_ELIGIBLE_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"\baustralia\b", re.I), "Australia", "Mentions Australia eligibility"),
     (re.compile(r"\bapac\b|\basia pacific\b", re.I), "APAC", "Mentions APAC eligibility"),
     (re.compile(r"\banz\b|\baustralia/new zealand\b", re.I), "Australia/ANZ", "Mentions ANZ eligibility"),
 )
+
+AUSTRALIA_EXCLUSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:not|cannot|can'?t|unable to|won'?t|doesn'?t|don'?t)\b(?:(?!\boutside\b)[^.]){0,60}\baustralia\b",
+            re.I,
+        ),
+        "Description explicitly excludes Australia",
+    ),
+    (re.compile(r"\bexcept\s+australia\b|\bexcluding\s+australia\b", re.I), "Excludes Australia"),
+    (
+        re.compile(
+            r"\bnot\s+(?:available|open|eligible)\s+(?:to|for|in)\s+(?:(?!\boutside\b)[^.]){0,20}\baustralia\b",
+            re.I,
+        ),
+        "Not open to Australia",
+    ),
+)
+
+
+def classify_australia_exclusion(text: str) -> "LocationEligibility | None":
+    for pattern, reason in AUSTRALIA_EXCLUSION_PATTERNS:
+        if pattern.search(text):
+            return LocationEligibility("restricted_remote", "Australia excluded", reason)
+    return None
 
 
 def apply_disqualification_scan(job: dict[str, Any]) -> dict[str, Any]:
@@ -163,11 +207,22 @@ def scan_disqualifying_signals(job: dict[str, Any]) -> list[DisqualificationSign
             signals.append(DisqualificationSignal("non_job", "suppress", reason))
             break
 
+    if is_generic_company_name(job.get("company_name")):
+        signals.append(
+            DisqualificationSignal(
+                "company_identity", "penalize", "Employer name is a placeholder, not a real company", 0.15
+            )
+        )
+
     return signals
 
 
 def classify_location_eligibility(job: dict[str, Any]) -> LocationEligibility:
     text = searchable_text(job)
+
+    exclusion = classify_australia_exclusion(text)
+    if exclusion:
+        return exclusion
 
     restricted = classify_with_rules(text)
     if restricted:

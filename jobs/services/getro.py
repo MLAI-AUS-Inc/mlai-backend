@@ -156,9 +156,17 @@ def extract_location(fragments: list[str], title: str, company: str | None) -> s
     return None
 
 
+POSTED_TEXT_EXACT_TERMS = {"today", "new"}
+POSTED_TEXT_RELATIVE_PATTERN = re.compile(
+    r"\b\d+\s*\+?\s*(?:hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mo)\b(?:\s+ago)?", re.I
+)
+
+
 def extract_posted_text(fragments: list[str]) -> str | None:
     for value in fragments:
-        if re.fullmatch(r"today|new|\d+\s+days?|\d+\s+hours?|\d+\s+months?|6\+\s+months", value, re.I):
+        if value.strip().lower() in POSTED_TEXT_EXACT_TERMS:
+            return value
+        if POSTED_TEXT_RELATIVE_PATTERN.search(value):
             return value
     return None
 
