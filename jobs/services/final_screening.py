@@ -92,8 +92,20 @@ def _is_stale(date_posted: Any, posted_text: str | None) -> bool:
                 date_posted = date_posted.replace(tzinfo=dt_timezone.utc)
             return date_posted.astimezone(dt_timezone.utc) < cutoff
 
-    age_match = re.search(r"\b(\d+)\s*(h|hr|hrs|hour|hours|d|day|days)\b", str(posted_text or ""), re.I)
+    age_match = re.search(
+        r"\b(\d+)\s*(h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mos|month|months)\b",
+        str(posted_text or ""),
+        re.I,
+    )
     if not age_match:
         return False
-    multiplier = 24 if age_match.group(2).lower().startswith("d") else 1
-    return int(age_match.group(1)) * multiplier > settings.jobs_freshness_hours
+    unit = age_match.group(2).lower()
+    if unit.startswith("mo"):
+        hours_per_unit = 24 * 30
+    elif unit.startswith("w"):
+        hours_per_unit = 24 * 7
+    elif unit.startswith("d"):
+        hours_per_unit = 24
+    else:
+        hours_per_unit = 1
+    return int(age_match.group(1)) * hours_per_unit > settings.jobs_freshness_hours
