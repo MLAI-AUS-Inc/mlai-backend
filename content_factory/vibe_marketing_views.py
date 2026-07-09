@@ -928,9 +928,21 @@ def _pending_article_system_setup_from_config(config) -> dict:
 
 def _store_pending_article_system_setup(config, *, mode: str, route_path: str, source_scan_run_id: str = "", article_surface_hint=None):
     article_system = dict(config.article_system or {})
+    resolved_mode = str(mode or "not_sure").strip() or "not_sure"
+    if resolved_mode in {"", "not_sure"}:
+        # Never downgrade an explicit stored selection ("none"/"existing") back to "not_sure"
+        # just because a later modeless re-dispatch arrived for the same route.
+        existing = article_system.get("pending_article_system_setup")
+        if isinstance(existing, dict):
+            existing_mode = str(existing.get("mode") or "").strip()
+            existing_route = str(
+                existing.get("route_path") or existing.get("routePath") or ""
+            ).strip()
+            if existing_mode in {"none", "existing"} and existing_route == str(route_path or "").strip():
+                resolved_mode = existing_mode
     saved_at = timezone.now().isoformat()
     pending = {
-        "mode": str(mode or "not_sure"),
+        "mode": resolved_mode,
         "routePath": str(route_path or ""),
         "route_path": str(route_path or ""),
         "sourceScanRunId": str(source_scan_run_id or ""),
@@ -13015,6 +13027,27 @@ class VibeMarketingScanView(APIView):
                 {"detail": "Choose or create an article/blog route before generating the articles setup."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if scan_purpose == "setup" and article_surface_mode in {"", "not_sure"}:
+            # A modeless setup re-dispatch (the frontend omitted articleSurfaceMode) must not
+            # lose the create-new ("none") / existing selection the founder saved in step 3 —
+            # otherwise content-factory sees "not_sure", never fires its create-new escape, and
+            # manual-blocks a from-scratch scaffold whose repo already has a different article
+            # surface (talathrive run 260bf5d4). Recover it from the stored pending setup when
+            # that selection targets the same route.
+            resolved_route_path = str(
+                (article_surface_hint or {}).get("route_path") or article_surface_url or ""
+            ).strip()
+            pending_setup = _pending_article_system_setup_from_config(config)
+            stored_mode = str(pending_setup.get("mode") or "").strip()
+            stored_route_path = str(
+                pending_setup.get("route_path") or pending_setup.get("routePath") or ""
+            ).strip()
+            if (
+                stored_mode in {"none", "existing"}
+                and stored_route_path
+                and stored_route_path == resolved_route_path
+            ):
+                article_surface_mode = stored_mode
         scaffold_if_missing = scan_purpose == "setup"
         force_refresh = _scan_should_force_refresh(config, request.data)
         payload = {
