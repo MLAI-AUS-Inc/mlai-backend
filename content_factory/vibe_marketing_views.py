@@ -7607,6 +7607,21 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
     live_preview = _live_preview_from_run(setup_run) if setup_run else None
     setup_result = _run_mapping(setup_run.result) if setup_run else {}
     setup_payload = _article_system_setup_payload_from_run(setup_run) if setup_run else {}
+    preview_runtime_unsupported = bool(
+        setup_payload.get("preview_runtime_unsupported")
+        or setup_payload.get("previewRuntimeUnsupported")
+        or setup_result.get("preview_runtime_unsupported")
+        or pending.get("previewRuntimeUnsupported")
+        or pending.get("preview_runtime_unsupported")
+    )
+    preview_unsupported_reason = str(
+        setup_payload.get("preview_unsupported_reason")
+        or setup_payload.get("previewUnsupportedReason")
+        or setup_result.get("preview_unsupported_reason")
+        or pending.get("previewUnsupportedReason")
+        or pending.get("preview_unsupported_reason")
+        or ""
+    ).strip()
     active_setup_run = bool(setup_run and setup_run.status in RUNNING_RUN_STATUSES)
     error = "" if active_setup_run else str(
         (setup_run.error if setup_run else "")
@@ -7654,6 +7669,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         "failedPreviewUrl": failed_preview_url or None,
         "failureKind": failure_kind or None,
         "failedStep": failed_step or None,
+        "previewRuntimeUnsupported": preview_runtime_unsupported,
+        "previewUnsupportedReason": preview_unsupported_reason or None,
         "previewFailureDetails": preview_failure_details or None,
         "directoryQualityGates": directory_quality_gates or None,
         "directoryBrowserRepair": directory_browser_repair or None,
