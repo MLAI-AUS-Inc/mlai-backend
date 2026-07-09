@@ -3594,6 +3594,93 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(pending["sourceScanRunId"], "scan-hint-1")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_modeless_setup_scan_recovers_create_new_selection(self):
+        # talathrive: a setup re-dispatch that omits articleSurfaceMode (resolves to
+        # "not_sure") must recover the founder's create-new ("none") selection saved in
+        # step 3 — otherwise content-factory never fires its create-new escape and
+        # manual-blocks a from-scratch scaffold on a repo with a different article surface.
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _ = OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "article_system": {
+                    "pending_article_system_setup": {
+                        "mode": "none",
+                        "route_path": "/articles",
+                        "routePath": "/articles",
+                    }
+                },
+            },
+        )
+
+        class FakeResponse:
+            status_code = 202
+            content = b"{}"
+
+            def json(self):
+                return {"run_id": "scan-recover-1", "status": "queued", "workflow": "repo_scan"}
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["mode"] = json["article_surface_mode"]
+            return FakeResponse()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/scan/",
+                {
+                    "githubRepo": "acme/site",
+                    # NOTE: no articleSurfaceMode → resolves to "not_sure"
+                    "articleSurfaceUrl": "https://www.acme.com/articles",
+                    "autoSetupPreview": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        # The stored create-new selection is recovered and forwarded to content-factory.
+        self.assertEqual(captured["mode"], "none")
+        run = ContentFactoryRun.objects.get(run_id="scan-recover-1")
+        self.assertEqual(run.run_request["article_surface_mode"], "none")
+        # And the pending selection is preserved (not downgraded to not_sure).
+        config.refresh_from_db()
+        self.assertEqual(config.article_system["pending_article_system_setup"]["mode"], "none")
+
+    def test_store_pending_setup_does_not_downgrade_explicit_selection(self):
+        from content_factory.vibe_marketing_views import _store_pending_article_system_setup
+
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _ = OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "article_system": {
+                    "pending_article_system_setup": {
+                        "mode": "none",
+                        "route_path": "/articles",
+                        "routePath": "/articles",
+                    }
+                },
+            },
+        )
+
+        # A modeless re-dispatch for the SAME route must keep the explicit "none".
+        pending = _store_pending_article_system_setup(config, mode="not_sure", route_path="/articles")
+        self.assertEqual(pending["mode"], "none")
+
+        # A modeless dispatch for a DIFFERENT route legitimately defaults to not_sure.
+        pending_other = _store_pending_article_system_setup(config, mode="not_sure", route_path="/blog")
+        self.assertEqual(pending_other["mode"], "not_sure")
+
+        # An explicit incoming mode always wins.
+        pending_explicit = _store_pending_article_system_setup(config, mode="existing", route_path="/articles")
+        self.assertEqual(pending_explicit["mode"], "existing")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_inventory_scan_does_not_require_article_surface_url(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
