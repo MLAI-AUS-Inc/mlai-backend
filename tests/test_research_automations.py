@@ -29,6 +29,7 @@ from core.models import User
 from integrations.services.notification_adapters import (
     build_action_url,
     notification_context_for_run,
+    send_review_ready,
     send_topic_selection,
 )
 from integrations.services.article_generation import InsufficientRooPointsError
@@ -411,11 +412,14 @@ class ResearchAutomationCallbackTests(TestCase):
         delivery = NotificationDelivery.objects.get(automation_run=self.run, event_type="review_ready")
         self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
         email_payload = mock_post.call_args.kwargs["json"]
-        self.assertIn(
-            "https://app.test/founder-tools/marketing/runs/article-run-1",
-            email_payload["text"],
+        review_url = (
+            "https://app.test/founder-tools/marketing/runs/article-run-1"
+            "?articleStep=review&reviewMode=expanded"
         )
-        self.assertIn("https://preview.test/run/article-run-1", email_payload["text"])
+        self.assertIn(review_url, email_payload["text"])
+        self.assertIn("Review article", email_payload["html"])
+        self.assertIn("Manage notifications", email_payload["html"])
+        self.assertNotIn("https://preview.test/run/article-run-1", email_payload["text"])
 
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_content_ready_includes_review_link_and_skips_relative_pr_path(self, mock_post):
@@ -657,6 +661,8 @@ class WhatsAppAutomationWebhookTests(TestCase):
     TWILIO_AUTH_TOKEN="twilio-auth-token",
     TWILIO_WHATSAPP_FROM="+61480000000",
     TWILIO_WHATSAPP_TOPIC_CONTENT_SID="HX-topic",
+    TWILIO_WHATSAPP_REVIEW_CONTENT_SID="HX-review",
+    FOUNDER_TOOLS_URL="https://app.test",
 )
 class FanOutDeliveryTests(TestCase):
     def setUp(self):
@@ -748,6 +754,82 @@ class FanOutDeliveryTests(TestCase):
         self.assertEqual(len(repeat), 3)
         self.assertEqual(mock_dm.call_count, 1)
         self.assertEqual(len(mock_post.call_args_list), 2)
+
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "2.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_review_ready_fans_out_expanded_review_actions(self, mock_post, mock_dm):
+        mock_post.return_value = _Response(200, {"id": "email-review", "sid": "SM-review"})
+        data = {
+            "event_type": "article_review_ready",
+            "job_id": "component-revision-4bb71d2a90703382",
+            "domain": "mlai.au",
+            "title": "Startup Business Investment Readiness for AI Founders",
+            "preview_url": "https://preview.test/raw-preview",
+            "notification_context": notification_context_for_run(self.run),
+        }
+
+        deliveries = send_review_ready(data)
+
+        self.assertEqual(len(deliveries), 3)
+        self.assertTrue(all(delivery.status == NotificationDeliveryStatus.SENT for delivery in deliveries))
+        review_url = (
+            "https://app.test/founder-tools/marketing/runs/component-revision-4bb71d2a90703382"
+            "?articleStep=review&reviewMode=expanded"
+        )
+
+        slack_text = mock_dm.call_args.args[1]
+        slack_blocks = mock_dm.call_args.kwargs["blocks"]
+        self.assertIn(review_url, slack_text)
+        self.assertEqual(slack_blocks[1]["elements"][0]["url"], review_url)
+
+        email_call = next(call for call in mock_post.call_args_list if "resend.com" in call.args[0])
+        self.assertEqual(email_call.kwargs["json"]["subject"], "Your article is ready to review")
+        self.assertIn(
+            review_url.replace("&", "&amp;"),
+            email_call.kwargs["json"]["html"],
+        )
+        self.assertNotIn("https://preview.test/raw-preview", email_call.kwargs["json"]["text"])
+
+        whatsapp_call = next(call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0])
+        whatsapp_payload = whatsapp_call.kwargs["data"]
+        self.assertEqual(whatsapp_payload["ContentSid"], "HX-review")
+        self.assertEqual(
+            json.loads(whatsapp_payload["ContentVariables"]),
+            {
+                "1": "Startup Business Investment Readiness for AI Founders",
+                "2": "mlai.au",
+                "3": review_url,
+            },
+        )
+
+    @override_settings(TWILIO_WHATSAPP_REVIEW_CONTENT_SID="")
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "3.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_review_ready_whatsapp_fallback_includes_stop_copy(self, mock_post, _mock_dm):
+        mock_post.return_value = _Response(200, {"id": "email-review", "sid": "SM-review"})
+        data = {
+            "event_type": "article_review_ready",
+            "job_id": "article-run-stop-copy",
+            "domain": "mlai.au",
+            "title": "Startup Business Investment Readiness for AI Founders",
+            "notification_context": notification_context_for_run(self.run),
+        }
+
+        send_review_ready(data)
+
+        whatsapp_call = next(call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0])
+        review_url = (
+            "https://app.test/founder-tools/marketing/runs/article-run-stop-copy"
+            "?articleStep=review&reviewMode=expanded"
+        )
+        self.assertEqual(
+            whatsapp_call.kwargs["data"]["Body"],
+            (
+                "Startup Business Investment Readiness for AI Founders is ready for mlai.au."
+                f"\n\nReview and approve: {review_url}"
+                "\n\nReply STOP to opt out."
+            ),
+        )
 
     @override_settings(CUSTOMERIO_API_KEY="cio-key")
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
