@@ -197,17 +197,24 @@ def installation_for_repo(user, repo) -> Optional[GitHubInstallation]:
     installs = user_github_installations(user)
     if not installs:
         return None
-    if len(installs) == 1:
-        # Single installation — assume it owns the repo. Token minting fails
-        # loudly downstream if it doesn't, which is the right signal.
-        return installs[0]
-
     owner = repo.split("/", 1)[0].strip().lower() if "/" in repo else ""
     owner_matches = [
         inst for inst in installs if (inst.account_login or "").strip().lower() == owner
     ]
     if len(owner_matches) == 1:
         return owner_matches[0]
+
+    if len(installs) == 1:
+        # An installation belongs to exactly one GitHub account. Never pair a
+        # repository owned by another account with the founder's sole legacy
+        # installation; that produces GitHub's opaque 422 response when a
+        # repository-scoped token is minted. Unknown legacy account metadata is
+        # confirmed by listing below.
+        account_login = (installs[0].account_login or "").strip().lower()
+        if owner and account_login and owner != account_login:
+            return None
+        if owner and account_login == owner:
+            return installs[0]
 
     # Ambiguous (or account_login unknown): confirm by listing.
     for inst in owner_matches or installs:
@@ -217,7 +224,7 @@ def installation_for_repo(user, repo) -> Optional[GitHubInstallation]:
         }
         if repo.lower() in names:
             return inst
-    return owner_matches[0] if owner_matches else None
+    return None
 
 
 def mint_user_repo_token(user, repo, *, permission_mode: str = "write"):

@@ -1152,6 +1152,11 @@ class ContentFactoryTokenView(APIView):
             create_installation_access_token,
             github_app_credentials_configured,
         )
+        from integrations.services.github_installations import (
+            installation_for_repo,
+            resolve_user_for_actor_id,
+            user_github_installations,
+        )
         from integrations.models import UserIntegration
 
         domain = request.query_params.get('domain')
@@ -1172,8 +1177,56 @@ class ContentFactoryTokenView(APIView):
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
                 github_repo = requested_repo or str(config.github_repo or '').strip()
+                installation_id = str(config.github_installation_id or '').strip()
 
-                if config.github_installation_id and github_repo:
+                # Resolve repository access from the founder's installation
+                # registry before trusting the legacy per-company id. A founder
+                # can authorize multiple GitHub accounts, so the stored config id
+                # may refer to another account after switching companies.
+                actor_id = str(config.connected_slack_user_id or slack_user_id or '').strip()
+                registry_user = resolve_user_for_actor_id(actor_id)
+                registry_installations = (
+                    user_github_installations(registry_user) if registry_user is not None else []
+                )
+                if registry_installations and github_repo:
+                    registry_installation = installation_for_repo(registry_user, github_repo)
+                    if registry_installation is None:
+                        message = (
+                            f"The MLAI Tools GitHub App is not installed for {github_repo} under any "
+                            "GitHub account connected by this founder. Reconnect GitHub for this repository, "
+                            "then retry."
+                        )
+                        logger.warning(
+                            "GitHub installation registry could not resolve repo domain=%s repo=%s actor_id=%s",
+                            normalized_domain,
+                            github_repo,
+                            actor_id,
+                        )
+                        return Response(
+                            {
+                                'error': 'GitHub repository installation mismatch',
+                                'message': message,
+                                'action_required': 'auth_required',
+                                'reason_code': 'repository_not_accessible_by_registered_installations',
+                                'github_repo': github_repo,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+
+                    installation_id = str(registry_installation.installation_id or '').strip()
+                    if installation_id and installation_id != str(config.github_installation_id or '').strip():
+                        previous_installation_id = str(config.github_installation_id or '').strip()
+                        config.github_installation_id = installation_id
+                        config.save(update_fields=['github_installation_id', 'updated_at'])
+                        logger.info(
+                            "Self-healed GitHub installation binding domain=%s repo=%s old_installation_id=%s installation_id=%s",
+                            normalized_domain,
+                            github_repo,
+                            previous_installation_id,
+                            installation_id,
+                        )
+
+                if installation_id and github_repo:
                     if not github_app_credentials_configured():
                         logger.warning("GitHub App credentials are not configured for installation token lookup.")
                         return Response(
@@ -1182,13 +1235,13 @@ class ContentFactoryTokenView(APIView):
                                 'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
                                 'action_required': 'server_configuration_required',
                                 'github_repo': github_repo,
-                                'github_installation_id': config.github_installation_id,
+                                'github_installation_id': installation_id,
                             },
                             status=status.HTTP_401_UNAUTHORIZED,
                         )
                     try:
                         installation_token = create_installation_access_token(
-                            installation_id=config.github_installation_id,
+                            installation_id=installation_id,
                             repository=github_repo,
                             permission_mode='write',
                         )
@@ -1197,7 +1250,7 @@ class ContentFactoryTokenView(APIView):
                             "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
                             normalized_domain,
                             github_repo,
-                            config.github_installation_id,
+                            installation_id,
                             exc,
                         )
                         return Response(
@@ -1205,8 +1258,9 @@ class ContentFactoryTokenView(APIView):
                                 'error': 'GitHub App installation access failed',
                                 'message': str(exc),
                                 'action_required': 'auth_required',
+                                'reason_code': 'github_installation_token_mint_failed',
                                 'github_repo': github_repo,
-                                'github_installation_id': config.github_installation_id,
+                                'github_installation_id': installation_id,
                             },
                             status=status.HTTP_401_UNAUTHORIZED,
                         )
@@ -1216,7 +1270,7 @@ class ContentFactoryTokenView(APIView):
                         "Provided GitHub App installation token for %s repo=%s installation_id=%s",
                         normalized_domain,
                         github_repo,
-                        config.github_installation_id,
+                        installation_id,
                     )
                     return Response(response_data, status=status.HTTP_200_OK)
 

@@ -30,7 +30,7 @@ from workflow_runs.models import (
     ContentFactoryRunStep,
     ContentFactoryStepStatus,
 )
-from integrations.models import UserIntegration
+from integrations.models import GitHubInstallation, UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
 User = get_user_model()
@@ -244,6 +244,125 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             repository="acme/site",
             permission_mode="write",
         )
+
+    def test_content_factory_token_resolves_repo_from_founder_registry_and_self_heals_stale_config(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        founder = User.objects.create_user(email="mark@example.com", slack_id="U_MARK")
+        organization = Organization.objects.create(name="Inner Expert", domain="innerx.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_MARK",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145611291",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+            account_type="User",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145558994",
+            account_login="sheldonhealth",
+            account_type="User",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_sheldon",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="145558994",
+            repository="sheldonhealth/v0-sheldon-health-app",
+            permissions={"contents": "write", "pull_requests": "write"},
+        )
+
+        with patch(
+            "integrations.services.github_app.github_app_credentials_configured",
+            return_value=True,
+        ), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {
+                    "domain": "innerx.example",
+                    "slack_user_id": "U_MARK",
+                    "github_repo": "sheldonhealth/v0-sheldon-health-app",
+                },
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_token"], "ghs_sheldon")
+        self.assertEqual(response.data["github_installation_id"], "145558994")
+        create_token.assert_called_once_with(
+            installation_id="145558994",
+            repository="sheldonhealth/v0-sheldon-health-app",
+            permission_mode="write",
+        )
+        config.refresh_from_db()
+        self.assertEqual(config.github_installation_id, "145558994")
+
+    def test_content_factory_token_rejects_repo_not_owned_by_registered_installations(self):
+        founder = User.objects.create_user(email="founder@example.com", slack_id="U_FOUNDER")
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_FOUNDER",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145611291",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+            account_type="User",
+        )
+
+        with patch(
+            "integrations.services.github_app.create_installation_access_token"
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "acme.example", "github_repo": "sheldonhealth/v0-sheldon-health-app"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data["reason_code"],
+            "repository_not_accessible_by_registered_installations",
+        )
+        self.assertIn("sheldonhealth/v0-sheldon-health-app", response.data["message"])
+        create_token.assert_not_called()
+
+    def test_github_app_token_error_includes_github_repository_scope_message(self):
+        from django.core.cache import cache
+
+        from integrations.services.github_app import (
+            GitHubAppTokenError,
+            create_installation_access_token,
+        )
+
+        cache.clear()
+        response = MagicMock(status_code=422)
+        response.json.return_value = {
+            "message": "There is at least one repository that does not exist or is not accessible to the parent installation."
+        }
+
+        with patch("integrations.services.github_app._github_app_jwt", return_value="jwt"), patch(
+            "integrations.services.github_app.http_requests.post",
+            return_value=response,
+        ):
+            with self.assertRaises(GitHubAppTokenError) as raised:
+                create_installation_access_token(
+                    installation_id="145611291",
+                    repository="sheldonhealth/v0-sheldon-health-app",
+                    permission_mode="write",
+                    use_cache=False,
+                )
+
+        self.assertIn("GitHub returned 422", str(raised.exception))
+        self.assertIn("not accessible to the parent installation", str(raised.exception))
 
     def test_github_app_installation_token_cache_preserves_permissions(self):
         from django.core.cache import cache

@@ -1147,6 +1147,21 @@ def _connect_with_existing_github_credentials(config, *, domain: str, actor_id: 
         except (ArticleGenerationError, TokenRefreshError):
             pass
 
+    # Once the founder-scoped registry exists it is the source of truth for
+    # installation/repository ownership. Do not promote the legacy single-row
+    # credential, whose installation id may belong to a different GitHub account.
+    try:
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+            user_github_installations,
+        )
+
+        registry_user = resolve_user_for_actor_id(actor_id)
+        if registry_user is not None and user_github_installations(registry_user):
+            return None
+    except Exception:
+        logger.exception("github_registry_legacy_promotion_guard_failed actor_id=%s", actor_id)
+
     integration = UserIntegration.objects.filter(slack_user_id=actor_id).first()
     if not integration or not integration.github_access_token:
         return None
@@ -4080,15 +4095,22 @@ def _resolve_installation_id_for_repo(config, repo: str) -> str:
         from integrations.services.github_installations import (
             installation_for_repo,
             resolve_user_for_actor_id,
+            user_github_installations,
         )
 
         owner_user = resolve_user_for_actor_id(getattr(config, "connected_slack_user_id", ""))
         if owner_user is not None:
+            installations = user_github_installations(owner_user)
             inst = installation_for_repo(owner_user, repo)
             if inst is not None:
                 resolved = str(inst.installation_id or "").strip()
                 if resolved:
                     return resolved
+            if installations:
+                # A populated registry that cannot resolve this repository is a
+                # real ownership mismatch. Falling back to the per-org id would
+                # recreate the invalid tuple the registry is meant to replace.
+                return ""
     except Exception:
         logger.exception("github_registry_installation_resolve_failed repo=%s", repo)
     return str(getattr(config, "github_installation_id", "") or "").strip()
@@ -13011,6 +13033,17 @@ class VibeMarketingGitHubConnectView(APIView):
         config.save(update_fields=list(dict.fromkeys(config_update_fields)))
 
         if not force_reconnect:
+            # Founder-scoped reuse is authoritative because it can disambiguate
+            # multiple GitHub accounts by repository owner. It also self-heals a
+            # stale per-company installation id before legacy OAuth is considered.
+            registry_connection = _connect_with_registry_installation(
+                config,
+                user=request.user,
+                requested_repo=requested_repo,
+            )
+            if registry_connection:
+                return Response(registry_connection, status=status.HTTP_200_OK)
+
             existing_connection = _connect_with_existing_github_credentials(
                 config,
                 domain=context.organization.domain,
@@ -13019,17 +13052,6 @@ class VibeMarketingGitHubConnectView(APIView):
             )
             if existing_connection:
                 return Response(existing_connection, status=status.HTTP_200_OK)
-
-            # Founder-scoped reuse: bind a repo from an installation the founder
-            # already authorized (e.g. while setting up another company) without a
-            # fresh GitHub OAuth. No auth_url in the response => frontend proceeds.
-            registry_connection = _connect_with_registry_installation(
-                config,
-                user=request.user,
-                requested_repo=requested_repo,
-            )
-            if registry_connection:
-                return Response(registry_connection, status=status.HTTP_200_OK)
 
         return_url = str(_request_value(request.data, "return_url", "returnUrl", default="") or "").strip() or None
         try:

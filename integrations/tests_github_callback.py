@@ -163,7 +163,10 @@ class GitHubCallbackTests(TestCase):
 
         integration = UserIntegration.objects.get(slack_user_id="U123")
         self.assertEqual(integration.github_repo, "owner/domain-one")
-        self.assertEqual(integration.github_installation_id, "inst-2")
+        # The legacy default remains a coherent tuple from the first connection;
+        # the second installation is stored separately in the founder registry.
+        self.assertEqual(integration.github_user_name, "sam-one")
+        self.assertEqual(integration.github_installation_id, "inst-1")
         self.assertEqual(mock_trigger_scan.call_count, 1)
 
     def test_callback_requires_exactly_one_repo_for_domain_binding(self):
@@ -240,7 +243,7 @@ class GitHubCallbackTests(TestCase):
         self.assertEqual(query.get("github"), "multiple_repos")
 
         config = OrganizationContentConfig.objects.get(organization__domain="needs-selection.com")
-        self.assertEqual(config.github_repo, "owner/not-selected")
+        self.assertIsNone(config.github_repo)
         self.assertEqual(config.github_token_encrypted, "gh-access")
         self.assertEqual(config.github_installation_id, "inst-5")
         mock_trigger_scan.assert_not_called()

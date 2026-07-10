@@ -156,6 +156,12 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
+        try:
+            error_payload = response.json()
+        except (TypeError, ValueError):
+            error_payload = {}
+        github_message = str(error_payload.get("message") or "").strip()
+        github_detail = f" GitHub message: {github_message}" if github_message else ""
         permission_hint = (
             " Ensure the MLAI Tools GitHub App is installed on this repository with "
             "Contents: Read/Write and Pull requests: Read/Write."
@@ -164,7 +170,7 @@ def create_installation_access_token(
         )
         raise GitHubAppTokenError(
             f"Could not mint GitHub App installation token for {normalized_repository}: "
-            f"GitHub returned {response.status_code}.{permission_hint}"
+            f"GitHub returned {response.status_code}.{github_detail}{permission_hint}"
         )
     payload = response.json()
     token = str(payload.get("token") or "").strip()
