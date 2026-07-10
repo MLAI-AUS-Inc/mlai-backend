@@ -241,7 +241,7 @@ class JobsSchedulerTests(TestCase):
         self.assertIn("1. AI Engineer", payload["text"])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
-    def test_previous_top_pick_is_not_repeated_but_updated_url_is_eligible(self, _mock_judge):
+    def test_previous_top_pick_is_not_repeated_even_when_url_changes(self, _mock_judge):
         previous_run = JobRun.objects.create(run_date="2026-05-30", run_id="2026-05-30-history")
         current_run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-history")
         common = {
@@ -271,7 +271,10 @@ class JobsSchedulerTests(TestCase):
             dedupe_key="ai-engineer|example-ai|old-url",
             **common,
         )
-        updated = JobListing.objects.create(
+        # Same underlying role (same title + company) reposted with a different URL,
+        # and therefore a different dedupe_key. It's still the same job, so it must
+        # stay excluded rather than resurface just because the URL changed.
+        JobListing.objects.create(
             run=current_run,
             job_url="https://example.com/jobs/ai-engineer-v2",
             dedupe_key="ai-engineer|example-ai|new-url",
@@ -280,7 +283,7 @@ class JobsSchedulerTests(TestCase):
 
         selected = job_pipeline.select_top_jobs(current_run)
 
-        self.assertEqual(selected, [updated])
+        self.assertEqual(selected, [])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
     def test_top_jobs_fills_seven_slots_from_screened_candidates_when_source_mix_is_limited(self, _mock_judge):
