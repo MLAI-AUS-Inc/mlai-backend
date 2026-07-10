@@ -511,16 +511,16 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
             ]
         )
     candidates.sort(key=lambda job: (-job.ranking_score, job.id))
+    # Jobs already shown as a top pick on a previous day are excluded outright, not
+    # used as a fallback to pad out to `limit` - a light day posts fewer than 7
+    # rather than repeating an old pick (Slack history already has it).
     unseen_candidates = [
         job
         for job in candidates
         if job.dedupe_key not in previous_top_pick_keys
         and f"{normalize_words(job.title)}|{normalize_words(job.company_name)}" not in previous_top_pick_pairs
     ]
-    repeat_candidates = [job for job in candidates if job not in unseen_candidates]
-    unseen_candidates, unseen_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
-    repeat_candidates, repeat_reasons = judge_top_candidates(repeat_candidates, candidate_limit=10)
-    llm_reasons = {**repeat_reasons, **unseen_reasons}
+    unseen_candidates, llm_reasons = judge_top_candidates(unseen_candidates, candidate_limit=10)
 
     selected: list[JobListing] = []
     companies: set[str] = set()
@@ -559,8 +559,6 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
 
     unseen_ai_candidates = [job for job in unseen_candidates if float(job.ai_score or 0.0) >= 0.35]
     unseen_startup_fallbacks = [job for job in unseen_candidates if float(job.ai_score or 0.0) < 0.35]
-    repeat_ai_candidates = [job for job in repeat_candidates if float(job.ai_score or 0.0) >= 0.35]
-    repeat_startup_fallbacks = [job for job in repeat_candidates if float(job.ai_score or 0.0) < 0.35]
 
     # Fresh AI/data/ML roles are the primary digest. Source/company diversity is
     # softened only after score-first passes fail to fill the seven slots.
@@ -576,6 +574,9 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     pick_from(unseen_startup_fallbacks, max_per_source=None)
     pick_from(unseen_startup_fallbacks, max_per_source=None, allow_same_company=True)
 
+    # `selected` is in pick order (diversified across source/company caps), not score
+    # order, so re-sort before numbering - otherwise #1 can score lower than #4.
+    selected.sort(key=lambda job: (-job.ranking_score, job.id))
     for index, job in enumerate(selected, start=1):
         job.is_top_pick = True
         job.rank = index

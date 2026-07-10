@@ -6,7 +6,7 @@ from typing import Any
 
 from jobs.conf import settings
 from jobs.services.job_scoring import is_target_role_title, rerank_for_relevance, score_job
-from jobs.services.location_eligibility import classify_with_rules, searchable_text
+from jobs.services.location_eligibility import classify_with_rules, scan_disqualifying_signals, searchable_text
 from jobs.services.summaries import build_job_summary
 
 
@@ -72,10 +72,14 @@ def _job_payload(job: Any) -> dict[str, Any]:
         "posted_text",
         "remote_eligibility",
         "remote_eligibility_score",
-        "ranking_penalty",
     )
     payload = {field: getattr(job, field, None) for field in fields}
     payload["source_quality_score"] = getattr(job, "source_score", 0.0)
+    # Soft-penalty signals (company stage, seniority, placeholder employer names, ...)
+    # aren't stored as their own column, so recompute them here rather than reading a
+    # stale/nonexistent value - otherwise every re-screening pass silently drops them.
+    signals = scan_disqualifying_signals(payload)
+    payload["ranking_penalty"] = min(0.35, sum(signal.penalty for signal in signals)) if signals else 0.0
     return payload
 
 

@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 
 from jobs.services.logos import logo_url_for_company
 
@@ -26,6 +27,10 @@ RELEVANCE_PATTERNS = (
 HEADERS = {
     "User-Agent": "RooJobsDaily/0.1 (+https://roo.jobs)",
     "Accept": "application/json",
+}
+HTML_HEADERS = {
+    "User-Agent": "RooJobsDaily/0.1 (+https://roo.jobs)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 
@@ -61,6 +66,13 @@ def map_workforce_job(item: dict[str, Any], query: str) -> dict[str, Any] | None
         return None
 
     company = item.get("employerName") or None
+    if not company:
+        # Some listings (usually recruiter-sourced, syndicated from CareerOne etc.) come
+        # through with no employer name at all. The description embeds a link to the
+        # original posting, which almost always carries the real employer name.
+        apply_link = extract_apply_link(item.get("description"))
+        if apply_link:
+            company = fetch_external_company_name(apply_link)
     location = format_location(item)
     description = item.get("description")
     if not is_relevant(title, description):
@@ -84,6 +96,34 @@ def map_workforce_job(item: dict[str, Any], query: str) -> dict[str, Any] | None
         "job_url": job_url,
         "apply_url": job_url,
     }
+
+
+def extract_apply_link(description: str | None) -> str | None:
+    if not description:
+        return None
+    link = BeautifulSoup(description, "html.parser").find("a", href=True)
+    return link["href"] if link else None
+
+
+def fetch_external_company_name(url: str) -> str | None:
+    try:
+        response = requests.get(url, headers=HTML_HEADERS, timeout=15, allow_redirects=True)
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+    return extract_company_from_job_posting_page(response.text)
+
+
+def extract_company_from_job_posting_page(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.select('script[type="application/ld+json"]'):
+        text = script.string or script.get_text()
+        if '"JobPosting"' not in text:
+            continue
+        match = re.search(r'"hiringOrganization"\s*:\s*\{[^}]*?"name"\s*:\s*"([^"]+)"', text)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    return None
 
 
 def format_location(item: dict[str, Any]) -> str | None:
