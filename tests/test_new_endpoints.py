@@ -1454,6 +1454,124 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertTrue(pending["previewRuntimeUnsupported"])
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_baseline_block_is_code_review_ready_not_unsupported(self, mock_send_dm):
+        organization = Organization.objects.create(name="Sheldon Health", domain="sheldonhealth.com.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-baseline-blocked",
+                }
+            },
+        )
+        reason = "Build error: Error: supabaseUrl is required. Failed to collect page data for /api/ai/summarize."
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_code_review_ready",
+                "job_id": "setup-baseline-blocked",
+                "run_id": "setup-baseline-blocked",
+                "workflow": "article_system_setup",
+                "domain": "sheldonhealth.com.au",
+                "github_repo": "sheldonhealth/v0-sheldon-health-app",
+                "approve_url": "/api/runs/setup-baseline-blocked/approve",
+                "deny_url": "/api/runs/setup-baseline-blocked/deny",
+                "baseline_build_blocked": True,
+                "preview_runtime_unsupported": False,
+                "code_review_reason": reason,
+                "article_system_setup": {
+                    "status": "code_review_ready",
+                    "setup_run_id": "setup-baseline-blocked",
+                    "branch_name": "feature/articles-publish-route-baseline",
+                    "baseline_build_blocked": True,
+                    "code_review_reason": reason,
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-baseline-blocked")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+        self.assertTrue(setup_run.result["baseline_build_blocked"])
+        self.assertFalse(setup_run.result["preview_runtime_unsupported"])
+        self.assertIn("supabaseUrl is required", setup_run.result["code_review_reason"])
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertTrue(pending["baselineBuildBlocked"])
+        self.assertFalse(pending["previewRuntimeUnsupported"])
+        self.assertIn("supabaseUrl is required", pending["codeReviewReason"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_cancelled_callback_is_terminal_and_clears_owned_config(self, mock_send_dm):
+        organization = Organization.objects.create(name="Cancel Co", domain="cancel.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "running",
+                    "setup_run_id": "setup-callback-cancel",
+                }
+            },
+            article_system_setup_cache={"setup_run_id": "setup-callback-cancel"},
+            publish_targets=[
+                {
+                    "target_id": "setup-target",
+                    "source": "scaffold_cache",
+                    "setup_run_id": "setup-callback-cancel",
+                }
+            ],
+            default_publish_target_id="setup-target",
+        )
+        ContentFactoryRun.objects.create(
+            run_id="setup-callback-cancel",
+            workflow="article_system_setup",
+            domain="cancel.example",
+            github_repo="acme/site",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            result={"status": "running"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_cancelled",
+                "job_id": "setup-callback-cancel",
+                "run_id": "setup-callback-cancel",
+                "workflow": "article_system_setup",
+                "domain": "cancel.example",
+                "github_repo": "acme/site",
+                "status": "cancelled",
+                "current_step": "cancelled",
+                "cleanup": {"setup_branch": {"status": "deleted"}},
+                "article_system_setup": {
+                    "status": "cancelled",
+                    "setup_run_id": "setup-callback-cancel",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("callback processed", response.data["message"])
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-callback-cancel")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(setup_run.current_step, "cancelled")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        config.refresh_from_db()
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertEqual(config.article_system_setup_cache, {})
+        self.assertEqual(config.publish_targets, [])
+        self.assertIsNone(config.default_publish_target_id)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_progress_callback_replaces_stale_failure(self, mock_send_dm):
         ContentFactoryRun.objects.create(
             run_id="setup-run-retry-progress",

@@ -29,7 +29,7 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
-from content_factory.article_setup_reset import carry_reset_markers
+from content_factory.article_setup_reset import carry_reset_markers, clear_cancelled_article_setup_config
 from content_factory.authors import normalize_authors, org_config_author_payload
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
@@ -2496,6 +2496,17 @@ def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: d
         "directoryVisualStyleReport",
         "directory_visual_repair",
         "directoryVisualRepair",
+        "directory_build_verification",
+        "baseline_build_blocked",
+        "baselineBuildBlocked",
+        "code_review_only",
+        "codeReviewOnly",
+        "code_review_reason",
+        "codeReviewReason",
+        "preview_runtime_unsupported",
+        "previewRuntimeUnsupported",
+        "preview_unsupported_reason",
+        "previewUnsupportedReason",
         "output_excerpt",
     ):
         value = data.get(key)
@@ -2755,6 +2766,48 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = current_step_value
         error = ""
+    elif event_type == "article_system_setup_cancelled":
+        setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
+        setup_payload.update(
+            {
+                "status": "cancelled",
+                "setup_run_id": run_id,
+                "source_setup_run_id": result.get("source_setup_run_id") or run_id,
+                "current_step": "cancelled",
+                "currentStep": "cancelled",
+                "cancelled": True,
+                "cancelled_at": data.get("cancelled_at") or timezone.now().isoformat(),
+                "approve_url": None,
+                "deny_url": None,
+                "requested_action": None,
+                "retry_available": False,
+                "retryable": False,
+                "cleanup": data.get("cleanup") if isinstance(data.get("cleanup"), dict) else {},
+            }
+        )
+        result.update(
+            {
+                "status": "cancelled",
+                "setup_status": "cancelled",
+                "setupStatus": "cancelled",
+                "cancelled": True,
+                "cancelled_at": setup_payload["cancelled_at"],
+                "current_step": "cancelled",
+                "currentStep": "cancelled",
+                "approve_url": None,
+                "deny_url": None,
+                "requested_action": None,
+                "retry_available": False,
+                "retryable": False,
+                "cleanup": setup_payload["cleanup"],
+                "article_system_setup": setup_payload,
+            }
+        )
+        run_status = ContentFactoryRunStatus.CANCELLED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "cancelled"
+        error = ""
     elif event_type == "article_system_setup_completed":
         setup_payload = dict(setup_payload)
         setup_payload.update(common_fields)
@@ -2918,7 +2971,29 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
         setup_payload["live_preview_url"] = live_preview_url_value
         setup_payload["preview_url"] = ""
-        setup_payload["preview_runtime_unsupported"] = True
+        baseline_build_blocked = bool(
+            data.get("baseline_build_blocked")
+            or data.get("baselineBuildBlocked")
+            or setup_payload.get("baseline_build_blocked")
+            or result.get("baseline_build_blocked")
+        )
+        preview_runtime_unsupported = bool(
+            data.get("preview_runtime_unsupported")
+            or data.get("previewRuntimeUnsupported")
+            or setup_payload.get("preview_runtime_unsupported")
+            or result.get("preview_runtime_unsupported")
+        ) and not baseline_build_blocked
+        code_review_reason = str(
+            data.get("code_review_reason")
+            or data.get("codeReviewReason")
+            or setup_payload.get("code_review_reason")
+            or result.get("code_review_reason")
+            or ""
+        ).strip()
+        setup_payload["baseline_build_blocked"] = baseline_build_blocked
+        setup_payload["code_review_only"] = True
+        setup_payload["code_review_reason"] = code_review_reason
+        setup_payload["preview_runtime_unsupported"] = preview_runtime_unsupported
         setup_payload["preview_unsupported_reason"] = str(
             data.get("preview_unsupported_reason") or setup_payload.get("preview_unsupported_reason") or ""
         )
@@ -2931,7 +3006,10 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         result["preview_url"] = ""
         result["approve_url"] = setup_payload["approve_url"]
         result["deny_url"] = setup_payload["deny_url"]
-        result["preview_runtime_unsupported"] = True
+        result["baseline_build_blocked"] = baseline_build_blocked
+        result["code_review_only"] = True
+        result["code_review_reason"] = code_review_reason
+        result["preview_runtime_unsupported"] = preview_runtime_unsupported
         result["preview_unsupported_reason"] = setup_payload["preview_unsupported_reason"]
         result["article_system_setup"] = setup_payload
         result["livePreview"] = live_preview
@@ -3102,7 +3180,29 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                 }
             )
             parent.result = sanitize_json_for_postgres(parent_result)
-            if parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
+            if event_type == "article_system_setup_cancelled":
+                parent_result.update(
+                    {
+                        "status": "article_system_setup_cancelled",
+                        "scaffold_status": "cancelled",
+                        "requested_action": None,
+                        "approve_url": None,
+                        "deny_url": None,
+                    }
+                )
+                parent.result = sanitize_json_for_postgres(parent_result)
+                if parent.status in {
+                    ContentFactoryRunStatus.QUEUED,
+                    ContentFactoryRunStatus.RUNNING,
+                    ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+                    ContentFactoryRunStatus.AWAITING_APPROVAL,
+                    ContentFactoryRunStatus.BLOCKED,
+                }:
+                    parent.status = ContentFactoryRunStatus.COMPLETED
+                parent.current_step = "finalize"
+                parent.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                parent.error = ""
+            elif parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
                 parent.status = ContentFactoryRunStatus.COMPLETED
                 parent.current_step = (
                     "article_system_setup_preview_failed"
@@ -3113,7 +3213,24 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     if event_type == "article_system_setup_pr_created"
                     else "article_system_setup_preview"
                 )
-            parent.save(update_fields=["status", "result", "current_step", "updated_at"])
+            parent.save(
+                update_fields=[
+                    "status",
+                    "result",
+                    "current_step",
+                    "approval_state",
+                    "error",
+                    "updated_at",
+                ]
+            )
+
+    if event_type == "article_system_setup_cancelled":
+        config = OrganizationContentConfig.objects.filter(
+            organization__domain__iexact=result["domain"]
+        ).first()
+        if config is not None:
+            clear_cancelled_article_setup_config(config, setup_run_id=run_id)
+        return run
 
     _update_pending_article_system_setup_for_domain(
         result["domain"],
@@ -3175,6 +3292,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         preview_runtime_unsupported=result.get("preview_runtime_unsupported"),
         previewUnsupportedReason=result.get("preview_unsupported_reason"),
         preview_unsupported_reason=result.get("preview_unsupported_reason"),
+        baselineBuildBlocked=result.get("baseline_build_blocked"),
+        baseline_build_blocked=result.get("baseline_build_blocked"),
+        codeReviewOnly=result.get("code_review_only"),
+        code_review_only=result.get("code_review_only"),
+        codeReviewReason=result.get("code_review_reason"),
+        code_review_reason=result.get("code_review_reason"),
     )
     if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
         _mark_article_system_setup_generation_ready_for_domain(
@@ -3419,6 +3542,7 @@ class ContentFactoryCallbackView(APIView):
             'article_system_setup_revision_ready',
             'article_system_setup_progress',
             'article_system_setup_preview_failed',
+            'article_system_setup_cancelled',
             'article_system_setup_completed',
             'article_system_setup_pr_created',
             'article_system_setup_manual_merge_required',
