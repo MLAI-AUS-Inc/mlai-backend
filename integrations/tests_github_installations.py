@@ -99,13 +99,16 @@ class GitHubInstallationRegistryTests(TestCase):
         self.assertEqual(
             gh.installation_for_repo(self.founder, "HB-Vastu/coworkadelaide").installation_id, "144909617")
 
-    def test_installation_for_repo_single_shortcut_and_empty(self):
+    def test_installation_for_repo_single_owner_match_and_empty(self):
         # Empty registry -> None
         self.assertIsNone(gh.installation_for_repo(self.founder, "x/y"))
-        # Single installation -> returned without any API listing (no mock needed)
+        # A single installation is safe to use only for its own account.
         gh.upsert_github_installation(user=self.founder, installation_id="144909617", account_login="HB-Vastu")
         self.assertEqual(
             gh.installation_for_repo(self.founder, "HB-Vastu/studynash").installation_id, "144909617")
+        self.assertIsNone(
+            gh.installation_for_repo(self.founder, "sheldonhealth/v0-sheldon-health-app")
+        )
 
     @mock.patch.object(gh, "create_installation_access_token", return_value=_FakeInstToken("ghs_minted"))
     def test_mint_user_repo_token_uses_resolved_installation(self, m_create):
@@ -164,6 +167,20 @@ class GitHubRegistryCrossCompanyResolutionTests(TestCase):
         GitHubInstallation.objects.all().delete()  # empty registry
         self.assertEqual(
             _resolve_installation_id_for_repo(self.cfg_a, "HB-Vastu/internash-ai-builder"), "144909617")
+
+    def test_resolve_installation_does_not_fall_back_to_stale_org_id_when_registry_mismatches(self):
+        from content_factory.vibe_marketing_views import _resolve_installation_id_for_repo
+
+        self.cfg_b.github_repo = "sheldonhealth/v0-sheldon-health-app"
+        self.cfg_b.github_installation_id = "144909617"
+        self.cfg_b.save(update_fields=["github_repo", "github_installation_id"])
+
+        self.assertEqual(
+            _resolve_installation_id_for_repo(
+                self.cfg_b, "sheldonhealth/v0-sheldon-health-app"
+            ),
+            "",
+        )
 
     @mock.patch.object(gh, "create_installation_access_token", return_value=_FakeInstToken("ghs_minted"))
     def test_get_github_credentials_mints_from_registry_for_company_b(self, _m_create):
