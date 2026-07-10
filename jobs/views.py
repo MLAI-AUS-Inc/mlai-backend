@@ -70,7 +70,6 @@ def _render_job_card(job: JobListing) -> str:
       <p class="meta">{escape(job.company_name or "Unknown company")} - {escape(job.location or "Location not listed")} - {escape(job.source_name)}</p>
       <p>{escape(job.summary or job.why_selected or "Good match for today.")}</p>
       <p class="meta">{escape(job.company_stage or "")} {escape(job.company_size or "")} {escape((job.remote_eligibility or "").replace("_", " ").title())}</p>
-      <p class="score">Score: {job.ranking_score:.2f}</p>
       <p><a href="{link}" target="_blank" rel="noopener noreferrer">Read more</a></p>
     </article>
     """
@@ -299,7 +298,6 @@ class DailyJobsHtmlView(APIView):
             .job {{ background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 18px; margin-bottom: 14px; }}
             .job[hidden] {{ display: none; }}
             .meta {{ color: #52616b; font-size: 14px; margin: 6px 0; }}
-            .score {{ color: #0f766e; font-weight: 700; }}
             .tag {{ display: inline-block; background: #e6f4f1; color: #0f5f59; border-radius: 8px; padding: 4px 8px; margin-right: 6px; font-size: 12px; }}
             .empty-state {{ display: none; background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 18px; color: #52616b; }}
             .empty-state.visible {{ display: block; }}
@@ -318,7 +316,6 @@ class DailyJobsHtmlView(APIView):
                 <input id="role-search" class="search-input" type="search" placeholder="Search role" aria-label="Search role">
                 <div class="filters">
                   {filter_html}
-                  <a class="filter-link" href="/api/v1/jobs/daily/{escape(run_date)}/json">JSON feed</a>
                 </div>
               </div>
               <p class="meta">Showing: {escape(selected_bucket.replace("_", " ").title() if selected_bucket else "All matched jobs")}</p>
