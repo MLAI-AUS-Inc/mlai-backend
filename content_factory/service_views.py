@@ -1176,7 +1176,8 @@ class ContentFactoryTokenView(APIView):
                 # Fetch config for additional context
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
-                github_repo = requested_repo or str(config.github_repo or '').strip()
+                configured_repo = str(config.github_repo or '').strip()
+                github_repo = requested_repo or configured_repo
                 installation_id = str(config.github_installation_id or '').strip()
 
                 # Resolve repository access from the founder's installation
@@ -1214,7 +1215,11 @@ class ContentFactoryTokenView(APIView):
                         )
 
                     installation_id = str(registry_installation.installation_id or '').strip()
-                    if installation_id and installation_id != str(config.github_installation_id or '').strip():
+                    if (
+                        installation_id
+                        and installation_id != str(config.github_installation_id or '').strip()
+                        and github_repo.casefold() == configured_repo.casefold()
+                    ):
                         previous_installation_id = str(config.github_installation_id or '').strip()
                         config.github_installation_id = installation_id
                         config.save(update_fields=['github_installation_id', 'updated_at'])
