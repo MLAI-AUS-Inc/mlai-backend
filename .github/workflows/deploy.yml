@@ -67,6 +67,9 @@ jobs:
           tests.test_content_factory_org_config \
           tests.test_new_endpoints.EndpointTests \
           tests.test_new_endpoints.ContentFactoryCallbackTests \
+          tests.test_content_factory_callback_idempotency \
+          tests.test_content_factory_reconciliation \
+          tests.test_content_factory_status_contract \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           hospital.test_sim_contest \

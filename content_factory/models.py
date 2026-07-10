@@ -489,16 +489,26 @@ class ContentFactoryCallbackEvent(models.Model):
 
     content-factory stamps each callback with a unique event_id and retries
     failed deliveries from a durable outbox, so the same event can arrive more
-    than once. A row here means the event was already acknowledged with a 2xx
-    response; replays return 200 without reprocessing. This must be a DB table
-    rather than Django cache: production uses per-process LocMemCache, which
-    is invisible to other workers and lost on restart.
+    than once. This must be a DB table rather than Django cache: production
+    uses per-process LocMemCache, which is invisible to other workers and lost
+    on restart.
+
+    Rows are leases, not just tombstones: `claimed_at` is stamped when a
+    delivery claims the event and `processed_at` only after its handler
+    succeeded. A row with `processed_at` set is done — replays return 200
+    without reprocessing. A row claimed but never processed means the worker
+    died mid-handler (SIGKILL/OOM/deploy restart — soft failures release the
+    claim in the view); once the claim is older than the lease TTL, the
+    sender's retry reclaims and reprocesses it instead of being falsely acked
+    as a duplicate.
     """
 
     event_id = models.CharField(max_length=100, unique=True, db_index=True)
     job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     event_type = models.CharField(max_length=100, blank=True, default="")
     emitted_at = models.DateTimeField(blank=True, null=True)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    processed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

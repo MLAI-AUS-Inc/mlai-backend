@@ -381,22 +381,46 @@ ARTICLE_SYSTEM_SETUP_BLOCKING_STATUSES = {
     "running",
     "processing",
     "preview_building",
+    "preview_verifying",
+    "repair_preview_building",
+    "revision_preview_building",
     "preview_ready",
     "code_review_ready",
     "revision_ready",
+    # fallback_ready is a reviewable state (see REVIEWABLE set above); it was
+    # historically missing here, letting the wizard drop ownership while a
+    # fallback preview sat waiting for the founder's review.
+    "fallback_ready",
     "awaiting_approval",
     "awaiting_confirmation",
     "approval_required",
     "await_review",
     "preview_failed",
+    "preview_not_available",
     "failed",
     "blocked",
     "pr_created",
     "setup_pr_created",
+    "setup_pr_create_failed",
     "manual_merge_required",
     "manual_blocked",
     "completed",
     *ARTICLE_SYSTEM_SETUP_MERGED_STATUSES,
+}
+# content-factory setup statuses that deliberately do NOT hold the wizard:
+# terminal user decisions (denied/cancelled) and scan-classification verdicts
+# that arrive through the same status field. Every status content-factory can
+# emit must be in exactly one of BLOCKING/NONBLOCKING — the contract test
+# (tests/test_content_factory_status_contract.py, backed by
+# contracts/run-statuses.json) fails when a new factory status is
+# unclassified, instead of it silently falling through as "not blocking".
+ARTICLE_SYSTEM_SETUP_NONBLOCKING_STATUSES = {
+    "denied",
+    "cancelled",
+    "ready",
+    "complete",
+    "upgrade_required",
+    "create_required",
 }
 ARTICLE_DELIVERY_MODES = {"content_only", "review_draft", "publish_code"}
 LEGACY_REVIEW_BLOCKING_DELIVERY_MODES = {"content_only", "publish_code"}
