@@ -509,7 +509,7 @@ class JobsSchedulerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("AI Engineer", response.content.decode())
-        self.assertIn("JSON feed", response.content.decode())
+        self.assertNotIn("JSON feed", response.content.decode())
 
     def test_jobs_history_html_page_renders_browser_friendly_links(self):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-history-html")
