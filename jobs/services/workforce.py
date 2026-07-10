@@ -67,9 +67,12 @@ def map_workforce_job(item: dict[str, Any], query: str) -> dict[str, Any] | None
 
     company = item.get("employerName") or None
     if not company:
-        # Some listings (usually recruiter-sourced, syndicated from CareerOne etc.) come
-        # through with no employer name at all. The description embeds a link to the
-        # original posting, which almost always carries the real employer name.
+        # Some listings (usually recruiter-sourced) come through with no employer name
+        # at all. Try the cheap path first: the description sometimes has a plain-text
+        # "Company: X" label. Only fall back to following the embedded apply link (an
+        # extra network fetch) when that's not there.
+        company = extract_company_label_from_text(item.get("description"))
+    if not company:
         apply_link = extract_apply_link(item.get("description"))
         if apply_link:
             company = fetch_external_company_name(apply_link)
@@ -98,8 +101,20 @@ def map_workforce_job(item: dict[str, Any], query: str) -> dict[str, Any] | None
     }
 
 
-def extract_apply_link(description: str | None) -> str | None:
+def extract_company_label_from_text(description: str | None) -> str | None:
     if not description:
+        return None
+    # Descriptions come through as either plain text or HTML paragraphs depending on
+    # the original listing source, so normalize to plain text before matching.
+    text = BeautifulSoup(description, "html.parser").get_text(" ") if "<" in description else description
+    match = re.search(r"\bCompany:\s*([^\n]+?)(?:\s+Location:|\s+View more detail|$)", text, re.I)
+    if match:
+        return re.sub(r"\s+", " ", match.group(1)).strip().rstrip(".")
+    return None
+
+
+def extract_apply_link(description: str | None) -> str | None:
+    if not description or "<" not in description:
         return None
     link = BeautifulSoup(description, "html.parser").find("a", href=True)
     return link["href"] if link else None
