@@ -44,6 +44,7 @@ from content_factory.delivery import (
     validate_content_factory_preview_signature,
 )
 from content_factory.article_publish_status import advance_publish_status
+from content_factory.dispatch_binding import bind_dispatch_token_run
 from content_factory.github_webhook import process_github_event, verify_github_signature
 from content_factory.models import (
     ArticlePublishStatus,
@@ -2116,6 +2117,9 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    # First signal carrying the real run id: bind any provisional local run
+    # still keyed by this callback's dispatch token (lost-response dispatch).
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     step_key = str(
         data.get("failed_step")
@@ -2206,6 +2210,7 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
@@ -2584,6 +2589,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)

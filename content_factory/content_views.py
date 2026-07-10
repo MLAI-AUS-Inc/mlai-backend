@@ -989,12 +989,14 @@ class ContentJobConfirmView(APIView):
             if opt_keyword and opt_keyword != confirmed_keyword:
                 skip_alternatives.append(opt_keyword)
 
-        # Update job status
-        job.status = 'confirmed'
+        # Record the user's selection, but do NOT flip status to 'confirmed' yet:
+        # confirm_topic below can fail (backend unavailable, generation error), and no
+        # failure handler restores the status — an early write would leave a phantom
+        # 'confirmed' job with no run behind it. Status is stamped after success.
         job.selected_keyword = confirmed_keyword
         job.slack_user_id = slack_user_id
         job.request_meta = request_meta
-        job.save(update_fields=["status", "selected_keyword", "slack_user_id", "request_meta", "updated_at"])
+        job.save(update_fields=["selected_keyword", "slack_user_id", "request_meta", "updated_at"])
 
         # Trigger article generation via Content Factory HTTP API
         try:
@@ -1020,6 +1022,11 @@ class ContentJobConfirmView(APIView):
                 confirm_kwargs["requested_by_slack_user_id"] = requested_by_slack_user_id
 
             result = confirm_topic(**confirm_kwargs)
+            # Content Factory accepted the confirmation — only now is 'confirmed' true.
+            # Narrow update_fields: confirm_topic's deferred-charge path may have
+            # rewritten request_meta/billing on a fresh instance of this row.
+            job.status = 'confirmed'
+            job.save(update_fields=["status", "updated_at"])
             result_status = str(result.get("status") or "").strip()
             new_job_id = result.get("job_id") or result.get("run_id")
             active_job_id = new_job_id or job.job_id
