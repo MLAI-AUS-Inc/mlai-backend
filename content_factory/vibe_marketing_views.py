@@ -902,6 +902,82 @@ def _clean_github_repo(value) -> str:
     return str(value or "").strip()
 
 
+def _explicit_company_scope_required_response(request, context):
+    """Require tenant pinning for GitHub mutations by multi-company founders.
+
+    Repository selection changes durable organization state. Falling back to the
+    profile's mutable ``active_company`` is unsafe when a founder owns several
+    startups because a request rendered for company A can otherwise land on
+    company B after a concurrent switch or an omitted frontend field.
+    """
+    if _company_id_from_request(request) or context.profile.companies.count() <= 1:
+        return None
+    return Response(
+        {
+            "status": "company_context_required",
+            "error": "company_context_required",
+            "detail": "Select the company again before connecting, scanning, or building this repository.",
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _github_repo_company_conflict_response(*, context, requested_repo: str):
+    """Block one founder's repo from silently carrying two company contexts."""
+    repo = _clean_github_repo(requested_repo)
+    if not repo:
+        return None
+
+    conflicting_org_ids = OrganizationContentConfig.objects.filter(
+        github_repo__iexact=repo,
+    ).exclude(
+        organization=context.organization,
+    ).values_list("organization_id", flat=True)
+    conflicting_company = (
+        context.profile.companies.filter(organization_id__in=conflicting_org_ids)
+        .select_related("organization")
+        .order_by("created_at", "id")
+        .first()
+    )
+    if conflicting_company is None:
+        return None
+
+    logger.warning(
+        "vibe_marketing_repo_company_conflict repo=%s requested_company=%s connected_company=%s user_id=%s",
+        repo,
+        context.company.id,
+        conflicting_company.id,
+        context.profile.user_id,
+    )
+    return Response(
+        {
+            "status": "repository_company_conflict",
+            "error": "repository_company_conflict",
+            "detail": (
+                f"{repo} is already connected to {conflicting_company.name}. "
+                f"Switch to {conflicting_company.name}, or choose a different repository for {context.company.name}."
+            ),
+            "githubRepo": repo,
+            "github_repo": repo,
+            "requestedCompany": {
+                "id": str(context.company.id),
+                "name": context.company.name,
+                "domain": context.organization.domain,
+            },
+            "connectedCompany": {
+                "id": str(conflicting_company.id),
+                "name": conflicting_company.name,
+                "domain": (
+                    conflicting_company.organization.domain
+                    if conflicting_company.organization
+                    else conflicting_company.domain
+                ),
+            },
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 def _github_repo_matches(candidate: str, expected: str) -> bool:
     return bool(candidate and expected and candidate.casefold() == expected.casefold())
 
@@ -13019,6 +13095,9 @@ class VibeMarketingGitHubConnectView(APIView):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
+        scope_response = _explicit_company_scope_required_response(request, context)
+        if scope_response:
+            return scope_response
         config = _get_config(context.organization)
         actor_id = founder_actor_id_for_user(request.user)
         config_update_fields = _assign_config_actor(config, request.user)
@@ -13026,6 +13105,12 @@ class VibeMarketingGitHubConnectView(APIView):
             _request_value(request.data, "force_reconnect", "forceReconnect", default=False)
         )
         requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
+        conflict_response = _github_repo_company_conflict_response(
+            context=context,
+            requested_repo=requested_repo or config.github_repo,
+        )
+        if conflict_response:
+            return conflict_response
         if requested_repo and not force_reconnect:
             config.github_repo = requested_repo
             config_update_fields.append("github_repo")
@@ -13091,6 +13176,9 @@ class VibeMarketingGitHubReposView(APIView):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
+        scope_response = _explicit_company_scope_required_response(request, context)
+        if scope_response:
+            return scope_response
 
         config = _get_config(context.organization)
         actor_id = founder_actor_id_for_user(request.user)
@@ -13258,7 +13346,17 @@ class VibeMarketingScanView(APIView):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
+        scope_response = _explicit_company_scope_required_response(request, context)
+        if scope_response:
+            return scope_response
         config = _get_config(context.organization)
+        requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
+        conflict_response = _github_repo_company_conflict_response(
+            context=context,
+            requested_repo=requested_repo or config.github_repo,
+        )
+        if conflict_response:
+            return conflict_response
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
             domain=context.organization.domain,
@@ -13266,8 +13364,8 @@ class VibeMarketingScanView(APIView):
         )
         if gate_response is not None:
             return gate_response
-        if request.data.get("github_repo") or request.data.get("githubRepo"):
-            config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
+        if requested_repo:
+            config.github_repo = requested_repo
             config.save(update_fields=["github_repo", "updated_at"])
         explicit_scan_purpose = _request_value(request.data, "scanPurpose", "scan_purpose", default=None)
         scan_purpose = str(
@@ -13385,7 +13483,17 @@ class VibeMarketingArticleSystemSetupView(APIView):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
+        scope_response = _explicit_company_scope_required_response(request, context)
+        if scope_response:
+            return scope_response
         config = _get_config(context.organization)
+        requested_repo = _clean_github_repo(request.data.get("github_repo") or request.data.get("githubRepo"))
+        conflict_response = _github_repo_company_conflict_response(
+            context=context,
+            requested_repo=requested_repo or config.github_repo,
+        )
+        if conflict_response:
+            return conflict_response
         gate_response, gate_balance = _require_roo_points_for_ai_agent(
             request.user,
             domain=context.organization.domain,
@@ -13393,8 +13501,8 @@ class VibeMarketingArticleSystemSetupView(APIView):
         )
         if gate_response is not None:
             return gate_response
-        if request.data.get("github_repo") or request.data.get("githubRepo"):
-            config.github_repo = request.data.get("github_repo") or request.data.get("githubRepo")
+        if requested_repo:
+            config.github_repo = requested_repo
             config.save(update_fields=["github_repo", "updated_at"])
         try:
             article_surface_hint, article_surface_mode, article_surface_url = _article_surface_hint_from_request(
