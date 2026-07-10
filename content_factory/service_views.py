@@ -49,6 +49,8 @@ from content_factory.models import (
     ArticlePublishStatus,
     ComponentMapping,
     ContentFactoryHealingRecord,
+    ContentFactoryLearningEntry,
+    ContentFactoryLearningScope,
     GeneratedComponent,
     OrganizationContentConfig,
     WebsiteBaselineSnapshot,
@@ -61,6 +63,7 @@ from content_factory.progress import (
 )
 from content_factory.serializers import (
     ContentFactoryHealingRecordSerializer,
+    ContentFactoryLearningEntrySerializer,
     GeneratedComponentListSerializer,
     GeneratedComponentSerializer,
 )
@@ -889,6 +892,7 @@ class ContentFactoryHealingRecordView(APIView):
         github_repo = str(request.query_params.get("github_repo") or "").strip()
         failure_kind = str(request.query_params.get("failure_kind") or "").strip()
         failure_family_key = str(request.query_params.get("failure_family_key") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
         promotion_state = str(request.query_params.get("promotion_state") or "").strip()
         limit_raw = str(request.query_params.get("limit") or "").strip()
 
@@ -900,6 +904,8 @@ class ContentFactoryHealingRecordView(APIView):
             records = records.filter(failure_kind=failure_kind)
         if failure_family_key:
             records = records.filter(failure_family_key=failure_family_key)
+        if framework:
+            records = records.filter(framework=framework)
         if promotion_state:
             records = records.filter(promotion_state=promotion_state)
 
@@ -949,6 +955,7 @@ class ContentFactoryHealingRecordView(APIView):
             github_repo=github_repo,
             failure_kind=failure_kind,
             failure_family_key=failure_family_key,
+            framework=data.get("framework") or "",
             defaults=defaults,
         )
         response_payload = ContentFactoryHealingRecordSerializer(record).data
@@ -956,6 +963,100 @@ class ContentFactoryHealingRecordView(APIView):
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryLearningEntryView(APIView):
+    """
+    GET/POST entries for Content Factory's durable learning stores
+    (error_fix_pairs, build_failures). Entries are opaque payloads keyed by
+    (store, scope, repo_name, framework, entry_key); all merge semantics live
+    in Content Factory, this endpoint only persists.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    MAX_BATCH = 200
+
+    def get(self, request):
+        store = str(request.query_params.get("store") or "").strip()
+        if not store:
+            return Response(
+                {"error": "store query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        entries = ContentFactoryLearningEntry.objects.filter(store=store)
+
+        scope = str(request.query_params.get("scope") or "").strip()
+        repo_name = str(request.query_params.get("repo_name") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
+        entry_key = str(request.query_params.get("entry_key") or "").strip()
+        limit_raw = str(request.query_params.get("limit") or "").strip()
+
+        if scope:
+            entries = entries.filter(scope=scope)
+        if repo_name:
+            entries = entries.filter(repo_name=repo_name)
+        if framework:
+            entries = entries.filter(framework=framework)
+        if entry_key:
+            entries = entries.filter(entry_key=entry_key)
+
+        limit = 200
+        if limit_raw:
+            try:
+                limit = max(1, min(int(limit_raw), 1000))
+            except ValueError:
+                limit = 200
+
+        serializer = ContentFactoryLearningEntrySerializer(entries.order_by("-updated_at")[:limit], many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        raw_entries = body.get("entries")
+        if raw_entries is None:
+            raw_entries = [body]
+        if not isinstance(raw_entries, list) or not raw_entries:
+            return Response(
+                {"error": "expected an entry object or {\"entries\": [...]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(raw_entries) > self.MAX_BATCH:
+            return Response(
+                {"error": f"batch too large (max {self.MAX_BATCH} entries)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ContentFactoryLearningEntrySerializer(data=raw_entries, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        results = []
+        created_count = 0
+        for data in serializer.validated_data:
+            payload = data.get("payload") or {}
+            try:
+                occurrences = int(payload.get("occurrences") or data.get("occurrences") or 1)
+            except (TypeError, ValueError):
+                occurrences = 1
+            record, created = ContentFactoryLearningEntry.objects.update_or_create(
+                store=data["store"],
+                scope=data.get("scope") or ContentFactoryLearningScope.REPO,
+                repo_name=data.get("repo_name") or "",
+                framework=data.get("framework") or "",
+                entry_key=data["entry_key"],
+                defaults={"payload": payload, "occurrences": occurrences},
+            )
+            if created:
+                created_count += 1
+            item = ContentFactoryLearningEntrySerializer(record).data
+            item["sync_status"] = "created" if created else "updated"
+            results.append(item)
+
+        return Response(
+            {"results": results, "created": created_count, "updated": len(results) - created_count},
+            status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
         )
 
 
