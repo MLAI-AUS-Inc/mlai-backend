@@ -378,14 +378,17 @@ def _delivery_mode_text(run: AutomationRun, data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _founder_tools_run_url(run_id: str) -> str:
+def _founder_tools_run_url(run_id: str, *, expanded_review: bool = False) -> str:
     """Review page for a content-factory run: founder-tools resolves :runId
     to the same id the callbacks carry as job_id/run_id."""
     run_id = str(run_id or "").strip()
     base_url = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
     if not run_id or not base_url:
         return ""
-    return f"{base_url}/founder-tools/marketing/runs/{run_id}"
+    url = f"{base_url}/founder-tools/marketing/runs/{run_id}"
+    if expanded_review:
+        return f"{url}?{urlencode({'articleStep': 'review', 'reviewMode': 'expanded'})}"
+    return url
 
 
 def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
@@ -404,6 +407,111 @@ def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
     if pr_url.startswith("http"):
         lines.append(f"Pull request: {pr_url}")
     return "\n".join(lines)
+
+
+def _review_ready_url(run: AutomationRun, data: dict[str, Any]) -> str:
+    return _founder_tools_run_url(
+        run.article_content_factory_run_id or _callback_job_id(data),
+        expanded_review=True,
+    )
+
+
+def _review_ready_text(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> str:
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    title = str(data.get("title") or data.get("topic") or "Article")
+    review_url = _review_ready_url(run, data)
+    lines = [f"{title} is ready for {domain}."]
+    if review_url:
+        lines.extend(["", f"Review and approve: {review_url}"])
+    if channel and channel.channel_type in {NotificationChannelType.EMAIL, NotificationChannelType.SLACK}:
+        lines.extend(["", f"Manage notifications: {_unsubscribe_url(run, channel)}"])
+    return "\n".join(lines)
+
+
+def _review_ready_email_html(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> str:
+    domain = html.escape(str(data.get("domain") or run.automation.organization.domain or "your site"))
+    title = html.escape(str(data.get("title") or data.get("topic") or "Article"))
+    review_url = html.escape(_review_ready_url(run, data))
+    unsubscribe_url = html.escape(_unsubscribe_url(run, channel))
+    action = (
+        f'<p><a href="{review_url}" style="display:inline-block;padding:12px 18px;'
+        'border-radius:10px;background:#111827;color:#ffffff;text-decoration:none;font-weight:700">'
+        "Review article</a></p>"
+        f'<p style="font-size:13px;color:#6b7280">Or open this link: <a href="{review_url}">{review_url}</a></p>'
+        if review_url
+        else ""
+    )
+    return (
+        f"<p><strong>{title}</strong> is ready for <strong>{domain}</strong>.</p>"
+        f"{action}"
+        f'<p style="font-size:13px"><a href="{unsubscribe_url}">Manage notifications</a></p>'
+    )
+
+
+def _review_ready_slack_blocks(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> list[dict[str, Any]]:
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    title = str(data.get("title") or data.get("topic") or "Article")
+    review_url = _review_ready_url(run, data)
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{title}* is ready for *{domain}*.",
+            },
+        }
+    ]
+    if review_url:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Review article", "emoji": True},
+                        "url": review_url,
+                        "action_id": "review_ready_open_article",
+                    }
+                ],
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"<{_unsubscribe_url(run, channel)}|Manage notifications>",
+                }
+            ],
+        }
+    )
+    return blocks
+
+
+def _whatsapp_review_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
+    """Variables for the review-ready utility template.
+
+    Template contract: {{1}} title, {{2}} domain, {{3}} expanded review URL.
+    The approved template must include the fixed `Reply STOP to opt out.` footer.
+    """
+    return {
+        "1": str(data.get("title") or data.get("topic") or "Article"),
+        "2": str(data.get("domain") or run.automation.organization.domain or "your site"),
+        "3": _review_ready_url(run, data),
+    }
 
 
 def _error_text(run: AutomationRun, data: dict[str, Any]) -> str:
@@ -658,6 +766,13 @@ def _send_channel_delivery(
                         "WhatsApp topic Content template is not configured; attempting plain text for run %s",
                         run.id,
                     )
+            elif not content_sid and event_type == "review_ready":
+                content_sid = str(getattr(settings, "TWILIO_WHATSAPP_REVIEW_CONTENT_SID", "") or "").strip()
+                if not content_sid:
+                    logger.warning(
+                        "WhatsApp review-ready Content template is not configured; attempting plain text for run %s",
+                        run.id,
+                    )
             success, provider_id, response_payload = _send_whatsapp(
                 channel,
                 text=text,
@@ -825,15 +940,16 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.status = AutomationRunStatus.COMPLETED
     run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
 
-    text = _content_ready_text(run, data)
     return _fan_out_event(
         run=run,
         event_type="review_ready",
         request_payload={"event_type": "review_ready", "job_id": job_id},
         build_kwargs=lambda channel: {
-            "text": text,
-            "subject": f"Article ready to review for {run.automation.organization.domain}",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "text": _review_ready_text(run, data, channel),
+            "subject": "Your article is ready to review",
+            "blocks": _review_ready_slack_blocks(run, data, channel),
+            "html_body": _review_ready_email_html(run, data, channel),
+            "whatsapp_variables": _whatsapp_review_variables(run, data),
         },
     )
 

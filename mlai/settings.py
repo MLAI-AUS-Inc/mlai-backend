@@ -509,6 +509,10 @@ TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '
 # {{1}} domain, {{2}}-{{4}} topic titles). Without it, topic sends fall back to
 # plain text and only deliver inside an open 24h service window.
 TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
+# Approved utility Content template for article review notifications (variables:
+# {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
+# template copy must include "Reply STOP to opt out.".
+TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
