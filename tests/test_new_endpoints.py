@@ -335,6 +335,53 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
         self.assertIn("sheldonhealth/v0-sheldon-health-app", response.data["message"])
         create_token.assert_not_called()
 
+    def test_content_factory_token_does_not_rebind_config_for_one_off_requested_repo(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        founder = User.objects.create_user(email="multi@example.com", slack_id="U_MULTI")
+        organization = Organization.objects.create(name="Multi", domain="multi.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_MULTI",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145558994",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145558994",
+            account_login="sheldonhealth",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_innerx",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="145611291",
+            repository="msinclair123/v0-innerx-ai",
+            permissions={"contents": "write", "pull_requests": "write"},
+        )
+
+        with patch(
+            "integrations.services.github_app.github_app_credentials_configured",
+            return_value=True,
+        ), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ):
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "multi.example", "github_repo": "msinclair123/v0-innerx-ai"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_installation_id"], "145611291")
+        config.refresh_from_db()
+        self.assertEqual(config.github_repo, "sheldonhealth/v0-sheldon-health-app")
+        self.assertEqual(config.github_installation_id, "145558994")
+
     def test_github_app_token_error_includes_github_repository_scope_message(self):
         from django.core.cache import cache
 
