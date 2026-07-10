@@ -38,6 +38,7 @@ from rest_framework.views import APIView
 from content_factory.article_setup_reset import (
     article_setup_reset_at,
     article_setup_reset_ignores_run,
+    clear_cancelled_article_setup_config,
     reset_article_setup_config,
 )
 from content_factory.article_system import (
@@ -5850,6 +5851,149 @@ def _release_cancelled_article_keyword(organization, run):
     return keyword
 
 
+def _cancel_local_article_system_setup_run(*, run, organization, remote_data=None):
+    remote_data = remote_data if isinstance(remote_data, dict) else {}
+    now = timezone.now()
+    cleanup = remote_data.get("cleanup") if isinstance(remote_data.get("cleanup"), dict) else {}
+
+    with transaction.atomic():
+        locked_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        previous_result = dict(_run_mapping(locked_run.result))
+        previous_setup = dict(_run_mapping(previous_result.get("article_system_setup")))
+        cancelled_setup = {
+            **previous_setup,
+            **dict(_run_mapping(remote_data.get("article_system_setup"))),
+            "status": ContentFactoryRunStatus.CANCELLED,
+            "setup_run_id": locked_run.run_id,
+            "source_setup_run_id": locked_run.run_id,
+            "current_step": "cancelled",
+            "currentStep": "cancelled",
+            "cancelled": True,
+            "cancelled_at": now.isoformat(),
+            "approve_url": None,
+            "deny_url": None,
+            "requested_action": None,
+            "cleanup": cleanup,
+        }
+        cancelled_result = {
+            **previous_result,
+            "status": ContentFactoryRunStatus.CANCELLED,
+            "setup_status": ContentFactoryRunStatus.CANCELLED,
+            "setupStatus": ContentFactoryRunStatus.CANCELLED,
+            "cancelled": True,
+            "cancelled_at": now.isoformat(),
+            "current_step": "cancelled",
+            "currentStep": "cancelled",
+            "approve_url": None,
+            "deny_url": None,
+            "requested_action": None,
+            "retry_available": False,
+            "retryable": False,
+            "cleanup": cleanup,
+            "article_system_setup": cancelled_setup,
+        }
+
+        VibeMarketingComponentComment.objects.filter(run=locked_run).delete()
+        locked_run.steps.exclude(status=ContentFactoryStepStatus.COMPLETED).update(
+            status=ContentFactoryStepStatus.CANCELLED,
+            message="Cancelled by user.",
+            error="",
+            artifacts=[],
+        )
+        locked_run.status = ContentFactoryRunStatus.CANCELLED
+        locked_run.current_step = "cancelled"
+        locked_run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        locked_run.resume_available = False
+        locked_run.error = ""
+        locked_run.result = sanitize_json_for_postgres(cancelled_result)
+        locked_run.save(
+            update_fields=[
+                "status",
+                "current_step",
+                "approval_state",
+                "resume_available",
+                "error",
+                "result",
+                "updated_at",
+            ]
+        )
+
+        config = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+        config_cleanup = (
+            clear_cancelled_article_setup_config(config, setup_run_id=locked_run.run_id)
+            if config is not None
+            else {"changed": False, "cleared_fields": [], "removed_target_ids": []}
+        )
+
+        run_request = _run_mapping(locked_run.run_request)
+        parent_run_id = str(
+            previous_result.get("parent_run_id")
+            or previous_result.get("scan_run_id")
+            or run_request.get("parent_run_id")
+            or run_request.get("scan_run_id")
+            or ""
+        ).strip()
+        if parent_run_id:
+            parent = ContentFactoryRun.objects.select_for_update().filter(run_id=parent_run_id).first()
+            if parent and parent.domain.casefold() == locked_run.domain.casefold():
+                parent_result = dict(_run_mapping(parent.result))
+                nested_result = dict(_run_mapping(parent_result.get("result")))
+                parent_setup = {
+                    **dict(_run_mapping(parent_result.get("article_system_setup"))),
+                    **cancelled_setup,
+                }
+                nested_result.update(
+                    {
+                        "setup_run_id": locked_run.run_id,
+                        "scaffold_status": "cancelled",
+                        "requested_action": None,
+                        "approve_url": None,
+                        "deny_url": None,
+                        "article_system_setup": parent_setup,
+                    }
+                )
+                parent_result.update(
+                    {
+                        "status": "article_system_setup_cancelled",
+                        "setup_run_id": locked_run.run_id,
+                        "scaffold_status": "cancelled",
+                        "requested_action": None,
+                        "approve_url": None,
+                        "deny_url": None,
+                        "article_system_setup": parent_setup,
+                        "result": nested_result,
+                    }
+                )
+                if parent.status in {
+                    ContentFactoryRunStatus.QUEUED,
+                    ContentFactoryRunStatus.RUNNING,
+                    ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+                    ContentFactoryRunStatus.AWAITING_APPROVAL,
+                    ContentFactoryRunStatus.BLOCKED,
+                }:
+                    parent.status = ContentFactoryRunStatus.COMPLETED
+                    parent.current_step = "finalize"
+                parent.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                parent.error = ""
+                parent.result = sanitize_json_for_postgres(parent_result)
+                parent.save(
+                    update_fields=[
+                        "status",
+                        "current_step",
+                        "approval_state",
+                        "error",
+                        "result",
+                        "updated_at",
+                    ]
+                )
+
+        locked_result = dict(_run_mapping(locked_run.result))
+        locked_result["local_config_cleanup"] = config_cleanup
+        locked_run.result = sanitize_json_for_postgres(locked_result)
+        locked_run.save(update_fields=["result", "updated_at"])
+        return locked_run
+
+
 def _cancel_local_article_run(*, run, organization, remote_data=None):
     remote_data = remote_data if isinstance(remote_data, dict) else {}
     now = timezone.now()
@@ -7665,6 +7809,21 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         or pending.get("preview_unsupported_reason")
         or ""
     ).strip()
+    baseline_build_blocked = bool(
+        setup_payload.get("baseline_build_blocked")
+        or setup_payload.get("baselineBuildBlocked")
+        or setup_result.get("baseline_build_blocked")
+        or pending.get("baselineBuildBlocked")
+        or pending.get("baseline_build_blocked")
+    )
+    code_review_reason = str(
+        setup_payload.get("code_review_reason")
+        or setup_payload.get("codeReviewReason")
+        or setup_result.get("code_review_reason")
+        or pending.get("codeReviewReason")
+        or pending.get("code_review_reason")
+        or ""
+    ).strip()
     active_setup_run = bool(setup_run and setup_run.status in RUNNING_RUN_STATUSES)
     error = "" if active_setup_run else str(
         (setup_run.error if setup_run else "")
@@ -7714,6 +7873,8 @@ def _article_setup_state_for_config(config, *, latest_runs=None, run=None, organ
         "failedStep": failed_step or None,
         "previewRuntimeUnsupported": preview_runtime_unsupported,
         "previewUnsupportedReason": preview_unsupported_reason or None,
+        "baselineBuildBlocked": baseline_build_blocked,
+        "codeReviewReason": code_review_reason or None,
         "previewFailureDetails": preview_failure_details or None,
         "directoryQualityGates": directory_quality_gates or None,
         "directoryBrowserRepair": directory_browser_repair or None,
@@ -7948,6 +8109,15 @@ def _setup_metadata_from_run(run) -> dict:
         "livePreviewUrl": str(
             _setup_value(result, "live_preview_url", "livePreviewUrl")
             or _setup_value(setup, "live_preview_url", "livePreviewUrl")
+            or ""
+        ).strip(),
+        "baselineBuildBlocked": bool(
+            _setup_value(result, "baseline_build_blocked", "baselineBuildBlocked")
+            or _setup_value(setup, "baseline_build_blocked", "baselineBuildBlocked")
+        ),
+        "codeReviewReason": str(
+            _setup_value(result, "code_review_reason", "codeReviewReason")
+            or _setup_value(setup, "code_review_reason", "codeReviewReason")
             or ""
         ).strip(),
     }
@@ -14858,6 +15028,46 @@ class VibeMarketingRunControlView(APIView):
                     transport_errors_are_pending=True,
                 )
                 run = _cancel_local_scan_run(run=run, remote_data=remote_data)
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
+                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+
+            if run.workflow in ARTICLE_SYSTEM_SETUP_WORKFLOWS:
+                if _run_has_external_publish_evidence(run):
+                    return Response(
+                        {
+                            "detail": (
+                                "This articles setup already has setup PR evidence. "
+                                "Close or clean up the external PR manually before cancelling."
+                            )
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                remote_data = _call_content_factory_run_action(
+                    run_id=run_id,
+                    action=action,
+                    payload=payload,
+                    workflow=run.workflow,
+                    timeout=(3, 30),
+                )
+                remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+                if remote_data.get("error"):
+                    response_status = (
+                        status.HTTP_409_CONFLICT
+                        if remote_status_code == 409
+                        else status.HTTP_502_BAD_GATEWAY
+                    )
+                    return Response(
+                        {
+                            "detail": remote_data.get("error") or "Content Factory could not cancel this setup build.",
+                            "retryable": bool(remote_data.get("retryable")),
+                        },
+                        status=response_status,
+                    )
+                run = _cancel_local_article_system_setup_run(
+                    run=run,
+                    organization=context.organization,
+                    remote_data=remote_data,
+                )
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
                 return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
 

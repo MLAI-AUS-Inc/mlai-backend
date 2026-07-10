@@ -14,7 +14,13 @@ from content_factory.models import ArticlePublishStatus, GeneratedComponent, Key
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
-from workflow_runs.models import ContentFactoryApprovalState, ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStatus
+from workflow_runs.models import (
+    ContentFactoryApprovalState,
+    ContentFactoryRun,
+    ContentFactoryRunStep,
+    ContentFactoryRunStatus,
+    ContentFactoryStepStatus,
+)
 from content_factory.vibe_marketing_views import (
     _call_content_factory_live_preview,
     _live_preview_from_run,
@@ -1507,6 +1513,122 @@ class VibeMarketingComponentCommentTests(TestCase):
         bootstrap = self.client.get("/api/v1/vibe-marketing/bootstrap/")
         self.assertEqual(bootstrap.status_code, 200)
         self.assertNotIn(self.run.run_id, [item["runId"] for item in bootstrap.data["latestRuns"]])
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_cancel_article_system_setup_cleans_only_matching_setup_state(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.article_system = {
+            "state": "detected",
+            "pending_article_system_setup": {
+                "status": "running",
+                "setup_run_id": "setup-cancel-clean",
+            },
+        }
+        config.article_system_setup_cache = {
+            "setup_run_id": "setup-cancel-clean",
+            "managed_files": ["app/articles/page.tsx"],
+        }
+        config.publish_targets = [
+            {
+                "target_id": "existing-blog",
+                "kind": "react_article_system",
+                "source": "detected",
+                "route_path": "/blog",
+            },
+            {
+                "target_id": "new-articles",
+                "kind": "react_article_system",
+                "source": "scaffold_cache",
+                "setup_run_id": "setup-cancel-clean",
+                "route_path": "/articles",
+            },
+        ]
+        config.default_publish_target_id = "new-articles"
+        config.save(
+            update_fields=[
+                "article_system",
+                "article_system_setup_cache",
+                "publish_targets",
+                "default_publish_target_id",
+                "updated_at",
+            ]
+        )
+        parent = ContentFactoryRun.objects.create(
+            run_id="scan-parent-clean",
+            workflow="repo_scan",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="finalize",
+            result={
+                "status": "article_system_setup_queued",
+                "setup_run_id": "setup-cancel-clean",
+                "article_system_setup": {"status": "running", "setup_run_id": "setup-cancel-clean"},
+            },
+        )
+        setup_run = ContentFactoryRun.objects.create(
+            run_id="setup-cancel-clean",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            approval_state=ContentFactoryApprovalState.NOT_REQUIRED,
+            run_request={"parent_run_id": parent.run_id},
+            result={
+                "status": "running",
+                "parent_run_id": parent.run_id,
+                "branch_name": "feature/articles-publish-route-setupcancel",
+                "article_system_setup": {"status": "running", "setup_run_id": "setup-cancel-clean"},
+            },
+        )
+        ContentFactoryRunStep.objects.create(
+            run=setup_run,
+            step_key="verify_directory_build",
+            display_order=1,
+            status=ContentFactoryStepStatus.RUNNING,
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertTrue(url.endswith("/api/runs/setup-cancel-clean/cancel"))
+            return _Response(
+                status_code=200,
+                payload={
+                    "run_id": "setup-cancel-clean",
+                    "status": "cancelled",
+                    "cleanup": {
+                        "setup_branch": {"status": "deleted"},
+                        "celery_revoke": {"status": "revoked"},
+                    },
+                    "article_system_setup": {"status": "cancelled", "setup_run_id": "setup-cancel-clean"},
+                },
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/runs/setup-cancel-clean/cancel",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], ContentFactoryRunStatus.CANCELLED)
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.current_step, "cancelled")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        self.assertEqual(setup_run.steps.get(step_key="verify_directory_build").status, ContentFactoryStepStatus.CANCELLED)
+
+        config.refresh_from_db()
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertEqual(config.article_system_setup_cache, {})
+        self.assertEqual([target["target_id"] for target in config.publish_targets], ["existing-blog"])
+        self.assertIsNone(config.default_publish_target_id)
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(parent.current_step, "finalize")
+        self.assertEqual(parent.result["status"], "article_system_setup_cancelled")
+        self.assertEqual(parent.result["article_system_setup"]["status"], "cancelled")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_cancel_group_removes_all_dedup_attempts_and_releases_topic(self):
