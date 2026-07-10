@@ -4,6 +4,7 @@ from datetime import date as calendar_date
 
 from django.core.management.base import BaseCommand, CommandError
 
+from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -67,6 +68,10 @@ class Command(BaseCommand):
             # Drives the daily research-topic email/Slack/WhatsApp send (8am slot).
             # Idempotent per run, so it is safe to tick every scheduler loop.
             ("research_automations", run_research_automation_scheduler),
+            # Closes runs whose content-factory callbacks were permanently
+            # lost (outbox retries exhaust after ~2h) and dispatch ghosts.
+            # Self-throttling per run, so it is safe to tick every loop.
+            ("content_factory_reconciliation", run_content_factory_reconciliation_sweep),
         ):
             try:
                 results[name] = runner()
