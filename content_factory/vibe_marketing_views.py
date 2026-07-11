@@ -9431,6 +9431,24 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
                 href=scaffold_check.get("prUrl") or setup_run_url,
                 variant="secondary",
             )
+        elif setup_status in {"pr_created", "setup_pr_created"}:
+            # The setup PR is created and open, waiting for the founder to click
+            # Publish (which merges it). Nothing is publishing on its own yet, so
+            # this is an explicit call to action, NOT a background "running" state —
+            # the old else-branch fell here and showed "preparing the setup PR",
+            # while the run page showed a RUNNING/"publishing on its own" card over
+            # a PR that only moves when Publish is clicked.
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "Ready to publish — click Publish to merge the setup PR. It goes live with the next site build and unlocks article generation."
+            action_by_id["publish"] = _workflow_step_action("Publish setup", href=setup_publish_url)
+        elif setup_status == "setup_pr_create_failed":
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "Publishing didn't finish last time. Retry to publish the approved setup."
+            action_by_id["publish"] = _workflow_step_action("Retry publish", href=setup_publish_url)
         elif rescan_run_id or setup_status in {"completed", "merged", "merged_verifying", "verifying"}:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "complete"
@@ -9460,6 +9478,23 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["publish"] = "locked"
             summary_by_id["review"] = "Hosted setup preview failed. Open diagnostics, inspect the build logs, then retry."
             action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
+        elif setup_status == "publishing":
+            # Native GitHub auto-merge is armed: the PR merges on its own once required
+            # checks pass, with nothing for the founder to do. That IS running — but the
+            # else-branch below would mislabel it "preparing the setup PR" (pre-PR work).
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "running"
+            summary_by_id["publish"] = "Publishing to production — GitHub merges automatically once required checks pass."
+        elif setup_status == "checks_failed":
+            # The setup PR exists but GitHub checks failed the merge — a genuine block
+            # awaiting a manual retry, NOT background progress. The else-branch below
+            # would wrongly show a running "preparing the setup PR" spinner here.
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "GitHub checks didn't pass, so publishing couldn't finish. Retry once the checks are green."
+            action_by_id["publish"] = _workflow_step_action("Retry publish", href=setup_publish_url)
         else:
             status_by_id["generate"] = "running"
             status_by_id["review"] = "locked"
