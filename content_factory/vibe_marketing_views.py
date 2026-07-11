@@ -4952,11 +4952,19 @@ def _publish_child_run_recoverable(run):
         return False
     if _publish_child_missing_remote(run):
         return True
-    if run.status != ContentFactoryRunStatus.AWAITING_CONFIRMATION:
-        return False
     if _run_has_publish_pr_or_preview_evidence(run) or _publish_child_has_real_approval_gate(run):
         return False
-    return True
+    if run.status == ContentFactoryRunStatus.AWAITING_CONFIRMATION:
+        return True
+    result = _run_mapping(run.result)
+    return bool(
+        run.status in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED}
+        and (
+            run.resume_available
+            or _truthy_flag(result.get("retry_available"))
+            or _truthy_flag(result.get("resume_available"))
+        )
+    )
 
 
 def _publish_child_wait_reason(run):
@@ -6802,6 +6810,32 @@ PUBLISH_MERGE_EVIDENCE_RESULT_KEYS = (
     "promoted_publish_job_id",
     "publish_child_preview_url",
 )
+DJANGO_OWNED_ARTICLE_RESULT_KEYS = (
+    *PUBLISH_MERGE_EVIDENCE_RESULT_KEYS,
+    "article_system_review_comments",
+    "daily_automation_channel_warning",
+    "latest_article_system_revision_response",
+)
+DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
+    "component_feedback_",
+    "publish_auto_merge",
+    "publish_child_",
+    "publish_handoff_",
+)
+
+
+def _merge_django_owned_article_result(local_result, remote_result):
+    local = _run_mapping(local_result)
+    merged = dict(_run_mapping(remote_result))
+    for key, value in local.items():
+        django_owned = key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
+            DJANGO_OWNED_ARTICLE_RESULT_PREFIXES
+        )
+        if not django_owned:
+            continue
+        if merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+            merged[key] = value
+    return merged
 
 # How long the per-poll publish-child remote refresh is suppressed between
 # attempts, and how often the auto-merge may hit the GitHub API.
@@ -7326,6 +7360,48 @@ def _sync_publish_child_from_control_response(
     if publish_run is None:
         return None
 
+    publish_request = dict(publish_run.run_request or {})
+    request_changed = False
+    for key, value in (
+        ("source_run_id", remote_run.run_id),
+        ("delivery_mode", "publish_code"),
+        ("delivery_mode_confirmed", True),
+        ("review_source_run_id", review_source_run_id),
+    ):
+        if value not in (None, "") and publish_request.get(key) != value:
+            publish_request[key] = value
+            request_changed = True
+    if request_changed:
+        publish_run.run_request = publish_request
+        publish_run.save(update_fields=["run_request", "updated_at"])
+
+    remote_child_status = _normalize_remote_run_status(
+        remote_data.get("status")
+        or remote_data.get("publish_child_status")
+        or publish_run.status
+    )
+    child_update_fields = []
+    if remote_child_status and publish_run.status != remote_child_status:
+        publish_run.status = remote_child_status
+        child_update_fields.append("status")
+    remote_current_step = str(
+        remote_data.get("current_step")
+        or remote_data.get("step")
+        or ("queued" if remote_child_status == ContentFactoryRunStatus.QUEUED else "")
+    ).strip()
+    if remote_current_step and publish_run.current_step != remote_current_step:
+        publish_run.current_step = remote_current_step
+        child_update_fields.append("current_step")
+    if remote_child_status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED}:
+        if publish_run.error:
+            publish_run.error = ""
+            child_update_fields.append("error")
+        if publish_run.resume_available:
+            publish_run.resume_available = False
+            child_update_fields.append("resume_available")
+    if child_update_fields:
+        publish_run.save(update_fields=child_update_fields + ["updated_at"])
+
     auto_merge = (
         _payload_requests_auto_merge(payload)
         or _publish_auto_merge_enabled(run, remote_run)
@@ -7562,6 +7638,81 @@ def _source_accepts_revision(source_run, revision_run):
         or ""
     ).strip()
     return latest_batch.get("status") == "accepted" and revision_run_id == revision_run.run_id
+
+
+_REVIEW_READY_REVISION_RUN_STATUSES = {
+    ContentFactoryRunStatus.COMPLETED,
+    ContentFactoryRunStatus.AWAITING_APPROVAL,
+    ContentFactoryRunStatus.APPROVAL_REQUIRED,
+}
+_REVIEW_READY_REVISION_RESULT_STATUSES = {
+    "approval_required",
+    "await_review",
+    "awaiting_approval",
+    "completed",
+    "content_ready",
+    "preview_ready",
+    "revision_ready",
+}
+
+
+def _component_revision_is_review_ready(run):
+    if not run or run.workflow != "article_revision":
+        return False
+    if run.status not in _REVIEW_READY_REVISION_RUN_STATUSES:
+        return False
+    if run.approval_state == ContentFactoryApprovalState.DENIED:
+        return False
+    result = _run_mapping(run.result)
+    result_status = str(result.get("status") or "").strip().lower()
+    if result_status in _REVIEW_READY_REVISION_RESULT_STATUSES:
+        return True
+    return bool(
+        result.get("promote_bundle_url")
+        or result.get("publish_pr_url")
+        or result.get("preview_url")
+        or result.get("delivery_package")
+        or result.get("content_package")
+        or _live_preview_from_run(run).get("previewUrl")
+    )
+
+
+def _latest_review_ready_component_revision(run, context):
+    """Return the newest review-ready descendant in an article revision chain.
+
+    The durable parent relationship is carried by each revision's source_run_id,
+    so it remains recoverable even when an older deployment lost the source run's
+    denormalized component_feedback_revision_run_id metadata.
+    """
+
+    if not run or run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    candidates = list(
+        ContentFactoryRun.objects.filter(
+            domain=run.domain,
+            workflow="article_revision",
+        ).order_by("created_at", "id")
+    )
+    candidates = [
+        candidate
+        for candidate in candidates
+        if _run_belongs_to_context(candidate, context)
+        and _component_revision_is_review_ready(candidate)
+    ]
+    current = run
+    visited = {run.run_id}
+    while True:
+        children = [
+            candidate
+            for candidate in candidates
+            if candidate.run_id not in visited
+            and _run_source_run_id(candidate) == current.run_id
+        ]
+        if not children:
+            break
+        current = children[-1]
+        visited.add(current.run_id)
+    return current if current.pk != run.pk else None
 
 
 def _run_can_promote_package(run, config=None):
@@ -11340,12 +11491,9 @@ def _sync_local_run_from_remote(run, remote_data):
     if result:
         result = _merge_preserved_live_preview(run.result or {}, result)
         if run.workflow in ARTICLE_WORKFLOWS:
-            # Merge evidence is written locally (Content Factory never merges
-            # PRs), so keep it when the remote result doesn't carry it.
-            local_result = run.result if isinstance(run.result, dict) else {}
-            for key in PUBLISH_MERGE_EVIDENCE_RESULT_KEYS:
-                if result.get(key) in (None, "", {}, []) and local_result.get(key) not in (None, "", {}, []):
-                    result[key] = local_result[key]
+            # Review lineage and publish/merge evidence are written locally,
+            # so Content Factory status polling must not erase them.
+            result = _merge_django_owned_article_result(run.result, result)
         if run.workflow in SCAN_WORKFLOWS:
             local_result = run.result if isinstance(run.result, dict) else {}
             run_request = run.run_request if isinstance(run.run_request, dict) else {}
@@ -14675,6 +14823,15 @@ class VibeMarketingRunView(APIView):
             )
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run):
+            latest_revision = _latest_review_ready_component_revision(run, context)
+            if latest_revision is not None:
+                logger.info(
+                    "vibe_marketing_run_superseded_by_revision requested_run_id=%s latest_run_id=%s",
+                    run.run_id,
+                    latest_revision.run_id,
+                )
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=latest_revision.pk)
         if _run_pending_remote_dispatch(run):
             resolved = _resolve_dispatch_token_run(run)
             if resolved is not None:
@@ -15468,22 +15625,27 @@ class VibeMarketingRunLivePreviewResourceView(APIView):
 def _accepted_component_revision_for_publish(run, context):
     result = _run_mapping(run.result)
     latest_batch = result.get("component_feedback_latest_batch")
-    if not isinstance(latest_batch, dict) or latest_batch.get("status") != "accepted":
-        return None
-    revision_run_id = str(
-        latest_batch.get("revisionRunId")
-        or latest_batch.get("revision_run_id")
-        or result.get("component_feedback_revision_run_id")
-        or ""
-    ).strip()
-    if not revision_run_id:
-        return None
-    revision_run = ContentFactoryRun.objects.filter(run_id=revision_run_id).first()
-    if not revision_run or not _run_belongs_to_context(revision_run, context):
-        return None
-    if revision_run.status != ContentFactoryRunStatus.COMPLETED:
-        return None
-    return revision_run
+    revision_run = None
+    if isinstance(latest_batch, dict) and latest_batch.get("status") == "accepted":
+        revision_run_id = str(
+            latest_batch.get("revisionRunId")
+            or latest_batch.get("revision_run_id")
+            or result.get("component_feedback_revision_run_id")
+            or ""
+        ).strip()
+        if revision_run_id:
+            candidate = ContentFactoryRun.objects.filter(run_id=revision_run_id).first()
+            if (
+                candidate
+                and _run_belongs_to_context(candidate, context)
+                and candidate.status in _REVIEW_READY_REVISION_RUN_STATUSES
+                and candidate.approval_state != ContentFactoryApprovalState.DENIED
+            ):
+                revision_run = candidate
+
+    lineage_start = revision_run or run
+    latest_revision = _latest_review_ready_component_revision(lineage_start, context)
+    return latest_revision or revision_run
 
 
 class VibeMarketingRunControlView(APIView):
@@ -15711,7 +15873,13 @@ class VibeMarketingRunControlView(APIView):
                 remote_run = accepted_revision
                 payload.setdefault("review_source_run_id", run.run_id)
                 payload.setdefault("source_run_id", accepted_revision.run_id)
-            existing_publish_run = _local_publish_child_for_run(run, context=context) or _local_publish_child_for_run(remote_run, context=context)
+            # Prefer the newest revision's child. An older source may already
+            # have a completed publish child from the regression this path is
+            # designed to repair; returning it would publish/reopen stale code.
+            publishing_superseding_revision = remote_run.pk != run.pk
+            existing_publish_run = _local_publish_child_for_run(remote_run, context=context)
+            if existing_publish_run is None and not publishing_superseding_revision:
+                existing_publish_run = _local_publish_child_for_run(run, context=context)
             if existing_publish_run is not None:
                 existing_publish_run = _refresh_publish_child_remote_state(existing_publish_run, context=context)
                 if not _publish_child_run_recoverable(existing_publish_run):
@@ -15719,7 +15887,9 @@ class VibeMarketingRunControlView(APIView):
                         _record_publish_auto_merge_flag(existing_publish_run)
                         _record_publish_auto_merge_flag(run)
                     return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
-            known_child_run_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(remote_run)
+            known_child_run_id = _publish_child_run_id_for_run(remote_run)
+            if not known_child_run_id and not publishing_superseding_revision:
+                known_child_run_id = _publish_child_run_id_for_run(run)
             if known_child_run_id:
                 recovered_publish_run = ContentFactoryRun.objects.filter(run_id=known_child_run_id).prefetch_related("steps").first()
                 if recovered_publish_run is not None and _run_belongs_to_context(recovered_publish_run, context):

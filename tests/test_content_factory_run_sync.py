@@ -70,6 +70,85 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(run.workflow, "repo_scan")
         self.assertEqual(run.run_request.get("domain"), "mlai.au")
 
+    def test_run_sync_preserves_django_owned_revision_and_publish_state(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="run-sync-revision-lineage-1",
+            workflow="article_revision",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            current_step="await_review",
+            result={
+                "status": "preview_ready",
+                "component_feedback_latest_batch": {
+                    "id": "batch-2",
+                    "revisionRunId": "revision-2",
+                    "status": "accepted",
+                },
+                "component_feedback_revision_run_id": "revision-2",
+                "publish_child_run_id": "publish-revision-2",
+                "publish_handoff_status": "blocked",
+            },
+        )
+        payload = {
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "domain": run.domain,
+            "status": run.status,
+            "current_step": run.current_step,
+            "result": {
+                "status": "preview_ready",
+                "preview_url": "https://preview.example/revision-1",
+            },
+            "step_states": {},
+        }
+
+        first = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            payload,
+            format="json",
+        )
+        run.refresh_from_db()
+        first_updated_at = run.updated_at
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(run.result["preview_url"], "https://preview.example/revision-1")
+        self.assertEqual(run.result["component_feedback_revision_run_id"], "revision-2")
+        self.assertEqual(run.result["component_feedback_latest_batch"]["revisionRunId"], "revision-2")
+        self.assertEqual(run.result["publish_child_run_id"], "publish-revision-2")
+        self.assertEqual(run.result["publish_handoff_status"], "blocked")
+
+        second = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            payload,
+            format="json",
+        )
+        run.refresh_from_db()
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["sync_status"], "unchanged")
+        self.assertEqual(run.updated_at, first_updated_at)
+
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+
+        _sync_local_run_from_remote(
+            run,
+            {
+                "workflow": run.workflow,
+                "status": run.status,
+                "current_step": run.current_step,
+                "result": {
+                    "status": "preview_ready",
+                    "preview_url": "https://preview.example/status-poll",
+                },
+            },
+        )
+        run.refresh_from_db()
+
+        self.assertEqual(run.result["preview_url"], "https://preview.example/status-poll")
+        self.assertEqual(run.result["component_feedback_revision_run_id"], "revision-2")
+        self.assertEqual(run.result["component_feedback_latest_batch"]["revisionRunId"], "revision-2")
+        self.assertEqual(run.result["publish_child_run_id"], "publish-revision-2")
+
     def test_repo_scan_status_serialization_includes_scan_progress(self):
         from content_factory.vibe_marketing_views import _serialize_run
 
