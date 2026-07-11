@@ -55,6 +55,7 @@ from content_factory.authors import (
     resolve_default_author,
 )
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
+from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.article_publish_status import (
     advance_publish_status,
@@ -8329,6 +8330,20 @@ def _article_system_is_published(config, article_system: dict) -> bool:
     )
 
 
+def _article_system_publish_targets_provisional(config) -> bool:
+    """True when the org's live publish targets carry content-factory's
+    ``provisional: true`` stamp (cf#687): a non-Tier-1 surface registered on
+    structural evidence alone, without a seeded detail-route proof. The wizard
+    should temper its green tick ("provisional — first article may need fixes")
+    instead of presenting a fully-verified surface."""
+    targets = [
+        target
+        for target in (getattr(config, "publish_targets", None) or [])
+        if isinstance(target, dict) and not is_bundle_only_fallback_target(target)
+    ]
+    return bool(targets) and any(bool(target.get("provisional")) for target in targets)
+
+
 def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dict:
     # Honor an article-setup reset here too. `_article_setup_state_for_config`
     # already filters reset-ignored runs, but `_profile_checks` (the bootstrap
@@ -8519,6 +8534,7 @@ def _article_system_setup_gate(config, latest_runs, article_system: dict) -> dic
     meta["setupBlocked"] = bool(setup_blocked)
     meta["setupMerged"] = bool(setup_merged)
     meta["generationReady"] = bool(generation_ready)
+    meta["publishTargetsProvisional"] = _article_system_publish_targets_provisional(config)
     for key in ("setupRunId", "setupStatus", "rescanRunId", "mergeStatus", "prUrl", "prNumber", "previewUrl", "fallbackPreviewUrl", "livePreviewUrl"):
         meta[key] = str(meta.get(key) or "").strip() or None
     return meta
@@ -11052,12 +11068,15 @@ def _persist_web_article_billing_to_job(run, payload) -> None:
         )
 
 
-def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None):
+def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=None, remote_data=None, fallback_run_id=""):
     remote_data = sanitize_json_for_postgres(remote_data or {})
     payload = sanitize_json_for_postgres(payload or {})
     run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "")
     if not run_id:
-        run_id = f"vibe-marketing-{workflow}-{uuid.uuid4().hex[:12]}"
+        # Key the provisional record by the dispatch token (client_request_id)
+        # so a later callback/key-lookup can bind it to the real remote run —
+        # an invented id can never be reconciled and becomes a ghost.
+        run_id = str(fallback_run_id or "").strip() or f"vibe-marketing-{workflow}-{uuid.uuid4().hex[:12]}"
     run, _created = ContentFactoryRun.objects.get_or_create(
         run_id=run_id,
         defaults={
@@ -11438,11 +11457,217 @@ def _sync_local_run_from_remote(run, remote_data):
     return run
 
 
+# Queue endpoints that honor a client_request_id idempotency key (content-factory
+# claims the key before enqueueing and replays the existing run on a retry).
+# Scan stays single-attempt: content-factory ignores the field there, so a
+# retry could double-enqueue.
+CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS = {
+    "article",
+    "discovery",
+    "autofill",
+    "baseline",
+    "article-system-setup",
+}
+CONTENT_FACTORY_KEYED_DISPATCH_WORKFLOWS = {
+    "article_generation",
+    "auto_discovery",
+    "startup_autofill",
+    "website_baseline",
+    "article_system_setup",
+}
+CONTENT_FACTORY_DISPATCH_MAX_POST_ATTEMPTS = 2
+# How long a provisional (token-keyed) run must age before a confirmed-absent
+# key lookup may fail it and release the withheld refund. Covers the race where
+# an overloaded content-factory processes the timed-out POST seconds later.
+CONTENT_FACTORY_DISPATCH_ABSENT_GRACE_SECONDS = 180
+
+
+def _mint_dispatch_client_request_id(workflow) -> str:
+    # Bounded well under 100 chars: the key lands in Ledger.reference_id and
+    # ContentFactoryJob.client_request_id, both varchar(100) (see mlai#548).
+    workflow_trace = re.sub(r"[^a-z0-9_-]+", "", str(workflow or "run").lower())[:24] or "run"
+    return f"vibe-dispatch:{workflow_trace}:{uuid.uuid4().hex}"
+
+
+def _lookup_content_factory_dispatch_by_key(remote_config, client_request_id):
+    """Resolve a dispatch whose response was lost, by its idempotency key.
+
+    Returns ``(outcome, payload)`` with outcome one of:
+    - ``"dispatched"`` — the run exists (payload carries run_id); adopt it.
+    - ``"absent"`` — content-factory proves nothing was enqueued for this key.
+    - ``"unknown"`` — cannot prove either way (lookup unreachable, key still
+      mid-claim, or an old content-factory without the lookup endpoint).
+    Refunds are only ever safe on ``"absent"``.
+    """
+    key = str(client_request_id or "").strip()
+    if not key:
+        return "unknown", {}
+    try:
+        response = http_client.get(
+            f"{remote_config['base_url']}/api/runs/lookup",
+            params={"client_request_id": key},
+            headers=_content_factory_headers(),
+            timeout=(3, 5),
+        )
+    except http_client.RequestException as exc:
+        return "unknown", {"error": str(exc)}
+    if response.status_code == 200:
+        try:
+            payload = sanitize_json_for_postgres(response.json() if response.content else {}) or {}
+        except Exception:
+            return "unknown", {}
+        key_status = str(payload.get("key_status") or "").strip()
+        if key_status == "dispatched" and str(payload.get("run_id") or "").strip():
+            return "dispatched", payload
+        if key_status == "failed":
+            return "absent", payload
+        # "claimed": a dispatch is (or died) mid-flight — not provable either way.
+        return "unknown", payload
+    if response.status_code == 404:
+        try:
+            detail = str((response.json() or {}).get("detail") or "")
+        except Exception:
+            detail = ""
+        # Only the lookup endpoint's own 404 proves the key was never claimed.
+        # A content-factory WITHOUT the endpoint routes this path to
+        # /api/runs/{run_id} ("Run not found") — that proves nothing.
+        if "client_request_id" in detail:
+            return "absent", {"detail": detail}
+        return "unknown", {"status_code": 404, "detail": detail}
+    return "unknown", {"status_code": response.status_code}
+
+
+def _run_pending_remote_dispatch(run) -> bool:
+    """True for a provisional run awaiting dispatch resolution: still keyed by
+    its dispatch token and stamped for resolution at dispatch time."""
+    if not run_is_dispatch_token_keyed(run):
+        return False
+    run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    return bool(run_request.get("dispatch_pending_resolution"))
+
+
+def _process_pending_dispatch_refund(run) -> None:
+    """Release the refund withheld at dispatch time, exactly once. Safe to call
+    repeatedly: guarded by a result flag AND the refund ledger's idempotency key."""
+    run_request = run.run_request if isinstance(run.run_request, dict) else {}
+    stash = run_request.get("pending_billing_refund")
+    if not isinstance(stash, dict) or not stash:
+        return
+    result = run.result if isinstance(run.result, dict) else {}
+    if result.get("dispatch_refund_processed"):
+        return
+    charged_user = None
+    charged_user_id = stash.get("charged_user_id")
+    if charged_user_id:
+        from django.contrib.auth import get_user_model
+
+        charged_user = get_user_model().objects.filter(pk=charged_user_id).first()
+    if charged_user is None:
+        logger.warning(
+            "content_factory_dispatch_deferred_refund_skipped run_id=%s reason=charged_user_missing",
+            run.run_id,
+        )
+        return
+    refund_kwargs = {
+        "charged_user": charged_user,
+        "actor_id": str(stash.get("actor_id") or ""),
+        "article_request": stash.get("article_request") or {},
+        "domain": run.domain,
+        "reason": stash.get("reason") or "Content Factory queue did not start.",
+    }
+    if stash.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+        _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+    else:
+        _refund_roo_points_for_article_start(**refund_kwargs)
+    result["dispatch_refund_processed"] = True
+    run.result = sanitize_json_for_postgres(result)
+    run.save(update_fields=["result", "updated_at"])
+    logger.warning(
+        "content_factory_dispatch_deferred_refund_processed run_id=%s client_request_id=%s",
+        run.run_id,
+        run_request.get("client_request_id"),
+    )
+
+
+def _fail_unconfirmed_dispatch_run(run):
+    """The key lookup confirms Content Factory never enqueued this dispatch:
+    fail the provisional run honestly and release the withheld refund."""
+    run_request = dict(run.run_request) if isinstance(run.run_request, dict) else {}
+    detail = (
+        "Content Factory never received this request (confirmed by dispatch-key lookup). "
+        "Any Roo points charged for it have been refunded — retry when ready."
+    )
+    result = run.result if isinstance(run.result, dict) else {}
+    result.update(
+        {
+            "dispatch_confirmed_absent": True,
+            "error": detail,
+            "errors": [detail],
+            "message": detail,
+            "retryable": True,
+        }
+    )
+    run_request["dispatch_pending_resolution"] = False
+    run.status = ContentFactoryRunStatus.FAILED
+    run.error = detail
+    run.result = sanitize_json_for_postgres(result)
+    run.run_request = sanitize_json_for_postgres(run_request)
+    run.save(update_fields=["status", "error", "result", "run_request", "updated_at"])
+    logger.warning(
+        "content_factory_dispatch_confirmed_absent run_id=%s workflow=%s",
+        run.run_id,
+        run.workflow,
+    )
+    _process_pending_dispatch_refund(run)
+    return run
+
+
+def _resolve_dispatch_token_run(run):
+    """Poll-time resolution for a provisional token-keyed run.
+
+    Returns the (possibly re-keyed) run when something changed, else None:
+    - key lookup says dispatched → bind the local record to the real run_id;
+    - confirmed absent AND the run has aged past the grace window (covers an
+      overloaded content-factory processing the timed-out POST late) → fail
+      honestly + release the withheld refund;
+    - anything else → stay pending; the next poll retries.
+    """
+    if run.workflow not in CONTENT_FACTORY_KEYED_DISPATCH_WORKFLOWS:
+        return None
+    remote_config = _content_factory_remote_config()
+    if not remote_config["enabled"]:
+        return None
+    token = str(run.run_id or "").strip()
+    outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, token)
+    if outcome == "dispatched":
+        bound = bind_dispatch_token_run(
+            client_request_id=token,
+            remote_run_id=lookup_payload.get("run_id"),
+        )
+        return bound
+    if outcome == "absent":
+        age_seconds = (timezone.now() - run.created_at).total_seconds()
+        if age_seconds < CONTENT_FACTORY_DISPATCH_ABSENT_GRACE_SECONDS:
+            return None
+        return _fail_unconfirmed_dispatch_run(run)
+    return None
+
+
 def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
     actor_id = founder_actor_id_for_user(context.profile.user)
     remote_config = _content_factory_remote_config()
     remote_data = {}
     remote_run_id = ""
+    # Every dispatch carries an idempotency key (article/content-island charges
+    # already minted one; mint for the rest). The SAME key is reused across
+    # in-call retries so content-factory can dedupe, and it doubles as the
+    # provisional local run id when the outcome stays ambiguous.
+    dispatch_key = str(payload.get("client_request_id") or "").strip()
+    if not dispatch_key:
+        dispatch_key = _mint_dispatch_client_request_id(workflow)
+        payload["client_request_id"] = dispatch_key
+    keyed_dispatch = endpoint in CONTENT_FACTORY_KEYED_DISPATCH_ENDPOINTS
+    dispatch_unresolved = False
     requires_remote = workflow == "startup_autofill" or _remote_required_for_workflow(workflow)
     if requires_remote and not remote_config["enabled"]:
         technical_error = _content_factory_unavailable_message(remote_config)
@@ -11464,88 +11689,176 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
     elif remote_config["enabled"]:
         url = f"{remote_config['base_url']}/api/runs/{endpoint}"
         logger.info(
-            "content_factory_dispatch_start workflow=%s endpoint=%s url_configured=%s api_key_configured=%s",
+            "content_factory_dispatch_start workflow=%s endpoint=%s url_configured=%s api_key_configured=%s client_request_id=%s",
             workflow,
             endpoint,
             bool(remote_config["base_url"]),
             bool(remote_config["api_key_configured"]),
+            dispatch_key,
         )
-        try:
-            response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
-            if response.status_code in (200, 202):
-                remote_data = response.json() if response.content else {}
-                run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
-                remote_run_id = run_id
-                logger.info(
-                    "content_factory_dispatch_result workflow=%s endpoint=%s status_code=%s run_id=%s",
-                    workflow,
-                    endpoint,
-                    response.status_code,
-                    run_id,
-                )
-                if requires_remote and not run_id:
-                    remote_data = _blocked_worker_payload(
-                        workflow=workflow,
-                        detail="Content Factory did not return a run id.",
-                        technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
-                        status_code=response.status_code,
-                        response_payload=remote_data,
-                        diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
-                        retryable=True,
-                    )
-            else:
-                try:
-                    response_payload = response.json()
-                except Exception:
-                    response_payload = {}
-                detail = (
-                    response_payload.get("detail")
-                    or response_payload.get("error")
-                    or response_payload.get("message")
-                    or response.text
-                    or f"Content Factory returned {response.status_code}."
-                )
-                logger.warning(
-                    "content_factory_dispatch_blocked workflow=%s endpoint=%s status_code=%s",
-                    workflow,
-                    endpoint,
-                    response.status_code,
-                )
+        response = None
+        request_exception = None
+        recovered_by_key = None
+        max_attempts = CONTENT_FACTORY_DISPATCH_MAX_POST_ATTEMPTS if keyed_dispatch else 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = http_client.post(url, json=payload, headers=_content_factory_headers(), timeout=(3, 10))
+                request_exception = None
+            except http_client.RequestException as exc:
+                request_exception = exc
+                response = None
+            if response is not None and response.status_code < 500:
+                break
+            logger.warning(
+                "content_factory_dispatch_transient_failure workflow=%s endpoint=%s attempt=%s/%s status_code=%s error=%s",
+                workflow,
+                endpoint,
+                attempt,
+                max_attempts,
+                getattr(response, "status_code", None),
+                request_exception,
+            )
+            if not keyed_dispatch:
+                break
+            # cf#670 retry discipline: before re-POSTing (and after the final
+            # attempt), check whether the failed POST actually landed — a lost
+            # RESPONSE is not a lost dispatch. Re-POSTing with the same key is
+            # safe either way: content-factory claims the key before enqueueing
+            # and replays the existing run.
+            outcome, lookup_payload = _lookup_content_factory_dispatch_by_key(remote_config, dispatch_key)
+            if outcome == "dispatched":
+                recovered_by_key = lookup_payload
+                break
+
+        if recovered_by_key is not None:
+            remote_run_id = str(recovered_by_key.get("run_id") or "").strip()
+            remote_data = {
+                "run_id": remote_run_id,
+                "status": recovered_by_key.get("run_status") or recovered_by_key.get("status") or "queued",
+                "client_request_id": dispatch_key,
+                "dispatch_recovered_by_key": True,
+            }
+            logger.warning(
+                "content_factory_dispatch_recovered_via_key workflow=%s endpoint=%s run_id=%s client_request_id=%s",
+                workflow,
+                endpoint,
+                remote_run_id,
+                dispatch_key,
+            )
+        elif response is not None and response.status_code in (200, 202):
+            remote_data = response.json() if response.content else {}
+            run_id = str(remote_data.get("run_id") or remote_data.get("job_id") or remote_data.get("task_id") or "").strip()
+            remote_run_id = run_id
+            logger.info(
+                "content_factory_dispatch_result workflow=%s endpoint=%s status_code=%s run_id=%s idempotent=%s",
+                workflow,
+                endpoint,
+                response.status_code,
+                run_id,
+                bool(remote_data.get("idempotent")) if isinstance(remote_data, dict) else False,
+            )
+            if requires_remote and not run_id:
                 remote_data = _blocked_worker_payload(
                     workflow=workflow,
-                    detail=str(detail),
-                    technical_error=str(detail),
+                    detail="Content Factory did not return a run id.",
+                    technical_error="Content Factory queue response did not include run_id, job_id, or task_id.",
                     status_code=response.status_code,
-                    response_payload=response_payload,
+                    response_payload=remote_data,
                     diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
-                    retryable=response.status_code >= 500,
+                    retryable=True,
                 )
-        except http_client.RequestException as exc:
+        elif response is not None:
+            try:
+                response_payload = response.json()
+            except Exception:
+                response_payload = {}
+            detail = (
+                response_payload.get("detail")
+                or response_payload.get("error")
+                or response_payload.get("message")
+                or response.text
+                or f"Content Factory returned {response.status_code}."
+            )
+            logger.warning(
+                "content_factory_dispatch_blocked workflow=%s endpoint=%s status_code=%s",
+                workflow,
+                endpoint,
+                response.status_code,
+            )
+            remote_data = _blocked_worker_payload(
+                workflow=workflow,
+                detail=str(detail),
+                technical_error=str(detail),
+                status_code=response.status_code,
+                response_payload=response_payload,
+                diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
+                retryable=response.status_code >= 500,
+            )
+            # A 5xx can land AFTER content-factory enqueued (the endpoint's
+            # generic handler). Only a definitive 4xx rejection proves no run
+            # exists; a keyed 5xx stays ambiguous until the key resolves.
+            if keyed_dispatch and response.status_code >= 500:
+                dispatch_unresolved = True
+        else:
             logger.warning(
                 "content_factory_dispatch_blocked workflow=%s endpoint=%s reason=request_exception error=%s",
                 workflow,
                 endpoint,
-                exc,
+                request_exception,
             )
             remote_data = _blocked_worker_payload(
                 workflow=workflow,
-                technical_error=str(exc),
+                technical_error=str(request_exception),
                 diagnostics=_content_factory_diagnostics(remote_config, workflow=workflow, endpoint=endpoint),
                 retryable=True,
             )
+            if keyed_dispatch:
+                # The POST may have been processed after our read timeout; the
+                # run is provisional until the key lookup proves it either way.
+                dispatch_unresolved = True
 
     if billing_refund_context and not remote_run_id:
-        refund_kwargs = {
-            "charged_user": billing_refund_context.get("charged_user"),
-            "actor_id": actor_id,
-            "article_request": billing_refund_context.get("article_request") or {},
-            "domain": context.organization.domain,
-            "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
-        }
-        if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
-            _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+        if dispatch_unresolved:
+            # The dispatch may have landed (lost response). Refunding now while
+            # the real run starts is the refund-then-ghost bug: withhold the
+            # refund and stash what the deferred refund needs; the poll path
+            # releases it once the key lookup confirms the dispatch is absent.
+            payload["pending_billing_refund"] = {
+                "kind": str(billing_refund_context.get("kind") or ""),
+                "charged_user_id": getattr(billing_refund_context.get("charged_user"), "pk", None),
+                "actor_id": actor_id,
+                "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
+                "article_request": {
+                    "client_request_id": dispatch_key,
+                    "domain": context.organization.domain,
+                    "topic": str(payload.get("topic") or payload.get("custom_title") or payload.get("target_keyword") or ""),
+                },
+            }
+            logger.warning(
+                "content_factory_dispatch_refund_withheld workflow=%s endpoint=%s client_request_id=%s "
+                "reason=dispatch_outcome_ambiguous",
+                workflow,
+                endpoint,
+                dispatch_key,
+            )
         else:
-            _refund_roo_points_for_article_start(**refund_kwargs)
+            refund_kwargs = {
+                "charged_user": billing_refund_context.get("charged_user"),
+                "actor_id": actor_id,
+                "article_request": billing_refund_context.get("article_request") or {},
+                "domain": context.organization.domain,
+                "reason": billing_refund_context.get("reason") or "Content Factory queue did not start.",
+            }
+            if billing_refund_context.get("kind") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
+                _refund_roo_points_for_content_island_topic_start(**refund_kwargs)
+            else:
+                _refund_roo_points_for_article_start(**refund_kwargs)
+
+    if dispatch_unresolved:
+        # Marks the provisional run for poll-time resolution (bind to the real
+        # run, or fail honestly + refund once confirmed absent after a grace
+        # window). Local-only: the POST already happened.
+        payload["dispatch_pending_resolution"] = True
 
     return _create_local_run(
         workflow=workflow,
@@ -11554,6 +11867,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
         actor_id=actor_id,
         payload=payload,
         remote_data=remote_data,
+        fallback_run_id=dispatch_key,
     )
 
 
@@ -14342,6 +14656,16 @@ class VibeMarketingRunView(APIView):
             return error_response
         run = ContentFactoryRun.objects.prefetch_related("steps").filter(run_id=run_id).first()
         if run is None:
+            # A provisional run polled by its dispatch token may have been bound
+            # to the real remote run_id since the client last heard from us —
+            # the token stays resolvable via the recorded client_request_id.
+            run = (
+                ContentFactoryRun.objects.prefetch_related("steps")
+                .filter(run_request__client_request_id=run_id)
+                .order_by("-id")
+                .first()
+            )
+        if run is None:
             # A deleted/reset run (e.g. after an article-setup reset) is polled by a stale
             # wizard session. Return an explicit, stable "gone" 404 the frontend run-status
             # loader can branch on, instead of a bare Http404 it turns into a 500.
@@ -14351,6 +14675,10 @@ class VibeMarketingRunView(APIView):
             )
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if _run_pending_remote_dispatch(run):
+            resolved = _resolve_dispatch_token_run(run)
+            if resolved is not None:
+                run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=resolved.pk)
         if run.workflow in ARTICLE_WORKFLOWS:
             _recover_publish_child_for_run(run, request=request, context=context)
             run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
@@ -14369,6 +14697,11 @@ class VibeMarketingRunView(APIView):
         skipped_missing_publish_child = bool(run.workflow in ARTICLE_WORKFLOWS and _publish_child_missing_remote(run))
         if skipped_missing_publish_child:
             skip_remote_status = True
+        if _run_pending_remote_dispatch(run):
+            # The local id is still the dispatch token, not a remote run id —
+            # polling it would 404 and clobber the pending verdict. Resolution
+            # happens via the key lookup above on each poll.
+            skip_remote_status = True
         remote_data = {} if skip_remote_status else _call_content_factory_run_status(run.run_id, workflow=run.workflow)
         if skip_remote_status:
             logger.info(
@@ -14380,6 +14713,8 @@ class VibeMarketingRunView(APIView):
                 if terminal_setup_failure
                 else "missing_publish_child_recoverable"
                 if skipped_missing_publish_child
+                else "pending_dispatch_resolution"
+                if _run_pending_remote_dispatch(run)
                 else "terminal_article",
             )
         if _is_status_poll_unavailable_payload(remote_data):
