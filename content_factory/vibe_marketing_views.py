@@ -15063,36 +15063,40 @@ class VibeMarketingArticleView(APIView):
         github_ready = _github_repo_operable(config)
         article_ready = article_system_ready(resolve_article_system(config)) or bool(config.publish_targets)
         has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
-        repo_review_capable = bool(github_ready and article_ready)
-        if not delivery_mode_explicit and has_repo_setup_intent and not repo_review_capable:
-            if not github_ready:
-                # Credential leg failed — the article surface may be perfectly set up; the
-                # honest ask is to reconnect GitHub, not to re-verify the article location.
-                return Response(
-                    {
-                        "status": "setup_required",
-                        "nextRequiredStep": "connect_github",
-                        "next_required_step": "connect_github",
-                        "detail": (
-                            "Reconnect GitHub before generating an exact preview article — the "
-                            "platform no longer has access to this repository (the GitHub App "
-                            "installation is missing or revoked and any saved token has expired)."
-                        ),
-                        "fallbackReason": "github_auth_required",
-                        "fallback_reason": "github_auth_required",
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+        if not delivery_mode_explicit and has_repo_setup_intent and not github_ready:
+            # An implicit exact-preview request still needs a credential that the
+            # Content Factory token service can mint from. Surface readiness is
+            # deliberately *not* enforced here: Content Factory owns the durable
+            # scan -> scaffold -> resume repair loop and must receive the article
+            # request in order to run it.
+            #
+            # Blocking an operable repo merely because its latest scan is
+            # ambiguous creates a deadlock: the backend asks the founder to
+            # verify the article location, while the self-healing scan that can
+            # perform that verification is never queued.
             return Response(
                 {
                     "status": "setup_required",
-                    "nextRequiredStep": "connect_repo_articles_location",
-                    "next_required_step": "connect_repo_articles_location",
-                    "detail": "Connect and verify the article repository location before generating an exact preview article.",
-                    "fallbackReason": "repo_articles_setup_not_trusted",
-                    "fallback_reason": "repo_articles_setup_not_trusted",
+                    "nextRequiredStep": "connect_github",
+                    "next_required_step": "connect_github",
+                    "detail": (
+                        "Reconnect GitHub before generating an exact preview article — the "
+                        "platform no longer has access to this repository (the GitHub App "
+                        "installation is missing or revoked and any saved token has expired)."
+                    ),
+                    "fallbackReason": "github_auth_required",
+                    "fallback_reason": "github_auth_required",
                 },
                 status=status.HTTP_409_CONFLICT,
+            )
+        if not delivery_mode_explicit and github_ready and not article_ready:
+            logger.info(
+                "vibe_marketing_article_surface_repair_delegated domain=%s github_repo=%s "
+                "article_system_state=%s publish_target_count=%s",
+                context.organization.domain,
+                config.github_repo,
+                resolve_article_system(config).get("state"),
+                len(config.publish_targets or []),
             )
         delivery_mode = (
             _effective_article_delivery_mode(
