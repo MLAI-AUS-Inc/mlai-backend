@@ -489,16 +489,26 @@ class ContentFactoryCallbackEvent(models.Model):
 
     content-factory stamps each callback with a unique event_id and retries
     failed deliveries from a durable outbox, so the same event can arrive more
-    than once. A row here means the event was already acknowledged with a 2xx
-    response; replays return 200 without reprocessing. This must be a DB table
-    rather than Django cache: production uses per-process LocMemCache, which
-    is invisible to other workers and lost on restart.
+    than once. This must be a DB table rather than Django cache: production
+    uses per-process LocMemCache, which is invisible to other workers and lost
+    on restart.
+
+    Rows are leases, not just tombstones: `claimed_at` is stamped when a
+    delivery claims the event and `processed_at` only after its handler
+    succeeded. A row with `processed_at` set is done — replays return 200
+    without reprocessing. A row claimed but never processed means the worker
+    died mid-handler (SIGKILL/OOM/deploy restart — soft failures release the
+    claim in the view); once the claim is older than the lease TTL, the
+    sender's retry reclaims and reprocesses it instead of being falsely acked
+    as a duplicate.
     """
 
     event_id = models.CharField(max_length=100, unique=True, db_index=True)
     job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     event_type = models.CharField(max_length=100, blank=True, default="")
     emitted_at = models.DateTimeField(blank=True, null=True)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    processed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -836,6 +846,11 @@ class ContentFactoryHealingRecord(models.Model):
     github_repo = models.CharField(max_length=255, blank=True, default="", db_index=True)
     failure_kind = models.CharField(max_length=100, db_index=True)
     failure_family_key = models.CharField(max_length=64, db_index=True)
+    # Framework/stack the healed failure belongs to (e.g. "nextjs", "react-router").
+    # Empty for legacy org-scoped records. Framework-scoped promoted rules (cross-site
+    # learning) will carry framework with an empty domain/github_repo, which is why the
+    # column participates in the upsert key below.
+    framework = models.CharField(max_length=64, blank=True, default="", db_index=True)
     exact_signature = models.CharField(max_length=64, blank=True, default="")
     summary = models.TextField(blank=True, default="")
     normalized_failure = models.JSONField(default=dict, blank=True)
@@ -859,15 +874,69 @@ class ContentFactoryHealingRecord(models.Model):
     class Meta:
         db_table = "content_factory_healing_record"
         ordering = ["-updated_at"]
+        # framework is "" for all org-scoped records, so this behaves exactly like the
+        # historical 4-tuple for them while keeping framework-scoped rows distinct.
         unique_together = (
             "domain",
             "github_repo",
             "failure_kind",
             "failure_family_key",
+            "framework",
         )
 
     def __str__(self):
         return f"{self.domain}:{self.github_repo}:{self.failure_kind}:{self.failure_family_key}"
+
+
+class ContentFactoryLearningScope(models.TextChoices):
+    REPO = "repo", "Repo"
+    FRAMEWORK = "framework", "Framework"
+
+
+class ContentFactoryLearningEntry(models.Model):
+    """Durable home for Content Factory's per-repo learning stores.
+
+    Content Factory previously persisted these as JSON files inside its own
+    container image (wiped on every deploy). Each row is one entry from one of
+    its stores ("error_fix_pairs", "build_failures"); the payload is the exact
+    dict Content Factory reads and writes, so merge semantics stay client-side.
+    Framework-scoped rows (scope="framework", empty repo_name) are reserved for
+    cross-site rule promotion; nothing writes them yet.
+    """
+
+    store = models.CharField(max_length=64, db_index=True)
+    scope = models.CharField(
+        max_length=32,
+        choices=ContentFactoryLearningScope.choices,
+        default=ContentFactoryLearningScope.REPO,
+        db_index=True,
+    )
+    repo_name = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    framework = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    entry_key = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict, blank=True)
+    # Mirrored from payload["occurrences"] on upsert for ops queries/ordering.
+    occurrences = models.IntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_learning_entry"
+        ordering = ["-updated_at"]
+        unique_together = (
+            "store",
+            "scope",
+            "repo_name",
+            "framework",
+            "entry_key",
+        )
+        indexes = [
+            models.Index(fields=["store", "repo_name"], name="cf_learning_store_repo_idx"),
+            models.Index(fields=["store", "scope", "framework"], name="cf_learning_store_fw_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.store}:{self.scope}:{self.repo_name or self.framework}:{self.entry_key}"
 
 
 class VibeMarketingComponentCommentStatus(models.TextChoices):

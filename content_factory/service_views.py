@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import time
-from datetime import date as calendar_date, datetime, timezone as datetime_timezone
+from datetime import date as calendar_date, datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Optional
 
 from django.conf import settings
@@ -50,6 +50,8 @@ from content_factory.models import (
     ArticlePublishStatus,
     ComponentMapping,
     ContentFactoryHealingRecord,
+    ContentFactoryLearningEntry,
+    ContentFactoryLearningScope,
     GeneratedComponent,
     OrganizationContentConfig,
     WebsiteBaselineSnapshot,
@@ -62,6 +64,7 @@ from content_factory.progress import (
 )
 from content_factory.serializers import (
     ContentFactoryHealingRecordSerializer,
+    ContentFactoryLearningEntrySerializer,
     GeneratedComponentListSerializer,
     GeneratedComponentSerializer,
 )
@@ -890,6 +893,7 @@ class ContentFactoryHealingRecordView(APIView):
         github_repo = str(request.query_params.get("github_repo") or "").strip()
         failure_kind = str(request.query_params.get("failure_kind") or "").strip()
         failure_family_key = str(request.query_params.get("failure_family_key") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
         promotion_state = str(request.query_params.get("promotion_state") or "").strip()
         limit_raw = str(request.query_params.get("limit") or "").strip()
 
@@ -901,6 +905,8 @@ class ContentFactoryHealingRecordView(APIView):
             records = records.filter(failure_kind=failure_kind)
         if failure_family_key:
             records = records.filter(failure_family_key=failure_family_key)
+        if framework:
+            records = records.filter(framework=framework)
         if promotion_state:
             records = records.filter(promotion_state=promotion_state)
 
@@ -950,6 +956,7 @@ class ContentFactoryHealingRecordView(APIView):
             github_repo=github_repo,
             failure_kind=failure_kind,
             failure_family_key=failure_family_key,
+            framework=data.get("framework") or "",
             defaults=defaults,
         )
         response_payload = ContentFactoryHealingRecordSerializer(record).data
@@ -957,6 +964,100 @@ class ContentFactoryHealingRecordView(APIView):
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryLearningEntryView(APIView):
+    """
+    GET/POST entries for Content Factory's durable learning stores
+    (error_fix_pairs, build_failures). Entries are opaque payloads keyed by
+    (store, scope, repo_name, framework, entry_key); all merge semantics live
+    in Content Factory, this endpoint only persists.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    MAX_BATCH = 200
+
+    def get(self, request):
+        store = str(request.query_params.get("store") or "").strip()
+        if not store:
+            return Response(
+                {"error": "store query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        entries = ContentFactoryLearningEntry.objects.filter(store=store)
+
+        scope = str(request.query_params.get("scope") or "").strip()
+        repo_name = str(request.query_params.get("repo_name") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
+        entry_key = str(request.query_params.get("entry_key") or "").strip()
+        limit_raw = str(request.query_params.get("limit") or "").strip()
+
+        if scope:
+            entries = entries.filter(scope=scope)
+        if repo_name:
+            entries = entries.filter(repo_name=repo_name)
+        if framework:
+            entries = entries.filter(framework=framework)
+        if entry_key:
+            entries = entries.filter(entry_key=entry_key)
+
+        limit = 200
+        if limit_raw:
+            try:
+                limit = max(1, min(int(limit_raw), 1000))
+            except ValueError:
+                limit = 200
+
+        serializer = ContentFactoryLearningEntrySerializer(entries.order_by("-updated_at")[:limit], many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        raw_entries = body.get("entries")
+        if raw_entries is None:
+            raw_entries = [body]
+        if not isinstance(raw_entries, list) or not raw_entries:
+            return Response(
+                {"error": "expected an entry object or {\"entries\": [...]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(raw_entries) > self.MAX_BATCH:
+            return Response(
+                {"error": f"batch too large (max {self.MAX_BATCH} entries)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ContentFactoryLearningEntrySerializer(data=raw_entries, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        results = []
+        created_count = 0
+        for data in serializer.validated_data:
+            payload = data.get("payload") or {}
+            try:
+                occurrences = int(payload.get("occurrences") or data.get("occurrences") or 1)
+            except (TypeError, ValueError):
+                occurrences = 1
+            record, created = ContentFactoryLearningEntry.objects.update_or_create(
+                store=data["store"],
+                scope=data.get("scope") or ContentFactoryLearningScope.REPO,
+                repo_name=data.get("repo_name") or "",
+                framework=data.get("framework") or "",
+                entry_key=data["entry_key"],
+                defaults={"payload": payload, "occurrences": occurrences},
+            )
+            if created:
+                created_count += 1
+            item = ContentFactoryLearningEntrySerializer(record).data
+            item["sync_status"] = "created" if created else "updated"
+            results.append(item)
+
+        return Response(
+            {"results": results, "created": created_count, "updated": len(results) - created_count},
+            status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
         )
 
 
@@ -2062,40 +2163,132 @@ def _callback_event_is_stale(*, existing_run: Optional[ContentFactoryRun], emitt
     return bool(last_synced and emitted_at < last_synced)
 
 
-def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitted_at: Optional[datetime]) -> bool:
+def _callback_claim_lease_ttl() -> timedelta:
+    """
+    How long a claimed-but-unprocessed callback claim stays exclusive.
+
+    Must comfortably exceed the longest synchronous handler run (bounded by
+    the web worker timeout) so a live handler is never raced by a retry, while
+    staying short enough that an event orphaned by a hard process death
+    (SIGKILL/OOM/deploy restart) is reprocessed on the sender's next retry
+    soon after.
+    """
+    try:
+        seconds = int(getattr(settings, "CONTENT_FACTORY_CALLBACK_CLAIM_TTL_SECONDS", 600) or 600)
+    except (TypeError, ValueError):
+        seconds = 600
+    return timedelta(seconds=seconds)
+
+
+# Dispositions returned by _claim_callback_event. "claimed" processes the
+# delivery; "duplicate" acks it 200 without reprocessing; "pending" answers
+# non-2xx so the sender's durable outbox keeps retrying — if the in-flight
+# worker finishes, a later retry dedupes to "duplicate", and if it died the
+# retry that lands after the lease TTL reclaims and reprocesses. Answering
+# 200 for a live claim would ack the outbox permanently and turn a hard
+# worker death into a silently dropped event.
+CALLBACK_CLAIM_CLAIMED = "claimed"
+CALLBACK_CLAIM_DUPLICATE = "duplicate"
+CALLBACK_CLAIM_PENDING = "pending"
+
+
+def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitted_at: Optional[datetime]) -> str:
     """
     Atomically claim a callback delivery by its event_id.
 
-    Returns True when this delivery is the first acknowledgement of the event
-    (caller should process it) and False when the event_id is already
-    recorded. The unique constraint makes the claim race-safe across workers.
-    Fails open on storage errors: reprocessing an event is recoverable,
-    silently dropping one is not.
+    Returns CALLBACK_CLAIM_CLAIMED when this delivery should be processed:
+    either the event_id was never seen, or an earlier claim was orphaned by a
+    hard process death (claimed, never processed, lease TTL elapsed) and this
+    delivery reclaims it. Returns CALLBACK_CLAIM_DUPLICATE when the event was
+    already fully processed, and CALLBACK_CLAIM_PENDING while another worker
+    holds a live (unexpired) claim. The unique constraint makes the insert
+    race-safe across workers; the reclaim is a guarded UPDATE so concurrent
+    retries elect exactly one winner. Fails open on storage errors:
+    reprocessing an event is recoverable, silently dropping one is not.
     """
     from content_factory.models import ContentFactoryCallbackEvent
 
     max_attempts = 3 if connection.vendor == "sqlite" else 1
     for attempt in range(max_attempts):
         try:
+            now = timezone.now()
             _, created = ContentFactoryCallbackEvent.objects.get_or_create(
                 event_id=event_id[:100],
                 defaults={
                     "job_id": str(job_id or "")[:100],
                     "event_type": str(event_type or "")[:100],
                     "emitted_at": emitted_at,
+                    "claimed_at": now,
                 },
             )
-            return created
+            if created:
+                return CALLBACK_CLAIM_CLAIMED
+            # The row exists: processed (duplicate), claimed by a live worker
+            # (pending), or orphaned by a hard death (reclaimable once the
+            # lease TTL has elapsed). The claimed_at guard means a NULL
+            # claimed_at (pre-lease legacy row) never matches a reclaim.
+            cutoff = now - _callback_claim_lease_ttl()
+            reclaimed = ContentFactoryCallbackEvent.objects.filter(
+                event_id=event_id[:100],
+                processed_at__isnull=True,
+                claimed_at__lt=cutoff,
+            ).update(claimed_at=now)
+            if reclaimed:
+                logger.warning(
+                    "Reclaimed orphaned callback claim event_id=%s event=%s job_id=%s; "
+                    "a previous worker died before processing completed",
+                    event_id,
+                    event_type,
+                    job_id,
+                )
+                return CALLBACK_CLAIM_CLAIMED
+            row = (
+                ContentFactoryCallbackEvent.objects.filter(event_id=event_id[:100])
+                .values("claimed_at", "processed_at")
+                .first()
+            )
+            if row is None:
+                # Deleted between the lookup and here: the in-flight worker
+                # failed and released the claim. The sender's retry will
+                # reprocess; tell it to keep retrying.
+                return CALLBACK_CLAIM_PENDING
+            if row["processed_at"] is None and row["claimed_at"] is not None:
+                return CALLBACK_CLAIM_PENDING
+            # processed_at set, or a legacy row without lease stamps (only
+            # 2xx-acknowledged deliveries left rows behind pre-lease).
+            return CALLBACK_CLAIM_DUPLICATE
         except OperationalError as exc:
             if _is_retryable_sqlite_lock(exc) and attempt < max_attempts - 1:
                 time.sleep(0.15 * (attempt + 1))
                 continue
             logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return True
+            return CALLBACK_CLAIM_CLAIMED
         except Exception as exc:
             logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return True
-    return True
+            return CALLBACK_CLAIM_CLAIMED
+    return CALLBACK_CLAIM_CLAIMED
+
+
+def _mark_callback_event_processed(event_id: str) -> None:
+    """
+    Stamp a claimed event as fully processed so replays dedupe permanently.
+
+    Without the stamp the claim would look orphaned once the lease TTL
+    elapses and a late replay would reprocess it. A failed stamp therefore
+    degrades to at-least-once (recoverable), never to dropped.
+    """
+    from content_factory.models import ContentFactoryCallbackEvent
+
+    try:
+        ContentFactoryCallbackEvent.objects.filter(event_id=event_id[:100]).update(
+            processed_at=timezone.now()
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to mark callback event_id=%s processed; a TTL-expired replay may reprocess it: %s",
+            event_id,
+            exc,
+        )
 
 
 def _release_callback_event(event_id: str) -> None:
@@ -3546,31 +3739,56 @@ class ContentFactoryCallbackView(APIView):
 
         # content-factory stamps each delivery with a unique event_id and
         # retries non-2xx responses from a durable outbox. Claim the event_id
-        # before processing so a replay of an already-acknowledged event
-        # returns 200 without reprocessing. Payloads from older
-        # content-factory versions have no event_id and skip the guard.
+        # before processing so a replay of an already-processed event returns
+        # 200 without reprocessing, while a delivery racing a live claim gets
+        # a retryable 409 — if that claim's worker dies without processing
+        # (SIGKILL/OOM/deploy restart), the retry that lands after the lease
+        # TTL reclaims the event instead of being falsely acked as a
+        # duplicate. Payloads from older content-factory versions have no
+        # event_id and skip the guard.
         event_id = str(data.get('event_id') or '').strip()
-        if event_id and not _claim_callback_event(
-            event_id=event_id,
-            event_type=str(event_type),
-            job_id=str(job_id),
-            emitted_at=_callback_event_emitted_at(data),
-        ):
-            logger.info(
-                "Duplicate content-factory callback ignored: event=%s, job_id=%s, event_id=%s",
-                event_type,
-                job_id,
-                event_id,
+        if event_id:
+            claim = _claim_callback_event(
+                event_id=event_id,
+                event_type=str(event_type),
+                job_id=str(job_id),
+                emitted_at=_callback_event_emitted_at(data),
             )
-            return Response(
-                {
-                    'status': 'duplicate',
-                    'message': f'{event_type} callback already processed',
-                    'job_id': job_id,
-                    'event_id': event_id,
-                },
-                status=status.HTTP_200_OK,
-            )
+            if claim == CALLBACK_CLAIM_DUPLICATE:
+                logger.info(
+                    "Duplicate content-factory callback ignored: event=%s, job_id=%s, event_id=%s",
+                    event_type,
+                    job_id,
+                    event_id,
+                )
+                return Response(
+                    {
+                        'status': 'duplicate',
+                        'message': f'{event_type} callback already processed',
+                        'job_id': job_id,
+                        'event_id': event_id,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            if claim == CALLBACK_CLAIM_PENDING:
+                logger.info(
+                    "Content-factory callback claim held by an in-flight delivery; deferring retry: "
+                    "event=%s, job_id=%s, event_id=%s",
+                    event_type,
+                    job_id,
+                    event_id,
+                )
+                return Response(
+                    {
+                        'status': 'pending',
+                        'message': (
+                            f'{event_type} callback is being processed by another delivery; retry later'
+                        ),
+                        'job_id': job_id,
+                        'event_id': event_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         try:
             response = self._dispatch_callback_event(data, event_type=event_type, job_id=job_id)
@@ -3582,10 +3800,16 @@ class ContentFactoryCallbackView(APIView):
                 {'error': 'Internal server error processing callback'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        if event_id and not (200 <= response.status_code < 300):
-            # Non-2xx tells the sender to retry; release the claim so the
-            # retry is reprocessed instead of deduped.
-            _release_callback_event(event_id)
+        if event_id:
+            if 200 <= response.status_code < 300:
+                # Only now is the claim a durable ack: a claim without this
+                # stamp is treated as orphaned (worker died mid-processing)
+                # and becomes reclaimable after the lease TTL.
+                _mark_callback_event_processed(event_id)
+            else:
+                # Non-2xx tells the sender to retry; release the claim so the
+                # retry is reprocessed instead of deduped.
+                _release_callback_event(event_id)
         return response
 
     def _dispatch_callback_event(self, data, *, event_type, job_id):

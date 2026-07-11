@@ -77,6 +77,11 @@ class ContentFactoryRun(models.Model):
     # callback stamped with emitted_at arrives (older content-factory versions
     # do not send the field).
     last_event_emitted_at = models.DateTimeField(blank=True, null=True)
+    # When the reconciliation sweep last probed this run against
+    # content-factory. Throttles re-probes of runs that stay active remotely,
+    # so a stuck-looking run is checked at most once per probe interval even
+    # though the scheduler ticks every minute.
+    reconciled_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

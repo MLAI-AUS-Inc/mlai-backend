@@ -332,7 +332,7 @@ class SEODashboardSerializer(serializers.Serializer):
     articles_written = serializers.IntegerField()
 
 
-from .models import ContentFactoryHealingRecord
+from .models import ContentFactoryHealingRecord, ContentFactoryLearningEntry
 
 
 class ContentFactoryHealingRecordSerializer(serializers.ModelSerializer):
@@ -343,6 +343,7 @@ class ContentFactoryHealingRecordSerializer(serializers.ModelSerializer):
             "github_repo",
             "failure_kind",
             "failure_family_key",
+            "framework",
             "exact_signature",
             "summary",
             "normalized_failure",
@@ -359,4 +360,25 @@ class ContentFactoryHealingRecordSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["created_at", "updated_at"]
+        validators = []
+
+
+class ContentFactoryLearningEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContentFactoryLearningEntry
+        fields = [
+            "store",
+            "scope",
+            "repo_name",
+            "framework",
+            "entry_key",
+            "payload",
+            "occurrences",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+        # The POST handler upserts on the unique tuple, so DRF's implicit
+        # unique-together validator must not reject updates (same pattern as
+        # ContentFactoryHealingRecordSerializer above).
         validators = []
