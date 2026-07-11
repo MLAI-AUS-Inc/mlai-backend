@@ -95,6 +95,37 @@ def resolve_automation_run(context: Optional[dict[str, Any]]) -> Optional[Automa
     )
 
 
+def resolve_automation_run_for_callback(data: dict[str, Any]) -> Optional[AutomationRun]:
+    """Resolve the automation run for a terminal article callback.
+
+    Prefer the routing context, but fall back to the article job id. The
+    deferred hosted-preview path in content-factory can emit article_review_ready
+    without notification_context (it fires after finalize, from the platform
+    callback, and only the runner's finalize-time payload carries the context);
+    without this fallback the review link never reaches the founder's channel and
+    the automation run is later swept to failed with content_factory_timeout.
+    """
+    run = resolve_automation_run(data.get("notification_context"))
+    if run is not None:
+        return run
+    job_id = _callback_job_id(data)
+    if not job_id:
+        return None
+    return (
+        AutomationRun.objects.select_related(
+            "automation",
+            "automation__organization",
+            "automation__user",
+            "automation__notification_channel",
+            "automation__notification_channel__user",
+            "automation__notification_channel__provider_connection",
+        )
+        .filter(article_content_factory_run_id=job_id)
+        .order_by("-updated_at")
+        .first()
+    )
+
+
 def _callback_job_id(data: dict[str, Any]) -> str:
     return str(data.get("job_id") or data.get("run_id") or "").strip()
 
@@ -880,7 +911,9 @@ def send_delivery_mode_required(data: dict[str, Any]) -> list[NotificationDelive
         # this prompt raced the selection and is stale — don't message anyone.
         return []
     job_id = _callback_job_id(data)
-    if job_id:
+    # Only stamp when empty — a later revision/child callback resolving this
+    # same run must not overwrite the article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.DELIVERY_MODE_REQUIRED
@@ -904,11 +937,15 @@ def send_content_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     if not run:
         return []
     job_id = _callback_job_id(data)
-    if job_id:
+    # Only stamp when empty — a later revision/child callback resolving this
+    # same run must not overwrite the article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.COMPLETED
-    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
+    # Recovering a swept run to COMPLETED must not leave a stale timeout error.
+    run.last_error = ""
+    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "last_error", "updated_at"])
 
     text = _content_ready_text(run, data)
     return _fan_out_event(
@@ -930,15 +967,30 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     reviewable outcomes of review_draft/publish_code deliveries, which
     otherwise notify nobody (content_ready only covers content_only runs).
     """
-    run = resolve_automation_run(data.get("notification_context"))
-    if not run:
-        return []
     job_id = _callback_job_id(data)
-    if job_id:
+    run = resolve_automation_run_for_callback(data)
+    if not run:
+        # Not every review-ready callback belongs to an automation (web/Slack
+        # runs have no channel to fan out to). Log so a genuinely dropped
+        # notification — the failure mode this fallback exists to catch — is
+        # diagnosable instead of silent.
+        logger.info(
+            "No automation run resolved for review-ready callback (job=%s); skipping channel fan-out.",
+            job_id or "?",
+        )
+        return []
+    # Only stamp the article run id when the run doesn't already have one: a
+    # later revision/child callback can resolve this same run via its inherited
+    # context, and must not overwrite the original article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.COMPLETED
-    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
+    # Clear any stale timeout error: the job-id fallback can resolve a run the
+    # sweep already flipped to FAILED, and recovering it to COMPLETED must not
+    # leave content_factory_timeout on a run that actually finished.
+    run.last_error = ""
+    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "last_error", "updated_at"])
 
     return _fan_out_event(
         run=run,

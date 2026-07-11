@@ -802,6 +802,85 @@ class FanOutDeliveryTests(TestCase):
             },
         )
 
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "4.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_review_ready_recovers_via_article_job_id_without_context(self, mock_post, _mock_dm):
+        # content-factory's deferred hosted-preview callback can emit
+        # article_review_ready WITHOUT notification_context; the run must still
+        # be resolved by its article job id so the review link is delivered.
+        # Simulate the real prod state: the sweep already flipped the run to
+        # FAILED (content_factory_timeout) before the late callback arrived, so
+        # recovery must also clear that stale error.
+        mock_post.return_value = _Response(200, {"id": "email-review", "sid": "SM-review"})
+        self.run.article_content_factory_run_id = "art-run-123"
+        self.run.status = AutomationRunStatus.FAILED
+        self.run.last_error = "content_factory_timeout: no terminal callback within the timeout window"
+        self.run.save(update_fields=["article_content_factory_run_id", "status", "last_error"])
+
+        deliveries = send_review_ready(
+            {
+                "event_type": "article_review_ready",
+                "job_id": "art-run-123",
+                "domain": "mlai.au",
+                "title": "Recovered Without Context",
+                # deliberately no notification_context
+            }
+        )
+
+        self.assertEqual(len(deliveries), 3)
+        self.assertTrue(all(d.status == NotificationDeliveryStatus.SENT for d in deliveries))
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+        self.assertEqual(self.run.article_content_factory_run_id, "art-run-123")
+        self.assertEqual(self.run.last_error, "")
+        self.assertTrue(any("api.twilio.com" in call.args[0] for call in mock_post.call_args_list))
+
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "5.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_review_ready_without_context_or_matching_run_skips_and_logs(self, mock_post, _mock_dm):
+        mock_post.return_value = _Response(200, {"id": "x", "sid": "y"})
+
+        with self.assertLogs("integrations.services.notification_adapters", level="INFO") as logs:
+            deliveries = send_review_ready(
+                {
+                    "event_type": "article_review_ready",
+                    "job_id": "unmatched-run-999",
+                    "domain": "mlai.au",
+                    "title": "No Home",
+                }
+            )
+
+        self.assertEqual(deliveries, [])
+        self.assertEqual(NotificationDelivery.objects.filter(event_type="review_ready").count(), 0)
+        self.assertTrue(any("skipping channel fan-out" in line for line in logs.output))
+        mock_post.assert_not_called()
+
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "6.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_review_ready_does_not_overwrite_existing_article_run_id(self, mock_post, _mock_dm):
+        # A later revision/child callback can resolve this same run via its
+        # inherited notification_context; it must not repoint the automation at
+        # the revision run (the prod symptom where an automation's article id
+        # became a component-revision-* id).
+        mock_post.return_value = _Response(200, {"id": "email-review", "sid": "SM-review"})
+        self.run.article_content_factory_run_id = "original-article-run"
+        self.run.status = AutomationRunStatus.GENERATING
+        self.run.save(update_fields=["article_content_factory_run_id", "status"])
+
+        send_review_ready(
+            {
+                "event_type": "article_review_ready",
+                "job_id": "component-revision-deadbeef",
+                "domain": "mlai.au",
+                "title": "Revision Draft",
+                "notification_context": notification_context_for_run(self.run),
+            }
+        )
+
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.article_content_factory_run_id, "original-article-run")
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+
     @override_settings(TWILIO_WHATSAPP_REVIEW_CONTENT_SID="")
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "3.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
@@ -944,6 +1023,138 @@ class FanOutDeliveryTests(TestCase):
         client.get(reverse("content_factory_automation_action"), {"token": whatsapp_token})
         self.automation.refresh_from_db()
         self.assertEqual(self.automation.status, ResearchAutomationStatus.PAUSED)
+
+
+@override_settings(
+    TWILIO_ACCOUNT_SID="AC-test",
+    TWILIO_AUTH_TOKEN="twilio-auth-token",
+    TWILIO_WHATSAPP_FROM="+61480000000",
+    TWILIO_WHATSAPP_REVIEW_CONTENT_SID="HX-review",
+    FOUNDER_TOOLS_URL="https://app.test",
+    ROO_API_KEY="test-roo-key",
+    INTERNAL_API_KEY="test-roo-key",
+)
+class ReviewReadyCallbackFallbackTests(TestCase):
+    """The article_review_ready HTTP callback must notify the automation's
+    channel even when content-factory omits notification_context — the exact
+    prod failure where daily-topics runs completed silently and then timed out.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.credentials(HTTP_X_API_KEY="test-roo-key")
+        self.org = Organization.objects.create(name="Review Co", domain="review.example.com")
+        self.whatsapp = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=self.whatsapp,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        self.run = AutomationRun.objects.create(
+            automation=self.automation,
+            scheduled_for_at=timezone.now(),
+            local_date=timezone.now().date(),
+            slot_index=0,
+            status=AutomationRunStatus.GENERATING,
+            article_content_factory_run_id="review-art-run-77",
+            idempotency_key="research-automation:review-fallback:0",
+        )
+
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_context_less_review_ready_notifies_via_job_id(self, mock_post):
+        mock_post.return_value = _Response(200, {"sid": "SM-review"})
+
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "article_review_ready",
+                "job_id": "review-art-run-77",
+                "run_id": "review-art-run-77",
+                "domain": "review.example.com",
+                "title": "Context-less Review",
+                # no notification_context — mirrors cf's deferred preview callback
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+        delivery = NotificationDelivery.objects.get(
+            automation_run=self.run, event_type="review_ready"
+        )
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        self.assertTrue(any("api.twilio.com" in call.args[0] for call in mock_post.call_args_list))
+
+    @patch("content_factory.service_views.ContentFactoryCallbackView._send_job_message")
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_context_less_generation_pr_opened_notifies_via_job_id(self, mock_post, mock_job_msg):
+        # The publish_code (PR) terminal outcome has the same deferred-callback
+        # gap: generation_pr_opened can arrive without notification_context and
+        # must still resolve the automation run by article job id, notify the
+        # channel, and suppress the legacy manual Slack job-thread message.
+        mock_post.return_value = _Response(200, {"sid": "SM-review"})
+
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "generation_pr_opened",
+                "job_id": "review-art-run-77",
+                "run_id": "review-art-run-77",
+                "domain": "review.example.com",
+                "title": "Context-less PR Opened",
+                "pr_url": "https://github.com/acme/site/pull/12",
+                "pr_number": 12,
+                "review_required": True,
+                # no notification_context — mirrors cf's deferred callback
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, AutomationRunStatus.COMPLETED)
+        delivery = NotificationDelivery.objects.get(
+            automation_run=self.run, event_type="review_ready"
+        )
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        self.assertTrue(any("api.twilio.com" in call.args[0] for call in mock_post.call_args_list))
+        # The automation branch handled it — the legacy manual Slack job-thread
+        # message must not also fire.
+        mock_job_msg.assert_not_called()
+
+    @patch("content_factory.service_views.ContentFactoryCallbackView._send_job_message", return_value=True)
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_generation_pr_opened_without_automation_uses_legacy_slack(self, mock_post, mock_job_msg):
+        # A manual/web run (no automation owns this job id) must still take the
+        # legacy Slack job-thread path and send no channel review delivery.
+        mock_post.return_value = _Response(200, {"sid": "SM-x"})
+
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "generation_pr_opened",
+                "job_id": "manual-run-no-automation",
+                "run_id": "manual-run-no-automation",
+                "domain": "review.example.com",
+                "title": "Manual PR Opened",
+                "pr_url": "https://github.com/acme/site/pull/13",
+                "pr_number": 13,
+                "review_required": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_job_msg.assert_called_once()
+        self.assertFalse(
+            NotificationDelivery.objects.filter(event_type="review_ready").exists()
+        )
 
 
 class SchedulerChannelFilterTests(TestCase):
