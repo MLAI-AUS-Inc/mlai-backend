@@ -57,6 +57,7 @@ from content_factory.authors import (
 from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
+from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
 from content_factory.article_publish_status import (
     advance_publish_status,
     article_bucket,
@@ -184,7 +185,6 @@ VIBE_MARKETING_WORKFLOWS = {
 }
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
 DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
-ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic", "article_revision"}
 ARTICLE_SYSTEM_SETUP_WORKFLOWS = {"article_system_setup"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
@@ -2949,6 +2949,90 @@ def _artifact_paths_from_run(run):
     return artifact_paths
 
 
+CONTENT_PACKAGE_STEP_KEYS = frozenset(
+    {
+        "build_content_package",
+        "content_package",
+        "package_article",
+        "package_content_delivery",
+        "package_delivery",
+    }
+)
+CONTENT_PACKAGE_ARTIFACT_ALIASES = {
+    "article_component_manifest": "article_component_manifest.json",
+    "article_component_manifest_path": "article_component_manifest.json",
+    "article_html": "article.html",
+    "article_html_path": "article.html",
+    "article_json": "article.json",
+    "article_json_path": "article.json",
+    "article_markdown": "article.md",
+    "article_markdown_path": "article.md",
+    "article_meta": "article_meta.json",
+    "article_meta_path": "article_meta.json",
+    "content_package": "delivery_package.json",
+    "content_package_path": "delivery_package.json",
+    "delivery_package": "delivery_package.json",
+    "delivery_package_path": "delivery_package.json",
+    "image_manifest": "image_manifest.json",
+    "image_manifest_path": "image_manifest.json",
+    "references": "references.json",
+    "references_path": "references.json",
+}
+CONTENT_PACKAGE_ARTIFACT_NAMES = frozenset(
+    {
+        "article.html",
+        "article.json",
+        "article.md",
+        "article.mdx",
+        "article_component_manifest.json",
+        "article_meta.json",
+        "content_package.json",
+        "delivery_package.json",
+        "image_manifest.json",
+        "references.json",
+    }
+)
+
+
+def _recognized_content_package_artifact(key, value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    key_text = str(key or "").strip()
+    normalized_name = CONTENT_PACKAGE_ARTIFACT_ALIASES.get(key_text)
+    if not normalized_name:
+        normalized_name = key_text.rsplit("/", 1)[-1]
+    if normalized_name not in CONTENT_PACKAGE_ARTIFACT_NAMES:
+        return None
+    return normalized_name, value.strip()
+
+
+def _completed_content_package_artifacts_from_run(run):
+    artifact_paths = {}
+    for step in run.steps.all():
+        if (
+            step.step_key not in CONTENT_PACKAGE_STEP_KEYS
+            or step.status != ContentFactoryStepStatus.COMPLETED
+        ):
+            continue
+        artifacts = step.artifacts if isinstance(step.artifacts, list) else []
+        for artifact in artifacts:
+            if isinstance(artifact, str):
+                recognized = _recognized_content_package_artifact(artifact.rsplit("/", 1)[-1], artifact)
+            elif isinstance(artifact, dict):
+                path = artifact.get("path") or artifact.get("url") or artifact.get("href")
+                name = artifact.get("name") or artifact.get("filename") or artifact.get("key")
+                recognized = _recognized_content_package_artifact(
+                    name or str(path or "").rsplit("/", 1)[-1],
+                    path,
+                )
+            else:
+                recognized = None
+            if recognized:
+                name, path = recognized
+                artifact_paths.setdefault(name, path)
+    return artifact_paths
+
+
 def _content_package_from_run(run):
     if not run:
         return None
@@ -2982,33 +3066,17 @@ def _content_package_from_run(run):
         delivery_package.get("artifact_paths"),
         delivery_package,
         evidence_summary,
-        _artifact_paths_from_run(run),
     ):
         if not isinstance(source, dict):
             continue
         for key, value in source.items():
-            if not value:
-                continue
-            normalized_key = {
-                "delivery_package": "delivery_package.json",
-                "delivery_package_path": "delivery_package.json",
-                "content_package_path": "delivery_package.json",
-                "article_markdown": "article.md",
-                "article_markdown_path": "article.md",
-                "article_html": "article.html",
-                "article_html_path": "article.html",
-                "article_json": "article.json",
-                "article_json_path": "article.json",
-                "article_meta": "article_meta.json",
-                "article_meta_path": "article_meta.json",
-                "article_component_manifest": "article_component_manifest.json",
-                "article_component_manifest_path": "article_component_manifest.json",
-                "image_manifest": "image_manifest.json",
-                "image_manifest_path": "image_manifest.json",
-                "references": "references.json",
-            }.get(key, key)
-            if str(normalized_key).endswith((".json", ".md", ".html")) or str(key).endswith("_path"):
-                artifact_paths[str(normalized_key)] = str(value)
+            recognized = _recognized_content_package_artifact(key, value)
+            if recognized:
+                name, path = recognized
+                artifact_paths.setdefault(name, path)
+    completed_package_artifacts = _completed_content_package_artifacts_from_run(run)
+    for name, path in completed_package_artifacts.items():
+        artifact_paths.setdefault(name, path)
 
     title = (
         delivery_package.get("title")
@@ -3029,8 +3097,9 @@ def _content_package_from_run(run):
     content_packaged = bool(
         acceptance_summary.get("content_packaged")
         or delivery_package
-        or artifact_paths
+        or result.get("content_packaged")
         or evidence_summary.get("content_package_path")
+        or completed_package_artifacts
     )
     if not content_packaged:
         return None
@@ -5263,6 +5332,184 @@ def _mark_pending_article_system_setup_pr_created(config, *, run, result):
     _link_built_scaffold_publish_target(config)
 
 
+SETUP_MERGED_VERIFICATION_KEY = "merged_setup_verification"
+SETUP_MERGED_VERIFICATION_PENDING_STATUSES = {
+    "accepted",
+    "pending",
+    "processing",
+    "queued",
+    "resume_queued",
+    "running",
+    "verification_queued",
+    "verifying",
+}
+SETUP_MERGED_VERIFICATION_SUCCESS_STATUSES = {
+    "completed",
+    "recovered",
+    "resumed",
+    "success",
+}
+
+
+def _setup_blocked_article_run_ids(run):
+    run_request = _run_mapping(getattr(run, "run_request", None))
+    raw_ids = run_request.get("blocked_article_run_ids")
+    if not isinstance(raw_ids, (list, tuple)):
+        return []
+    run_ids = []
+    for raw_run_id in raw_ids:
+        run_id = str(raw_run_id or "").strip()
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+    return run_ids
+
+
+def _persist_setup_merged_verification(run, metadata):
+    result = dict(run.result or {})
+    setup = dict(result.get("article_system_setup") or {})
+    clean_metadata = sanitize_json_for_postgres(metadata if isinstance(metadata, dict) else {})
+    result[SETUP_MERGED_VERIFICATION_KEY] = clean_metadata
+    setup[SETUP_MERGED_VERIFICATION_KEY] = clean_metadata
+    result["article_system_setup"] = setup
+    run.result = sanitize_json_for_postgres(result)
+    run.save(update_fields=["result", "updated_at"])
+    return run
+
+
+def _setup_merged_verification_is_settled(metadata):
+    metadata = _run_mapping(metadata)
+    status_value = str(metadata.get("status") or "").strip().lower()
+    if status_value in SETUP_MERGED_VERIFICATION_SUCCESS_STATUSES:
+        return True
+    if status_value == "skipped" and metadata.get("benign_skip") is True:
+        return True
+    return status_value == "error" and metadata.get("retryable") is False
+
+
+def _maybe_verify_merged_setup_for_blocked_articles(*, run, context, force=False):
+    """Ask Content Factory to verify the merged setup and resume blocked parents.
+
+    Merge truth remains authoritative even when this best-effort continuation call
+    fails. Accepted calls are idempotent; retryable failures are attempted again on
+    a later GitHub merge-status refresh.
+    """
+
+    # Content Factory owns the durable setup request and therefore remains the
+    # authority for the blocked article lineage. The local setup row is created
+    # from callbacks that historically did not include these ids, so an empty
+    # local list must not suppress the post-merge verification call.
+    blocked_article_run_ids = _setup_blocked_article_run_ids(run)
+    existing = _run_mapping((run.result or {}).get(SETUP_MERGED_VERIFICATION_KEY))
+    if not force and _setup_merged_verification_is_settled(existing):
+        return run
+
+    actor_user = getattr(getattr(context, "profile", None), "user", None)
+    actor_id = (
+        founder_actor_id_for_user(actor_user)
+        if actor_user is not None
+        else str(run.slack_user_id or "")
+    )
+    attempted_at = timezone.now().isoformat()
+    payload = {
+        "actor_id": actor_id,
+        "blocked_article_run_ids": blocked_article_run_ids,
+        "requested_by_slack_user_id": actor_id,
+        "setup_run_id": run.run_id,
+        "slack_user_id": actor_id,
+    }
+    try:
+        response = _call_content_factory_run_action(
+            run_id=run.run_id,
+            action="verify-merged-setup",
+            payload=payload,
+            workflow=run.workflow,
+            transport_errors_are_pending=True,
+        )
+    except Exception as exc:  # pragma: no cover - defensive best-effort boundary
+        logger.warning(
+            "content_factory_verify_merged_setup_failed run_id=%s error=%s",
+            run.run_id,
+            exc,
+        )
+        response = {"error": str(exc), "retryable": True}
+
+    response = response if isinstance(response, dict) else {}
+    response_status = str(response.get("status") or "").strip().lower()
+    response_errors = response.get("errors")
+    first_error = (
+        response_errors[0]
+        if isinstance(response_errors, list) and response_errors
+        else response_errors
+    )
+    error = str(response.get("error") or first_error or "").strip()
+    transport_error = bool(response.get("content_factory_transport_error"))
+    skipped_reason = str(response.get("reason") or "").strip()
+    parent_transfer = _run_mapping(response.get("parent_transfer"))
+    skipped_parents = _run_mapping(parent_transfer.get("skipped"))
+    benign_parent_skip_reasons = {
+        "parent_is_no_longer_precondition_blocked",
+        "parent_linked_to_different_setup",
+    }
+    non_benign_parent_skips = {
+        run_id: reason
+        for run_id, reason in skipped_parents.items()
+        if reason not in benign_parent_skip_reasons
+    }
+    benign_skip = bool(
+        response_status == "skipped"
+        and (
+            skipped_reason == "no_blocked_article_parents"
+            or (
+                skipped_reason == "no_blocked_article_parents_attached"
+                and skipped_parents
+                and all(
+                    reason in benign_parent_skip_reasons
+                    for reason in skipped_parents.values()
+                )
+            )
+        )
+    )
+    if response_status == "skipped" and not benign_skip and not error:
+        error = skipped_reason or "Content Factory skipped merged setup verification without reconciling its blocked articles."
+    if non_benign_parent_skips and not error:
+        error = (
+            "Content Factory could not attach every blocked article to merged setup verification: "
+            + ", ".join(
+                f"{run_id} ({reason})"
+                for run_id, reason in sorted(non_benign_parent_skips.items())
+            )
+        )
+    accepted = bool(not error and not transport_error and (response_status != "skipped" or benign_skip))
+    if accepted:
+        persisted_status = response_status or "accepted"
+        metadata = {
+            "accepted": True,
+            "accepted_at": attempted_at,
+            "attempted_at": attempted_at,
+            "blocked_article_run_ids": blocked_article_run_ids,
+            "pending": persisted_status in SETUP_MERGED_VERIFICATION_PENDING_STATUSES,
+            "response": response,
+            "retryable": False,
+            "status": persisted_status,
+        }
+        if response_status == "skipped":
+            metadata["benign_skip"] = True
+            metadata["reason"] = skipped_reason
+    else:
+        retryable = bool(transport_error or response.get("retryable"))
+        metadata = {
+            "accepted": False,
+            "attempted_at": attempted_at,
+            "blocked_article_run_ids": blocked_article_run_ids,
+            "error": error or "Content Factory did not accept merged setup verification.",
+            "pending": False,
+            "response": response,
+            "retryable": retryable,
+            "status": "retryable_error" if retryable else "error",
+        }
+    return _persist_setup_merged_verification(run, metadata)
+
+
 def _apply_setup_merge_result(*, run, context, checks_status="success", merge_response=None):
     config = _get_config(context.organization)
     result = dict(run.result or {})
@@ -5309,7 +5556,7 @@ def _apply_setup_merge_result(*, run, context, checks_status="success", merge_re
     run.approval_state = ContentFactoryApprovalState.APPROVED
     run.save(update_fields=["status", "current_step", "approval_state", "result", "updated_at"])
     _mark_pending_article_system_setup_merged(config, run=run, result=result)
-    return run
+    return _maybe_verify_merged_setup_for_blocked_articles(run=run, context=context)
 
 
 def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required"):
@@ -5759,26 +6006,82 @@ def _pull_request_number_from_values(*values):
     return None
 
 
-def _refresh_pending_article_system_setup_pr_status(*, context, config=None, latest_runs=None, run=None):
+def _refresh_pending_article_system_setup_pr_status(
+    *,
+    context,
+    config=None,
+    latest_runs=None,
+    run=None,
+    force_merged_verification=False,
+):
     config = config or _get_config(context.organization)
     pending = _pending_article_system_setup_from_config(config)
+    explicit_setup_run = run if run and run.workflow == "article_system_setup" else None
+    explicit_pending_mismatch = False
+    if explicit_setup_run is not None:
+        pending_setup_id = str(
+            pending.get("setupRunId") or pending.get("setup_run_id") or ""
+        ).strip()
+        if pending_setup_id != explicit_setup_run.run_id:
+            # A parent can remain linked to an older setup while the org starts
+            # a newer one. Never apply the org-wide pending PR/status to the
+            # explicitly linked setup run.
+            pending = {}
+            explicit_pending_mismatch = True
     if not pending and not (run and run.workflow == "article_system_setup"):
         return run, False
 
-    setup_status = str(pending.get("setupStatus") or pending.get("setup_status") or pending.get("status") or "").strip()
-    merge_status = str(pending.get("mergeStatus") or pending.get("merge_status") or "").strip()
-    if _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status):
-        if not bool(getattr(config, "articles_scaffolded", False)):
-            _mark_pending_article_system_setup_merged(config, run=run, result=getattr(run, "result", {}) if run else pending)
-        return run, False
-
     setup_run_id = str(pending.get("setupRunId") or pending.get("setup_run_id") or "").strip()
-    setup_run = run if run and run.workflow == "article_system_setup" else None
+    setup_run = explicit_setup_run
     if setup_run is None and setup_run_id:
         setup_run = (
             _article_setup_state_run_from_latest(latest_runs or [], setup_run_id)
             or ContentFactoryRun.objects.filter(run_id=setup_run_id, workflow="article_system_setup").first()
         )
+
+    setup_run_result = _run_mapping(getattr(setup_run, "result", None))
+    setup_run_payload = _run_mapping(setup_run_result.get("article_system_setup"))
+    setup_status = str(
+        pending.get("setupStatus")
+        or pending.get("setup_status")
+        or pending.get("status")
+        or setup_run_payload.get("setupStatus")
+        or setup_run_payload.get("setup_status")
+        or setup_run_payload.get("status")
+        or setup_run_result.get("setupStatus")
+        or setup_run_result.get("setup_status")
+        or setup_run_result.get("status")
+        or ""
+    ).strip()
+    merge_status = str(
+        pending.get("mergeStatus")
+        or pending.get("merge_status")
+        or setup_run_payload.get("mergeStatus")
+        or setup_run_payload.get("merge_status")
+        or setup_run_result.get("mergeStatus")
+        or setup_run_result.get("merge_status")
+        or ""
+    ).strip()
+    if _article_system_setup_status_is_merged(setup_status=setup_status, merge_status=merge_status):
+        if (
+            not explicit_pending_mismatch
+            and not bool(getattr(config, "articles_scaffolded", False))
+        ):
+            _mark_pending_article_system_setup_merged(
+                config,
+                run=setup_run or run,
+                result=getattr(setup_run or run, "result", {}) if (setup_run or run) else pending,
+            )
+        if setup_run is not None:
+            verification = _run_mapping((setup_run.result or {}).get(SETUP_MERGED_VERIFICATION_KEY))
+            if force_merged_verification or not _setup_merged_verification_is_settled(verification):
+                setup_run = _maybe_verify_merged_setup_for_blocked_articles(
+                    run=setup_run,
+                    context=context,
+                    force=force_merged_verification,
+                )
+                return setup_run, True
+        return setup_run or run, False
 
     pr_url = str(
         pending.get("prUrl")
@@ -8834,6 +9137,13 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         publish_child_run = run
     else:
         publish_child_run = _latest_publish_child_run(latest_runs, article_run)
+    run_scoped_article = bool(
+        run
+        and article_run
+        and run.pk == article_run.pk
+        and run.workflow in ARTICLE_WORKFLOWS
+        and not active_run_is_publish_child
+    )
     revision_source_run = _accepted_revision_source_run(article_run)
     publish_evidence_run = publish_child_run or article_run
     publish_evidence = _publish_evidence_from_run(publish_evidence_run)
@@ -8899,8 +9209,18 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         href_by_id[step_id] = step_def["href"]
         summary_by_id[step_id] = step_def["summary"]
 
+    # An article run page is a view of that run, not the organization's most
+    # advanced historical article. Rebuild create/publish state from the current
+    # run below so an older package or PR cannot unlock this new draft's steps.
+    if run_scoped_article:
+        for step_id in ("generate", "review", "revise", "package", "publish"):
+            status_by_id[step_id] = "locked"
+
     scaffold_check = checks.get("scaffold", {})
-    setup_blocked = bool(scaffold_check.get("setupBlocked"))
+    # Once this exact article run is actively orchestrating, a stale org-level
+    # setup verdict must not turn its run page back into the setup wizard.
+    active_run_scoped_article = bool(run_scoped_article and run.status in RUNNING_RUN_STATUSES)
+    setup_blocked = bool(scaffold_check.get("setupBlocked")) and not active_run_scoped_article
     setup_merged = bool(scaffold_check.get("setupMerged"))
     generation_ready = bool(scaffold_check.get("generationReady"))
 
@@ -9171,6 +9491,9 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
 
     active_statuses = {"blocked", "needs_action", "running", "ready"}
     current_step = next((step for step in steps if step["status"] in active_statuses), steps[-1])
+    if run_scoped_article and run.status in RUNNING_RUN_STATUSES:
+        active_article_step_id = "revise" if run.workflow == "article_revision" else "generate"
+        current_step = next(step for step in steps if step["id"] == active_article_step_id)
     current_index = WORKFLOW_STEP_IDS.index(current_step["id"])
     next_step = next((step for step in steps[current_index + 1 :] if step["status"] != "locked"), None)
     return {
@@ -9223,6 +9546,34 @@ COMPACT_RUN_RESULT_KEYS = {
     "publish_handoff_stale",
     "publish_handoff_status",
     "pull_request_url",
+    # Article precondition repair is polled through the compact status view.
+    # Keep the complete repair contract here so a fast poll cannot turn an
+    # automatic repair into a false manual blocker in the frontend.
+    "auto_recovery_state",
+    "autoRecoveryState",
+    "next_action",
+    "nextAction",
+    "precondition_recovered",
+    "preconditionRecovered",
+    "precondition_status",
+    "preconditionStatus",
+    "previous_status",
+    "previousStatus",
+    "recovery",
+    "repair_error",
+    "repairError",
+    "repair_run_id",
+    "repairRunId",
+    "repair_status",
+    "repairStatus",
+    "requires_user_action",
+    "requiresUserAction",
+    "retry_available",
+    "retryAvailable",
+    "scan_run_id",
+    "scanRunId",
+    "setup_required",
+    "setupRequired",
     "requested_action",
     "resolved_delivery_mode",
     "route_path",
@@ -10773,6 +11124,8 @@ def _run_result_from_remote(remote_data):
         "sourceRunId",
         "review_source_run_id",
         "reviewSourceRunId",
+        "precondition_recovered",
+        "recovery",
         "repaired",
         "repair_requested",
         "previous_status",
@@ -11450,6 +11803,7 @@ def _sync_local_run_from_remote(run, remote_data):
         and remote_status in RUNNING_RUN_STATUSES
         and _article_system_setup_current_retry_attempt(remote_data, result)
     )
+    remote_active_retry_attempt = active_retry_signal(remote_data, result)
     if (
         run.workflow in SCAN_WORKFLOWS
         and run.status in SCAN_LOCAL_AUTHORITATIVE_STATUSES
@@ -11468,7 +11822,12 @@ def _sync_local_run_from_remote(run, remote_data):
     if run.status == ContentFactoryRunStatus.CANCELLED and remote_status != ContentFactoryRunStatus.CANCELLED:
         return run
     if run.status in FAILED_RUN_STATUSES and remote_status in RUNNING_RUN_STATUSES:
-        if not remote_current_retry_attempt and not _article_system_setup_remote_can_replace_local(run, result, remote_status):
+        article_retry_can_replace = bool(run.workflow in ARTICLE_WORKFLOWS and remote_active_retry_attempt)
+        if (
+            not remote_current_retry_attempt
+            and not article_retry_can_replace
+            and not _article_system_setup_remote_can_replace_local(run, result, remote_status)
+        ):
             return run
 
     run.status = remote_status
@@ -11488,6 +11847,14 @@ def _sync_local_run_from_remote(run, remote_data):
         run.error = str(remote_data.get("error"))
     elif run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED}:
         run.error = ""
+    active_result_cleanup_applied = False
+    if not result and remote_status in RUNNING_RUN_STATUSES:
+        result = clear_obsolete_active_run_blockers(
+            run.result,
+            active_status=remote_status,
+            current_step=run.current_step,
+        )
+        active_result_cleanup_applied = True
     if result:
         result = _merge_preserved_live_preview(run.result or {}, result)
         if run.workflow in ARTICLE_WORKFLOWS:
@@ -11568,6 +11935,17 @@ def _sync_local_run_from_remote(run, remote_data):
                 for key in ("error_code", "stale", "stale_reason", "retry_available", "retryable", "article_system_setup"):
                     if result.get(key) in (None, "", {}, []) and run.result.get(key) not in (None, "", {}, []):
                         result[key] = run.result[key]
+        if remote_status in RUNNING_RUN_STATUSES:
+            result = clear_obsolete_active_run_blockers(
+                result,
+                active_status=remote_status,
+                current_step=run.current_step,
+            )
+        run.result = result
+    elif active_result_cleanup_applied:
+        # An active snapshot with no result is still authoritative. If cleanup
+        # removes every stale blocker, persist the empty mapping instead of
+        # leaving the previous terminal result attached to the running run.
         run.result = result
     _sync_steps_from_remote(run, remote_data)
     next_snapshot = {
@@ -14911,6 +15289,125 @@ class VibeMarketingRunView(APIView):
                 run = ContentFactoryRun.objects.prefetch_related("steps").get(pk=run.pk)
             run = _annotate_publish_handoff_staleness(run)
             run = _annotate_publish_child_state(run, context=context)
+            repair_result = _run_mapping(run.result)
+            setup_run_id = str(
+                repair_result.get("setup_run_id")
+                or repair_result.get("setupRunId")
+                or ""
+            ).strip()
+            if (
+                setup_run_id
+                and str(repair_result.get("precondition_status") or "").strip()
+                == "precondition_failed"
+            ):
+                repair_setup_run = ContentFactoryRun.objects.filter(
+                    run_id=setup_run_id,
+                    workflow="article_system_setup",
+                    domain=run.domain,
+                    github_repo=run.github_repo,
+                ).first()
+                if repair_setup_run is not None:
+                    # The durable article page keeps polling while its completed
+                    # setup child does not. Use that parent poll to retry a
+                    # transient post-merge continuation and to observe the
+                    # terminal verification result.
+                    existing_verification = _run_mapping(
+                        (repair_setup_run.result or {}).get(SETUP_MERGED_VERIFICATION_KEY)
+                    )
+                    existing_verification_response = _run_mapping(
+                        existing_verification.get("response")
+                    )
+                    force_late_parent_recheck = bool(
+                        str(existing_verification.get("status") or "").strip().lower()
+                        == "skipped"
+                        and existing_verification.get("benign_skip") is True
+                        and str(
+                            existing_verification.get("reason")
+                            or existing_verification_response.get("reason")
+                            or ""
+                        ).strip()
+                        == "no_blocked_article_parents"
+                    )
+                    refreshed_setup_run, _ = _refresh_pending_article_system_setup_pr_status(
+                        context=context,
+                        run=repair_setup_run,
+                        force_merged_verification=force_late_parent_recheck,
+                    )
+                    verification = _run_mapping(
+                        ((refreshed_setup_run or repair_setup_run).result or {}).get(
+                            SETUP_MERGED_VERIFICATION_KEY
+                        )
+                    )
+                    verification_response = _run_mapping(verification.get("response"))
+                    verification_transfer = _run_mapping(
+                        verification_response.get("parent_transfer")
+                    )
+                    verification_skipped = _run_mapping(
+                        verification_transfer.get("skipped")
+                    )
+                    verification_updated = {
+                        str(parent_run_id or "").strip()
+                        for parent_run_id in verification_transfer.get("updated") or []
+                        if str(parent_run_id or "").strip()
+                    }
+                    verification_status = str(
+                        verification.get("status") or ""
+                    ).strip().lower()
+                    project_verification_progress = bool(
+                        verification.get("accepted") is True
+                        and run.run_id in verification_updated
+                        and (
+                            verification_status in SETUP_MERGED_VERIFICATION_PENDING_STATUSES
+                            or verification_status in SETUP_MERGED_VERIFICATION_SUCCESS_STATUSES
+                        )
+                    )
+                    project_verification_error = bool(
+                        verification_status == "error"
+                        and (
+                            not verification_transfer
+                            or run.run_id in verification_skipped
+                        )
+                    )
+                    if project_verification_progress:
+                        projected = dict(run.result or {})
+                        projected.pop("repair_error", None)
+                        verification_scan_id = str(
+                            verification_response.get("scan_run_id")
+                            or verification_response.get("verification_run_id")
+                            or projected.get("scan_run_id")
+                            or ""
+                        ).strip()
+                        projected.update(
+                            {
+                                "repair_status": "queued",
+                                "next_action": "monitor_repair",
+                                "requires_user_action": False,
+                                "retry_available": False,
+                                SETUP_MERGED_VERIFICATION_KEY: verification,
+                            }
+                        )
+                        if verification_scan_id:
+                            projected["repair_run_id"] = verification_scan_id
+                            projected["scan_run_id"] = verification_scan_id
+                        run.result = sanitize_json_for_postgres(projected)
+                        run.save(update_fields=["result", "updated_at"])
+                    elif project_verification_error:
+                        projected = dict(run.result or {})
+                        projected.update(
+                            {
+                                "repair_status": "resume_failed",
+                                "next_action": "review_setup",
+                                "requires_user_action": True,
+                                "retry_available": bool(verification.get("retryable")),
+                                "repair_error": str(
+                                    verification.get("error")
+                                    or "Merged article setup verification could not attach this article."
+                                ),
+                                SETUP_MERGED_VERIFICATION_KEY: verification,
+                            }
+                        )
+                        run.result = sanitize_json_for_postgres(projected)
+                        run.save(update_fields=["result", "updated_at"])
         if run.workflow == "article_system_setup":
             refreshed_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
             if setup_pr_refreshed and refreshed_run is not None:
@@ -16032,6 +16529,21 @@ class VibeMarketingRunControlView(APIView):
                 run.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
                 run.resume_available = False
                 run.error = ""
+            elif run.workflow in ARTICLE_WORKFLOWS:
+                resume_current_step = str(
+                    remote_data.get("current_step")
+                    or remote_data.get("step")
+                    or run.current_step
+                    or "queued"
+                ).strip()
+                run.result = clear_obsolete_active_run_blockers(
+                    run.result,
+                    active_status=ContentFactoryRunStatus.QUEUED,
+                    current_step=resume_current_step,
+                )
+                run.current_step = resume_current_step
+                run.resume_available = False
+                run.error = ""
         elif action == "delivery-mode":
             result = run.result or {}
             result["delivery_mode"] = request.data.get("delivery_mode") or request.data.get("deliveryMode")
@@ -16222,6 +16734,12 @@ class VibeMarketingRunControlView(APIView):
                     setup_payload = {**setup_payload, **remote_setup_payload}
                     if setup_payload:
                         result["article_system_setup"] = setup_payload
+            elif action == "resume" and run.workflow in ARTICLE_WORKFLOWS:
+                result = clear_obsolete_active_run_blockers(
+                    result,
+                    active_status=ContentFactoryRunStatus.QUEUED,
+                    current_step=run.current_step,
+                )
             run.result = result
         run.save(update_fields=["approval_state", "status", "current_step", "resume_available", "result", "error", "updated_at"])
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
