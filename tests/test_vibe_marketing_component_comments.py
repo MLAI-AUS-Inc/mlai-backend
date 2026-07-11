@@ -3213,6 +3213,118 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(revision_run.result["publish_child_run_id"], "article-publish-child-from-revision")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_stale_run_view_and_publish_target_latest_review_ready_revision(self):
+        first_revision = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-revision-first",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            current_step="await_review",
+            run_request={"source_run_id": self.run.run_id, "feedback_batch_id": "batch-first"},
+            result={
+                "source_run_id": self.run.run_id,
+                "feedback_batch_id": "batch-first",
+                "status": "preview_ready",
+                "preview_url": "https://preview.example/first",
+                "promote_bundle_url": "/api/runs/article-run-comments-revision-first/promote-bundle",
+            },
+        )
+        latest_revision = ContentFactoryRun.objects.create(
+            run_id="article-run-comments-revision-latest",
+            workflow="article_revision",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            approval_state=ContentFactoryApprovalState.APPROVAL_REQUIRED,
+            current_step="await_review",
+            run_request={"source_run_id": first_revision.run_id, "feedback_batch_id": "batch-latest"},
+            result={
+                "source_run_id": first_revision.run_id,
+                "feedback_batch_id": "batch-latest",
+                "status": "preview_ready",
+                "preview_url": "https://preview.example/latest",
+                "promote_bundle_url": "/api/runs/article-run-comments-revision-latest/promote-bundle",
+            },
+        )
+        latest_publish = ContentFactoryRun.objects.create(
+            run_id="article-publish-child-latest",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            resume_available=True,
+            run_request={
+                "source_run_id": latest_revision.run_id,
+                "delivery_mode": "publish_code",
+                "delivery_mode_confirmed": True,
+            },
+            result={
+                "status": "blocked",
+                "retry_available": True,
+                "error": "The article scaffold was not ready yet.",
+            },
+            error="The article scaffold was not ready yet.",
+        )
+        latest_revision.result["publish_child_run_id"] = latest_publish.run_id
+        latest_revision.save(update_fields=["result", "updated_at"])
+        stale_publish = ContentFactoryRun.objects.create(
+            run_id="article-publish-child-stale",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            run_request={"source_run_id": self.run.run_id, "delivery_mode": "publish_code"},
+            result={"status": "pr_created", "pr_url": "https://github.example/pull/stale"},
+        )
+        # Reproduce the damaged production state: the root has an old publish
+        # child, while all denormalized revision pointers were erased by sync.
+        self.run.result = {"publish_child_run_id": stale_publish.run_id}
+        self.run.save(update_fields=["result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            view_response = self.client.get(f"/api/v1/vibe-marketing/runs/{self.run.run_id}")
+
+        self.assertEqual(view_response.status_code, 200)
+        self.assertEqual(view_response.data["runId"], latest_revision.run_id)
+        self.assertEqual(view_response.data["result"]["preview_url"], "https://preview.example/latest")
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response(
+                status_code=202,
+                payload={
+                    "run_id": latest_publish.run_id,
+                    "status": "queued",
+                    "publish_child_status": "queued",
+                    "repaired": True,
+                },
+            )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+                publish_response = self.client.post(
+                    f"/api/v1/vibe-marketing/runs/{self.run.run_id}/promote-bundle",
+                    {},
+                    format="json",
+                )
+
+        self.assertEqual(publish_response.status_code, 202)
+        self.assertEqual(
+            captured["url"],
+            "https://content-factory.test/api/runs/article-run-comments-revision-latest/promote-bundle",
+        )
+        publish_run = ContentFactoryRun.objects.get(run_id=latest_publish.run_id)
+        self.assertEqual(publish_run.status, ContentFactoryRunStatus.QUEUED)
+        self.assertFalse(publish_run.resume_available)
+        self.assertEqual(publish_run.run_request["source_run_id"], latest_revision.run_id)
+        self.assertEqual(publish_run.run_request["review_source_run_id"], self.run.run_id)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_timeout_preserves_completed_source_state(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "encrypted-token"

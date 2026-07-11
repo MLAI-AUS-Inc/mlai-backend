@@ -8057,6 +8057,51 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
     return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
 
 
+_DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
+    {
+        "article_system_review_comments",
+        "daily_automation_channel_warning",
+        "latest_article_system_revision_response",
+        "merge_blocked_reason",
+        "merge_response",
+        "merge_status",
+        "merged_at",
+        "pr_number",
+        "pr_url",
+        "promoted_publish_job_id",
+    }
+)
+_DJANGO_OWNED_RUN_RESULT_PREFIXES = (
+    "component_feedback_",
+    "publish_auto_merge",
+    "publish_child_",
+    "publish_handoff_",
+)
+
+
+def _merge_django_owned_run_result(existing_result, incoming_result):
+    """Keep local orchestration state that Content Factory cannot reproduce.
+
+    Content Factory sends authoritative snapshots for its own result fields. Django
+    augments those snapshots with review lineage, publish-child, and merge state.
+    Replacing the whole JSON object on every PUT silently severed revision chains;
+    preserve only the known Django-owned keys when the incoming snapshot omits them.
+    Explicit incoming values remain authoritative.
+    """
+
+    existing = existing_result if isinstance(existing_result, dict) else {}
+    merged = dict(incoming_result) if isinstance(incoming_result, dict) else {}
+    for key, value in existing.items():
+        django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
+            _DJANGO_OWNED_RUN_RESULT_PREFIXES
+        )
+        if not django_owned:
+            continue
+        if merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+            merged[key] = value
+    return merged
+
+
 def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dict, step_states: dict) -> bool:
     core_fields = {
         "workflow": data["workflow"],
@@ -8143,6 +8188,11 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             .filter(run_id=run_id)
             .first()
         )
+        if existing_run is not None:
+            data["result"] = _merge_django_owned_run_result(
+                existing_run.result,
+                data.get("result"),
+            )
         if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
