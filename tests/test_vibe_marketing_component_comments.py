@@ -22,10 +22,14 @@ from workflow_runs.models import (
     ContentFactoryStepStatus,
 )
 from content_factory.vibe_marketing_views import (
+    _apply_setup_merge_result,
     _call_content_factory_live_preview,
+    _content_package_from_run,
     _live_preview_from_run,
+    _refresh_pending_article_system_setup_pr_status,
     _resolve_article_root_run_id,
     _sync_local_run_from_remote,
+    _workflow_progress,
 )
 
 
@@ -2405,6 +2409,341 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(steps["publish"]["primaryAction"]["intent"], "promote-bundle")
         self.assertNotEqual(steps["publish"]["status"], "complete")
 
+    def test_content_package_ignores_unrelated_json_step_artifacts(self):
+        self.run.status = ContentFactoryRunStatus.RUNNING
+        self.run.current_step = "scan_repository"
+        self.run.result = {"status": "running"}
+        self.run.acceptance_summary = {}
+        self.run.save(update_fields=["status", "current_step", "result", "acceptance_summary", "updated_at"])
+        ContentFactoryRunStep.objects.create(
+            run=self.run,
+            step_key="fetch_org_config",
+            display_order=0,
+            status=ContentFactoryStepStatus.COMPLETED,
+            artifacts=["steps/fetch_org_config/attempt-01/artifacts/org_config_snapshot.json"],
+        )
+        ContentFactoryRunStep.objects.create(
+            run=self.run,
+            step_key="scan_repository",
+            display_order=1,
+            status=ContentFactoryStepStatus.COMPLETED,
+            artifacts=[{"name": "repo_scan.json", "path": "steps/scan_repository/repo_scan.json"}],
+        )
+
+        self.assertIsNone(_content_package_from_run(self.run))
+
+    def test_content_package_accepts_recognized_artifact_from_completed_package_step(self):
+        self.run.status = ContentFactoryRunStatus.RUNNING
+        self.run.result = {"status": "running"}
+        self.run.acceptance_summary = {}
+        self.run.save(update_fields=["status", "result", "acceptance_summary", "updated_at"])
+        package_step = ContentFactoryRunStep.objects.create(
+            run=self.run,
+            step_key="package_content_delivery",
+            display_order=0,
+            status=ContentFactoryStepStatus.RUNNING,
+            artifacts=["steps/package_content_delivery/attempt-01/artifacts/delivery_package.json"],
+        )
+
+        self.assertIsNone(_content_package_from_run(self.run))
+
+        package_step.status = ContentFactoryStepStatus.COMPLETED
+        package_step.save(update_fields=["status"])
+        package = _content_package_from_run(self.run)
+        self.assertTrue(package["contentPackaged"])
+        self.assertEqual(
+            package["artifactPaths"]["delivery_package.json"],
+            "steps/package_content_delivery/attempt-01/artifacts/delivery_package.json",
+        )
+
+    def test_active_article_progress_does_not_inherit_historical_package_or_publish_state(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.github_token_encrypted = "encrypted-token"
+        config.company_context = "MLAI helps Australian founders adopt AI."
+        config.article_delivery_mode = "content_only"
+        config.baseline_skipped_at = timezone.now()
+        config.last_scanned_at = timezone.now()
+        config.article_system = {"state": "existing", "confidence": "high", "directory_name": "articles"}
+        config.publish_targets = [{"id": "articles", "label": "Articles"}]
+        config.save(
+            update_fields=[
+                "github_token_encrypted",
+                "company_context",
+                "article_delivery_mode",
+                "baseline_skipped_at",
+                "last_scanned_at",
+                "article_system",
+                "publish_targets",
+                "updated_at",
+            ]
+        )
+        self.organization.seed_keywords = ["australian founders"]
+        self.organization.save(update_fields=["seed_keywords"])
+        self._create_mlai_featured_components()
+        self.run.acceptance_summary = {"content_packaged": True}
+        self.run.result = {
+            "status": "completed",
+            "delivery_package": {
+                "title": "Previous article",
+                "slug": "previous-article",
+                "article_markdown": "article.md",
+            },
+            "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/99",
+        }
+        self.run.save(update_fields=["acceptance_summary", "result", "updated_at"])
+        active_run = ContentFactoryRun.objects.create(
+            run_id="new-article-generation",
+            workflow="confirmed_topic",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="research_topic",
+            result={"status": "running"},
+        )
+        ContentFactoryRunStep.objects.create(
+            run=active_run,
+            step_key="fetch_org_config",
+            display_order=0,
+            status=ContentFactoryStepStatus.COMPLETED,
+            artifacts=["steps/fetch_org_config/org_config_snapshot.json"],
+        )
+
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_status", return_value={}):
+            response = self.client.get(f"/api/v1/vibe-marketing/runs/{active_run.run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["contentPackage"])
+        progress = response.data["workflowProgress"]
+        steps = {step["id"]: step for step in progress["steps"]}
+        self.assertEqual(progress["currentStepId"], "generate")
+        self.assertEqual(steps["generate"]["status"], "running")
+        self.assertEqual(steps["review"]["status"], "locked")
+        self.assertEqual(steps["package"]["status"], "locked")
+        self.assertEqual(steps["publish"]["status"], "locked")
+
+        progress_with_stale_setup = _workflow_progress(
+            run=active_run,
+            latest_runs=[active_run, self.run],
+            checks={
+                "websiteProfile": {"passed": True},
+                "baseline": {"passed": True},
+                "github": {"passed": True},
+                "scaffold": {
+                    "passed": False,
+                    "setupBlocked": True,
+                    "setupRunId": "stale-setup-run",
+                    "setupStatus": "awaiting_approval",
+                },
+                "research": {"passed": True},
+                "write": {"passed": True},
+                "contentPackage": {"passed": True},
+                "publish": {"passed": True},
+                "dailyAutomation": {"passed": False},
+            },
+        )
+        stale_steps = {step["id"]: step for step in progress_with_stale_setup["steps"]}
+        self.assertEqual(progress_with_stale_setup["currentStepId"], "generate")
+        self.assertEqual(stale_steps["generate"]["status"], "running")
+        self.assertEqual(stale_steps["review"]["status"], "locked")
+        self.assertEqual(stale_steps["package"]["status"], "locked")
+        self.assertEqual(stale_steps["publish"]["status"], "locked")
+
+    def test_active_article_retry_sync_clears_resolved_precondition_state(self):
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.error = "Article system setup is required."
+        self.run.result = {
+            "status": "precondition_failed",
+            "error": "Article system setup is required.",
+            "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+            "blocking_reason": "The cached setup is stale.",
+            "repair_status": "required",
+            "requires_user_action": True,
+            "next_action": "resume",
+            "retryable": True,
+            "article_system_readiness": {
+                "status": "precondition_failed",
+                "blocking_reason": "The cached setup is stale.",
+            },
+        }
+        self.run.save(update_fields=["status", "current_step", "error", "result", "updated_at"])
+
+        synced = _sync_local_run_from_remote(
+            self.run,
+            {
+                "run_id": self.run.run_id,
+                "workflow": self.run.workflow,
+                "status": "processing",
+                "current_step": "research_topic",
+                "result": {
+                    "status": "processing",
+                    "recovery": {"status": "resume_queued"},
+                    "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                    "repair_status": "required",
+                    "requires_user_action": True,
+                    "next_action": "resume",
+                    "article_system_readiness": {
+                        "status": "precondition_failed",
+                        "blocking_reason": "The cached setup is stale.",
+                    },
+                },
+            },
+        )
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(synced.current_step, "research_topic")
+        self.assertEqual(synced.error, "")
+        for key in (
+            "error_code",
+            "blocking_reason",
+            "repair_status",
+            "requires_user_action",
+            "next_action",
+            "retryable",
+            "article_system_readiness",
+        ):
+            self.assertNotIn(key, synced.result)
+
+    def test_article_status_poll_does_not_resurrect_blocked_run_from_legacy_retry_marker(self):
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.error = "Article system setup is required."
+        self.run.result = {
+            "status": "precondition_failed",
+            "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+        }
+        self.run.save(update_fields=["status", "current_step", "error", "result", "updated_at"])
+
+        synced = _sync_local_run_from_remote(
+            self.run,
+            {
+                "status": "processing",
+                "current_step": "research_topic",
+                "result": {"status": "processing", "is_current_attempt": True, "attempt_number": 2},
+            },
+        )
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(synced.current_step, "precondition_failed")
+        self.assertEqual(synced.error, "Article system setup is required.")
+        self.assertEqual(synced.result["error_code"], "ARTICLE_SYSTEM_SETUP_REQUIRED")
+
+    def test_active_article_retry_with_no_remote_result_persists_empty_cleaned_result(self):
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.error = "Article system setup is required."
+        self.run.result = {
+            "error": "Article system setup is required.",
+            "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+            "repair_status": "required",
+            "requires_user_action": True,
+            "next_action": "resume",
+        }
+        self.run.save(update_fields=["status", "current_step", "error", "result", "updated_at"])
+
+        with patch("content_factory.vibe_marketing_views._run_result_from_remote", return_value={}):
+            synced = _sync_local_run_from_remote(
+                self.run,
+                {
+                    "status": "processing",
+                    "current_step": "research_topic",
+                    "precondition_recovered": True,
+                },
+            )
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(synced.current_step, "research_topic")
+        self.assertEqual(synced.error, "")
+        self.assertEqual(synced.result, {})
+
+    def test_blocked_article_accepts_realistic_fast_queued_recovery_payload(self):
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.error = "Article system setup is required."
+        self.run.result = {
+            "status": "precondition_failed",
+            "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+            "requires_user_action": True,
+            "next_action": "resume",
+        }
+        self.run.save(update_fields=["status", "current_step", "error", "result", "updated_at"])
+
+        synced = _sync_local_run_from_remote(
+            self.run,
+            {
+                "run_id": self.run.run_id,
+                "workflow": self.run.workflow,
+                "status": "queued",
+                "current_step": "fetch_org_config",
+                "precondition_recovered": True,
+                "recovery": {"status": "resume_queued"},
+            },
+        )
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(synced.current_step, "fetch_org_config")
+        self.assertEqual(synced.error, "")
+        self.assertTrue(synced.result["precondition_recovered"])
+        self.assertEqual(synced.result["recovery"]["status"], "resume_queued")
+        self.assertNotIn("error_code", synced.result)
+        self.assertNotIn("requires_user_action", synced.result)
+        self.assertNotIn("next_action", synced.result)
+
+    def test_article_status_view_preserves_automatic_repair_contract(self):
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.result = {
+            "precondition_status": "precondition_failed",
+            "repair_status": "queued",
+            "repair_run_id": "repair-scan-status-view",
+            "scan_run_id": "repair-scan-status-view",
+            "setup_run_id": "setup-status-view",
+            "next_action": "monitor_repair",
+            "requires_user_action": False,
+            "retry_available": False,
+            "setup_required": True,
+            "repair_error": "",
+            "auto_recovery_state": {
+                "attempt": 1,
+                "limit": 1,
+                "status": "queued",
+                "exhausted": False,
+            },
+        }
+        self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        ContentFactoryRun.objects.create(
+            run_id="setup-status-view",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="start_hosted_preview",
+            result={"status": "preview_building"},
+        )
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_status",
+            return_value={},
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        compact = response.data["result"]
+        self.assertEqual(compact["precondition_status"], "precondition_failed")
+        self.assertEqual(compact["repair_status"], "queued")
+        self.assertEqual(compact["repair_run_id"], "repair-scan-status-view")
+        self.assertEqual(compact["scan_run_id"], "repair-scan-status-view")
+        self.assertEqual(compact["setup_run_id"], "setup-status-view")
+        self.assertEqual(compact["next_action"], "monitor_repair")
+        self.assertIs(compact["requires_user_action"], False)
+        self.assertEqual(compact["auto_recovery_state"]["status"], "queued")
+
     def test_workflow_progress_review_step_links_to_article_preview(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.github_token_encrypted = "encrypted-token"
@@ -4049,6 +4388,377 @@ class VibeMarketingComponentCommentTests(TestCase):
         pending = config.article_system["pending_article_system_setup"]
         self.assertEqual(pending["status"], "pr_created")
         self.assertEqual(pending["pr_number"], 44)
+
+    def _setup_run_for_merge_continuation(self, blocked_article_run_ids=None):
+        run_request = {}
+        if blocked_article_run_ids is not None:
+            run_request["blocked_article_run_ids"] = blocked_article_run_ids
+        return ContentFactoryRun.objects.create(
+            run_id="setup-merge-continuation",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="create_pull_request",
+            approval_state=ContentFactoryApprovalState.APPROVED,
+            run_request=run_request,
+            result={
+                "status": "setup_pr_created",
+                "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/144",
+                "pr_number": 144,
+                "article_system_setup": {
+                    "status": "pr_created",
+                    "setup_run_id": "setup-merge-continuation",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/144",
+                    "pr_number": 144,
+                },
+            },
+        )
+
+    def _merge_continuation_context(self):
+        return SimpleNamespace(organization=self.organization, profile=self.profile)
+
+    def test_setup_merge_asks_content_factory_to_verify_blocked_article_parents(self):
+        blocked_run_ids = ["blocked-article-1", "blocked-article-2"]
+        setup_run = self._setup_run_for_merge_continuation(blocked_run_ids)
+        response_payload = {
+            "status": "queued",
+            "blocked_article_run_ids": blocked_run_ids,
+            "verification_queued": True,
+        }
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            return_value=response_payload,
+        ) as verify_call:
+            merged_run = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+
+        verify_call.assert_called_once()
+        call_kwargs = verify_call.call_args.kwargs
+        self.assertEqual(call_kwargs["run_id"], setup_run.run_id)
+        self.assertEqual(call_kwargs["action"], "verify-merged-setup")
+        self.assertEqual(call_kwargs["workflow"], "article_system_setup")
+        self.assertTrue(call_kwargs["transport_errors_are_pending"])
+        self.assertEqual(call_kwargs["payload"]["actor_id"], f"mlai_user:{self.user.id}")
+        self.assertEqual(call_kwargs["payload"]["blocked_article_run_ids"], blocked_run_ids)
+        self.assertEqual(merged_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(merged_run.current_step, "merged")
+        metadata = merged_run.result["merged_setup_verification"]
+        self.assertTrue(metadata["accepted"])
+        self.assertTrue(metadata["pending"])
+        self.assertEqual(metadata["status"], "queued")
+        self.assertEqual(metadata["response"], response_payload)
+        self.assertEqual(
+            merged_run.result["article_system_setup"]["merged_setup_verification"],
+            metadata,
+        )
+
+    def test_setup_merge_without_local_parent_ids_defers_to_content_factory_lineage(self):
+        setup_run = self._setup_run_for_merge_continuation()
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            return_value={"status": "skipped", "reason": "no_blocked_article_parents"},
+        ) as verify_call:
+            first = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+            merged_run = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+
+        verify_call.assert_called_once()
+        self.assertEqual(verify_call.call_args.kwargs["payload"]["blocked_article_run_ids"], [])
+        self.assertTrue(first.result["merged_setup_verification"]["benign_skip"])
+        self.assertEqual(merged_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(merged_run.result["merge_status"], "merged")
+        self.assertEqual(merged_run.result["merged_setup_verification"]["status"], "skipped")
+
+    def test_setup_merge_verification_acceptance_is_idempotent(self):
+        setup_run = self._setup_run_for_merge_continuation(["blocked-article-1"])
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            side_effect=[{"status": "resume_queued"}, {"status": "completed"}],
+        ) as verify_call:
+            first = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+            first_accepted_at = first.result["merged_setup_verification"]["accepted_at"]
+            second = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+
+        self.assertEqual(verify_call.call_count, 2)
+        self.assertEqual(second.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(second.current_step, "merged")
+        self.assertEqual(second.result["merged_setup_verification"]["status"], "completed")
+        self.assertNotEqual(second.result["merged_setup_verification"]["accepted_at"], "")
+        self.assertGreaterEqual(second.result["merged_setup_verification"]["accepted_at"], first_accepted_at)
+
+    def test_setup_merge_verification_transport_failure_retries_on_later_refresh(self):
+        setup_run = self._setup_run_for_merge_continuation(["blocked-article-1"])
+        responses = [
+            {
+                "status": "action_pending",
+                "error": "Read timed out.",
+                "errors": ["Read timed out."],
+                "content_factory_transport_error": True,
+                "retryable": True,
+            },
+            {"status": "queued", "verification_queued": True},
+        ]
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            side_effect=responses,
+        ) as verify_call:
+            first = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+            first_metadata = dict(first.result["merged_setup_verification"])
+            self.run.status = ContentFactoryRunStatus.BLOCKED
+            self.run.current_step = "precondition_failed"
+            self.run.result = {
+                "precondition_status": "precondition_failed",
+                "repair_status": "awaiting_merge",
+                "repair_run_id": setup_run.run_id,
+                "setup_run_id": setup_run.run_id,
+                "requires_user_action": True,
+            }
+            self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+            with patch(
+                "content_factory.vibe_marketing_views._call_content_factory_run_status",
+                return_value={},
+            ):
+                response = self.client.get(
+                    f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status"
+                )
+
+        self.assertEqual(verify_call.call_count, 2)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(first.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(first.current_step, "merged")
+        self.assertEqual(first_metadata["status"], "retryable_error")
+        self.assertTrue(first_metadata["retryable"])
+        self.assertIn("Read timed out", first_metadata["error"])
+        setup_run.refresh_from_db()
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.COMPLETED)
+        self.assertEqual(setup_run.current_step, "merged")
+        self.assertTrue(setup_run.result["merged_setup_verification"]["accepted"])
+        self.assertEqual(setup_run.result["merged_setup_verification"]["status"], "queued")
+        self.assertNotIn("error", setup_run.result["merged_setup_verification"])
+
+    def test_late_parent_poll_retries_setup_after_benign_no_parent_skip(self):
+        setup_run = self._setup_run_for_merge_continuation()
+        responses = [
+            {"status": "skipped", "reason": "no_blocked_article_parents"},
+            {
+                "status": "queued",
+                "scan_run_id": "late-parent-verification-scan",
+                "verification_queued": True,
+                "blocked_article_run_ids": [self.run.run_id],
+                "parent_transfer": {"updated": [self.run.run_id], "skipped": {}},
+            },
+        ]
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            side_effect=responses,
+        ) as verify_call:
+            setup_run = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+            self.assertTrue(setup_run.result["merged_setup_verification"]["benign_skip"])
+
+            # Content Factory has since attached this late article to the durable
+            # setup lineage, but its immediate verification enqueue failed. The
+            # article therefore still exposes the already-merged setup as its
+            # repair anchor while MLAI retains the earlier no-parent skip.
+            self.run.status = ContentFactoryRunStatus.BLOCKED
+            self.run.current_step = "precondition_failed"
+            self.run.result = {
+                "precondition_status": "precondition_failed",
+                "repair_status": "awaiting_merge",
+                "repair_run_id": setup_run.run_id,
+                "setup_run_id": setup_run.run_id,
+                "next_action": "merge_scaffold_pr",
+                "requires_user_action": True,
+            }
+            self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+            with patch(
+                "content_factory.vibe_marketing_views._call_content_factory_run_status",
+                return_value={},
+            ):
+                response = self.client.get(
+                    f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(verify_call.call_count, 2)
+        self.assertEqual(response.data["result"]["repair_status"], "queued")
+        self.assertEqual(
+            response.data["result"]["repair_run_id"],
+            "late-parent-verification-scan",
+        )
+        self.assertEqual(response.data["result"]["next_action"], "monitor_repair")
+        self.assertFalse(response.data["result"]["requires_user_action"])
+        setup_run.refresh_from_db()
+        verification = setup_run.result["merged_setup_verification"]
+        self.assertTrue(verification["accepted"])
+        self.assertEqual(verification["status"], "queued")
+        self.assertEqual(
+            verification["response"]["blocked_article_run_ids"],
+            [self.run.run_id],
+        )
+
+    def test_nonbenign_setup_parent_skip_is_projected_to_blocked_article(self):
+        attached_run = ContentFactoryRun.objects.create(
+            run_id="article-attached-to-post-merge-scan",
+            workflow="article_generation",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="precondition_failed",
+            result={
+                "precondition_status": "precondition_failed",
+                "repair_status": "queued",
+                "setup_run_id": "setup-merge-continuation",
+                "next_action": "monitor_repair",
+                "requires_user_action": False,
+            },
+        )
+        setup_run = self._setup_run_for_merge_continuation(
+            [attached_run.run_id, self.run.run_id]
+        )
+        response_payload = {
+            "status": "queued",
+            "parent_transfer": {
+                "updated": [attached_run.run_id],
+                "skipped": {self.run.run_id: "parent_repository_scope_mismatch"},
+            },
+        }
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_action",
+            return_value=response_payload,
+        ) as verify_call:
+            setup_run = _apply_setup_merge_result(
+                run=setup_run,
+                context=self._merge_continuation_context(),
+                checks_status="merged",
+            )
+
+        verification = setup_run.result["merged_setup_verification"]
+        self.assertFalse(verification["accepted"])
+        self.assertEqual(verification["status"], "error")
+        self.assertIn("parent_repository_scope_mismatch", verification["error"])
+        verify_call.assert_called_once()
+
+        self.run.status = ContentFactoryRunStatus.BLOCKED
+        self.run.current_step = "precondition_failed"
+        self.run.result = {
+            "precondition_status": "precondition_failed",
+            "repair_status": "awaiting_merge",
+            "repair_run_id": setup_run.run_id,
+            "setup_run_id": setup_run.run_id,
+            "requires_user_action": True,
+        }
+        self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_status",
+            return_value={},
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}?view=status"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["result"]["repair_status"], "resume_failed")
+        self.assertEqual(response.data["result"]["next_action"], "review_setup")
+        self.assertTrue(response.data["result"]["requires_user_action"])
+        self.assertIn("parent_repository_scope_mismatch", response.data["result"]["repair_error"])
+
+        with patch(
+            "content_factory.vibe_marketing_views._call_content_factory_run_status",
+            return_value={},
+        ):
+            attached_response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{attached_run.run_id}?view=status"
+            )
+        self.assertEqual(attached_response.status_code, 200)
+        self.assertEqual(attached_response.data["result"]["repair_status"], "queued")
+        self.assertEqual(attached_response.data["result"]["next_action"], "monitor_repair")
+        self.assertFalse(attached_response.data["result"]["requires_user_action"])
+
+    def test_explicit_setup_refresh_ignores_newer_org_pending_setup(self):
+        config = OrganizationContentConfig.objects.get(organization=self.organization)
+        config.articles_scaffolded = False
+        config.article_system = {
+            "pending_article_system_setup": {
+                "setupRunId": "newer-org-setup",
+                "status": "merged",
+                "mergeStatus": "merged",
+                "prUrl": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/999",
+            }
+        }
+        config.save(update_fields=["articles_scaffolded", "article_system", "updated_at"])
+        older_setup = ContentFactoryRun.objects.create(
+            run_id="older-linked-setup",
+            workflow="article_system_setup",
+            domain="mlai.au",
+            github_repo="MLAI-AUS-Inc/mlai-au",
+            status=ContentFactoryRunStatus.COMPLETED,
+            current_step="merged",
+            result={
+                "status": "merged",
+                "merge_status": "merged",
+                "article_system_setup": {
+                    "status": "merged",
+                    "merge_status": "merged",
+                    "setup_run_id": "older-linked-setup",
+                    "pr_url": "https://github.com/MLAI-AUS-Inc/mlai-au/pull/100",
+                },
+            },
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._call_content_factory_run_action",
+                return_value={"status": "skipped", "reason": "no_blocked_article_parents"},
+            ) as verify_call,
+            patch("content_factory.vibe_marketing_views._github_api_request") as github_call,
+        ):
+            refreshed, changed = _refresh_pending_article_system_setup_pr_status(
+                context=self._merge_continuation_context(),
+                config=config,
+                run=older_setup,
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(refreshed.run_id, older_setup.run_id)
+        self.assertEqual(verify_call.call_args.kwargs["run_id"], older_setup.run_id)
+        github_call.assert_not_called()
+        config.refresh_from_db()
+        self.assertEqual(
+            config.article_system["pending_article_system_setup"]["setupRunId"],
+            "newer-org-setup",
+        )
 
     def test_merge_setup_pr_publishes_via_auto_merge_when_direct_merge_blocked(self):
         setup_run = ContentFactoryRun.objects.create(

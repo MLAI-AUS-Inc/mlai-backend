@@ -62,6 +62,12 @@ from content_factory.progress import (
     maybe_send_still_working_ping,
     upsert_live_progress_card,
 )
+from content_factory.run_state import (
+    ACTIVE_RUN_STATUSES as DURABLE_ACTIVE_RUN_STATUSES,
+    ARTICLE_WORKFLOWS,
+    active_retry_signal,
+    clear_obsolete_active_run_blockers,
+)
 from content_factory.serializers import (
     ContentFactoryHealingRecordSerializer,
     ContentFactoryLearningEntrySerializer,
@@ -8190,10 +8196,21 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             .filter(run_id=run_id)
             .first()
         )
+        active_snapshot = str(data.get("status") or "").strip().lower() in DURABLE_ACTIVE_RUN_STATUSES
+        if active_snapshot:
+            data["error"] = ""
         if existing_run is not None:
             data["result"] = _merge_django_owned_run_result(
                 existing_run.result,
                 data.get("result"),
+            )
+        if active_snapshot:
+            # Clean after the Django-owned merge as a final invariant: no local
+            # augmentation may reintroduce a blocker into an active snapshot.
+            data["result"] = clear_obsolete_active_run_blockers(
+                data.get("result"),
+                active_status=data["status"],
+                current_step=data.get("current_step") or "",
             )
         if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
@@ -8292,6 +8309,18 @@ class ContentFactoryRunView(APIView):
         data = serializer.validated_data
         step_states = data.get("step_states", {}) or {}
         incoming_status = str(data.get("status") or "").strip()
+        active_retry_snapshot = bool(
+            existing_run is not None
+            and existing_run.status
+            in {
+                ContentFactoryRunStatus.BLOCKED,
+                ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.FAILED,
+            }
+            and existing_run.workflow in ARTICLE_WORKFLOWS
+            and incoming_status in DURABLE_ACTIVE_RUN_STATUSES
+            and active_retry_signal(payload, data.get("result"))
+        )
 
         if (
             existing_run is not None
@@ -8323,6 +8352,7 @@ class ContentFactoryRunView(APIView):
                 data=data,
                 raw_payload=payload if isinstance(payload, dict) else {},
             )
+            and not active_retry_snapshot
         ):
             response_payload = _serialize_content_factory_run(existing_run)
             response_payload["sync_status"] = "ignored_terminal_state"

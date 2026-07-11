@@ -149,6 +149,139 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(run.result["component_feedback_latest_batch"]["revisionRunId"], "revision-2")
         self.assertEqual(run.result["publish_child_run_id"], "publish-revision-2")
 
+    def test_run_sync_accepts_active_article_retry_and_clears_resolved_blocker_fields(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="article-retry-sync-1",
+            workflow="confirmed_topic",
+            domain="coworkadelaide.com.au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="precondition_failed",
+            error="Article system setup is required.",
+            result={
+                "status": "precondition_failed",
+                "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                "blocking_reason": "The cached setup contract is stale.",
+                "repair_status": "required",
+                "requires_user_action": True,
+                "next_action": "resume",
+            },
+        )
+
+        response = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            {
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "domain": run.domain,
+                "status": "running",
+                "current_step": "research_topic",
+                "error": "Article system setup is required.",
+                "result": {
+                    "status": "running",
+                    "precondition_recovered": True,
+                    "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                    "blocking_reason": "The cached setup contract is stale.",
+                    "repair_status": "required",
+                    "requires_user_action": True,
+                    "next_action": "resume",
+                    "article_system_readiness": {
+                        "status": "precondition_failed",
+                        "blocking_reason": "The cached setup contract is stale.",
+                    },
+                },
+                "step_states": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sync_status"], "updated")
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "research_topic")
+        self.assertEqual(run.error, "")
+        for key in (
+            "error_code",
+            "blocking_reason",
+            "repair_status",
+            "requires_user_action",
+            "next_action",
+            "article_system_readiness",
+        ):
+            self.assertNotIn(key, run.result)
+
+    def test_run_sync_does_not_resurrect_unrelated_workflow_with_article_recovery_signal(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="scan-stale-recovery-sync-1",
+            workflow="repo_scan",
+            domain="coworkadelaide.com.au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="scan_repository",
+            error="Repository scan failed.",
+            result={"status": "blocked", "error_code": "REPO_SCAN_FAILED"},
+        )
+
+        response = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            {
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "domain": run.domain,
+                "status": "running",
+                "current_step": "scan_repository",
+                "result": {"status": "running", "precondition_recovered": True},
+                "step_states": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sync_status"], "ignored_terminal_state")
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.error, "Repository scan failed.")
+        self.assertEqual(run.result["error_code"], "REPO_SCAN_FAILED")
+
+    def test_run_sync_does_not_resurrect_article_from_legacy_retry_markers(self):
+        legacy_payloads = (
+            {"is_current_attempt": True},
+            {"repaired": True},
+            {"repair_requested": True},
+            {"attempt_number": 2},
+            {"resume_generation": 2},
+            {"previous_status": "precondition_failed"},
+        )
+        for index, legacy_marker in enumerate(legacy_payloads):
+            with self.subTest(legacy_marker=legacy_marker):
+                run = ContentFactoryRun.objects.create(
+                    run_id=f"article-stale-retry-sync-{index}",
+                    workflow="confirmed_topic",
+                    domain="coworkadelaide.com.au",
+                    status=ContentFactoryRunStatus.BLOCKED,
+                    current_step="precondition_failed",
+                    error="Article system setup is required.",
+                    result={"status": "precondition_failed", "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED"},
+                )
+                response = self.client.put(
+                    f"/api/content-factory/runs/{run.run_id}/",
+                    {
+                        "run_id": run.run_id,
+                        "workflow": run.workflow,
+                        "domain": run.domain,
+                        "status": "running",
+                        "current_step": "research_topic",
+                        "result": {"status": "running", **legacy_marker},
+                        "step_states": {},
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["sync_status"], "ignored_terminal_state")
+                run.refresh_from_db()
+                self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+                self.assertEqual(run.result["error_code"], "ARTICLE_SYSTEM_SETUP_REQUIRED")
+
     def test_repo_scan_status_serialization_includes_scan_progress(self):
         from content_factory.vibe_marketing_views import _serialize_run
 
