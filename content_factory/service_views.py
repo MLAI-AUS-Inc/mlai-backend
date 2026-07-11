@@ -4791,14 +4791,18 @@ class ContentFactoryCallbackView(APIView):
             )
 
         from integrations.services.notification_adapters import (
-            normalize_notification_context,
+            resolve_automation_run_for_callback,
             send_review_ready,
         )
 
         slack_sent = False
-        if normalize_notification_context(data.get('notification_context')):
-            # Automation-driven runs route through notification channels; the
-            # Slack job-thread message below is the legacy manual-run path.
+        # Automation-driven runs route through their notification channels; the
+        # Slack job-thread message below is the legacy manual-run path. Gate on
+        # whether an automation run resolves (by context, or — when the deferred
+        # preview callback omits the context — by article job id), not on
+        # whether a channel was reachable, so an automation whose channels are
+        # all opted out still doesn't fall back to the manual Slack message.
+        if resolve_automation_run_for_callback(data) is not None:
             send_review_ready(data)
         elif pr_url:
             blocks = build_draft_pr_created_blocks(
@@ -5231,10 +5235,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_article_review_ready(self, data):
-        from integrations.services.notification_adapters import (
-            normalize_notification_context,
-            send_review_ready,
-        )
+        from integrations.services.notification_adapters import send_review_ready
 
         # Keep the pre-enrichment payload for channel fan-out: this event only
         # fires after the hosted preview passed the exact-ready gate, but the
@@ -5268,10 +5269,11 @@ class ContentFactoryCallbackView(APIView):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
 
-        if normalize_notification_context(raw_payload.get('notification_context')):
-            # Automation-driven runs notify their channels with the review
-            # link; without this, review-draft articles complete silently.
-            send_review_ready(raw_payload)
+        # Automation-driven runs notify their channels with the review link.
+        # send_review_ready resolves the run by context, or falls back to the
+        # article job id when content-factory's deferred preview callback omits
+        # the routing context, and no-ops (with a log) for non-automation runs.
+        send_review_ready(raw_payload)
 
         logger.info("Article review draft ready for job %s (%s)", job_id, domain)
         return Response(
