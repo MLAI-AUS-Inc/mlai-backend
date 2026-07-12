@@ -28,7 +28,11 @@ def roo_reply(**overrides):
 
 
 def public_reply(**overrides):
-    payload = roo_reply(case_title='', presenting_complaint='')
+    payload = roo_reply(
+        case_title='',
+        presenting_complaint='',
+        suggested_action=None,
+    )
     payload.update(overrides)
     return payload
 
@@ -98,7 +102,12 @@ class SimPatientProxyTests(TestCase):
         upstream = Mock(ok=True, status_code=200)
         upstream.json.return_value = roo_reply(
             patient_name='Nurse Priya',
-            response_source='deterministic',
+            response_source='llm',
+            model='gpt-5.6-terra',
+            tool_calls=[{
+                'name': 'get_results',
+                'arguments': {'test_ids': ['bloods']},
+            }],
         )
         post.return_value = upstream
 
@@ -110,7 +119,63 @@ class SimPatientProxyTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(post.call_args.kwargs['json']['role'], 'nurse')
-        self.assertEqual(SimConversationTurn.objects.get().response_source, 'deterministic')
+        turn = SimConversationTurn.objects.get()
+        self.assertEqual(turn.response_source, 'llm')
+        self.assertEqual(turn.model_name, 'gpt-5.6-terra')
+        self.assertEqual(turn.tool_calls[0]['name'], 'get_results')
+
+    @patch('hospital.sim_patient_views.requests.post')
+    def test_forwards_nurse_paws_context_and_validated_action(self, post):
+        upstream = Mock(ok=True, status_code=200)
+        upstream.json.return_value = roo_reply(
+            patient_name='Nurse Paws',
+            response_source='llm',
+            tool_calls=[{
+                'name': 'prepare_final_guess',
+                'arguments': {'diagnosis': 'adrenal crisis'},
+            }],
+            suggested_action={
+                'type': 'confirm_diagnosis',
+                'diagnosis': 'adrenal crisis',
+            },
+        )
+        post.return_value = upstream
+
+        response = self.post({
+            'question': 'My final answer is adrenal crisis.',
+            'history': [],
+            'player_id': 'aaaaaaaa-1111-4111-8111-111111111111',
+            'role': 'clerk',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs['json']['role'], 'clerk')
+        self.assertEqual(
+            post.call_args.kwargs['json']['contest_state'],
+            {'state': 'eligible', 'outcome': None},
+        )
+        self.assertEqual(response.data['suggested_action'], {
+            'type': 'confirm_diagnosis',
+            'diagnosis': 'adrenal crisis',
+        })
+        turn = SimConversationTurn.objects.get()
+        self.assertEqual(turn.suggested_action, response.data['suggested_action'])
+        self.assertEqual(turn.tool_calls[0]['name'], 'prepare_final_guess')
+
+    @patch('hospital.sim_patient_views.requests.post')
+    def test_suggested_action_is_only_exposed_for_nurse_paws(self, post):
+        upstream = Mock(ok=True, status_code=200)
+        upstream.json.return_value = roo_reply(suggested_action={
+            'type': 'confirm_diagnosis',
+            'diagnosis': 'adrenal crisis',
+        })
+        post.return_value = upstream
+
+        response = self.post({'question': 'Is it adrenal crisis?', 'role': 'patient'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data['suggested_action'])
+        self.assertIsNone(SimConversationTurn.objects.get().suggested_action)
 
     @patch('hospital.sim_patient_views.requests.post')
     def test_backend_reconstructs_history_from_saved_turns(self, post):
