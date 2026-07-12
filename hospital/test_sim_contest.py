@@ -10,14 +10,16 @@ from .models import SimCaseWinner, SimDiagnosisGuess
 
 RECORD_URL = '/api/v1/hackathons/hospital/sim-guess/record/'
 CLAIM_URL = '/api/v1/hackathons/hospital/sim-guess/claim/'
+STATUS_URL = '/api/v1/hackathons/hospital/sim-guess/status/'
 
 ROO_KEY = 'test-roo-key'
+HEALTH_HACK_KEY = 'test-health-hack-key'
 CLIENT_A = 'aaaaaaaa-1111-4111-8111-111111111111'
 CLIENT_B = 'bbbbbbbb-2222-4222-8222-222222222222'
 CLIENT_C = 'cccccccc-3333-4333-8333-333333333333'
 
 
-@override_settings(ROO_API_KEY=ROO_KEY)
+@override_settings(ROO_API_KEY=ROO_KEY, HEALTH_HACK_API_KEY=HEALTH_HACK_KEY)
 class SimGuessRecordTests(TestCase):
     def setUp(self):
         cache.clear()  # throttle + any view caches
@@ -51,13 +53,17 @@ class SimGuessRecordTests(TestCase):
             'already_guessed': False,
             'is_correct': True,
             'outcome': 'pending_claim',
-            'winner_taken': False,
+            'prize_kind': 'free_ticket',
+            'is_first_solver': True,
+            'winner_taken': True,
         })
         guess = SimDiagnosisGuess.objects.get()
         self.assertEqual(guess.case_id, 1)
         self.assertEqual(guess.client_id, CLIENT_A)
         self.assertEqual(guess.outcome, 'pending_claim')
+        self.assertEqual(guess.prize_kind, 'free_ticket')
         self.assertEqual(guess.email, '')
+        self.assertEqual(SimCaseWinner.objects.get().guess, guess)
 
     def test_record_incorrect_guess_locks_out(self):
         resp = self._record(is_correct=False, guess_text='gastro')
@@ -77,15 +83,16 @@ class SimGuessRecordTests(TestCase):
 
     def test_winner_taken_flag(self):
         self._record(client_id=CLIENT_A, is_correct=True)
-        winner_guess = SimDiagnosisGuess.objects.get(client_id=CLIENT_A)
-        SimCaseWinner.objects.create(case_id=1, guess=winner_guess)
 
         resp = self._record(client_id=CLIENT_B, is_correct=True)
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.data['winner_taken'])
+        self.assertFalse(resp.data['is_first_solver'])
+        self.assertEqual(resp.data['prize_kind'], 'discount_30')
         # Different case → fresh winner slot.
         resp = self._record(case_id=2, client_id=CLIENT_B, is_correct=True)
-        self.assertFalse(resp.data['winner_taken'])
+        self.assertTrue(resp.data['winner_taken'])
+        self.assertTrue(resp.data['is_first_solver'])
 
     def test_record_validation(self):
         resp = self._record(client_id='short')  # too short / bad format
@@ -96,34 +103,53 @@ class SimGuessRecordTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
-@override_settings(ROO_API_KEY=ROO_KEY)
+@override_settings(
+    ROO_API_KEY=ROO_KEY,
+    HEALTH_HACK_API_KEY=HEALTH_HACK_KEY,
+    HEALTH_HACK_FREE_TICKET_URL='https://luma.test/free',
+    HEALTH_HACK_DISCOUNT_URL='https://luma.test/discount',
+)
 class SimGuessClaimTests(TestCase):
     def setUp(self):
         cache.clear()
         self.client = APIClient()
 
-    def _seed_guess(self, *, case_id=1, client_id=CLIENT_A, is_correct=True):
-        return SimDiagnosisGuess.objects.create(
+    def _seed_guess(self, *, case_id=1, client_id=CLIENT_A, is_correct=True,
+                    prize_kind=None):
+        if prize_kind is None:
+            prize_kind = ('free_ticket' if is_correct and
+                          not SimCaseWinner.objects.filter(case_id=case_id).exists()
+                          else 'discount_30' if is_correct else 'none')
+        guess = SimDiagnosisGuess.objects.create(
             case_id=case_id,
             client_id=client_id,
             guess_text='adrenal crisis' if is_correct else 'gastro',
             is_correct=is_correct,
             outcome=(SimDiagnosisGuess.OUTCOME_PENDING_CLAIM if is_correct
                      else SimDiagnosisGuess.OUTCOME_INCORRECT),
+            prize_kind=prize_kind,
         )
+        if prize_kind == 'free_ticket':
+            SimCaseWinner.objects.create(case_id=case_id, guess=guess)
+        return guess
 
     def _claim(self, *, case_id=1, client_id=CLIENT_A, email='doc@example.com'):
         return self.client.post(CLAIM_URL, {
             'case_id': case_id,
             'client_id': client_id,
             'email': email,
-        }, format='json')
+        }, format='json', HTTP_AUTHORIZATION=f'Bearer {HEALTH_HACK_KEY}')
 
     def test_first_claim_wins_ticket(self):
         self._seed_guess()
         resp = self._claim(email='Winner@Example.com')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data, {'result': 'ticket', 'already_claimed': False})
+        self.assertEqual(resp.data, {
+            'result': 'ticket',
+            'prize_kind': 'free_ticket',
+            'redemption_url': 'https://luma.test/free',
+            'already_claimed': False,
+        })
 
         guess = SimDiagnosisGuess.objects.get()
         self.assertEqual(guess.outcome, 'ticket')
@@ -140,7 +166,8 @@ class SimGuessClaimTests(TestCase):
 
         resp = self._claim(client_id=CLIENT_B, email='second@example.com')
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data, {'result': 'discount', 'already_claimed': False})
+        self.assertEqual(resp.data['result'], 'discount')
+        self.assertEqual(resp.data['redemption_url'], 'https://luma.test/discount')
         self.assertEqual(SimCaseWinner.objects.count(), 1)
         self.assertEqual(
             SimDiagnosisGuess.objects.get(client_id=CLIENT_B).outcome, 'discount')
@@ -152,7 +179,9 @@ class SimGuessClaimTests(TestCase):
 
         again = self._claim(email='other@example.com')  # even with a new email
         self.assertEqual(again.status_code, 200)
-        self.assertEqual(again.data, {'result': 'ticket', 'already_claimed': True})
+        self.assertEqual(again.data['result'], 'ticket')
+        self.assertTrue(again.data['already_claimed'])
+        self.assertEqual(again.data['redemption_url'], 'https://luma.test/free')
         # Stored email unchanged, still exactly one winner row.
         self.assertEqual(SimDiagnosisGuess.objects.get().email, 'doc@example.com')
         self.assertEqual(SimCaseWinner.objects.count(), 1)
@@ -194,15 +223,10 @@ class SimGuessClaimTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(SimDiagnosisGuess.objects.get().outcome, 'pending_claim')
 
-    def test_winner_slot_race_falls_through_to_discount(self):
-        """Direct IntegrityError path: winner row exists but MY guess is
-        still pending (the 'told free ticket, pipped at the post' race)."""
+    def test_prize_assignment_does_not_depend_on_claim_order(self):
         self._seed_guess(client_id=CLIENT_A)
         self._seed_guess(client_id=CLIENT_B)
-        # A won the slot, e.g. concurrently.
-        SimCaseWinner.objects.create(
-            case_id=1, guess=SimDiagnosisGuess.objects.get(client_id=CLIENT_A))
-
+        # B claims first but was assigned the consolation prize at guess time.
         resp = self._claim(client_id=CLIENT_B, email='raced@example.com')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['result'], 'discount')
@@ -225,3 +249,62 @@ class SimGuessClaimTests(TestCase):
                                      email='b@example.com').data['result'], 'discount')
         self.assertEqual(self._claim(case_id=7, client_id=CLIENT_C,
                                      email='c@example.com').status_code, 404)
+
+
+@override_settings(
+    ROO_API_KEY=ROO_KEY,
+    HEALTH_HACK_API_KEY=HEALTH_HACK_KEY,
+    HEALTH_HACK_ACTIVE_CASE_ID=1,
+    HEALTH_HACK_FREE_TICKET_URL='https://luma.test/free',
+    HEALTH_HACK_DISCOUNT_URL='https://luma.test/discount',
+)
+class SimGuessStatusTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def _status(self, client_id=CLIENT_A, key=HEALTH_HACK_KEY):
+        headers = {}
+        if key is not None:
+            headers['HTTP_AUTHORIZATION'] = f'Bearer {key}'
+        return self.client.get(
+            STATUS_URL,
+            {'client_id': client_id},
+            **headers,
+        )
+
+    def test_status_requires_worker_key(self):
+        self.assertEqual(self._status(key=None).status_code, 403)
+
+    def test_status_transitions_from_eligible_to_claim_to_completed(self):
+        self.assertEqual(self._status().data['state'], 'eligible')
+
+        guess = SimDiagnosisGuess.objects.create(
+            case_id=1,
+            client_id=CLIENT_A,
+            guess_text='adrenal crisis',
+            is_correct=True,
+            outcome='pending_claim',
+            prize_kind='free_ticket',
+        )
+        SimCaseWinner.objects.create(case_id=1, guess=guess)
+        pending = self._status().data
+        self.assertEqual(pending['state'], 'awaiting_claim')
+        self.assertEqual(pending['prize_kind'], 'free_ticket')
+        self.assertIsNone(pending['redemption_url'])
+
+        guess.outcome = 'ticket'
+        guess.save(update_fields=['outcome'])
+        completed = self._status().data
+        self.assertEqual(completed['state'], 'completed')
+        self.assertEqual(completed['redemption_url'], 'https://luma.test/free')
+
+    def test_incorrect_guess_is_locked(self):
+        SimDiagnosisGuess.objects.create(
+            case_id=1,
+            client_id=CLIENT_A,
+            guess_text='gastro',
+            is_correct=False,
+            outcome='incorrect',
+            prize_kind='none',
+        )
+        self.assertEqual(self._status().data['state'], 'locked')

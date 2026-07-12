@@ -8,6 +8,8 @@ from . import sim_patient_views
 
 urlpatterns = [
     path('world/', world_views.WorldStateView.as_view(), name='hospital-world'),
+    path('sim-guess/check/', sim_contest_views.SimGuessCheckView.as_view(), name='hospital-sim-guess-check'),
+    path('sim-guess/status/', sim_contest_views.SimGuessStatusView.as_view(), name='hospital-sim-guess-status'),
     path('sim-guess/record/', sim_contest_views.SimGuessRecordView.as_view(), name='hospital-sim-guess-record'),
     path('sim-guess/claim/', sim_contest_views.SimGuessClaimView.as_view(), name='hospital-sim-guess-claim'),
     path('sim-patient/', sim_patient_views.SimPatientProxyView.as_view(), name='hospital-sim-patient'),

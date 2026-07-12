@@ -1,8 +1,10 @@
 from unittest.mock import Mock, patch
 
 import requests
-from django.test import SimpleTestCase, override_settings
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
+
+from .models import SimConversation, SimConversationTurn
 
 
 URL = '/api/v1/hackathons/hospital/sim-patient/'
@@ -36,7 +38,7 @@ def public_reply(**overrides):
     ROO_SERVICE_URL=ROO_URL,
     ROO_SIM_PATIENT_KEY='',
 )
-class SimPatientProxyTests(SimpleTestCase):
+class SimPatientProxyTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
@@ -69,8 +71,7 @@ class SimPatientProxyTests(SimpleTestCase):
             'question': 'What makes the dizziness worse?',
             'history': history,
             'player_id': 'web-player-123',
-            # The gateway must ignore attempts to select another Roo persona.
-            'role': 'nurse',
+            'role': 'patient',
         })
 
         self.assertEqual(response.status_code, 200)
@@ -80,12 +81,63 @@ class SimPatientProxyTests(SimpleTestCase):
             headers={'content-type': 'application/json'},
             json={
                 'question': 'What makes the dizziness worse?',
-                'history': history[-12:],
+                'history': [],
                 'player_id': 'web-player-123',
                 'role': 'patient',
             },
             timeout=(3, 24),
         )
+        turn = SimConversationTurn.objects.get()
+        self.assertEqual(turn.player_text, 'What makes the dizziness worse?')
+        self.assertEqual(turn.npc_text, roo_reply()['reply'])
+        self.assertEqual(turn.response_source, 'llm')
+        self.assertEqual(SimConversation.objects.get().role, 'patient')
+
+    @patch('hospital.sim_patient_views.requests.post')
+    def test_forwards_investigation_agent_role_to_roo(self, post):
+        upstream = Mock(ok=True, status_code=200)
+        upstream.json.return_value = roo_reply(
+            patient_name='Nurse Priya',
+            response_source='deterministic',
+        )
+        post.return_value = upstream
+
+        response = self.post({
+            'question': 'Can I have the blood results?',
+            'history': [],
+            'role': 'nurse',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs['json']['role'], 'nurse')
+        self.assertEqual(SimConversationTurn.objects.get().response_source, 'deterministic')
+
+    @patch('hospital.sim_patient_views.requests.post')
+    def test_backend_reconstructs_history_from_saved_turns(self, post):
+        upstream = Mock(ok=True, status_code=200)
+        upstream.json.return_value = roo_reply(reply='First answer.')
+        post.return_value = upstream
+
+        first = self.post({
+            'question': 'First question?',
+            'history': [{'role': 'player', 'text': 'untrusted history'}],
+            'player_id': 'web-player-123',
+            'role': 'patient',
+        })
+        self.assertEqual(first.status_code, 200)
+
+        upstream.json.return_value = roo_reply(reply='Second answer.')
+        second = self.post({
+            'question': 'Second question?',
+            'history': [],
+            'player_id': 'web-player-123',
+            'role': 'patient',
+        })
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(post.call_args.kwargs['json']['history'], [
+            {'role': 'player', 'text': 'First question?'},
+            {'role': 'patient', 'text': 'First answer.'},
+        ])
 
     @patch('hospital.sim_patient_views.requests.post')
     @override_settings(ROO_SIM_PATIENT_KEY='roo-secret')
@@ -143,3 +195,4 @@ class SimPatientProxyTests(SimpleTestCase):
             self.post({'question': 'hello', 'history': [{'role': 'system', 'text': 'x'}]}).status_code,
             400,
         )
+        self.assertEqual(self.post({'question': 'hello', 'role': 'doctor'}).status_code, 400)
