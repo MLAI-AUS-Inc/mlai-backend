@@ -333,6 +333,65 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertIsNone(payload["scanProgress"])
         self.assertIsNone(payload["scan_progress"])
 
+    def test_research_shortfall_serialization_is_honest_and_not_resumable(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        run = ContentFactoryRun.objects.create(
+            run_id="research-shortfall-serialize-1",
+            workflow="confirmed_topic",
+            domain="golden-vite-router-baseline.com",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="collect_research_bundle",
+            resume_available=False,
+            # A stale poll may have overwritten run.error with the raw internal phrasing.
+            error="Collected only 3 usable research sources for 'react router'; need at least 4.",
+            result={
+                "status": "failed",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+            },
+        )
+
+        for mode in ("status", "full"):
+            payload = _serialize_run(run, mode=mode)
+            message = payload["errors"][0]
+            # Honest, actionable copy regardless of the raw run.error text.
+            self.assertIn("too narrow", message)
+            self.assertIn("3 of the 4", message)
+            self.assertIn("broader", message.lower())
+            self.assertNotIn("Collected only", message)
+            # No blind Resume/Retry affordance for a deterministic content shortfall.
+            self.assertFalse(payload["resumeAvailable"])
+            self.assertFalse(payload["retryAvailable"])
+            self.assertEqual(payload["errorCode"], "INSUFFICIENT_SOURCE_SUPPORT")
+
+    def test_resumable_insufficient_sources_shows_raw_message_not_too_narrow(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        # Same error_code, but resumable (transient scrape storm / ground_section):
+        # "too narrow — try a broader topic" would be wrong, so the raw text passes through.
+        run = ContentFactoryRun.objects.create(
+            run_id="research-transient-serialize-1",
+            workflow="confirmed_topic",
+            domain="golden-vite-router-baseline.com",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="collect_research_bundle",
+            resume_available=True,
+            error="Collected only 3 usable research sources because several were rate limited; need at least 4.",
+            result={
+                "status": "failed",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+            },
+        )
+
+        for mode in ("status", "full"):
+            payload = _serialize_run(run, mode=mode)
+            message = payload["errors"][0]
+            self.assertNotIn("too narrow", message)
+            self.assertIn("rate limited", message)
+            self.assertTrue(payload["resumeAvailable"])
+
     def test_run_sync_sanitizes_nul_payload_before_persisting(self):
         response = self.client.put(
             "/api/content-factory/runs/run-sync-nul-1/",

@@ -9963,6 +9963,45 @@ def _run_blocking_detail(result):
     }
 
 
+_RESEARCH_SHORTFALL_ERROR_CODES = {"INSUFFICIENT_SOURCE_SUPPORT"}
+
+
+def _humanized_run_failure_message(run, result):
+    """A stable, user-facing failure message for a deterministic research shortfall.
+
+    content-factory's humanized text rides the generation_failed callback into
+    run.error, but a later status poll can overwrite run.error with the raw internal
+    phrasing (e.g. "Collected only 3 usable research sources ..."). Rendering the
+    message here keeps the wizard copy stable and honest regardless of which sync path
+    last wrote run.error.
+
+    Gated on ``not run.resume_available``: the INSUFFICIENT_SOURCE_SUPPORT code is
+    shared by resumable failures (transient scrape storms, ground_section
+    evidence-starved) for which "too narrow — try a broader topic" would be wrong.
+    content-factory sends resume_available=False only for the deterministic
+    sparse-corpus case, and run.resume_available is durable on the run (unlike
+    diagnostics, which a poll may drop), so it is the reliable signal here. Returns
+    None otherwise (the caller falls back to the raw error text).
+    """
+    error_code = str(result.get("error_code") or "").strip().upper()
+    if error_code not in _RESEARCH_SHORTFALL_ERROR_CODES or run.resume_available:
+        return None
+    diagnostics = _run_mapping(result.get("diagnostics"))
+    usable = diagnostics.get("usable_source_count")
+    minimum = diagnostics.get("minimum_usable_sources")
+    if isinstance(usable, int) and isinstance(minimum, int):
+        detail = (
+            f"we found only {usable} of the {minimum} quality source pages needed "
+            "to write a well-grounded article"
+        )
+    else:
+        detail = "we could not find enough quality source pages to write a well-grounded article"
+    return (
+        f"This topic looks too narrow to research well — {detail}. "
+        "Try a broader or more common topic."
+    )
+
+
 _SETUP_RUN_REF_KEYS = ("setup_run_id", "setupRunId", "scaffold_job_id", "scaffoldJobId")
 _SETUP_RUN_REF_NESTED_KEYS = ("result", "article_system_setup", "articleSystemSetup", "latest_control_response")
 _SETUP_RUN_PREVIEW_KEYS = ("live_preview_url", "livePreviewUrl")
@@ -10029,6 +10068,12 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
     step_states = _serialize_run_steps(run, compact=compact)
     result = _run_mapping(run.result)
     blocking_detail = _run_blocking_detail(result)
+    humanized_failure_message = _humanized_run_failure_message(run, result)
+    error_list = (
+        [humanized_failure_message]
+        if humanized_failure_message
+        else ([run.error] if run.error else result.get("errors") or [])
+    )
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
@@ -10056,7 +10101,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
             "stepOrder": run.step_order or [],
             "steps": step_states,
             "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
-            "errors": [run.error] if run.error else result.get("errors") or [],
+            "errors": error_list,
             "errorCode": result.get("error_code"),
             "blockingReason": blocking_detail["reason"] or None,
             "blockingCode": blocking_detail["code"] or None,
@@ -10103,7 +10148,7 @@ def _serialize_run(run, *, context=None, latest_runs=None, checks=None, mode="fu
         "stepOrder": run.step_order or [],
         "steps": step_states,
         "warnings": result.get("warnings") or run.acceptance_summary.get("warnings") or [],
-        "errors": [run.error] if run.error else result.get("errors") or [],
+        "errors": error_list,
         "errorCode": result.get("error_code"),
         "blockingReason": blocking_detail["reason"] or None,
         "blockingCode": blocking_detail["code"] or None,

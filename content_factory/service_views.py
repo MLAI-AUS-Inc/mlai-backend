@@ -2344,6 +2344,12 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             existing_run.last_event_emitted_at.isoformat(),
         )
         return existing_run
+    # content-factory sends the true resume decision for the failure. A deterministic
+    # content shortfall is NOT resumable (re-running the same keyword loops to the same
+    # failure), so the wizard must not advertise a blind Resume. Default to resumable
+    # only when the field is absent (older content-factory that predates this signal).
+    remote_resume_available = data.get("resume_available")
+    resume_available = True if remote_resume_available is None else bool(remote_resume_available)
     result = dict((existing_run.result if existing_run else None) or {})
     result.update(
         {
@@ -2355,6 +2361,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "step": step_key,
             "error": error_message,
             "error_code": error_code,
+            "resume_available": resume_available,
             "retry_after_seconds": data.get("retry_after_seconds"),
             "next_step": data.get("next_step"),
             "rerunnable_step": data.get("rerunnable_step"),
@@ -2385,7 +2392,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "run_request": (existing_run.run_request if existing_run else {}),
             "result": result,
             "error": error_message,
-            "resume_available": True,
+            "resume_available": resume_available,
             "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         },
     )
@@ -6117,6 +6124,7 @@ class ContentFactoryCallbackView(APIView):
                 job,
                 error_code=error_code,
                 error_message=error_message,
+                refundable=bool(data.get('refundable')),
             )
 
         mark_scheduled_dispatch_failed(
