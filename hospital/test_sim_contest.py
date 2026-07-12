@@ -30,13 +30,15 @@ class SimGuessRecordTests(TestCase):
         kwargs = {}
         if key is not None:
             kwargs['HTTP_X_API_KEY'] = key
-        return self.client.post(RECORD_URL, {
+        payload = {
             'case_id': case_id,
-            'case_title': case_title,
             'client_id': client_id,
             'guess_text': guess_text,
             'is_correct': is_correct,
-        }, format='json', **kwargs)
+        }
+        if case_title is not None:
+            payload['case_title'] = case_title
+        return self.client.post(RECORD_URL, payload, format='json', **kwargs)
 
     def test_record_requires_service_key(self):
         resp = self._record(key=None)
@@ -72,6 +74,11 @@ class SimGuessRecordTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['outcome'], 'incorrect')
         self.assertFalse(resp.data['is_correct'])
+
+    def test_record_without_title_uses_rolling_deploy_fallback(self):
+        resp = self._record(case_id=7, case_title=None)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(SimDiagnosisGuess.objects.get().case_title, 'Case 7')
 
     def test_duplicate_guess_returns_stored_verdict(self):
         self._record(is_correct=False, guess_text='gastro')

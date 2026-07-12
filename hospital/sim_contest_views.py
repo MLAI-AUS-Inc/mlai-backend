@@ -5,7 +5,7 @@ Flow: the health-hack browser game submits a diagnosis guess to Roo, Roo
 adjudicates it deterministically (same fuzzy matcher as the Slack game) and
 records the verdict here server-to-server. The first correct RECORDED guess is
 atomically assigned the free ticket; later correct guesses receive the 30%
-discount. Email claim only delivers the already-assigned prize.
+discount. Prize registration only reveals the already-assigned prize.
 The registration step stores the email on that guess and returns the assigned
 Luma URL directly; it does not send email.
 
@@ -169,7 +169,15 @@ class SimGuessClaimThrottle(AnonRateThrottle):
 
 class SimGuessRecordSerializer(serializers.Serializer):
     case_id = serializers.IntegerField(min_value=1)
-    case_title = serializers.CharField(max_length=200, trim_whitespace=True)
+    # Optional during rolling deploys so the backend can land before the Roo
+    # release that starts sending human-readable challenge titles.
+    case_title = serializers.CharField(
+        max_length=200,
+        trim_whitespace=True,
+        allow_blank=True,
+        required=False,
+        default='',
+    )
     client_id = serializers.RegexField(regex=r'^[A-Za-z0-9-]{8,64}$', max_length=64)
     guess_text = serializers.CharField(max_length=300)
     is_correct = serializers.BooleanField()
@@ -247,7 +255,7 @@ class SimGuessRecordView(APIView):
                 client_id=data['client_id'],
                 defaults={
                     'participant': participant,
-                    'case_title': data['case_title'],
+                    'case_title': data['case_title'] or f"Case {data['case_id']}",
                     'guess_text': data['guess_text'],
                     'is_correct': data['is_correct'],
                     'outcome': (
