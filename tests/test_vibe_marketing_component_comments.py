@@ -3441,6 +3441,7 @@ class VibeMarketingComponentCommentTests(TestCase):
                 "title": "Australian Founders and What the Term Means Today",
                 "article_markdown": "article.md",
             },
+            "approval_blocker": {"detail": "A previous transient preview check failed."},
         }
         self.run.save(update_fields=["run_request", "status", "current_step", "approval_state", "acceptance_summary", "result", "updated_at"])
 
@@ -3469,6 +3470,54 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertEqual(self.run.approval_state, ContentFactoryApprovalState.APPROVED)
         self.assertEqual(self.run.status, ContentFactoryRunStatus.COMPLETED)
         self.assertEqual(self.run.result["publish_child_run_id"], "article-publish-child-approved")
+        self.assertNotIn("approval_blocker", self.run.result)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_approve_propagates_content_factory_conflict_and_keeps_review_state(self):
+        self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
+        self.run.current_step = "await_review"
+        self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        self.run.result = {
+            "status": "preview_ready",
+            "preview_url": "https://preview.example/articles/generated",
+            "livePreview": {
+                "available": True,
+                "status": "ready",
+                "previewUrl": "https://preview.example/articles/generated",
+                "exactRender": True,
+            },
+        }
+        self.run.save(
+            update_fields=["status", "current_step", "approval_state", "result", "updated_at"]
+        )
+        blocker = (
+            "The hosted preview loaded before its required deployment assets were available. "
+            "Content Factory is rechecking the current preview automatically; try approval again shortly."
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return _Response(status_code=409, payload={"detail": blocker})
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/approve",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["detail"], blocker)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.APPROVAL_REQUIRED)
+        self.assertEqual(
+            self.run.approval_state,
+            ContentFactoryApprovalState.APPROVAL_REQUIRED,
+        )
+        self.assertEqual(
+            self.run.result["latest_control_response"]["content_factory_status_code"],
+            409,
+        )
+        self.assertEqual(self.run.result["approval_blocker"]["detail"], blocker)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_creates_local_publish_child_run(self):

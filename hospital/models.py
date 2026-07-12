@@ -265,6 +265,12 @@ class SimDiagnosisGuess(models.Model):
     ]
 
     case_id = models.PositiveIntegerField(db_index=True, help_text="Case ID from roo cases.yaml")
+    case_title = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Human-readable simulated-patient challenge title from Roo",
+    )
     client_id = models.CharField(max_length=64, help_text="Anonymous browser UUID")
     participant = models.ForeignKey(
         SimParticipant,
@@ -281,10 +287,18 @@ class SimDiagnosisGuess(models.Model):
         choices=PRIZE_CHOICES,
         default=PRIZE_NONE,
     )
-    email = models.EmailField(blank=True, default="", help_text="Set at claim time")
+    email = models.EmailField(
+        blank=True,
+        default="",
+        help_text="Prize registration email; stored only, no email is sent",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     claimed_at = models.DateTimeField(null=True, blank=True)
-    redemption_delivered_at = models.DateTimeField(null=True, blank=True)
+    redemption_delivered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Legacy field; unused by the link-only prize flow",
+    )
 
     class Meta:
         verbose_name = "Sim Diagnosis Guess"

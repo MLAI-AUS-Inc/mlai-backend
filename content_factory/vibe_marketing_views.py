@@ -7782,6 +7782,7 @@ def _sync_publish_child_from_control_response(
         result["publish_child_run_id"] = publish_run.run_id
         result["promoted_publish_job_id"] = publish_run.run_id
         result["latest_control_response"] = remote_data
+        result.pop("approval_blocker", None)
         result["promote_bundle_requested_at"] = timestamp
         result["publish_handoff_pending"] = False
         result["publish_handoff_stale"] = False
@@ -16572,6 +16573,43 @@ class VibeMarketingRunControlView(APIView):
             timeout=(3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15),
             transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
         )
+
+        remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+        if action == "approve" and remote_status_code in {400, 404, 409, 422}:
+            # Approval is a gate, not a fire-and-forget command. Preserve Content
+            # Factory's rejection verbatim and keep the local run awaiting review;
+            # converting this to a 200 makes the frontend redirect back to the same
+            # page with no explanation and can briefly mislabel the run approved.
+            remote_errors = remote_data.get("errors")
+            first_remote_error = (
+                remote_errors[0]
+                if isinstance(remote_errors, list) and remote_errors
+                else ""
+            )
+            detail = str(
+                remote_data.get("error")
+                or first_remote_error
+                or "Content Factory rejected article approval."
+            ).strip()
+            result = dict(run.result or {})
+            result["latest_control_response"] = remote_data
+            result["approval_blocker"] = {
+                "detail": detail,
+                "content_factory_status_code": remote_status_code,
+                "recorded_at": timezone.now().isoformat(),
+            }
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(
+                {
+                    "detail": detail,
+                    "error": detail,
+                    "runId": run.run_id,
+                    "run_id": run.run_id,
+                    "contentFactoryStatusCode": remote_status_code,
+                },
+                status=remote_status_code,
+            )
 
         if action == "revise":
             new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
