@@ -995,7 +995,11 @@ class VibeMarketingComponentCommentTests(TestCase):
             status_code=200,
             content=(
                 b'<html><head><link rel="stylesheet" href="/@react-router/critical.css?pathname=/articles/featured/generated">'
-                b'<link rel="modulepreload" href="/app/root.tsx">'
+                + (
+                    f'<link rel="stylesheet" href="/api/runs/{self.run.run_id}'
+                    '/live-preview/proxy/__cf-preview/styles.css">'
+                ).encode()
+                + b'<link rel="modulepreload" href="/app/root.tsx">'
                 b'<link rel="modulepreload" href="/node_modules/.vite/deps/react.js?v=test">'
                 b'<script type="module" src="/app/entry.client.tsx"></script>'
                 b'<script type="module" src="/@vite/client"></script>'
@@ -1031,6 +1035,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         text = response.content.decode("utf-8")
         proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
         self.assertIn(f'href="{proxy_prefix}/@react-router/critical.css?pathname=/articles/featured/generated"', text)
+        self.assertIn(f'href="{proxy_prefix}/__cf-preview/styles.css"', text)
+        self.assertNotIn(f'/api/runs/{self.run.run_id}/live-preview/proxy', text)
         self.assertIn(f'srcset="{proxy_prefix}/assets/small.png 1x, /api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource?url=https%3A%2F%2Fcdn.example.com%2Fhero.webp 2x"', text)
         self.assertIn(f"background-image:url({proxy_prefix}/assets/bg.png)", text)
         self.assertIn("window.__cfArticleInspectorInstalled", text)
