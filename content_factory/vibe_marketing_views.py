@@ -1253,14 +1253,18 @@ def _connect_with_existing_github_credentials(config, *, domain: str, actor_id: 
     # Once the founder-scoped registry exists it is the source of truth for
     # installation/repository ownership. Do not promote the legacy single-row
     # credential, whose installation id may belong to a different GitHub account.
+    # A registry of only stale (uninstalled) installations is NOT a source of
+    # truth — it lists no repos — so it must not block the legacy fallback
+    # (golden-repo baseline N1). user_has_registered_installation excludes rows
+    # GitHub confirms are gone; the reconciliation sweep durably deletes them.
     try:
         from integrations.services.github_installations import (
             resolve_user_for_actor_id,
-            user_github_installations,
+            user_has_registered_installation,
         )
 
         registry_user = resolve_user_for_actor_id(actor_id)
-        if registry_user is not None and user_github_installations(registry_user):
+        if registry_user is not None and user_has_registered_installation(registry_user):
             return None
     except Exception:
         logger.exception("github_registry_legacy_promotion_guard_failed actor_id=%s", actor_id)
@@ -4297,23 +4301,29 @@ def _resolve_installation_id_for_repo(config, repo: str) -> str:
     repo = str(repo or "").strip()
     try:
         from integrations.services.github_installations import (
+            _installation_confirmed_dead,
             installation_for_repo,
             resolve_user_for_actor_id,
-            user_github_installations,
+            user_has_registered_installation,
         )
 
         owner_user = resolve_user_for_actor_id(getattr(config, "connected_slack_user_id", ""))
         if owner_user is not None:
-            installations = user_github_installations(owner_user)
             inst = installation_for_repo(owner_user, repo)
-            if inst is not None:
+            # installation_for_repo can match a stale row by account_login without
+            # a liveness check; never return a confirmed-dead id (minting against
+            # it 404s), fall through to the per-org id instead.
+            if inst is not None and not _installation_confirmed_dead(inst):
                 resolved = str(inst.installation_id or "").strip()
                 if resolved:
                     return resolved
-            if installations:
-                # A populated registry that cannot resolve this repository is a
-                # real ownership mismatch. Falling back to the per-org id would
-                # recreate the invalid tuple the registry is meant to replace.
+            if user_has_registered_installation(owner_user):
+                # A registry with a live installation that cannot resolve this
+                # repository is a real ownership mismatch. Falling back to the
+                # per-org id would recreate the invalid tuple the registry is
+                # meant to replace. (A registry of only stale/uninstalled rows
+                # is excluded, so it falls through to the per-org id instead of
+                # dead-ending.)
                 return ""
     except Exception:
         logger.exception("github_registry_installation_resolve_failed repo=%s", repo)
