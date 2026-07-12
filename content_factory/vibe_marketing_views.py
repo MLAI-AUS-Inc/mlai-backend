@@ -13,7 +13,7 @@ import uuid
 import time
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
@@ -3727,6 +3727,37 @@ def _live_preview_resource_url(run_id, url):
     return f"{_backend_live_preview_resource_prefix(run_id)}?{urlencode({'url': str(url or '')})}"
 
 
+def _live_preview_proxy_destination(run_id, path):
+    clean_path = str(path or "").lstrip("/")
+    parsed = urlsplit(f"/{clean_path}")
+    if parsed.path.rstrip("/") == "/__cf-resource":
+        resource_url = next(
+            (value for key, value in parse_qsl(parsed.query, keep_blank_values=False) if key == "url" and value),
+            "",
+        )
+        if resource_url:
+            return _live_preview_resource_url(run_id, resource_url)
+    return _live_preview_proxy_asset_url(run_id, clean_path)
+
+
+def _rewrite_content_factory_preview_prefixes(run_id, text):
+    content_factory_proxy = _content_factory_live_preview_proxy_prefix(run_id)
+    backend_proxy = _backend_live_preview_proxy_prefix(run_id)
+    content_factory_resource = _content_factory_live_preview_resource_prefix(run_id)
+    backend_resource = _backend_live_preview_resource_prefix(run_id)
+    rewritten = str(text or "")
+    # Content Factory has already rewritten fallback-shell assets before MLAI
+    # receives the body. Translate that inner proxy layer first, including the
+    # legacy form where /__cf-resource was nested under /proxy.
+    rewritten = rewritten.replace(
+        f"{content_factory_proxy}/__cf-resource?",
+        f"{backend_resource}?",
+    )
+    rewritten = rewritten.replace(content_factory_resource, backend_resource)
+    rewritten = rewritten.replace(content_factory_proxy, backend_proxy)
+    return rewritten
+
+
 def _is_probable_visual_asset_url(url):
     parsed = urlsplit(str(url or ""))
     if parsed.scheme not in {"http", "https"}:
@@ -3749,7 +3780,7 @@ def _rewrite_root_asset_reference(run_id, value):
     parsed = urlsplit(text)
     if parsed.scheme or parsed.netloc or not text.startswith("/") or not _is_live_preview_root_asset_path(text):
         return text
-    return _live_preview_proxy_asset_url(run_id, text.lstrip("/"))
+    return _live_preview_proxy_destination(run_id, text.lstrip("/"))
 
 
 def _rewrite_external_visual_reference(run_id, value):
@@ -3807,7 +3838,7 @@ def _rewrite_css_asset_references(run_id, text):
         quote_char = match.group("quote") or ""
         return (
             f"{match.group('prefix')}{quote_char}"
-            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{_live_preview_proxy_destination(run_id, match.group('path'))}"
             f"{quote_char}{match.group('suffix')}"
         )
 
@@ -3822,7 +3853,7 @@ def _rewrite_css_asset_references(run_id, text):
     def replace_css_import(match):
         return (
             f"{match.group('prefix')}{match.group('quote')}"
-            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{_live_preview_proxy_destination(run_id, match.group('path'))}"
             f"{match.group('quote')}"
         )
 
@@ -3921,27 +3952,16 @@ def _rewrite_live_preview_html_assets(run_id, text):
 
 def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
     def replace_quoted(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}"
 
     def replace_unquoted_attr(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}"
 
     def replace_js_import(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}{match.group('suffix')}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}{match.group('suffix')}"
 
     content_type_lower = str(content_type or "").lower()
-    # Content Factory rewrites root-relative preview assets to its own public
-    # `/api/runs/...` endpoints. The browser is talking to this backend proxy,
-    # so translate those already-rewritten URLs before applying the normal
-    # root-asset pass. Without this, content-only preview CSS is requested from
-    # a non-existent MLAI route and the article appears as unstyled source text.
-    rewritten = str(text or "").replace(
-        _content_factory_live_preview_proxy_prefix(run_id),
-        _backend_live_preview_proxy_prefix(run_id),
-    ).replace(
-        _content_factory_live_preview_resource_prefix(run_id),
-        _backend_live_preview_resource_prefix(run_id),
-    )
+    rewritten = _rewrite_content_factory_preview_prefixes(run_id, text)
     rewritten = _rewrite_css_asset_references(run_id, rewritten)
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
