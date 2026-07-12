@@ -3,7 +3,8 @@ from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
     Team, Submission, Announcement, MedHackCase, MedHackGuess, MedHackWinner,
-    SimDiagnosisGuess, SimCaseWinner,
+    SimDiagnosisGuess, SimCaseWinner, SimParticipant, SimConversation,
+    SimConversationTurn,
 )
 
 class TeamAdmin(admin.ModelAdmin):
@@ -64,8 +65,8 @@ class MedHackWinnerAdmin(admin.ModelAdmin):
 @admin.register(SimDiagnosisGuess)
 class SimDiagnosisGuessAdmin(admin.ModelAdmin):
     """Organizer export surface for the web ward contest (emails + outcomes)."""
-    list_display = ('id', 'case_id', 'client_id', 'guess_text', 'is_correct', 'outcome', 'email', 'created_at', 'claimed_at')
-    list_filter = ('case_id', 'outcome', 'is_correct')
+    list_display = ('id', 'case_id', 'client_id', 'guess_text', 'is_correct', 'prize_kind', 'outcome', 'email', 'created_at', 'claimed_at')
+    list_filter = ('case_id', 'prize_kind', 'outcome', 'is_correct')
     search_fields = ('email', 'client_id', 'guess_text')
     readonly_fields = ('created_at', 'claimed_at')
     ordering = ('-created_at',)
@@ -75,4 +76,42 @@ class SimDiagnosisGuessAdmin(admin.ModelAdmin):
 class SimCaseWinnerAdmin(admin.ModelAdmin):
     list_display = ('id', 'case_id', 'guess', 'created_at')
     readonly_fields = ('created_at',)
+    ordering = ('-created_at',)
+
+
+@admin.register(SimParticipant)
+class SimParticipantAdmin(admin.ModelAdmin):
+    list_display = ('id', 'created_at', 'last_seen_at')
+    search_fields = ('id',)
+    readonly_fields = ('created_at', 'last_seen_at')
+    ordering = ('-last_seen_at',)
+
+
+class SimConversationTurnInline(admin.TabularInline):
+    model = SimConversationTurn
+    extra = 0
+    can_delete = False
+    fields = (
+        'created_at', 'player_text', 'npc_text', 'response_source',
+        'model_name', 'latency_ms', 'error_code',
+    )
+    readonly_fields = fields
+
+
+@admin.register(SimConversation)
+class SimConversationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'participant', 'case_id', 'role', 'created_at', 'last_turn_at')
+    list_filter = ('case_id', 'role')
+    search_fields = ('id', 'participant__id', 'turns__player_text', 'turns__npc_text')
+    readonly_fields = ('created_at', 'last_turn_at')
+    ordering = ('-last_turn_at',)
+    inlines = [SimConversationTurnInline]
+
+
+@admin.register(SimConversationTurn)
+class SimConversationTurnAdmin(admin.ModelAdmin):
+    list_display = ('id', 'conversation', 'response_source', 'model_name', 'latency_ms', 'created_at')
+    list_filter = ('response_source', 'conversation__role', 'conversation__case_id')
+    search_fields = ('player_text', 'npc_text', 'conversation__participant__id')
+    readonly_fields = ('created_at', 'completed_at')
     ordering = ('-created_at',)

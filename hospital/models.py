@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Lower
 from django.conf import settings
 import uuid
 from django.utils import timezone
@@ -138,6 +139,98 @@ class MedHackWinner(models.Model):
         return f"{self.slack_user_id} won Case #{self.case_id}{first}"
 
 
+class SimParticipant(models.Model):
+    """Stable anonymous identity minted by the Health Hack Worker."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Sim Participant"
+        verbose_name_plural = "Sim Participants"
+        ordering = ['-last_seen_at']
+
+    def __str__(self):
+        return str(self.id)
+
+
+class SimConversation(models.Model):
+    """One participant's persisted transcript with one ward NPC."""
+
+    ROLE_PATIENT = 'patient'
+    ROLE_NURSE = 'nurse'
+    ROLE_CHOICES = [
+        (ROLE_PATIENT, 'Sash'),
+        (ROLE_NURSE, 'Dr Snow'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    participant = models.ForeignKey(
+        SimParticipant,
+        on_delete=models.CASCADE,
+        related_name='conversations',
+    )
+    case_id = models.PositiveIntegerField(db_index=True)
+    role = models.CharField(max_length=16, choices=ROLE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_turn_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-last_turn_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['participant', 'case_id', 'role'],
+                name='uniq_sim_conversation_participant_case_role',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.participant_id} · case {self.case_id} · {self.role}"
+
+
+class SimConversationTurn(models.Model):
+    """A single player question and its resulting NPC response or error."""
+
+    SOURCE_PENDING = 'pending'
+    SOURCE_LLM = 'llm'
+    SOURCE_DETERMINISTIC = 'deterministic'
+    SOURCE_ERROR = 'error'
+    SOURCE_CHOICES = [
+        (SOURCE_PENDING, 'Pending'),
+        (SOURCE_LLM, 'LLM'),
+        (SOURCE_DETERMINISTIC, 'Deterministic'),
+        (SOURCE_ERROR, 'Error'),
+    ]
+
+    conversation = models.ForeignKey(
+        SimConversation,
+        on_delete=models.CASCADE,
+        related_name='turns',
+    )
+    message_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    player_text = models.TextField()
+    npc_text = models.TextField(blank=True, default='')
+    response_source = models.CharField(
+        max_length=16,
+        choices=SOURCE_CHOICES,
+        default=SOURCE_PENDING,
+    )
+    model_name = models.CharField(max_length=100, blank=True, default='')
+    prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
+    completion_tokens = models.PositiveIntegerField(null=True, blank=True)
+    latency_ms = models.PositiveIntegerField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.conversation_id} · {self.response_source} · {self.created_at:%Y-%m-%d %H:%M}"
+
+
 class SimDiagnosisGuess(models.Model):
     """
     One web-game diagnosis guess per anonymous browser client per case.
@@ -158,14 +251,36 @@ class SimDiagnosisGuess(models.Model):
         (OUTCOME_DISCOUNT, '30% discount'),
     ]
 
+    PRIZE_NONE = 'none'
+    PRIZE_FREE_TICKET = 'free_ticket'
+    PRIZE_DISCOUNT_30 = 'discount_30'
+    PRIZE_CHOICES = [
+        (PRIZE_NONE, 'No prize'),
+        (PRIZE_FREE_TICKET, 'Free ticket'),
+        (PRIZE_DISCOUNT_30, '30% discount'),
+    ]
+
     case_id = models.PositiveIntegerField(db_index=True, help_text="Case ID from roo cases.yaml")
     client_id = models.CharField(max_length=64, help_text="Anonymous browser UUID")
+    participant = models.ForeignKey(
+        SimParticipant,
+        on_delete=models.PROTECT,
+        related_name='guesses',
+        null=True,
+        blank=True,
+    )
     guess_text = models.CharField(max_length=300)
     is_correct = models.BooleanField()
     outcome = models.CharField(max_length=20, choices=OUTCOME_CHOICES)
+    prize_kind = models.CharField(
+        max_length=20,
+        choices=PRIZE_CHOICES,
+        default=PRIZE_NONE,
+    )
     email = models.EmailField(blank=True, default="", help_text="Set at claim time")
     created_at = models.DateTimeField(auto_now_add=True)
     claimed_at = models.DateTimeField(null=True, blank=True)
+    redemption_delivered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "Sim Diagnosis Guess"
@@ -176,6 +291,12 @@ class SimDiagnosisGuess(models.Model):
                 fields=['case_id', 'client_id'],
                 name='uniq_sim_guess_case_client',
             ),
+            models.UniqueConstraint(
+                Lower('email'),
+                'case_id',
+                condition=~models.Q(email=''),
+                name='uniq_sim_claim_email_case_ci',
+            ),
         ]
 
     def __str__(self):
@@ -185,9 +306,9 @@ class SimDiagnosisGuess(models.Model):
 class SimCaseWinner(models.Model):
     """
     The single free-ticket winner per web-contest case.
-    unique=True on case_id IS the contest lock — the winner slot is claimed
-    by inserting this row inside a transaction; the loser of a claim race
-    hits IntegrityError and falls through to the discount outcome.
+    unique=True on case_id IS the contest lock. The winner slot is claimed at
+    correct-guess recording time; a concurrent later solver falls through to
+    the discount before either player reaches the email-claim screen.
     """
     case_id = models.PositiveIntegerField(unique=True)
     guess = models.OneToOneField(SimDiagnosisGuess, on_delete=models.PROTECT, related_name='win')
