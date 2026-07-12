@@ -93,7 +93,7 @@ class SimConversationTurnInline(admin.TabularInline):
     can_delete = False
     fields = (
         'created_at', 'player_text', 'npc_text', 'response_source',
-        'model_name', 'latency_ms', 'error_code',
+        'model_name', 'tool_calls', 'suggested_action', 'latency_ms', 'error_code',
     )
     readonly_fields = fields
 

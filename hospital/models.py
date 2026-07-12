@@ -160,9 +160,11 @@ class SimConversation(models.Model):
 
     ROLE_PATIENT = 'patient'
     ROLE_NURSE = 'nurse'
+    ROLE_CLERK = 'clerk'
     ROLE_CHOICES = [
         (ROLE_PATIENT, 'Sash'),
         (ROLE_NURSE, 'Dr Snow'),
+        (ROLE_CLERK, 'Nurse Paws'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -219,6 +221,8 @@ class SimConversationTurn(models.Model):
     model_name = models.CharField(max_length=100, blank=True, default='')
     prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
     completion_tokens = models.PositiveIntegerField(null=True, blank=True)
+    tool_calls = models.JSONField(default=list, blank=True)
+    suggested_action = models.JSONField(null=True, blank=True)
     latency_ms = models.PositiveIntegerField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)

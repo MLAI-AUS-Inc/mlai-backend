@@ -12,7 +12,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.permissions import HasHealthHackApiKey
-from .models import SimConversation, SimConversationTurn, SimParticipant
+from .models import (
+    SimConversation,
+    SimConversationTurn,
+    SimDiagnosisGuess,
+    SimParticipant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +46,7 @@ class SimPatientRequestSerializer(serializers.Serializer):
         default='web-anon',
     )
     role = serializers.ChoiceField(
-        choices=('patient', 'nurse'),
+        choices=('patient', 'nurse', 'clerk'),
         required=False,
         default='patient',
     )
@@ -92,6 +97,56 @@ def _history_from_conversation(conversation):
             {'role': 'patient', 'text': turn.npc_text},
         ])
     return history
+
+
+def _contest_state(participant, case_id):
+    """Return only the read-only contest context Nurse Paws needs."""
+    guess = SimDiagnosisGuess.objects.filter(
+        participant=participant,
+        case_id=case_id,
+    ).first()
+    if guess is None:
+        return {'state': 'eligible', 'outcome': None}
+    if not guess.is_correct:
+        state = 'locked'
+    elif guess.outcome == SimDiagnosisGuess.OUTCOME_PENDING_CLAIM:
+        state = 'awaiting_claim'
+    else:
+        state = 'completed'
+    return {'state': state, 'outcome': guess.outcome}
+
+
+def _sanitized_tool_calls(payload):
+    calls = payload.get('tool_calls')
+    if not isinstance(calls, list):
+        return []
+    sanitized = []
+    for call in calls[:8]:
+        if not isinstance(call, dict):
+            continue
+        name = call.get('name')
+        arguments = call.get('arguments')
+        if not isinstance(name, str) or not name or len(name) > 64:
+            continue
+        if not isinstance(arguments, dict):
+            arguments = {}
+        sanitized.append({'name': name, 'arguments': arguments})
+    return sanitized
+
+
+def _sanitized_action(payload, role):
+    action = payload.get('suggested_action')
+    if role != SimConversation.ROLE_CLERK or not isinstance(action, dict):
+        return None
+    if action.get('type') != 'confirm_diagnosis':
+        return None
+    diagnosis = action.get('diagnosis')
+    if not isinstance(diagnosis, str):
+        return None
+    diagnosis = diagnosis.strip()
+    if not diagnosis or len(diagnosis) > 200:
+        return None
+    return {'type': 'confirm_diagnosis', 'diagnosis': diagnosis}
 
 
 class SimPatientProxyView(APIView):
@@ -158,10 +213,12 @@ class SimPatientProxyView(APIView):
             # caller-provided history that could rewrite the agent's memory.
             'history': history,
             'player_id': data['player_id'],
-            # Only the two explicitly validated, non-adjudicating personas are
-            # exposed. Diagnosis verdicts use the separate contest endpoint.
+            # Only explicitly validated, non-adjudicating personas are exposed.
+            # Diagnosis verdicts use the separate contest endpoint.
             'role': data['role'],
         }
+        if data['role'] == SimConversation.ROLE_CLERK:
+            upstream_payload['contest_state'] = _contest_state(participant, case_id)
         if 'case_id' in data:
             upstream_payload['case_id'] = data['case_id']
 
@@ -215,17 +272,22 @@ class SimPatientProxyView(APIView):
         }:
             source = SimConversationTurn.SOURCE_LLM
         usage = payload.get('usage') if isinstance(payload.get('usage'), dict) else {}
+        tool_calls = _sanitized_tool_calls(payload)
+        suggested_action = _sanitized_action(payload, data['role'])
         turn.npc_text = payload['reply']
         turn.response_source = source
         turn.model_name = str(payload.get('model') or '')[:100]
         turn.prompt_tokens = usage.get('prompt_tokens') if isinstance(usage.get('prompt_tokens'), int) else None
         turn.completion_tokens = usage.get('completion_tokens') if isinstance(usage.get('completion_tokens'), int) else None
+        turn.tool_calls = tool_calls
+        turn.suggested_action = suggested_action
         turn.latency_ms = max(0, round((time.monotonic() - started) * 1000))
         completed_at = timezone.now()
         turn.completed_at = completed_at
         turn.save(update_fields=[
             'npc_text', 'response_source', 'model_name', 'prompt_tokens',
-            'completion_tokens', 'latency_ms', 'completed_at',
+            'completion_tokens', 'tool_calls', 'suggested_action', 'latency_ms',
+            'completed_at',
         ])
         SimConversation.objects.filter(pk=conversation.pk).update(
             last_turn_at=completed_at,
@@ -244,4 +306,5 @@ class SimPatientProxyView(APIView):
             'is_guess': payload['is_guess'],
             'correct': None,
             'diagnosis': None,
+            'suggested_action': suggested_action,
         })
