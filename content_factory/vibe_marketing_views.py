@@ -13,7 +13,7 @@ import uuid
 import time
 from io import BytesIO
 from datetime import timedelta, timezone as datetime_timezone
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
@@ -38,6 +38,8 @@ from rest_framework.views import APIView
 from content_factory.article_setup_reset import (
     article_setup_reset_at,
     article_setup_reset_ignores_run,
+    article_setup_reset_marker,
+    clear_article_setup_reset_markers,
     clear_cancelled_article_setup_config,
     reset_article_setup_config,
 )
@@ -3725,6 +3727,37 @@ def _live_preview_resource_url(run_id, url):
     return f"{_backend_live_preview_resource_prefix(run_id)}?{urlencode({'url': str(url or '')})}"
 
 
+def _live_preview_proxy_destination(run_id, path):
+    clean_path = str(path or "").lstrip("/")
+    parsed = urlsplit(f"/{clean_path}")
+    if parsed.path.rstrip("/") == "/__cf-resource":
+        resource_url = next(
+            (value for key, value in parse_qsl(parsed.query, keep_blank_values=False) if key == "url" and value),
+            "",
+        )
+        if resource_url:
+            return _live_preview_resource_url(run_id, resource_url)
+    return _live_preview_proxy_asset_url(run_id, clean_path)
+
+
+def _rewrite_content_factory_preview_prefixes(run_id, text):
+    content_factory_proxy = _content_factory_live_preview_proxy_prefix(run_id)
+    backend_proxy = _backend_live_preview_proxy_prefix(run_id)
+    content_factory_resource = _content_factory_live_preview_resource_prefix(run_id)
+    backend_resource = _backend_live_preview_resource_prefix(run_id)
+    rewritten = str(text or "")
+    # Content Factory has already rewritten fallback-shell assets before MLAI
+    # receives the body. Translate that inner proxy layer first, including the
+    # legacy form where /__cf-resource was nested under /proxy.
+    rewritten = rewritten.replace(
+        f"{content_factory_proxy}/__cf-resource?",
+        f"{backend_resource}?",
+    )
+    rewritten = rewritten.replace(content_factory_resource, backend_resource)
+    rewritten = rewritten.replace(content_factory_proxy, backend_proxy)
+    return rewritten
+
+
 def _is_probable_visual_asset_url(url):
     parsed = urlsplit(str(url or ""))
     if parsed.scheme not in {"http", "https"}:
@@ -3747,7 +3780,7 @@ def _rewrite_root_asset_reference(run_id, value):
     parsed = urlsplit(text)
     if parsed.scheme or parsed.netloc or not text.startswith("/") or not _is_live_preview_root_asset_path(text):
         return text
-    return _live_preview_proxy_asset_url(run_id, text.lstrip("/"))
+    return _live_preview_proxy_destination(run_id, text.lstrip("/"))
 
 
 def _rewrite_external_visual_reference(run_id, value):
@@ -3805,7 +3838,7 @@ def _rewrite_css_asset_references(run_id, text):
         quote_char = match.group("quote") or ""
         return (
             f"{match.group('prefix')}{quote_char}"
-            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{_live_preview_proxy_destination(run_id, match.group('path'))}"
             f"{quote_char}{match.group('suffix')}"
         )
 
@@ -3820,7 +3853,7 @@ def _rewrite_css_asset_references(run_id, text):
     def replace_css_import(match):
         return (
             f"{match.group('prefix')}{match.group('quote')}"
-            f"{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+            f"{_live_preview_proxy_destination(run_id, match.group('path'))}"
             f"{match.group('quote')}"
         )
 
@@ -3919,16 +3952,17 @@ def _rewrite_live_preview_html_assets(run_id, text):
 
 def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
     def replace_quoted(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}"
 
     def replace_unquoted_attr(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}"
 
     def replace_js_import(match):
-        return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}{match.group('suffix')}"
+        return f"{match.group('prefix')}{_live_preview_proxy_destination(run_id, match.group('path'))}{match.group('suffix')}"
 
     content_type_lower = str(content_type or "").lower()
-    rewritten = _rewrite_css_asset_references(run_id, str(text or ""))
+    rewritten = _rewrite_content_factory_preview_prefixes(run_id, text)
+    rewritten = _rewrite_css_asset_references(run_id, rewritten)
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
     rewritten = _LIVE_PREVIEW_JS_IMPORT_ASSET_RE.sub(replace_js_import, rewritten)
@@ -5188,6 +5222,9 @@ def _link_built_scaffold_publish_target(config) -> bool:
     article_system["publish_mutation_target"] = bundle["registry_path"]
     article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
     article_system["scaffold_accepted_at"] = timezone.now().isoformat()
+    # Linking a built scaffold (auto after merge, or explicit Accept) is a durable
+    # exit from any prior reset — drop the watermark so it can't suppress published.
+    clear_article_setup_reset_markers(article_system)
     config.article_system = article_system
     update_fields = [
         "publish_targets",
@@ -5273,6 +5310,8 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         article_system["source"] = article_system.get("source") or "setup_pr_merge"
         article_system["confidence"] = article_system.get("confidence") or "high"
 
+    # A merged setup is an explicit exit from any prior reset — drop the watermark.
+    clear_article_setup_reset_markers(article_system)
     update_fields = ["article_system"]
     config.article_system = sanitize_json_for_postgres(article_system)
     if not config.articles_scaffolded:
@@ -8757,6 +8796,17 @@ def _article_system_is_published(config, article_system: dict) -> bool:
     state = str(article_system.get("state") or "").strip()
     if state in ARTICLE_SYSTEM_PUBLISHED_STATES:
         if state in ARTICLE_SYSTEM_DETECTION_ONLY_STATES:
+            # The reset watermark lives on the *stored* article_system; the
+            # normalized ``article_system`` passed in has dropped the non-template
+            # marker keys, so read it off the config field directly.
+            stored_article_system = getattr(config, "article_system", None) if config else None
+            if article_setup_reset_marker(stored_article_system) and not bool(
+                getattr(config, "articles_scaffolded", False)
+            ):
+                # The founder explicitly reset this setup. A detection verdict alone
+                # must not re-complete the wizard; they exit by building a scaffold
+                # or explicitly adopting the detected system (both clear the markers).
+                return False
             return _article_system_has_publish_path(config, article_system)
         return True
     if state == "roo_scaffolded" and bool(getattr(config, "articles_scaffolded", False)):
@@ -9431,6 +9481,24 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
                 href=scaffold_check.get("prUrl") or setup_run_url,
                 variant="secondary",
             )
+        elif setup_status in {"pr_created", "setup_pr_created"}:
+            # The setup PR is created and open, waiting for the founder to click
+            # Publish (which merges it). Nothing is publishing on its own yet, so
+            # this is an explicit call to action, NOT a background "running" state —
+            # the old else-branch fell here and showed "preparing the setup PR",
+            # while the run page showed a RUNNING/"publishing on its own" card over
+            # a PR that only moves when Publish is clicked.
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "Ready to publish — click Publish to merge the setup PR. It goes live with the next site build and unlocks article generation."
+            action_by_id["publish"] = _workflow_step_action("Publish setup", href=setup_publish_url)
+        elif setup_status == "setup_pr_create_failed":
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "Publishing didn't finish last time. Retry to publish the approved setup."
+            action_by_id["publish"] = _workflow_step_action("Retry publish", href=setup_publish_url)
         elif rescan_run_id or setup_status in {"completed", "merged", "merged_verifying", "verifying"}:
             status_by_id["generate"] = "complete"
             status_by_id["review"] = "complete"
@@ -9460,6 +9528,23 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
             status_by_id["publish"] = "locked"
             summary_by_id["review"] = "Hosted setup preview failed. Open diagnostics, inspect the build logs, then retry."
             action_by_id["review"] = _workflow_step_action("Open setup diagnostics", href=setup_run_url, variant="secondary")
+        elif setup_status == "publishing":
+            # Native GitHub auto-merge is armed: the PR merges on its own once required
+            # checks pass, with nothing for the founder to do. That IS running — but the
+            # else-branch below would mislabel it "preparing the setup PR" (pre-PR work).
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "running"
+            summary_by_id["publish"] = "Publishing to production — GitHub merges automatically once required checks pass."
+        elif setup_status == "checks_failed":
+            # The setup PR exists but GitHub checks failed the merge — a genuine block
+            # awaiting a manual retry, NOT background progress. The else-branch below
+            # would wrongly show a running "preparing the setup PR" spinner here.
+            status_by_id["generate"] = "complete"
+            status_by_id["review"] = "complete"
+            status_by_id["publish"] = "needs_action"
+            summary_by_id["publish"] = "GitHub checks didn't pass, so publishing couldn't finish. Retry once the checks are green."
+            action_by_id["publish"] = _workflow_step_action("Retry publish", href=setup_publish_url)
         else:
             status_by_id["generate"] = "running"
             status_by_id["review"] = "locked"
@@ -15108,36 +15193,40 @@ class VibeMarketingArticleView(APIView):
         github_ready = _github_repo_operable(config)
         article_ready = article_system_ready(resolve_article_system(config)) or bool(config.publish_targets)
         has_repo_setup_intent = bool(config.github_repo or config.github_connection_state == "connected")
-        repo_review_capable = bool(github_ready and article_ready)
-        if not delivery_mode_explicit and has_repo_setup_intent and not repo_review_capable:
-            if not github_ready:
-                # Credential leg failed — the article surface may be perfectly set up; the
-                # honest ask is to reconnect GitHub, not to re-verify the article location.
-                return Response(
-                    {
-                        "status": "setup_required",
-                        "nextRequiredStep": "connect_github",
-                        "next_required_step": "connect_github",
-                        "detail": (
-                            "Reconnect GitHub before generating an exact preview article — the "
-                            "platform no longer has access to this repository (the GitHub App "
-                            "installation is missing or revoked and any saved token has expired)."
-                        ),
-                        "fallbackReason": "github_auth_required",
-                        "fallback_reason": "github_auth_required",
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+        if not delivery_mode_explicit and has_repo_setup_intent and not github_ready:
+            # An implicit exact-preview request still needs a credential that the
+            # Content Factory token service can mint from. Surface readiness is
+            # deliberately *not* enforced here: Content Factory owns the durable
+            # scan -> scaffold -> resume repair loop and must receive the article
+            # request in order to run it.
+            #
+            # Blocking an operable repo merely because its latest scan is
+            # ambiguous creates a deadlock: the backend asks the founder to
+            # verify the article location, while the self-healing scan that can
+            # perform that verification is never queued.
             return Response(
                 {
                     "status": "setup_required",
-                    "nextRequiredStep": "connect_repo_articles_location",
-                    "next_required_step": "connect_repo_articles_location",
-                    "detail": "Connect and verify the article repository location before generating an exact preview article.",
-                    "fallbackReason": "repo_articles_setup_not_trusted",
-                    "fallback_reason": "repo_articles_setup_not_trusted",
+                    "nextRequiredStep": "connect_github",
+                    "next_required_step": "connect_github",
+                    "detail": (
+                        "Reconnect GitHub before generating an exact preview article — the "
+                        "platform no longer has access to this repository (the GitHub App "
+                        "installation is missing or revoked and any saved token has expired)."
+                    ),
+                    "fallbackReason": "github_auth_required",
+                    "fallback_reason": "github_auth_required",
                 },
                 status=status.HTTP_409_CONFLICT,
+            )
+        if not delivery_mode_explicit and github_ready and not article_ready:
+            logger.info(
+                "vibe_marketing_article_surface_repair_delegated domain=%s github_repo=%s "
+                "article_system_state=%s publish_target_count=%s",
+                context.organization.domain,
+                config.github_repo,
+                resolve_article_system(config).get("state"),
+                len(config.publish_targets or []),
             )
         delivery_mode = (
             _effective_article_delivery_mode(

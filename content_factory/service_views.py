@@ -29,7 +29,11 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
-from content_factory.article_setup_reset import carry_reset_markers, clear_cancelled_article_setup_config
+from content_factory.article_setup_reset import (
+    carry_reset_markers,
+    clear_article_setup_reset_markers,
+    clear_cancelled_article_setup_config,
+)
 from content_factory.authors import normalize_authors, org_config_author_payload
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
@@ -2715,6 +2719,8 @@ def _mark_article_system_setup_generation_ready_for_domain(domain: str, *, pr_ur
             article_system["source"] = article_system.get("source") or "setup_pr_merge"
             article_system["confidence"] = article_system.get("confidence") or "high"
 
+        # A merged setup is an explicit exit from any prior reset — drop the watermark.
+        clear_article_setup_reset_markers(article_system)
         update_fields = ["article_system"]
         config.article_system = sanitize_json_for_postgres(article_system)
         if not config.articles_scaffolded:

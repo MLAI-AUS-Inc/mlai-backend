@@ -995,7 +995,11 @@ class VibeMarketingComponentCommentTests(TestCase):
             status_code=200,
             content=(
                 b'<html><head><link rel="stylesheet" href="/@react-router/critical.css?pathname=/articles/featured/generated">'
-                b'<link rel="modulepreload" href="/app/root.tsx">'
+                + (
+                    f'<link rel="stylesheet" href="/api/runs/{self.run.run_id}'
+                    '/live-preview/proxy/__cf-preview/styles.css">'
+                ).encode()
+                + b'<link rel="modulepreload" href="/app/root.tsx">'
                 b'<link rel="modulepreload" href="/node_modules/.vite/deps/react.js?v=test">'
                 b'<script type="module" src="/app/entry.client.tsx"></script>'
                 b'<script type="module" src="/@vite/client"></script>'
@@ -1031,6 +1035,8 @@ class VibeMarketingComponentCommentTests(TestCase):
         text = response.content.decode("utf-8")
         proxy_prefix = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
         self.assertIn(f'href="{proxy_prefix}/@react-router/critical.css?pathname=/articles/featured/generated"', text)
+        self.assertIn(f'href="{proxy_prefix}/__cf-preview/styles.css"', text)
+        self.assertNotIn(f'/api/runs/{self.run.run_id}/live-preview/proxy', text)
         self.assertIn(f'srcset="{proxy_prefix}/assets/small.png 1x, /api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource?url=https%3A%2F%2Fcdn.example.com%2Fhero.webp 2x"', text)
         self.assertIn(f"background-image:url({proxy_prefix}/assets/bg.png)", text)
         self.assertIn("window.__cfArticleInspectorInstalled", text)
@@ -1044,6 +1050,41 @@ class VibeMarketingComponentCommentTests(TestCase):
         self.assertFalse(response.has_header("X-Frame-Options"))
         self.assertFalse(response.has_header("Content-Security-Policy"))
         self.assertFalse(response.has_header("Content-Security-Policy-Report-Only"))
+
+    def test_live_preview_proxy_translates_content_factory_nested_preview_urls(self):
+        content_factory_proxy = f"/api/runs/{self.run.run_id}/live-preview/proxy"
+        remote_response = SimpleNamespace(
+            status_code=200,
+            content=(
+                f'<html><head><link rel="stylesheet" href="{content_factory_proxy}/__cf-preview/styles.css">'
+                f'</head><body><img src="{content_factory_proxy}/__cf-resource?url='
+                'https%3A%2F%2Ffirebasestorage.googleapis.com%2Fv0%2Fb%2Fdemo%2Fo%2Fhero.jpg">'
+                '</body></html>'
+            ).encode("utf-8"),
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+
+        with (
+            patch(
+                "content_factory.vibe_marketing_views._content_factory_remote_config",
+                return_value={"enabled": True, "base_url": "http://content-factory-web:8000"},
+            ),
+            patch("content_factory.vibe_marketing_views._content_factory_headers", return_value={"X-API-Key": "test-key"}),
+            patch("content_factory.vibe_marketing_views.http_client.request", return_value=remote_response),
+        ):
+            response = self.client.get(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}"
+                "/live-preview/proxy/articles/what-is-a-traffic-impact-assessment",
+                HTTP_ACCEPT="text/html",
+            )
+
+        text = response.content.decode("utf-8")
+        backend_proxy = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/proxy"
+        backend_resource = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/live-preview/resource"
+        self.assertIn(f'href="{backend_proxy}/__cf-preview/styles.css"', text)
+        self.assertIn(f'src="{backend_resource}?url=https%3A%2F%2Ffirebasestorage.googleapis.com', text)
+        self.assertNotIn("/live-preview/proxy/__cf-resource", text)
+        self.assertNotIn(f"/api/runs/{self.run.run_id}/live-preview", text)
 
     def test_live_preview_proxy_rewrites_root_relative_js_modules(self):
         remote_response = SimpleNamespace(

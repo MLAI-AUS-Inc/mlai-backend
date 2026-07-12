@@ -12,7 +12,8 @@ even though the platform could mint a write token for the repo right then.
 
 These tests pin the corrected contract: ``_github_repo_operable`` treats a stamped App
 installation (with server app credentials configured) as a usable credential, and the four
-gates honor it. They also lock the honest 409 wording (auth vs. location).
+gates honor it. A missing credential remains an honest 409, while an operable repository
+with an unresolved article surface is delegated to Content Factory's repair loop.
 """
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -381,11 +382,38 @@ class ArticleGenerationGateEndpointTests(TestCase):
         self.assertEqual(response.data.get("nextRequiredStep"), "connect_github")
         self.assertFalse(post.called)
 
+    @override_settings(
+        CONTENT_FACTORY_URL="https://content-factory.test",
+        CONTENT_FACTORY_API_KEY="secret-key",
+        IS_LOCAL_ENV=False,
+    )
     @patch("content_factory.vibe_marketing_views.github_app_credentials_configured", return_value=True)
     @patch("content_factory.vibe_marketing_views.http_client.post")
-    def test_operable_repo_without_surface_returns_location_message(self, post, _creds):
-        # Credential is fine (installation); the article surface is not set up => location leg.
+    def test_operable_repo_without_surface_dispatches_self_healing_article(self, post, _creds):
+        # Credential is fine (installation), but the latest scan cannot prove a
+        # writable target. Content Factory must receive the article request so it
+        # can run its durable scan -> scaffold -> resume repair loop.
+        post.return_value = _QueuedResponse(
+            {
+                "run_id": "cowork-repair-parent-1",
+                "status": "precondition_failed",
+                "repair_status": "queued",
+                "repair_run_id": "cowork-repair-scan-1",
+            }
+        )
         self.config.github_installation_id = "144909617"
+        self.config.article_system = {
+            "state": "ambiguous",
+            "directory_name": "articles",
+            "directory_path": "src/articles",
+            "publish_mutation_target": None,
+        }
+        self.config.article_system_setup_cache = {
+            "schema_version": 1,
+            "route_path": "/articles",
+            "route_shell_path": "src/routes/articles.tsx",
+        }
+        self.config.publish_targets = []
         self.config.save()
 
         # Discriminates from the credential-leg 409: the repo IS operable here, so the
@@ -399,7 +427,10 @@ class ArticleGenerationGateEndpointTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 409, response.data)
-        self.assertEqual(response.data.get("fallbackReason"), "repo_articles_setup_not_trusted")
-        self.assertEqual(response.data.get("nextRequiredStep"), "connect_repo_articles_location")
-        self.assertFalse(post.called)
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data.get("runId"), "cowork-repair-parent-1")
+        self.assertTrue(post.called)
+        dispatched = post.call_args.kwargs["json"]
+        self.assertEqual(dispatched["github_repo"], "HB-Vastu/coworkadelaide")
+        self.assertFalse(dispatched["delivery_mode_explicit"])
+        self.assertNotIn("delivery_mode", dispatched)
