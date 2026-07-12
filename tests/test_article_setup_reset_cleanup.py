@@ -20,6 +20,8 @@ from content_factory.vibe_marketing_views import (
     _article_generation_history_exists,
     _article_setup_state_for_config,
     _delete_article_setup_scaffold_branches,
+    _profile_checks,
+    compute_article_readiness,
 )
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
@@ -206,3 +208,47 @@ class GenerationHistorySurvivesResetTests(TestCase):
 
         after = _article_setup_state_for_config(self.config, organization=self.org)
         self.assertFalse(after.get("generationReady"))
+
+
+class ResetThenRedetectionStaysUnpublishedTests(TestCase):
+    """The end-to-end pin the false-tick bug slipped through: after "Reset
+    everything", CF's deliberate auto-reconnect re-scans and re-detects the existing
+    surface within minutes — carrying the reset markers forward and even re-registering
+    a direct publish target. The wizard must NOT re-report step 4 (scaffold) complete
+    off that detection alone; the founder has to explicitly build or adopt."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(domain="talathrive.com", name="Tala Thrive")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org,
+            github_repo="Gshah810/tala-main-website",
+        )
+
+    def test_redetection_after_reset_is_not_published(self):
+        reset_article_setup_config(self.config, github_repo="Gshah810/tala-main-website")
+        self.config.refresh_from_db()
+
+        # Simulate the scan-complete callback: it carries the reset markers forward
+        # (service_views.carry_reset_markers) and can re-register a direct target.
+        re_detected = dict(self.config.article_system)
+        re_detected.update(
+            {
+                "state": "existing",
+                "source": "scan",
+                "reason": (
+                    "Detected article surface at app/stories/page.tsx, "
+                    "but no safe publish target could be confirmed."
+                ),
+            }
+        )
+        self.config.article_system = re_detected
+        self.config.publish_targets = [
+            {"target_id": "articles", "kind": "react_article_system", "publish_capability": "direct"}
+        ]
+        self.config.save(update_fields=["article_system", "publish_targets", "updated_at"])
+
+        readiness = compute_article_readiness(self.org, self.config, [])
+        self.assertFalse(readiness["proofs"]["article_system_published"])
+
+        scaffold = _profile_checks(self.org, self.config, latest_runs=[])["scaffold"]
+        self.assertFalse(scaffold["passed"])

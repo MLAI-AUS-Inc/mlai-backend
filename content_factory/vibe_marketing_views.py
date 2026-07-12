@@ -38,6 +38,8 @@ from rest_framework.views import APIView
 from content_factory.article_setup_reset import (
     article_setup_reset_at,
     article_setup_reset_ignores_run,
+    article_setup_reset_marker,
+    clear_article_setup_reset_markers,
     clear_cancelled_article_setup_config,
     reset_article_setup_config,
 )
@@ -5188,6 +5190,9 @@ def _link_built_scaffold_publish_target(config) -> bool:
     article_system["publish_mutation_target"] = bundle["registry_path"]
     article_system.pop(PUBLISH_DISCONNECTED_KEY, None)
     article_system["scaffold_accepted_at"] = timezone.now().isoformat()
+    # Linking a built scaffold (auto after merge, or explicit Accept) is a durable
+    # exit from any prior reset — drop the watermark so it can't suppress published.
+    clear_article_setup_reset_markers(article_system)
     config.article_system = article_system
     update_fields = [
         "publish_targets",
@@ -5273,6 +5278,8 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
         article_system["source"] = article_system.get("source") or "setup_pr_merge"
         article_system["confidence"] = article_system.get("confidence") or "high"
 
+    # A merged setup is an explicit exit from any prior reset — drop the watermark.
+    clear_article_setup_reset_markers(article_system)
     update_fields = ["article_system"]
     config.article_system = sanitize_json_for_postgres(article_system)
     if not config.articles_scaffolded:
@@ -8757,6 +8764,17 @@ def _article_system_is_published(config, article_system: dict) -> bool:
     state = str(article_system.get("state") or "").strip()
     if state in ARTICLE_SYSTEM_PUBLISHED_STATES:
         if state in ARTICLE_SYSTEM_DETECTION_ONLY_STATES:
+            # The reset watermark lives on the *stored* article_system; the
+            # normalized ``article_system`` passed in has dropped the non-template
+            # marker keys, so read it off the config field directly.
+            stored_article_system = getattr(config, "article_system", None) if config else None
+            if article_setup_reset_marker(stored_article_system) and not bool(
+                getattr(config, "articles_scaffolded", False)
+            ):
+                # The founder explicitly reset this setup. A detection verdict alone
+                # must not re-complete the wizard; they exit by building a scaffold
+                # or explicitly adopting the detected system (both clear the markers).
+                return False
             return _article_system_has_publish_path(config, article_system)
         return True
     if state == "roo_scaffolded" and bool(getattr(config, "articles_scaffolded", False)):
