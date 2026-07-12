@@ -26,12 +26,13 @@ class SimGuessRecordTests(TestCase):
         self.client = APIClient()
 
     def _record(self, *, case_id=1, client_id=CLIENT_A, guess_text='adrenal crisis',
-                is_correct=True, key=ROO_KEY):
+                is_correct=True, case_title='Salt & Static', key=ROO_KEY):
         kwargs = {}
         if key is not None:
             kwargs['HTTP_X_API_KEY'] = key
         return self.client.post(RECORD_URL, {
             'case_id': case_id,
+            'case_title': case_title,
             'client_id': client_id,
             'guess_text': guess_text,
             'is_correct': is_correct,
@@ -59,6 +60,7 @@ class SimGuessRecordTests(TestCase):
         })
         guess = SimDiagnosisGuess.objects.get()
         self.assertEqual(guess.case_id, 1)
+        self.assertEqual(guess.case_title, 'Salt & Static')
         self.assertEqual(guess.client_id, CLIENT_A)
         self.assertEqual(guess.outcome, 'pending_claim')
         self.assertEqual(guess.prize_kind, 'free_ticket')
@@ -100,6 +102,8 @@ class SimGuessRecordTests(TestCase):
         resp = self._record(guess_text='x' * 301)
         self.assertEqual(resp.status_code, 400)
         resp = self._record(case_id=0)
+        self.assertEqual(resp.status_code, 400)
+        resp = self._record(case_title='x' * 201)
         self.assertEqual(resp.status_code, 400)
 
 
@@ -237,6 +241,7 @@ class SimGuessClaimTests(TestCase):
         for client_id, correct in ((CLIENT_A, True), (CLIENT_B, True), (CLIENT_C, False)):
             resp = service.post(RECORD_URL, {
                 'case_id': 7,
+                'case_title': 'Pressure Behind the Curtain',
                 'client_id': client_id,
                 'guess_text': 'cerebral venous thrombosis' if correct else 'migraine',
                 'is_correct': correct,
@@ -249,6 +254,11 @@ class SimGuessClaimTests(TestCase):
                                      email='b@example.com').data['result'], 'discount')
         self.assertEqual(self._claim(case_id=7, client_id=CLIENT_C,
                                      email='c@example.com').status_code, 404)
+        winner = SimDiagnosisGuess.objects.get(case_id=7, client_id=CLIENT_A)
+        self.assertEqual(winner.email, 'a@example.com')
+        self.assertEqual(winner.case_title, 'Pressure Behind the Curtain')
+        self.assertTrue(winner.is_correct)
+        self.assertEqual(winner.guess_text, 'cerebral venous thrombosis')
 
 
 @override_settings(

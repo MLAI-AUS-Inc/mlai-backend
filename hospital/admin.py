@@ -65,9 +65,9 @@ class MedHackWinnerAdmin(admin.ModelAdmin):
 @admin.register(SimDiagnosisGuess)
 class SimDiagnosisGuessAdmin(admin.ModelAdmin):
     """Organizer export surface for the web ward contest (emails + outcomes)."""
-    list_display = ('id', 'case_id', 'client_id', 'guess_text', 'is_correct', 'prize_kind', 'outcome', 'email', 'created_at', 'claimed_at')
+    list_display = ('id', 'case_id', 'case_title', 'client_id', 'guess_text', 'is_correct', 'prize_kind', 'outcome', 'email', 'created_at', 'claimed_at')
     list_filter = ('case_id', 'prize_kind', 'outcome', 'is_correct')
-    search_fields = ('email', 'client_id', 'guess_text')
+    search_fields = ('email', 'case_title', 'client_id', 'guess_text')
     readonly_fields = ('created_at', 'claimed_at')
     ordering = ('-created_at',)
 

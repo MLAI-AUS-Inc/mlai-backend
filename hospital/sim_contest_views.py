@@ -6,6 +6,8 @@ adjudicates it deterministically (same fuzzy matcher as the Slack game) and
 records the verdict here server-to-server. The first correct RECORDED guess is
 atomically assigned the free ticket; later correct guesses receive the 30%
 discount. Email claim only delivers the already-assigned prize.
+The registration step stores the email on that guess and returns the assigned
+Luma URL directly; it does not send email.
 
 Invariants:
 - record/ is service-only (HasRooApiKey) — a browser can never assert "I was
@@ -167,6 +169,7 @@ class SimGuessClaimThrottle(AnonRateThrottle):
 
 class SimGuessRecordSerializer(serializers.Serializer):
     case_id = serializers.IntegerField(min_value=1)
+    case_title = serializers.CharField(max_length=200, trim_whitespace=True)
     client_id = serializers.RegexField(regex=r'^[A-Za-z0-9-]{8,64}$', max_length=64)
     guess_text = serializers.CharField(max_length=300)
     is_correct = serializers.BooleanField()
@@ -244,6 +247,7 @@ class SimGuessRecordView(APIView):
                 client_id=data['client_id'],
                 defaults={
                     'participant': participant,
+                    'case_title': data['case_title'],
                     'guess_text': data['guess_text'],
                     'is_correct': data['is_correct'],
                     'outcome': (
@@ -284,6 +288,7 @@ class SimGuessClaimView(APIView):
 
     Prize kind was assigned atomically when the correct guess was recorded.
     This endpoint saves the email and returns the matching Luma redemption URL.
+    No email or other outbound message is sent.
     Idempotent: re-claiming returns the same stored outcome and URL.
     """
     authentication_classes = []
@@ -341,11 +346,10 @@ class SimGuessClaimView(APIView):
 
             guess.email = email
             guess.claimed_at = timezone.now()
-            guess.redemption_delivered_at = timezone.now()
             try:
                 with transaction.atomic():
                     guess.save(update_fields=[
-                        'outcome', 'email', 'claimed_at', 'redemption_delivered_at',
+                        'outcome', 'email', 'claimed_at',
                     ])
             except IntegrityError:
                 return Response(
