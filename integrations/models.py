@@ -324,6 +324,11 @@ class GitHubInstallation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+    # When the reconciliation sweep last verified this installation is still
+    # live against GitHub. Throttles re-probing (see
+    # integrations.services.github_installations.run_github_installation_reconciliation_sweep);
+    # null means never probed.
+    liveness_checked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [

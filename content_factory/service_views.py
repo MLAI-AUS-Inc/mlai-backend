@@ -1267,7 +1267,7 @@ class ContentFactoryTokenView(APIView):
         from integrations.services.github_installations import (
             installation_for_repo,
             resolve_user_for_actor_id,
-            user_github_installations,
+            user_has_registered_installation,
         )
         from integrations.models import UserIntegration
 
@@ -1298,10 +1298,16 @@ class ContentFactoryTokenView(APIView):
                 # may refer to another account after switching companies.
                 actor_id = str(config.connected_slack_user_id or slack_user_id or '').strip()
                 registry_user = resolve_user_for_actor_id(actor_id)
-                registry_installations = (
-                    user_github_installations(registry_user) if registry_user is not None else []
+                # A registry of only stale (uninstalled) installations lists no
+                # repos and must not be treated as authoritative — otherwise a
+                # dead row forces a hard "installation mismatch" 401 instead of
+                # falling back to the legacy per-org id. Excludes GitHub-confirmed
+                # dead rows; the reconciliation sweep durably removes them.
+                registry_is_authoritative = (
+                    registry_user is not None
+                    and user_has_registered_installation(registry_user)
                 )
-                if registry_installations and github_repo:
+                if registry_is_authoritative and github_repo:
                     registry_installation = installation_for_repo(registry_user, github_repo)
                     if registry_installation is None:
                         message = (

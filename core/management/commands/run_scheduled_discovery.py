@@ -9,6 +9,9 @@ from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
 )
+from integrations.services.github_installations import (
+    run_github_installation_reconciliation_sweep,
+)
 from integrations.services.research_automations import run_research_automation_scheduler
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 
@@ -72,6 +75,11 @@ class Command(BaseCommand):
             # lost (outbox retries exhaust after ~2h) and dispatch ghosts.
             # Self-throttling per run, so it is safe to tick every loop.
             ("content_factory_reconciliation", run_content_factory_reconciliation_sweep),
+            # Prunes stale GitHub App installations (founder uninstalled the
+            # App) from the founder registry so dead rows stop poisoning the
+            # "registry exists" guards. Self-throttling (min-age + probe
+            # interval + batch cap), so it is safe to tick every loop.
+            ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
         ):
             try:
                 results[name] = runner()
