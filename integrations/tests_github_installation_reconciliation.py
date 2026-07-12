@@ -216,6 +216,44 @@ class GitHubInstallationSweepTests(TestCase):
         self.assertEqual(summary["pruned"], 0)
         self.assertTrue(GitHubInstallation.objects.filter(installation_id="114549385").exists())
 
+    @mock.patch.object(gh, "github_app_credentials_configured", return_value=True)
+    def test_dead_row_still_listed_as_owned_is_withheld_but_unlisted_dead_is_pruned(self, _cfg):
+        # Contradictory GitHub window: GET /app/installations still LISTS an id as
+        # owned while POST .../access_tokens 404s for that SAME id. Deleting on the
+        # 404 alone would hard-delete a still-live founder install (dropping its
+        # refresh token; recovery needs a full OAuth re-auth). The row GitHub still
+        # lists is withheld and logged; a dead row genuinely absent from the owned
+        # list is still pruned in the same pass — proving the guard is selective.
+        _make_install(self.founder, LIVE_ID)             # ownership anchor, live
+        _make_install(self.founder, "contradicted")      # dead-probed, but still owned
+        _make_install(self.founder, "genuinely-gone")    # dead-probed and not owned
+        liveness = _liveness_by_id({
+            LIVE_ID: INSTALLATION_LIVE,
+            "contradicted": INSTALLATION_DEAD,
+            "genuinely-gone": INSTALLATION_DEAD,
+        })
+        # GitHub's list still reports "contradicted" as owned; "genuinely-gone" is absent.
+        owned = {LIVE_ID, "contradicted"}
+        with mock.patch.object(gh, "probe_installation_liveness", liveness), \
+                mock.patch.object(gh, "list_app_installation_ids", return_value=owned), \
+                self.assertLogs("integrations.services.github_installations", level="WARNING") as logs:
+            summary = gh.run_github_installation_reconciliation_sweep()
+
+        # Still-owned dead row survives (not hard-deleted on the contradictory 404).
+        self.assertTrue(GitHubInstallation.objects.filter(installation_id="contradicted").exists())
+        # Dead row absent from the owned list is pruned as before.
+        self.assertFalse(GitHubInstallation.objects.filter(installation_id="genuinely-gone").exists())
+        self.assertTrue(GitHubInstallation.objects.filter(installation_id=LIVE_ID).exists())
+        self.assertEqual(summary["status"], "completed")
+        self.assertEqual(summary["pruned"], 1)
+        self.assertEqual(summary["withheld_contradiction"], 1)
+        self.assertEqual(summary["live"], 1)
+        # The contradiction is surfaced for operators.
+        self.assertTrue(
+            any("contradicted" in line and "not pruning" in line for line in logs.output),
+            logs.output,
+        )
+
 
 @override_settings()
 class GitHubRegistryGuardResilienceTests(TestCase):
