@@ -471,6 +471,13 @@ ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL') or (
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
+
+# Health Hack simulated-patient gateway. The browser-facing Cloudflare Worker
+# calls this Django service over HTTPS; Django reaches Roo over the private
+# DigitalOcean VPC so Roo itself does not need a public hostname.
+ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
+ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '')
+HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '')
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
     os.getenv('CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS', str(7 * 24 * 60 * 60))

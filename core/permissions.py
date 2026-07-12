@@ -1,4 +1,5 @@
 import os
+import secrets
 from rest_framework import permissions
 
 class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
@@ -70,6 +71,25 @@ class HasAPIKey(permissions.BasePermission):
             return False
             
         return api_key == internal_key
+
+
+class HasHealthHackApiKey(permissions.BasePermission):
+    """Authenticate the Health Hack Worker with its dedicated bearer key."""
+
+    def has_permission(self, request, view):
+        from django.conf import settings
+
+        expected = str(getattr(settings, 'HEALTH_HACK_API_KEY', '') or '')
+        if not expected:
+            return False
+
+        supplied = request.META.get('HTTP_X_API_KEY', '')
+        if not supplied:
+            authorization = request.META.get('HTTP_AUTHORIZATION', '')
+            if authorization.startswith('Bearer '):
+                supplied = authorization.removeprefix('Bearer ').strip()
+
+        return bool(supplied) and secrets.compare_digest(supplied, expected)
 
 
 class HasRooApiKey(permissions.BasePermission):
