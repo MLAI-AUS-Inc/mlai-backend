@@ -359,7 +359,10 @@ def run_github_installation_reconciliation_sweep(*, limit: Optional[int] = None,
     Idempotent, self-throttling, and safe to tick every scheduler loop. Deletes
     installations GitHub confirms are gone (404/410); leaves live and
     inconclusive (``unknown``) rows untouched, stamping ``liveness_checked_at``
-    so they are not re-probed until the probe interval elapses.
+    so they are not re-probed until the probe interval elapses. A dead-probed row
+    that GitHub's own ``/app/installations`` list still reports as owned is a
+    contradiction (an incident / eventual-consistency window), so it is withheld
+    rather than pruned.
     """
     now = now or timezone.now()
     summary = {
@@ -369,6 +372,7 @@ def run_github_installation_reconciliation_sweep(*, limit: Optional[int] = None,
         "live": 0,
         "unknown": 0,
         "skipped_raced": 0,
+        "withheld_contradiction": 0,
     }
 
     # Every probe would be inconclusive without App credentials; do not stamp a
@@ -432,7 +436,29 @@ def run_github_installation_reconciliation_sweep(*, limit: Optional[int] = None,
         )
         return summary
 
+    # Per-row contradiction guard: GitHub is not always internally consistent. In
+    # a rare incident / eventual-consistency window, GET /app/installations still
+    # LISTS an installation as owned while POST .../access_tokens returns 404 for
+    # that SAME id (the signal ``installation_liveness`` reads as DEAD). Pruning on
+    # that 404 alone would hard-delete a still-live founder installation, dropping
+    # its stored user/refresh token — recovery then needs a full OAuth re-auth. We
+    # already hold the authoritative owned set, so withhold any dead row whose id
+    # GitHub still lists as owned and prune only ids the list agrees are gone.
+    owned = {str(i) for i in owned_ids}
+
     for inst in dead_rows:
+        if str(inst.installation_id) in owned:
+            summary["withheld_contradiction"] += 1
+            logger.warning(
+                "github_installation_reconciliation withholding installation "
+                "id=%s user_id=%s account=%s: GitHub /app/installations lists it as "
+                "owned but access-token mint returned 404 — treating as inconclusive, "
+                "not pruning",
+                inst.installation_id,
+                inst.user_id,
+                inst.account_login or inst.github_user_name,
+            )
+            continue
         # Conditional on updated_at so a concurrent reinstall/refresh of this exact
         # row (which bumps auto_now updated_at) is never clobbered by a probe that
         # observed the pre-refresh state.
