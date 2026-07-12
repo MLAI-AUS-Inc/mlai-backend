@@ -3930,7 +3930,19 @@ def _rewrite_live_preview_proxy_text(run_id, text, content_type=""):
         return f"{match.group('prefix')}{_live_preview_proxy_asset_url(run_id, match.group('path'))}{match.group('suffix')}"
 
     content_type_lower = str(content_type or "").lower()
-    rewritten = _rewrite_css_asset_references(run_id, str(text or ""))
+    # Content Factory rewrites root-relative preview assets to its own public
+    # `/api/runs/...` endpoints. The browser is talking to this backend proxy,
+    # so translate those already-rewritten URLs before applying the normal
+    # root-asset pass. Without this, content-only preview CSS is requested from
+    # a non-existent MLAI route and the article appears as unstyled source text.
+    rewritten = str(text or "").replace(
+        _content_factory_live_preview_proxy_prefix(run_id),
+        _backend_live_preview_proxy_prefix(run_id),
+    ).replace(
+        _content_factory_live_preview_resource_prefix(run_id),
+        _backend_live_preview_resource_prefix(run_id),
+    )
+    rewritten = _rewrite_css_asset_references(run_id, rewritten)
     rewritten = _LIVE_PREVIEW_QUOTED_ASSET_RE.sub(replace_quoted, rewritten)
     rewritten = _LIVE_PREVIEW_UNQUOTED_ATTR_ASSET_RE.sub(replace_unquoted_attr, rewritten)
     rewritten = _LIVE_PREVIEW_JS_IMPORT_ASSET_RE.sub(replace_js_import, rewritten)
