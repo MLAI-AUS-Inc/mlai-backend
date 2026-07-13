@@ -510,6 +510,10 @@ RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>'
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
 CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
+# Transactional message id of the Victor:AI completed-registration receipt.
+CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID', '4'
+)
 # Transactional message id of the "Vibe Marketing Daily Reminder" template in
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.

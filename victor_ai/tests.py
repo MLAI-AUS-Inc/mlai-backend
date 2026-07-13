@@ -1,4 +1,6 @@
-from django.test import TestCase
+from unittest.mock import patch
+
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from .models import VictorApplication
@@ -78,6 +80,38 @@ class VictorApplicationApiTests(TestCase):
         )
         self.assertEqual(application.idea, 'An AI copilot for grant applications.')
         self.assertTrue(application.consent)
+
+    @patch('victor_ai.views.send_registration_confirmation')
+    def test_completion_sends_confirmation_once(self, send_confirmation):
+        self.client.post(URL, lead_payload(), format='json')
+        first_completion = self.client.post(URL, complete_payload(), format='json')
+        repeated_completion = self.client.post(URL, complete_payload(), format='json')
+
+        self.assertEqual(first_completion.status_code, 200)
+        self.assertEqual(repeated_completion.status_code, 200)
+        send_confirmation.assert_called_once()
+        application = send_confirmation.call_args.args[0]
+        self.assertEqual(application.email, 'jordan@example.com')
+
+    @patch('victor_ai.views.send_registration_confirmation')
+    def test_lead_does_not_send_confirmation(self, send_confirmation):
+        response = self.client.post(URL, lead_payload(), format='json')
+
+        self.assertEqual(response.status_code, 201)
+        send_confirmation.assert_not_called()
+
+    @patch('victor_ai.views.send_registration_confirmation')
+    def test_confirmation_failure_does_not_lose_registration(self, send_confirmation):
+        send_confirmation.side_effect = RuntimeError('Customer.io unavailable')
+
+        response = self.client.post(URL, complete_payload(), format='json')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(VictorApplication.objects.count(), 1)
+        self.assertEqual(
+            VictorApplication.objects.get().stage,
+            VictorApplication.STAGE_COMPLETE,
+        )
 
     def test_complete_without_prior_lead_creates_record(self):
         response = self.client.post(URL, complete_payload(), format='json')
@@ -223,3 +257,45 @@ class VictorApplicationApiTests(TestCase):
         self.client.post(URL, complete_payload(), format='json')
         response = self.client.get(URL)
         self.assertEqual(response.status_code, 405)
+
+
+@override_settings(
+    CUSTOMERIO_API_KEY='cio-key',
+    CUSTOMERIO_FROM_EMAIL='Victor:AI <hello@mlai.au>',
+    CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID='victor-template-id',
+)
+class VictorRegistrationEmailTests(TestCase):
+    @patch('customerio.APIClient')
+    def test_customerio_receives_template_data(self, api_client_class):
+        from .emails import send_registration_confirmation
+
+        application = VictorApplication.objects.create(**complete_payload())
+
+        send_registration_confirmation(application)
+
+        api_client_class.assert_called_once_with('cio-key')
+        api_client_class.return_value.send_email.assert_called_once_with(
+            {
+                'transactional_message_id': 'victor-template-id',
+                'message_data': {
+                    'first_name': 'Jordan',
+                    'full_name': 'Jordan Taylor',
+                    'team_name': 'Team Sunrise',
+                    'startup_stage': 'Prototype / MVP',
+                    'website_url': 'https://victorai.win',
+                },
+                'to': 'jordan@example.com',
+                'identifiers': {'email': 'jordan@example.com'},
+                'from': 'Victor:AI <hello@mlai.au>',
+            }
+        )
+
+    @override_settings(CUSTOMERIO_API_KEY='')
+    @patch('customerio.APIClient')
+    def test_missing_customerio_config_skips_send(self, api_client_class):
+        from .emails import send_registration_confirmation
+
+        application = VictorApplication.objects.create(**complete_payload())
+
+        self.assertIsNone(send_registration_confirmation(application))
+        api_client_class.assert_not_called()
