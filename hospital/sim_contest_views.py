@@ -89,7 +89,10 @@ def _project_roo_guess_reply(payload, *, active_case_id):
         if (
             not diagnosis
             or len(diagnosis) > 200
-            or any(unicodedata.category(character) in {'Cc', 'Cf'} for character in diagnosis)
+            or any(
+                unicodedata.category(character) in {'Cc', 'Cf', 'Cs'}
+                for character in diagnosis
+            )
         ):
             return None
 

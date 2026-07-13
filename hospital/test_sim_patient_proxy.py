@@ -116,6 +116,20 @@ class SimPatientProxyTests(TestCase):
         self.assertEqual(self.post(self.payload(), key="wrong").status_code, 403)
 
     @patch("hospital.sim_patient_views.requests.post")
+    def test_rejects_malformed_unicode_before_guards_or_database_writes(self, post):
+        raw = json.dumps(
+            self.payload(question="\ud800"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        response = self.post(raw, content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        post.assert_not_called()
+        self.assertEqual(SimParticipant.objects.count(), 0)
+        self.assertEqual(SimConversation.objects.count(), 0)
+        self.assertEqual(SimConversationTurn.objects.count(), 0)
+
+    @patch("hospital.sim_patient_views.requests.post")
     def test_forwards_validated_turn_with_pinned_case_and_ignores_history(self, post):
         post.return_value = upstream_response()
         history = [

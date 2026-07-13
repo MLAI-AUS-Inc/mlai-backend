@@ -87,6 +87,7 @@ def _validate_health_hack_service_secrets(
     *,
     health_hack_key: str,
     roo_sim_patient_key: str,
+    roo_api_key: str,
     is_production: bool,
 ) -> None:
     """Require strong, purpose-specific cross-service credentials in production."""
@@ -101,9 +102,14 @@ def _validate_health_hack_service_secrets(
         raise ImproperlyConfigured(
             'ROO_SIM_PATIENT_KEY must contain at least 32 characters in production.'
         )
-    if health_hack_key == roo_sim_patient_key:
+    if len(roo_api_key) < 32:
         raise ImproperlyConfigured(
-            'HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must be distinct credentials.'
+            'ROO_API_KEY must contain at least 32 characters in production.'
+        )
+    if len({health_hack_key, roo_sim_patient_key, roo_api_key}) != 3:
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must be '
+            'distinct credentials.'
         )
 
 
@@ -611,9 +617,11 @@ CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
 ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
+ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
 _validate_health_hack_service_secrets(
     health_hack_key=HEALTH_HACK_API_KEY,
     roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
+    roo_api_key=ROO_API_KEY,
     is_production=IS_PRODUCTION_ENV,
 )
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
@@ -901,7 +909,6 @@ COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
-ROO_API_KEY = os.environ.get('ROO_API_KEY')
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')

@@ -101,6 +101,9 @@ class SimGuessCheckProxyTests(SimpleTestCase):
         post.return_value = upstream_response(roo_reply(diagnosis=123))
         self.assertEqual(self.post().status_code, 502)
 
+        post.return_value = upstream_response(roo_reply(diagnosis="\ud800"))
+        self.assertEqual(self.post().status_code, 502)
+
     @patch('hospital.sim_contest_views.requests.post')
     def test_bounds_stream_and_rejects_incoherent_or_extra_fields(self, post):
         post.side_effect = [

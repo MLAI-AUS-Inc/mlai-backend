@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
+import math
+import time
 from unittest import mock
 from unittest.mock import patch
 import uuid
@@ -26,7 +28,12 @@ from .models import (
     SimParticipant,
 )
 from .sim_retention import run_scheduled_sim_conversation_cleanup
-from .sim_security import _daily_key, _daily_timeout, _reserve_budget_atomic
+from .sim_security import (
+    BudgetReservation,
+    _daily_key,
+    _daily_timeout,
+    _reserve_budget_atomic,
+)
 
 
 @override_settings(HEALTH_HACK_CHAT_RETENTION_DAYS=30)
@@ -180,6 +187,30 @@ class SecurityBudgetClockTests(TestCase):
         self.assertEqual(cache.get(_daily_key("calls")), 5)
         self.assertEqual(cache.get(_daily_key("tokens")), 10)
 
+    def test_reservation_reconciliation_stays_bound_to_original_day(self):
+        cache.clear()
+        old_calls = _daily_key("calls", "2026-07-13")
+        old_tokens = _daily_key("tokens", "2026-07-13")
+        new_calls = _daily_key("calls", "2026-07-14")
+        new_tokens = _daily_key("tokens", "2026-07-14")
+        cache.set(old_calls, 1, timeout=60)
+        cache.set(old_tokens, 20, timeout=60)
+        cache.set(new_calls, 3, timeout=60)
+        cache.set(new_tokens, 60, timeout=60)
+        reservation = BudgetReservation(
+            20,
+            calls_key=old_calls,
+            tokens_key=old_tokens,
+            expires_at=math.ceil(time.time()) + 60,
+        )
+
+        reservation.reconcile(4, 6)
+
+        self.assertEqual(cache.get(old_calls), 1)
+        self.assertEqual(cache.get(old_tokens), 10)
+        self.assertEqual(cache.get(new_calls), 3)
+        self.assertEqual(cache.get(new_tokens), 60)
+
 
 class SharedCacheConfigurationTests(TestCase):
     def test_production_requires_redis_url_and_dependency(self):
@@ -237,18 +268,28 @@ class SharedCacheConfigurationTests(TestCase):
             _validate_health_hack_service_secrets(
                 health_hack_key="short",
                 roo_sim_patient_key="r" * 32,
+                roo_api_key="a" * 32,
                 is_production=True,
             )
         with self.assertRaisesMessage(ImproperlyConfigured, "must be distinct"):
             _validate_health_hack_service_secrets(
                 health_hack_key="s" * 32,
                 roo_sim_patient_key="s" * 32,
+                roo_api_key="a" * 32,
+                is_production=True,
+            )
+        with self.assertRaisesMessage(ImproperlyConfigured, "ROO_API_KEY"):
+            _validate_health_hack_service_secrets(
+                health_hack_key="h" * 32,
+                roo_sim_patient_key="r" * 32,
+                roo_api_key="short",
                 is_production=True,
             )
 
         _validate_health_hack_service_secrets(
             health_hack_key="h" * 32,
             roo_sim_patient_key="r" * 32,
+            roo_api_key="a" * 32,
             is_production=True,
         )
 
@@ -256,6 +297,7 @@ class SharedCacheConfigurationTests(TestCase):
         _validate_health_hack_service_secrets(
             health_hack_key="",
             roo_sim_patient_key="",
+            roo_api_key="",
             is_production=False,
         )
 

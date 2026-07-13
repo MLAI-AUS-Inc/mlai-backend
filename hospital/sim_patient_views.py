@@ -77,7 +77,11 @@ class SimPatientRequestSerializer(serializers.Serializer):
 
     def validate_question(self, value):
         for character in value:
-            if unicodedata.category(character) == "Cc" and character not in "\n\r\t":
+            category = unicodedata.category(character)
+            if (
+                category in {"Cf", "Cs"}
+                or (category == "Cc" and character not in "\n\r\t")
+            ):
                 raise serializers.ValidationError("question contains invalid control characters")
         return value
 
@@ -155,7 +159,7 @@ def _clean_text(value, *, max_length: int, multiline: bool = False):
         return None
     allowed_controls = "\n\r\t" if multiline else ""
     if any(
-        unicodedata.category(character) in {"Cc", "Cf"}
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
         and character not in allowed_controls
         for character in value
     ):

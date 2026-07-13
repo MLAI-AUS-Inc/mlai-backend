@@ -136,10 +136,14 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
+    # Keep the atomic worst-case reservation aligned with Roo's enforced model
+    # request limits, including on hosts whose .env predates these defaults.
+    upsert_env_value HEALTH_HACK_AI_MAX_PROMPT_TOKENS "12000"
+    upsert_env_value HEALTH_HACK_AI_MAX_COMPLETION_TOKENS "2000"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -151,17 +155,19 @@ ssh $USER@$DROPLET_IP <<EOF
     require_env_value ROO_SERVICE_URL "Set ROO_SERVICE_URL to Roo's private VPC base URL."
     require_env_value ROO_SIM_PATIENT_KEY "Set the GitHub Actions ROO_SIM_PATIENT_KEY repository secret to the same dedicated value configured on Roo."
     require_env_value HEALTH_HACK_API_KEY "Set HEALTH_HACK_API_KEY to the dedicated Cloudflare Worker credential."
+    require_env_value ROO_API_KEY "Set ROO_API_KEY to the separate credential Roo uses to record diagnosis verdicts."
     health_hack_key=\$(read_env_value HEALTH_HACK_API_KEY)
     roo_sim_key=\$(read_env_value ROO_SIM_PATIENT_KEY)
-    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ]; then
-        echo "❌ HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must each contain at least 32 characters."
+    roo_api_key=\$(read_env_value ROO_API_KEY)
+    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ] || [ "\${#roo_api_key}" -lt 32 ]; then
+        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must each contain at least 32 characters."
         exit 1
     fi
-    if [ "\$health_hack_key" = "\$roo_sim_key" ]; then
-        echo "❌ HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must be distinct credentials."
+    if [ "\$health_hack_key" = "\$roo_sim_key" ] || [ "\$health_hack_key" = "\$roo_api_key" ] || [ "\$roo_sim_key" = "\$roo_api_key" ]; then
+        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must be distinct credentials."
         exit 1
     fi
-    unset health_hack_key roo_sim_key
+    unset health_hack_key roo_sim_key roo_api_key
 
     runtime_services=(web scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then

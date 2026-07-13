@@ -311,8 +311,9 @@ def _daily_timeout() -> int:
     return max(60, math.ceil((midnight - now).total_seconds()) + 60)
 
 
-def _daily_key(kind: str) -> str:
-    return f"{CACHE_PREFIX}:budget:{timezone.localdate().isoformat()}:{kind}"
+def _daily_key(kind: str, budget_day: str | None = None) -> str:
+    day = budget_day or timezone.localdate().isoformat()
+    return f"{CACHE_PREFIX}:budget:{day}:{kind}"
 
 
 def _redis_client_and_keys(*keys: str):
@@ -338,11 +339,15 @@ def _reserve_budget_atomic(
     token_reservation: int,
     timeout: int,
     enforce: bool,
+    calls_key: str | None = None,
+    tokens_key: str | None = None,
+    expires_at: int | None = None,
 ) -> tuple[bool, int, int]:
     """Atomically reserve a call and its worst-case token cost."""
 
-    calls_key = _daily_key("calls")
-    tokens_key = _daily_key("tokens")
+    calls_key = calls_key or _daily_key("calls")
+    tokens_key = tokens_key or _daily_key("tokens")
+    expires_at = expires_at or (math.ceil(time.time()) + max(1, timeout))
     redis_context = _redis_client_and_keys(calls_key, tokens_key)
     if redis_context is not None:
         client, redis_keys = redis_context
@@ -359,8 +364,8 @@ def _reserve_budget_atomic(
             end
             calls = redis.call('incr', KEYS[1])
             tokens = redis.call('incrby', KEYS[2], ARGV[3])
-            if redis.call('ttl', KEYS[1]) < 0 then redis.call('expire', KEYS[1], ARGV[4]) end
-            if redis.call('ttl', KEYS[2]) < 0 then redis.call('expire', KEYS[2], ARGV[4]) end
+            if redis.call('ttl', KEYS[1]) < 0 then redis.call('expireat', KEYS[1], ARGV[4]) end
+            if redis.call('ttl', KEYS[2]) < 0 then redis.call('expireat', KEYS[2], ARGV[4]) end
             return {1, calls, tokens}
             """,
             2,
@@ -368,11 +373,12 @@ def _reserve_budget_atomic(
             max(0, call_limit),
             max(0, token_limit),
             max(0, token_reservation),
-            max(1, timeout),
+            expires_at,
             1 if enforce else 0,
         )
         return bool(int(result[0])), int(result[1]), int(result[2])
 
+    remaining_ttl = max(1, expires_at - math.floor(time.time()))
     with _LOCAL_BUDGET_LOCK:
         calls = int(cache.get(calls_key, 0) or 0)
         tokens = int(cache.get(tokens_key, 0) or 0)
@@ -384,16 +390,21 @@ def _reserve_budget_atomic(
         )
         if enforce and blocked:
             return False, calls, tokens
-        cache.set(calls_key, next_calls, timeout=timeout)
-        cache.set(tokens_key, next_tokens, timeout=timeout)
+        cache.set(calls_key, next_calls, timeout=remaining_ttl)
+        cache.set(tokens_key, next_tokens, timeout=remaining_ttl)
         return True, next_calls, next_tokens
 
 
-def _release_budget_atomic(*, calls: int, tokens: int, timeout: int) -> tuple[int, int]:
+def _release_budget_atomic(
+    *,
+    calls: int,
+    tokens: int,
+    calls_key: str,
+    tokens_key: str,
+    expires_at: int,
+) -> tuple[int, int]:
     """Atomically return an unused reservation without allowing negatives."""
 
-    calls_key = _daily_key("calls")
-    tokens_key = _daily_key("tokens")
     redis_context = _redis_client_and_keys(calls_key, tokens_key)
     if redis_context is not None:
         client, redis_keys = redis_context
@@ -403,32 +414,42 @@ def _release_budget_atomic(*, calls: int, tokens: int, timeout: int) -> tuple[in
             local current_tokens = tonumber(redis.call('get', KEYS[2]) or '0')
             local next_calls = math.max(0, current_calls - tonumber(ARGV[1]))
             local next_tokens = math.max(0, current_tokens - tonumber(ARGV[2]))
-            redis.call('set', KEYS[1], next_calls, 'EX', ARGV[3])
-            redis.call('set', KEYS[2], next_tokens, 'EX', ARGV[3])
+            redis.call('set', KEYS[1], next_calls, 'EXAT', ARGV[3])
+            redis.call('set', KEYS[2], next_tokens, 'EXAT', ARGV[3])
             return {next_calls, next_tokens}
             """,
             2,
             *redis_keys,
             max(0, calls),
             max(0, tokens),
-            max(1, timeout),
+            max(math.ceil(time.time()) + 1, expires_at),
         )
         return int(result[0]), int(result[1])
 
+    remaining_ttl = max(1, expires_at - math.floor(time.time()))
     with _LOCAL_BUDGET_LOCK:
         next_calls = max(0, int(cache.get(calls_key, 0) or 0) - max(0, calls))
         next_tokens = max(0, int(cache.get(tokens_key, 0) or 0) - max(0, tokens))
-        cache.set(calls_key, next_calls, timeout=timeout)
-        cache.set(tokens_key, next_tokens, timeout=timeout)
+        cache.set(calls_key, next_calls, timeout=remaining_ttl)
+        cache.set(tokens_key, next_tokens, timeout=remaining_ttl)
         return next_calls, next_tokens
 
 
 class BudgetReservation:
     """A worst-case token reservation for one admitted upstream attempt."""
 
-    def __init__(self, token_reservation: int, timeout: int):
+    def __init__(
+        self,
+        token_reservation: int,
+        *,
+        calls_key: str,
+        tokens_key: str,
+        expires_at: int,
+    ):
         self.token_reservation = max(0, int(token_reservation))
-        self.timeout = max(1, int(timeout))
+        self.calls_key = calls_key
+        self.tokens_key = tokens_key
+        self.expires_at = int(expires_at)
         self.active = True
 
     def cancel(self) -> None:
@@ -436,7 +457,13 @@ class BudgetReservation:
 
         if not self.active:
             return
-        _release_budget_atomic(calls=1, tokens=self.token_reservation, timeout=self.timeout)
+        _release_budget_atomic(
+            calls=1,
+            tokens=self.token_reservation,
+            calls_key=self.calls_key,
+            tokens_key=self.tokens_key,
+            expires_at=self.expires_at,
+        )
         self.active = False
 
     def reconcile(
@@ -465,7 +492,9 @@ class BudgetReservation:
         _release_budget_atomic(
             calls=0,
             tokens=self.token_reservation - actual,
-            timeout=self.timeout,
+            calls_key=self.calls_key,
+            tokens_key=self.tokens_key,
+            expires_at=self.expires_at,
         )
         self.active = False
 
@@ -475,13 +504,20 @@ class BudgetReservation:
         self.active = False
 
 
-def _alert_budget(kind: str, count: int, limit: int, timeout: int) -> None:
+def _alert_budget(
+    kind: str,
+    count: int,
+    limit: int,
+    timeout: int,
+    *,
+    budget_day: str | None = None,
+) -> None:
     if limit <= 0:
         return
     ratio = count / limit
     for threshold in (0.7, 0.9, 1.0):
         if ratio >= threshold:
-            marker = f"{_daily_key(kind)}:alert:{int(threshold * 100)}"
+            marker = f"{_daily_key(kind, budget_day)}:alert:{int(threshold * 100)}"
             if cache.add(marker, True, timeout=timeout):
                 logger.warning(
                     "Health Hack AI daily %s budget reached %s%% (%s/%s)",
@@ -513,6 +549,10 @@ def reserve_global_call() -> tuple[BudgetReservation | None, GuardDecision]:
         int(getattr(settings, "HEALTH_HACK_AI_MAX_COMPLETION_TOKENS", 8_192)),
     )
     timeout = _daily_timeout()
+    expires_at = math.ceil(time.time()) + timeout
+    budget_day = timezone.localdate().isoformat()
+    calls_key = _daily_key("calls", budget_day)
+    tokens_key = _daily_key("tokens", budget_day)
     try:
         admitted, call_count, current_tokens = _reserve_budget_atomic(
             call_limit=call_limit,
@@ -520,9 +560,12 @@ def reserve_global_call() -> tuple[BudgetReservation | None, GuardDecision]:
             token_reservation=token_reservation,
             timeout=timeout,
             enforce=mode == "enforce",
+            calls_key=calls_key,
+            tokens_key=tokens_key,
+            expires_at=expires_at,
         )
-        _alert_budget("calls", call_count, call_limit, timeout)
-        _alert_budget("tokens", current_tokens, token_limit, timeout)
+        _alert_budget("calls", call_count, call_limit, timeout, budget_day=budget_day)
+        _alert_budget("tokens", current_tokens, token_limit, timeout, budget_day=budget_day)
     except Exception:
         logger.exception("Health Hack AI budget cache unavailable")
         return None, GuardDecision(
@@ -537,7 +580,12 @@ def reserve_global_call() -> tuple[BudgetReservation | None, GuardDecision]:
         or (token_limit > 0 and current_tokens > token_limit)
     )
     if not exceeded:
-        return BudgetReservation(token_reservation, timeout), GuardDecision(allowed=True)
+        return BudgetReservation(
+            token_reservation,
+            calls_key=calls_key,
+            tokens_key=tokens_key,
+            expires_at=expires_at,
+        ), GuardDecision(allowed=True)
 
     logger.warning(
         "Health Hack AI daily budget exceeded calls=%s/%s tokens=%s/%s mode=%s",
@@ -553,5 +601,14 @@ def reserve_global_call() -> tuple[BudgetReservation | None, GuardDecision]:
         retry_after_seconds=max(60, timeout - 60),
         observed=True,
     )
-    reservation = BudgetReservation(token_reservation, timeout) if decision.allowed else None
+    reservation = (
+        BudgetReservation(
+            token_reservation,
+            calls_key=calls_key,
+            tokens_key=tokens_key,
+            expires_at=expires_at,
+        )
+        if decision.allowed
+        else None
+    )
     return reservation, decision
