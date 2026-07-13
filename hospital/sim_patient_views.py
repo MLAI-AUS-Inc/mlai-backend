@@ -151,6 +151,27 @@ def _contest_state(participant, case_id):
     return {"state": state, "outcome": guess.outcome}
 
 
+def _merged_contest_state(participant):
+    """Nurse Paws coaches across every open one-guess book at her one desk.
+
+    Her chat only needs the most actionable state: if ANY case can still take
+    this player's final answer she is "eligible"; else an unclaimed win wants
+    an email ("awaiting_claim"); else a finished win shows its link
+    ("completed"); only with every book burnt is she "locked". The per-case
+    truth stays with the sim-guess endpoints — this is conversational context.
+    """
+    open_ids = list(getattr(settings, "HEALTH_HACK_OPEN_CASE_IDS", None) or [])
+    active = int(getattr(settings, "HEALTH_HACK_ACTIVE_CASE_ID", 1))
+    if active not in open_ids:
+        open_ids.insert(0, active)
+    states = [_contest_state(participant, case_id) for case_id in open_ids]
+    for wanted in ("eligible", "awaiting_claim", "completed"):
+        for state in states:
+            if state["state"] == wanted:
+                return state
+    return states[0]
+
+
 def _clean_text(value, *, max_length: int, multiline: bool = False):
     if not isinstance(value, str):
         return None
@@ -646,7 +667,7 @@ class SimPatientProxyView(APIView):
                 "role": data["role"],
             }
             if data["role"] == SimConversation.ROLE_CLERK:
-                upstream_payload["contest_state"] = _contest_state(participant, case_id)
+                upstream_payload["contest_state"] = _merged_contest_state(participant)
 
             started = time.monotonic()
             upstream = None
