@@ -211,6 +211,9 @@ class SubmissionListCreateView(APIView):
         submissions = (
             Submission.objects.filter(user=request.user)
             .select_related('team')
+            # The list serialises only light fields — leave the multi-KB
+            # feedback JSON in the database.
+            .defer('feedback')
             .order_by('-submitted_at')
         )
         data = [
@@ -265,17 +268,31 @@ class LeaderboardView(APIView):
     permission_classes = [IsLeaderboardAdmin]
 
     def get(self, request):
-        submissions = (
-            Submission.objects.select_related('team')
-            .filter(team__isnull=False)
+        # Best submission per team, in two phases: a light id scan (two
+        # small columns), then full rows — feedback included — for just the
+        # one winner per team. Iterating whole model instances here loads
+        # every submission's multi-KB feedback blob (37k rows ≈ 600MB at the
+        # 2026-07-13 event) on each request.
+        best_ids = {}
+        for sub in (
+            Submission.objects.filter(team__isnull=False)
             .order_by('-score', '-submitted_at')
-        )
+            .values('id', 'team_id')
+        ):
+            if sub['team_id'] not in best_ids:
+                best_ids[sub['team_id']] = sub['id']
 
-        # Best submission per team.
-        best_by_team = {}
-        for sub in submissions:
-            if sub.team_id not in best_by_team:
-                best_by_team[sub.team_id] = sub
+        winners = {
+            sub.id: sub
+            for sub in Submission.objects.select_related('team').filter(
+                id__in=best_ids.values()
+            )
+        }
+        # Rebuild in phase-1 discovery order so tied teams keep the original
+        # newest-first ordering (the final sort below is stable).
+        best_by_team = {
+            team_id: winners[sub_id] for team_id, sub_id in best_ids.items()
+        }
 
         rows = []
         for team_id, sub in best_by_team.items():

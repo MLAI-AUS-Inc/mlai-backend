@@ -26,14 +26,28 @@ class WorldStateViewTests(TestCase):
         self.team_b = Team.objects.create(team_id=2, team_name="Beta")
         self.team_a.members.add(self.user)
 
-    def _submit(self, team, score, accuracy=0.9):
-        return Submission.objects.create(
+    def _submit(self, team, score, accuracy=0.9, submitted_at=None):
+        sub = Submission.objects.create(
             user=self.user,
             team=team,
             participant_name="World Tester",
             score=score,
             accuracy=accuracy,
+            # Every real submission carries a multi-KB scoring blob. The
+            # world payload must never depend on it (2026-07-13 meltdown:
+            # materialising feedback for the whole table on every poll).
+            feedback={
+                "confusion_matrix": [[123] * 4] * 4,
+                "per_class": {
+                    str(i): {"precision": 0.5, "recall": 0.5} for i in range(4)
+                },
+                "row_details": [{"row": i, "ok": bool(i % 2)} for i in range(100)],
+            },
         )
+        if submitted_at is not None:
+            Submission.objects.filter(pk=sub.pk).update(submitted_at=submitted_at)
+            sub.refresh_from_db()
+        return sub
 
     def test_anonymous_get_returns_world_state(self):
         self._submit(self.team_a, 0.5)
@@ -115,3 +129,30 @@ class WorldStateViewTests(TestCase):
         cache.clear()
         third = self.client.get(WORLD_URL)
         self.assertNotEqual(first.data, third.data)
+
+    def test_tie_break_prefers_the_earliest_best_submission(self):
+        now = timezone.now()
+        self._submit(self.team_b, 0.9, submitted_at=now)
+        self._submit(
+            self.team_a, 0.9, submitted_at=now - timezone.timedelta(minutes=5)
+        )
+        cache.clear()
+        response = self.client.get(WORLD_URL)
+        cubes = {e["id"]: e for e in response.data["entities"] if e["kind"] == "cube"}
+        # Equal best scores: the team that got there first outranks.
+        self.assertEqual(cubes["team-1"]["meta"]["rank"], 1)
+        self.assertEqual(cubes["team-2"]["meta"]["rank"], 2)
+
+    def test_build_query_count_is_constant_and_light(self):
+        # REGRESSION (2026-07-13): the build previously materialised every
+        # Submission row — feedback blob included — per cache miss. The
+        # rewrite scans narrow values() rows in exactly three queries; any
+        # per-row attribute access would reintroduce N+1 and fail this.
+        for i in range(1, 7):
+            self._submit(self.team_a, 0.1 * i)
+            self._submit(self.team_b, 0.05 * i)
+        cache.clear()
+        with self.assertNumQueries(3):
+            response = self.client.get(WORLD_URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["entities"])

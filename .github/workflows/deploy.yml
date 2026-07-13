@@ -75,6 +75,8 @@ jobs:
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           hospital.test_sim_contest \
+          hospital.test_world_view \
+          hospital.test_leaderboard_view \
           --verbosity 2
 
   deploy:
