@@ -49,18 +49,23 @@ class WorldStateView(APIView):
         return Response(payload)
 
     def _build(self):
+        # values() keeps this scan to four small columns. Every submission
+        # row also carries a multi-KB `feedback` JSON blob; materialising it
+        # for the whole table (37k rows ≈ 600MB) on every cache miss is what
+        # melted the workers on event morning (2026-07-13) — this view is
+        # polled every ~5s per connected player.
         best_by_team = {}
         for sub in (
-            Submission.objects.select_related("team")
-            .filter(team__isnull=False)
+            Submission.objects.filter(team__isnull=False)
             .order_by("-score", "submitted_at")
+            .values("team_id", "team__team_id", "team__team_name", "score", "submitted_at")
         ):
-            best_by_team.setdefault(sub.team_id, sub)
+            best_by_team.setdefault(sub["team_id"], sub)
 
         ranked = sorted(
-            best_by_team.values(), key=lambda s: (-s.score, s.submitted_at)
+            best_by_team.values(), key=lambda s: (-s["score"], s["submitted_at"])
         )
-        scores = [s.score for s in ranked] or [0.0]
+        scores = [s["score"] for s in ranked] or [0.0]
         lo = min(scores)
         span = (max(scores) - lo) or 1.0
 
@@ -68,14 +73,14 @@ class WorldStateView(APIView):
         for rank, sub in enumerate(ranked, start=1):
             lat, lon = rank_to_lat_lon(rank)
             entities.append({
-                "id": "team-%s" % sub.team.team_id,
+                "id": "team-%s" % sub["team__team_id"],
                 "kind": "cube",
-                "label": "#%d %s" % (rank, sub.team.team_name),
+                "label": "#%d %s" % (rank, sub["team__team_name"]),
                 "lat": lat,
                 "lon": lon,
-                "size": round(1.0 + 2.0 * (sub.score - lo) / span, 2),
-                "color": PALETTE[(sub.team.team_id or 0) % len(PALETTE)],
-                "meta": {"score": round(sub.score, 4), "rank": rank},
+                "size": round(1.0 + 2.0 * (sub["score"] - lo) / span, 2),
+                "color": PALETTE[(sub["team__team_id"] or 0) % len(PALETTE)],
+                "meta": {"score": round(sub["score"], 4), "rank": rank},
             })
 
         # Teams that have not submitted yet still get a spot on the planet.
@@ -99,12 +104,12 @@ class WorldStateView(APIView):
         cutoff = timezone.now() - RECENT_SUBMISSION_WINDOW
         for sub in (
             Submission.objects.filter(submitted_at__gte=cutoff)
-            .select_related("team")
-            .order_by("-submitted_at")[:RECENT_SUBMISSION_LIMIT]
+            .order_by("-submitted_at")
+            .values("id", "accuracy", "team__team_name")[:RECENT_SUBMISSION_LIMIT]
         ):
-            digest = int(hashlib.md5(str(sub.id).encode()).hexdigest()[:8], 16)
+            digest = int(hashlib.md5(str(sub["id"]).encode()).hexdigest()[:8], 16)
             entities.append({
-                "id": "sub-%s" % sub.id,
+                "id": "sub-%s" % sub["id"],
                 "kind": "sphere",
                 "lat": float(digest % 120) - 60.0,
                 "lon": float((digest // 120) % 360) - 180.0,
@@ -113,8 +118,8 @@ class WorldStateView(APIView):
                 "spin": True,
                 "color": "#ffffff",
                 "meta": {
-                    "team": sub.team.team_name if sub.team else None,
-                    "accuracy": round(sub.accuracy, 4),
+                    "team": sub["team__team_name"],
+                    "accuracy": round(sub["accuracy"], 4),
                 },
             })
 
