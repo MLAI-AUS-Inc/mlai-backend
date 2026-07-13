@@ -104,8 +104,13 @@ jobs:
 
     - name: Deploy
       env:
+        REDIS_URL: ${{ secrets.REDIS_URL }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
       run: |
+        if [ -z "$REDIS_URL" ]; then
+          echo "::error::Required repository secret REDIS_URL is not configured"
+          exit 1
+        fi
         if [ -z "$ROO_SIM_PATIENT_KEY" ]; then
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
           exit 1
