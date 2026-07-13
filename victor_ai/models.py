@@ -1,0 +1,50 @@
+from django.db import models
+
+
+class VictorApplication(models.Model):
+    """A registration from the public Victor:AI landing page (victorai.win).
+
+    Rows are captured progressively: a ``lead`` row is created as soon as the
+    applicant finishes step 1 (first name / last name / email), then upgraded
+    to ``complete`` when the full form is submitted. ``client_ref`` is the
+    browser-generated id the form sends with both saves, so the submit
+    endpoint can upsert instead of duplicating.
+
+    Registrations are only ever read through the Django admin — there is no
+    public read API.
+    """
+
+    STAGE_LEAD = 'lead'
+    STAGE_COMPLETE = 'complete'
+    STAGE_CHOICES = (
+        (STAGE_LEAD, 'Lead'),
+        (STAGE_COMPLETE, 'Complete'),
+    )
+
+    client_ref = models.CharField(max_length=64, unique=True)
+    stage = models.CharField(max_length=16, choices=STAGE_CHOICES, default=STAGE_LEAD)
+
+    first_name = models.CharField(max_length=255)
+    last_name = models.CharField(max_length=255)
+    # Not unique: people can register twice; client_ref is the upsert key.
+    email = models.EmailField(db_index=True)
+
+    team_name = models.CharField(max_length=255, blank=True)
+    # Choice labels from the form ("Founder", "Idea stage"), not enums, so
+    # the form options can change without a migration.
+    role = models.CharField(max_length=64, blank=True)
+    startup_stage = models.CharField(max_length=64, blank=True)
+    location = models.CharField(max_length=255, blank=True)
+
+    idea = models.TextField(blank=True)
+    support = models.TextField(blank=True)
+    consent = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.first_name} {self.last_name} <{self.email}> ({self.stage})'
