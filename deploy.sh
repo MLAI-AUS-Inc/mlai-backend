@@ -8,6 +8,14 @@ USER="root"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
+if [ -z "${REDIS_URL:-}" ]; then
+    echo "❌ REDIS_URL must be supplied by the deployment secret store."
+    exit 1
+fi
+if [[ "$REDIS_URL" != redis://* && "$REDIS_URL" != rediss://* ]]; then
+    echo "❌ REDIS_URL must use the redis:// or rediss:// scheme."
+    exit 1
+fi
 if [ -z "${ROO_SIM_PATIENT_KEY:-}" ]; then
     echo "❌ ROO_SIM_PATIENT_KEY must be supplied by the deployment secret store."
     exit 1
@@ -43,6 +51,30 @@ printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
         grep -v "^ROO_SIM_PATIENT_KEY=" .env > "$tmp" || true
     fi
     printf "ROO_SIM_PATIENT_KEY=%s\n" "$secret" >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+'
+
+# Keep the managed Redis credential in the same secret store and transport it
+# over SSH stdin. This avoids relying on a manually edited production .env and
+# keeps the value out of shell arguments and deployment output.
+echo "🔐 Updating shared Redis credential (value redacted)..."
+printf '%s' "$REDIS_URL" | ssh $USER@$DROPLET_IP '
+    set -euo pipefail
+    project_dir="/root/mlai-backend"
+    mkdir -p "$project_dir"
+    cd "$project_dir"
+    umask 077
+    secret=$(cat)
+    case "$secret" in
+        redis://*|rediss://*) ;;
+        *) echo "Invalid REDIS_URL payload" >&2; exit 1 ;;
+    esac
+    tmp=$(mktemp .env.redis-url.XXXXXX)
+    if [ -f .env ]; then
+        grep -v "^REDIS_URL=" .env > "$tmp" || true
+    fi
+    printf "REDIS_URL=%s\n" "$secret" >> "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" .env
 '
