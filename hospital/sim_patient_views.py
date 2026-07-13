@@ -274,12 +274,10 @@ def _project_roo_reply(payload, role, active_case_id):
     if max_words > 0 and len(reply.split()) > max_words:
         return None
 
-    # These fields are required so unexpected upstream schema changes fail
-    # closed, but their clinical/internal contents are never sent to a browser.
-    if _clean_text(payload.get("case_title"), max_length=200) is None:
-        return None
-    if _clean_text(payload.get("presenting_complaint"), max_length=500) is None:
-        return None
+    # Legacy Roo versions supplied case_title and presenting_complaint here.
+    # Hardened Roo deliberately omits or blanks both internal clinical fields.
+    # Neither field is needed to validate a spoken reply, and neither is ever
+    # projected to the browser, so tolerate both wire shapes during rollout.
     upstream_name = _clean_text(payload.get("patient_name"), max_length=100)
     if upstream_name is None:
         return None

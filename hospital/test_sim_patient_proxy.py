@@ -200,6 +200,26 @@ class SimPatientProxyTests(TestCase):
         self.assertEqual(SimConversationTurn.objects.get().tool_calls, [])
 
     @patch("hospital.sim_patient_views.requests.post")
+    def test_hardened_roo_may_blank_or_omit_internal_case_fields(self, post):
+        omitted = roo_reply()
+        omitted.pop("case_title")
+        omitted.pop("presenting_complaint")
+        post.side_effect = [
+            upstream_response(roo_reply(case_title="", presenting_complaint="")),
+            upstream_response(omitted),
+        ]
+
+        blank_response = self.post(self.payload(question="When did this start?"))
+        omitted_response = self.post(self.payload(question="What does it feel like?"))
+
+        self.assertEqual(blank_response.status_code, 200)
+        self.assertEqual(omitted_response.status_code, 200)
+        self.assertEqual(blank_response.data["case_title"], "")
+        self.assertEqual(blank_response.data["presenting_complaint"], "")
+        self.assertEqual(omitted_response.data["case_title"], "")
+        self.assertEqual(omitted_response.data["presenting_complaint"], "")
+
+    @patch("hospital.sim_patient_views.requests.post")
     def test_forwards_nurse_paws_context_and_validated_action(self, post):
         post.return_value = upstream_response(roo_reply(
             patient_name="Nurse Paws",
