@@ -32,7 +32,12 @@ VALID_PROD_URL_SETTINGS = {
     "VALLEY_HARNESS_URL": "http://10.126.0.6:8080",
     "VALLEY_HARNESS_API_KEY": "valley-key",
     "ALLOWED_HOSTS": ["api.mlai.au", "10.126.0.2"],
-    "CORS_ALLOWED_ORIGINS": ["https://mlai.au", "https://www.mlai.au"],
+    "CORS_ALLOWED_ORIGINS": [
+        "https://mlai.au",
+        "https://www.mlai.au",
+        "https://victorai.win",
+        "https://www.victorai.win",
+    ],
     "CSRF_TRUSTED_ORIGINS": ["https://mlai.au", "https://www.mlai.au", "https://api.mlai.au"],
 }
 
@@ -93,7 +98,7 @@ class ValidateProdUrlsTests(SimpleTestCase):
 
     def test_required_cors_and_csrf_origins_are_enforced(self):
         errors = self._validation_errors(
-            CORS_ALLOWED_ORIGINS=["https://mlai.au"],
+            CORS_ALLOWED_ORIGINS=["https://mlai.au", "https://victorai.win", "https://www.victorai.win"],
             CSRF_TRUSTED_ORIGINS=["https://mlai.au", "https://www.mlai.au"],
         )
 

@@ -169,6 +169,7 @@ INSTALLED_APPS = [
     'generic_hackathons',
     'vibe_raising',
     'mlai_studio',
+    'victor_ai',
     'jobs',
     "rest_framework",
     "roo",
