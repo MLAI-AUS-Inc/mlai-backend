@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from unittest import mock
 from unittest.mock import patch
@@ -7,8 +8,15 @@ import uuid
 from django.core.management import call_command
 from django.core.cache import cache
 from django.core.management.base import CommandError
+from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase, override_settings
 from django.utils import timezone
+
+from mlai.settings import (
+    _build_cache_settings,
+    _validate_health_hack_ai_modes,
+    _validate_health_hack_service_secrets,
+)
 
 from .models import (
     SimCaseWinner,
@@ -18,7 +26,7 @@ from .models import (
     SimParticipant,
 )
 from .sim_retention import run_scheduled_sim_conversation_cleanup
-from .sim_security import _daily_timeout
+from .sim_security import _daily_key, _daily_timeout, _reserve_budget_atomic
 
 
 @override_settings(HEALTH_HACK_CHAT_RETENTION_DAYS=30)
@@ -152,3 +160,114 @@ class SecurityBudgetClockTests(TestCase):
 
         self.assertGreater(timeout, 22 * 60 * 60)
         self.assertLess(timeout, 23 * 60 * 60)
+
+    def test_atomic_reservations_never_admit_beyond_hard_bound(self):
+        cache.clear()
+
+        def reserve(_index):
+            return _reserve_budget_atomic(
+                call_limit=5,
+                token_limit=10,
+                token_reservation=2,
+                timeout=60,
+                enforce=True,
+            )[0]
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            admitted = list(executor.map(reserve, range(20)))
+
+        self.assertEqual(sum(admitted), 5)
+        self.assertEqual(cache.get(_daily_key("calls")), 5)
+        self.assertEqual(cache.get(_daily_key("tokens")), 10)
+
+
+class SharedCacheConfigurationTests(TestCase):
+    def test_production_requires_redis_url_and_dependency(self):
+        with self.assertRaisesMessage(ImproperlyConfigured, "REDIS_URL must be configured"):
+            _build_cache_settings(
+                redis_url="",
+                redis_available=False,
+                is_production=True,
+            )
+        with self.assertRaisesMessage(ImproperlyConfigured, "redis package is required"):
+            _build_cache_settings(
+                redis_url="redis://cache.internal:6379/0",
+                redis_available=False,
+                is_production=True,
+            )
+
+    def test_local_environment_may_use_process_local_cache(self):
+        config = _build_cache_settings(
+            redis_url="",
+            redis_available=False,
+            is_production=False,
+        )
+        self.assertEqual(
+            config["default"]["BACKEND"],
+            "django.core.cache.backends.locmem.LocMemCache",
+        )
+
+    @override_settings(CACHES={
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    })
+    def test_deployment_check_rejects_process_local_cache(self):
+        with self.assertRaisesMessage(CommandError, "default cache must use"):
+            call_command("validate_health_hack_ai_cache", stdout=StringIO())
+
+    @override_settings(CACHES={
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": "rediss://cache.internal:25061/0",
+        },
+    })
+    @patch("hospital.management.commands.validate_health_hack_ai_cache.cache")
+    def test_deployment_check_exercises_atomic_cache_operations(self, mock_cache):
+        mock_cache.add.return_value = True
+        mock_cache.incr.return_value = 2
+        mock_cache.get.return_value = 2
+        output = StringIO()
+
+        call_command("validate_health_hack_ai_cache", stdout=output)
+
+        self.assertIn("shared Redis cache is ready", output.getvalue())
+        mock_cache.delete.assert_called_once()
+
+    def test_production_service_secrets_are_strong_and_distinct(self):
+        with self.assertRaisesMessage(ImproperlyConfigured, "HEALTH_HACK_API_KEY"):
+            _validate_health_hack_service_secrets(
+                health_hack_key="short",
+                roo_sim_patient_key="r" * 32,
+                is_production=True,
+            )
+        with self.assertRaisesMessage(ImproperlyConfigured, "must be distinct"):
+            _validate_health_hack_service_secrets(
+                health_hack_key="s" * 32,
+                roo_sim_patient_key="s" * 32,
+                is_production=True,
+            )
+
+        _validate_health_hack_service_secrets(
+            health_hack_key="h" * 32,
+            roo_sim_patient_key="r" * 32,
+            is_production=True,
+        )
+
+    def test_local_service_secrets_remain_optional(self):
+        _validate_health_hack_service_secrets(
+            health_hack_key="",
+            roo_sim_patient_key="",
+            is_production=False,
+        )
+
+    def test_global_budget_cannot_be_observation_only_in_production(self):
+        with self.assertRaisesMessage(ImproperlyConfigured, "must be enforce"):
+            _validate_health_hack_ai_modes(
+                rate_mode="observe",
+                budget_mode="observe",
+                is_production=True,
+            )
+        _validate_health_hack_ai_modes(
+            rate_mode="observe",
+            budget_mode="enforce",
+            is_production=True,
+        )

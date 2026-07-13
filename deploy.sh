@@ -12,6 +12,10 @@ if [ -z "${ROO_SIM_PATIENT_KEY:-}" ]; then
     echo "❌ ROO_SIM_PATIENT_KEY must be supplied by the deployment secret store."
     exit 1
 fi
+if [ "${#ROO_SIM_PATIENT_KEY}" -lt 32 ]; then
+    echo "❌ ROO_SIM_PATIENT_KEY must contain at least 32 characters."
+    exit 1
+fi
 
 echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
 
@@ -73,6 +77,13 @@ ssh $USER@$DROPLET_IP <<EOF
         grep -Eq "^\${key}=.+" .env
     }
 
+    read_env_value() {
+        local key="\$1"
+        local line
+        line=\$(grep -m1 "^\${key}=" .env || true)
+        printf '%s' "\${line#*=}"
+    }
+
     print_redacted_env_status() {
         echo "🔐 Required production env status (values redacted):"
         for key in "\$@"; do
@@ -124,20 +135,33 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
+    upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
     require_env_value VALLEY_HARNESS_URL "Set VALLEY_HARNESS_URL to http://<valley-private-ip>:8080 for the cross-droplet Valley deployment."
+    require_env_value REDIS_URL "Set REDIS_URL to the managed Redis/Valkey connection string. Production AI guards refuse process-local cache state."
     if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
     require_env_value ROO_SERVICE_URL "Set ROO_SERVICE_URL to Roo's private VPC base URL."
     require_env_value ROO_SIM_PATIENT_KEY "Set the GitHub Actions ROO_SIM_PATIENT_KEY repository secret to the same dedicated value configured on Roo."
     require_env_value HEALTH_HACK_API_KEY "Set HEALTH_HACK_API_KEY to the dedicated Cloudflare Worker credential."
+    health_hack_key=\$(read_env_value HEALTH_HACK_API_KEY)
+    roo_sim_key=\$(read_env_value ROO_SIM_PATIENT_KEY)
+    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ]; then
+        echo "❌ HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must each contain at least 32 characters."
+        exit 1
+    fi
+    if [ "\$health_hack_key" = "\$roo_sim_key" ]; then
+        echo "❌ HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must be distinct credentials."
+        exit 1
+    fi
+    unset health_hack_key roo_sim_key
 
     runtime_services=(web scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
@@ -189,6 +213,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
 
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
+
+    echo "🧱 Validating shared Redis security state..."
+    compose_run_web python manage.py validate_health_hack_ai_cache
 
     echo "🔗 Validating production URL configuration and service connectivity..."
     compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8

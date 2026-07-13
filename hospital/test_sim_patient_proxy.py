@@ -300,6 +300,34 @@ class SimPatientProxyTests(TestCase):
         lease.release()
 
     @patch("hospital.sim_patient_views.requests.post")
+    def test_stream_transport_failure_is_retryable_network_error(self, post):
+        broken = upstream_response()
+        broken.iter_content.side_effect = requests.ConnectionError("stream reset")
+        post.side_effect = [broken, upstream_response()]
+        request = self.payload(message_id=str(uuid.uuid4()))
+
+        first = self.post(request)
+        second = self.post(request)
+
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(first.data["code"], "network_error")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(post.call_count, 2)
+
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_pathologically_deep_json_is_retryable_malformed_response(self, post):
+        raw = (b"[" * 1500) + b"0" + (b"]" * 1500)
+        post.side_effect = [upstream_response(raw=raw), upstream_response()]
+        request = self.payload(message_id=str(uuid.uuid4()))
+
+        first = self.post(request)
+        second = self.post(request)
+
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(first.data["code"], "malformed_response")
+        self.assertEqual(second.status_code, 200)
+
+    @patch("hospital.sim_patient_views.requests.post")
     def test_transient_failure_can_retry_same_message_id_safely(self, post):
         post.side_effect = [requests.Timeout(), upstream_response()]
         request = self.payload(message_id=str(uuid.uuid4()))
@@ -397,6 +425,20 @@ class SimPatientProxyTests(TestCase):
         self.assertEqual(second.headers["X-Idempotent-Replay"], "true")
         self.assertEqual(post.call_count, 1)
         self.assertEqual(SimConversationTurn.objects.count(), 1)
+
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_completed_replay_survives_upstream_configuration_outage(self, post):
+        post.return_value = upstream_response()
+        request = self.payload(message_id=str(uuid.uuid4()))
+        first = self.post(request)
+
+        with override_settings(ROO_SERVICE_URL="", ROO_SIM_PATIENT_KEY=""):
+            replay = self.post(request)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.headers["X-Idempotent-Replay"], "true")
+        self.assertEqual(post.call_count, 1)
 
     @patch("hospital.sim_patient_views.requests.post")
     def test_message_id_cannot_be_reused_for_another_player_or_question(self, post):
@@ -507,6 +549,8 @@ class SimPatientProxyTests(TestCase):
         )
         self.assertEqual(response.status_code, 429)  # same /24
         self.assertEqual(post.call_count, 1)
+        self.assertFalse(SimParticipant.objects.filter(id=PLAYER_B).exists())
+        self.assertEqual(SimConversation.objects.count(), 1)
 
     @patch("hospital.sim_patient_views.requests.post")
     def test_one_inflight_request_per_participant_across_npc_roles(self, post):
@@ -524,20 +568,29 @@ class SimPatientProxyTests(TestCase):
         HEALTH_HACK_AI_BUDGET_MODE="enforce",
         HEALTH_HACK_AI_DAILY_CALL_LIMIT=1,
         HEALTH_HACK_AI_DAILY_TOKEN_LIMIT=1000,
+        HEALTH_HACK_AI_MAX_PROMPT_TOKENS=100,
+        HEALTH_HACK_AI_MAX_COMPLETION_TOKENS=100,
     )
     @patch("hospital.sim_patient_views.requests.post")
     def test_daily_call_budget_circuit_breaker(self, post):
         post.return_value = upstream_response()
         self.assertEqual(self.post(self.payload()).status_code, 200)
-        blocked = self.post(self.payload(question="Can I ask again?"))
+        blocked = self.post(self.payload(
+            player_id=PLAYER_B,
+            question="Can I ask again?",
+        ))
         self.assertEqual(blocked.status_code, 503)
         self.assertEqual(blocked.data["code"], "ai_budget_exhausted")
         self.assertEqual(post.call_count, 1)
+        self.assertFalse(SimParticipant.objects.filter(id=PLAYER_B).exists())
+        self.assertEqual(SimConversation.objects.count(), 1)
 
     @override_settings(
         HEALTH_HACK_AI_BUDGET_MODE="enforce",
         HEALTH_HACK_AI_DAILY_CALL_LIMIT=100,
-        HEALTH_HACK_AI_DAILY_TOKEN_LIMIT=10,
+        HEALTH_HACK_AI_DAILY_TOKEN_LIMIT=12,
+        HEALTH_HACK_AI_MAX_PROMPT_TOKENS=8,
+        HEALTH_HACK_AI_MAX_COMPLETION_TOKENS=4,
     )
     @patch("hospital.sim_patient_views.requests.post")
     def test_reported_tokens_trip_future_call_budget(self, post):
@@ -549,6 +602,24 @@ class SimPatientProxyTests(TestCase):
         self.assertEqual(blocked.status_code, 503)
         self.assertEqual(post.call_count, 1)
 
+    @override_settings(
+        HEALTH_HACK_AI_BUDGET_MODE="enforce",
+        HEALTH_HACK_AI_DAILY_CALL_LIMIT=100,
+        HEALTH_HACK_AI_DAILY_TOKEN_LIMIT=10,
+        HEALTH_HACK_AI_MAX_PROMPT_TOKENS=6,
+        HEALTH_HACK_AI_MAX_COMPLETION_TOKENS=4,
+    )
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_missing_usage_keeps_worst_case_token_reservation(self, post):
+        post.return_value = upstream_response(roo_reply())
+
+        self.assertEqual(self.post(self.payload()).status_code, 200)
+        blocked = self.post(self.payload(question="Can I ask again?"))
+
+        self.assertEqual(blocked.status_code, 503)
+        self.assertEqual(blocked.data["code"], "ai_budget_exhausted")
+        self.assertEqual(post.call_count, 1)
+
     @override_settings(HEALTH_HACK_AI_KILL_SWITCH=True)
     @patch("hospital.sim_patient_views.requests.post")
     def test_kill_switch_prevents_upstream_call(self, post):
@@ -557,6 +628,8 @@ class SimPatientProxyTests(TestCase):
         self.assertEqual(response.data["code"], "ai_temporarily_disabled")
         post.assert_not_called()
         self.assertEqual(SimConversationTurn.objects.count(), 0)
+        self.assertEqual(SimConversation.objects.count(), 0)
+        self.assertEqual(SimParticipant.objects.count(), 0)
 
     def test_lock_release_never_deletes_a_new_owner(self):
         lease = InflightLease(PLAYER_A, "patient")

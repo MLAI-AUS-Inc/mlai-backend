@@ -12,9 +12,11 @@ from datetime import datetime, time as datetime_time, timedelta
 import hashlib
 import io
 import ipaddress
+import json
 import logging
 import math
 import secrets
+import threading
 import time
 
 from django.conf import settings
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_PREFIX = "health-hack:ai:v1"
 VALID_MODES = {"observe", "enforce"}
+_LOCAL_BUDGET_LOCK = threading.Lock()
 
 
 class RequestEntityTooLarge(APIException):
@@ -60,6 +63,38 @@ class LimitedJSONParser(JSONParser):
             media_type=media_type,
             parser_context=parser_context,
         )
+
+
+def read_limited_json(upstream, *, max_bytes: int):
+    """Read one streamed JSON response without buffering an unbounded body.
+
+    Transport exceptions deliberately propagate to the caller so they can be
+    classified as retryable network failures. Malformed or pathologically deep
+    JSON is represented by ``None`` and never escapes as an application 500.
+    """
+
+    headers = getattr(upstream, "headers", {}) or {}
+    declared = headers.get("content-length") or headers.get("Content-Length")
+    try:
+        if declared and int(declared) > max_bytes:
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    chunks = []
+    total = 0
+    iterator = upstream.iter_content(chunk_size=8192)
+    for chunk in iterator:
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    try:
+        return json.loads(b"".join(chunks))
+    except (ValueError, TypeError, UnicodeDecodeError, RecursionError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -280,6 +315,166 @@ def _daily_key(kind: str) -> str:
     return f"{CACHE_PREFIX}:budget:{timezone.localdate().isoformat()}:{kind}"
 
 
+def _redis_client_and_keys(*keys: str):
+    """Return the built-in Redis cache client and versioned wire keys.
+
+    Production is required to use Django's shared Redis cache. LocMem remains a
+    development/test fallback and is serialized with ``_LOCAL_BUDGET_LOCK``.
+    """
+
+    backend_client = getattr(cache, "_cache", None)
+    get_client = getattr(backend_client, "get_client", None)
+    make_key = getattr(cache, "make_and_validate_key", None)
+    if not callable(get_client) or not callable(make_key):
+        return None
+    redis_keys = [make_key(key) for key in keys]
+    return get_client(redis_keys[0], write=True), redis_keys
+
+
+def _reserve_budget_atomic(
+    *,
+    call_limit: int,
+    token_limit: int,
+    token_reservation: int,
+    timeout: int,
+    enforce: bool,
+) -> tuple[bool, int, int]:
+    """Atomically reserve a call and its worst-case token cost."""
+
+    calls_key = _daily_key("calls")
+    tokens_key = _daily_key("tokens")
+    redis_context = _redis_client_and_keys(calls_key, tokens_key)
+    if redis_context is not None:
+        client, redis_keys = redis_context
+        result = client.eval(
+            """
+            local calls = tonumber(redis.call('get', KEYS[1]) or '0')
+            local tokens = tonumber(redis.call('get', KEYS[2]) or '0')
+            local next_calls = calls + 1
+            local next_tokens = tokens + tonumber(ARGV[3])
+            local call_blocked = tonumber(ARGV[1]) > 0 and next_calls > tonumber(ARGV[1])
+            local token_blocked = tonumber(ARGV[2]) > 0 and next_tokens > tonumber(ARGV[2])
+            if tonumber(ARGV[5]) == 1 and (call_blocked or token_blocked) then
+                return {0, calls, tokens}
+            end
+            calls = redis.call('incr', KEYS[1])
+            tokens = redis.call('incrby', KEYS[2], ARGV[3])
+            if redis.call('ttl', KEYS[1]) < 0 then redis.call('expire', KEYS[1], ARGV[4]) end
+            if redis.call('ttl', KEYS[2]) < 0 then redis.call('expire', KEYS[2], ARGV[4]) end
+            return {1, calls, tokens}
+            """,
+            2,
+            *redis_keys,
+            max(0, call_limit),
+            max(0, token_limit),
+            max(0, token_reservation),
+            max(1, timeout),
+            1 if enforce else 0,
+        )
+        return bool(int(result[0])), int(result[1]), int(result[2])
+
+    with _LOCAL_BUDGET_LOCK:
+        calls = int(cache.get(calls_key, 0) or 0)
+        tokens = int(cache.get(tokens_key, 0) or 0)
+        next_calls = calls + 1
+        next_tokens = tokens + token_reservation
+        blocked = (
+            (call_limit > 0 and next_calls > call_limit)
+            or (token_limit > 0 and next_tokens > token_limit)
+        )
+        if enforce and blocked:
+            return False, calls, tokens
+        cache.set(calls_key, next_calls, timeout=timeout)
+        cache.set(tokens_key, next_tokens, timeout=timeout)
+        return True, next_calls, next_tokens
+
+
+def _release_budget_atomic(*, calls: int, tokens: int, timeout: int) -> tuple[int, int]:
+    """Atomically return an unused reservation without allowing negatives."""
+
+    calls_key = _daily_key("calls")
+    tokens_key = _daily_key("tokens")
+    redis_context = _redis_client_and_keys(calls_key, tokens_key)
+    if redis_context is not None:
+        client, redis_keys = redis_context
+        result = client.eval(
+            """
+            local current_calls = tonumber(redis.call('get', KEYS[1]) or '0')
+            local current_tokens = tonumber(redis.call('get', KEYS[2]) or '0')
+            local next_calls = math.max(0, current_calls - tonumber(ARGV[1]))
+            local next_tokens = math.max(0, current_tokens - tonumber(ARGV[2]))
+            redis.call('set', KEYS[1], next_calls, 'EX', ARGV[3])
+            redis.call('set', KEYS[2], next_tokens, 'EX', ARGV[3])
+            return {next_calls, next_tokens}
+            """,
+            2,
+            *redis_keys,
+            max(0, calls),
+            max(0, tokens),
+            max(1, timeout),
+        )
+        return int(result[0]), int(result[1])
+
+    with _LOCAL_BUDGET_LOCK:
+        next_calls = max(0, int(cache.get(calls_key, 0) or 0) - max(0, calls))
+        next_tokens = max(0, int(cache.get(tokens_key, 0) or 0) - max(0, tokens))
+        cache.set(calls_key, next_calls, timeout=timeout)
+        cache.set(tokens_key, next_tokens, timeout=timeout)
+        return next_calls, next_tokens
+
+
+class BudgetReservation:
+    """A worst-case token reservation for one admitted upstream attempt."""
+
+    def __init__(self, token_reservation: int, timeout: int):
+        self.token_reservation = max(0, int(token_reservation))
+        self.timeout = max(1, int(timeout))
+        self.active = True
+
+    def cancel(self) -> None:
+        """Return the call and token reservation before any upstream attempt."""
+
+        if not self.active:
+            return
+        _release_budget_atomic(calls=1, tokens=self.token_reservation, timeout=self.timeout)
+        self.active = False
+
+    def reconcile(
+        self,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+    ) -> None:
+        """Replace worst-case tokens with trusted usage; missing usage stays worst-case."""
+
+        if not self.active:
+            return
+        if prompt_tokens is None or completion_tokens is None:
+            self.active = False
+            return
+        actual = max(0, int(prompt_tokens)) + max(0, int(completion_tokens))
+        if actual > self.token_reservation:
+            # Response projection should make this impossible. Keeping the full
+            # reservation is the conservative choice if contracts drift.
+            logger.error(
+                "Health Hack AI usage exceeded worst-case reservation actual=%s reserved=%s",
+                actual,
+                self.token_reservation,
+            )
+            self.active = False
+            return
+        _release_budget_atomic(
+            calls=0,
+            tokens=self.token_reservation - actual,
+            timeout=self.timeout,
+        )
+        self.active = False
+
+    def finalize_unknown(self) -> None:
+        """Keep the full reservation when an attempted call has no trusted usage."""
+
+        self.active = False
+
+
 def _alert_budget(kind: str, count: int, limit: int, timeout: int) -> None:
     if limit <= 0:
         return
@@ -297,11 +492,11 @@ def _alert_budget(kind: str, count: int, limit: int, timeout: int) -> None:
                 )
 
 
-def reserve_global_call() -> GuardDecision:
-    """Reserve one upstream call against the daily circuit breaker."""
+def reserve_global_call() -> tuple[BudgetReservation | None, GuardDecision]:
+    """Reserve one call plus its worst-case tokens against the daily budget."""
 
     if _setting_bool("HEALTH_HACK_AI_KILL_SWITCH"):
-        return GuardDecision(
+        return None, GuardDecision(
             allowed=False,
             code="ai_temporarily_disabled",
             retry_after_seconds=60,
@@ -310,27 +505,39 @@ def reserve_global_call() -> GuardDecision:
     mode = _mode("HEALTH_HACK_AI_BUDGET_MODE")
     call_limit = int(getattr(settings, "HEALTH_HACK_AI_DAILY_CALL_LIMIT", 5000))
     token_limit = int(getattr(settings, "HEALTH_HACK_AI_DAILY_TOKEN_LIMIT", 5_000_000))
+    token_reservation = max(
+        0,
+        int(getattr(settings, "HEALTH_HACK_AI_MAX_PROMPT_TOKENS", 100_000)),
+    ) + max(
+        0,
+        int(getattr(settings, "HEALTH_HACK_AI_MAX_COMPLETION_TOKENS", 8_192)),
+    )
     timeout = _daily_timeout()
     try:
-        current_tokens = int(cache.get(_daily_key("tokens"), 0) or 0)
-        call_count = _increment(_daily_key("calls"), timeout=timeout)
+        admitted, call_count, current_tokens = _reserve_budget_atomic(
+            call_limit=call_limit,
+            token_limit=token_limit,
+            token_reservation=token_reservation,
+            timeout=timeout,
+            enforce=mode == "enforce",
+        )
         _alert_budget("calls", call_count, call_limit, timeout)
         _alert_budget("tokens", current_tokens, token_limit, timeout)
     except Exception:
         logger.exception("Health Hack AI budget cache unavailable")
-        return GuardDecision(
+        return None, GuardDecision(
             allowed=mode != "enforce",
             code="ai_guard_unavailable",
             retry_after_seconds=2,
             observed=mode != "enforce",
         )
 
-    exceeded = (
+    exceeded = not admitted or (
         (call_limit > 0 and call_count > call_limit)
-        or (token_limit > 0 and current_tokens >= token_limit)
+        or (token_limit > 0 and current_tokens > token_limit)
     )
     if not exceeded:
-        return GuardDecision(allowed=True)
+        return BudgetReservation(token_reservation, timeout), GuardDecision(allowed=True)
 
     logger.warning(
         "Health Hack AI daily budget exceeded calls=%s/%s tokens=%s/%s mode=%s",
@@ -340,24 +547,11 @@ def reserve_global_call() -> GuardDecision:
         token_limit,
         mode,
     )
-    return GuardDecision(
+    decision = GuardDecision(
         allowed=mode != "enforce",
         code="ai_budget_exhausted",
         retry_after_seconds=max(60, timeout - 60),
         observed=True,
     )
-
-
-def record_global_tokens(prompt_tokens: int | None, completion_tokens: int | None) -> None:
-    total = int(prompt_tokens or 0) + int(completion_tokens or 0)
-    if total <= 0:
-        return
-    timeout = _daily_timeout()
-    limit = int(getattr(settings, "HEALTH_HACK_AI_DAILY_TOKEN_LIMIT", 5_000_000))
-    try:
-        count = _increment(_daily_key("tokens"), amount=total, timeout=timeout)
-        _alert_budget("tokens", count, limit, timeout)
-    except Exception:
-        # The call ceiling still bounds spend if an upstream response omits usage
-        # or a post-response token counter update fails.
-        logger.exception("Health Hack AI token budget update failed")
+    reservation = BudgetReservation(token_reservation, timeout) if decision.allowed else None
+    return reservation, decision

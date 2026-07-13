@@ -83,6 +83,41 @@ def _env_first(*names: str, default: str = "") -> str:
     return default
 
 
+def _validate_health_hack_service_secrets(
+    *,
+    health_hack_key: str,
+    roo_sim_patient_key: str,
+    is_production: bool,
+) -> None:
+    """Require strong, purpose-specific cross-service credentials in production."""
+
+    if not is_production:
+        return
+    if len(health_hack_key) < 32:
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_API_KEY must contain at least 32 characters in production.'
+        )
+    if len(roo_sim_patient_key) < 32:
+        raise ImproperlyConfigured(
+            'ROO_SIM_PATIENT_KEY must contain at least 32 characters in production.'
+        )
+    if health_hack_key == roo_sim_patient_key:
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_API_KEY and ROO_SIM_PATIENT_KEY must be distinct credentials.'
+        )
+
+
+def _validate_health_hack_ai_modes(*, rate_mode: str, budget_mode: str, is_production: bool):
+    if rate_mode not in {'observe', 'enforce'}:
+        raise ImproperlyConfigured('HEALTH_HACK_AI_RATE_LIMIT_MODE must be observe or enforce')
+    if budget_mode not in {'observe', 'enforce'}:
+        raise ImproperlyConfigured('HEALTH_HACK_AI_BUDGET_MODE must be observe or enforce')
+    if is_production and budget_mode != 'enforce':
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_AI_BUDGET_MODE must be enforce in production.'
+        )
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -271,21 +306,36 @@ if _REDIS_URL:
 else:
     _REDIS_CACHE_AVAILABLE = False
 
-if _REDIS_CACHE_AVAILABLE:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': _REDIS_URL,
-            'KEY_PREFIX': 'mlai',
-        },
-        'watt_session': {
-            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': _REDIS_URL,
-            'KEY_PREFIX': 'watt_session',
-        },
-    }
-else:
-    CACHES = {
+
+def _build_cache_settings(*, redis_url: str, redis_available: bool, is_production: bool):
+    """Build cache settings, refusing process-local security state in production."""
+
+    if is_production and not redis_url:
+        raise ImproperlyConfigured(
+            'REDIS_URL must be configured in production. Health Hack quotas, '
+            'in-flight locks, and spending caps require a shared Redis/Valkey cache.'
+        )
+    if is_production and not redis_available:
+        raise ImproperlyConfigured(
+            'The redis package is required in production when REDIS_URL is configured.'
+        )
+    if redis_url and not redis_url.lower().startswith(('redis://', 'rediss://')):
+        raise ImproperlyConfigured('REDIS_URL must use the redis:// or rediss:// scheme.')
+
+    if redis_available:
+        return {
+            'default': {
+                'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+                'LOCATION': redis_url,
+                'KEY_PREFIX': 'mlai',
+            },
+            'watt_session': {
+                'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+                'LOCATION': redis_url,
+                'KEY_PREFIX': 'watt_session',
+            },
+        }
+    return {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
         },
@@ -294,6 +344,13 @@ else:
             'LOCATION': 'watt_unity_session_cache',
         },
     }
+
+
+CACHES = _build_cache_settings(
+    redis_url=_REDIS_URL,
+    redis_available=_REDIS_CACHE_AVAILABLE,
+    is_production=IS_PRODUCTION_ENV,
+)
 
 
 def _configure_sqlite_connection(sender, connection, **kwargs):
@@ -341,25 +398,29 @@ HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
 HEALTH_HACK_AI_REPLY_MAX_CHARS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_CHARS', '1500'))
 HEALTH_HACK_AI_REPLY_MAX_WORDS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_WORDS', '160'))
 HEALTH_HACK_AI_MAX_PROMPT_TOKENS = int(
-    os.getenv('HEALTH_HACK_AI_MAX_PROMPT_TOKENS', '100000')
+    os.getenv('HEALTH_HACK_AI_MAX_PROMPT_TOKENS', '12000')
 )
 HEALTH_HACK_AI_MAX_COMPLETION_TOKENS = int(
-    os.getenv('HEALTH_HACK_AI_MAX_COMPLETION_TOKENS', '8192')
+    os.getenv('HEALTH_HACK_AI_MAX_COMPLETION_TOKENS', '2000')
+)
+HEALTH_HACK_DIAGNOSIS_UPSTREAM_MAX_BYTES = int(
+    os.getenv('HEALTH_HACK_DIAGNOSIS_UPSTREAM_MAX_BYTES', str(8 * 1024))
 )
 
-# AI abuse controls default to observation so they add no gameplay friction
-# during the first production measurement window. Set each mode to "enforce"
-# independently after thresholds have been verified against event traffic.
+# Participant/network thresholds start in observation mode so event traffic can
+# tune them without gameplay friction. The generous global spend ceiling is a
+# hard circuit breaker by default and must never silently become advisory.
 HEALTH_HACK_AI_RATE_LIMIT_MODE = os.getenv(
     'HEALTH_HACK_AI_RATE_LIMIT_MODE', 'observe'
 ).strip().lower()
 HEALTH_HACK_AI_BUDGET_MODE = os.getenv(
-    'HEALTH_HACK_AI_BUDGET_MODE', 'observe'
+    'HEALTH_HACK_AI_BUDGET_MODE', 'enforce'
 ).strip().lower()
-if HEALTH_HACK_AI_RATE_LIMIT_MODE not in {'observe', 'enforce'}:
-    raise ImproperlyConfigured('HEALTH_HACK_AI_RATE_LIMIT_MODE must be observe or enforce')
-if HEALTH_HACK_AI_BUDGET_MODE not in {'observe', 'enforce'}:
-    raise ImproperlyConfigured('HEALTH_HACK_AI_BUDGET_MODE must be observe or enforce')
+_validate_health_hack_ai_modes(
+    rate_mode=HEALTH_HACK_AI_RATE_LIMIT_MODE,
+    budget_mode=HEALTH_HACK_AI_BUDGET_MODE,
+    is_production=IS_PRODUCTION_ENV,
+)
 
 HEALTH_HACK_AI_KILL_SWITCH = _env_is_true('HEALTH_HACK_AI_KILL_SWITCH', False)
 HEALTH_HACK_AI_PARTICIPANT_BURST_LIMIT = int(
@@ -548,8 +609,13 @@ CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
 # calls this Django service over HTTPS; Django reaches Roo over the private
 # DigitalOcean VPC so Roo itself does not need a public hostname.
 ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
-ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '')
-HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '')
+ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
+HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
+_validate_health_hack_service_secrets(
+    health_hack_key=HEALTH_HACK_API_KEY,
+    roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
+    is_production=IS_PRODUCTION_ENV,
+)
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
     os.getenv('CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS', str(7 * 24 * 60 * 60))

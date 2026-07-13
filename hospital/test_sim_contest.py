@@ -6,7 +6,7 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from .models import SimCaseWinner, SimDiagnosisGuess
+from .models import SimCaseWinner, SimDiagnosisGuess, SimParticipant
 
 RECORD_URL = '/api/v1/hackathons/hospital/sim-guess/record/'
 CLAIM_URL = '/api/v1/hackathons/hospital/sim-guess/claim/'
@@ -314,6 +314,7 @@ class SimGuessStatusTests(TestCase):
 
     def test_status_transitions_from_eligible_to_claim_to_completed(self):
         self.assertEqual(self._status().data['state'], 'eligible')
+        self.assertFalse(SimParticipant.objects.filter(id=CLIENT_A).exists())
 
         guess = SimDiagnosisGuess.objects.create(
             case_id=1,

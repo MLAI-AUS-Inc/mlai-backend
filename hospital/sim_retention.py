@@ -32,7 +32,22 @@ def run_scheduled_sim_conversation_cleanup(*, now=None) -> dict:
     try:
         call_command("cleanup_sim_conversations", stdout=output)
         cache.set(done_key, True, timeout=3 * 24 * 60 * 60)
-        return {"status": "completed", "date": local_day}
+        metrics = {}
+        for token in output.getvalue().split():
+            key, separator, value = token.partition("=")
+            if separator and key in {"deleted_turns", "deleted_empty_conversations"}:
+                try:
+                    metrics[key] = int(value)
+                except ValueError:
+                    continue
+        logger.info(
+            "health_hack_retention_scheduled status=completed date=%s "
+            "deleted_turns=%s deleted_empty_conversations=%s",
+            local_day,
+            metrics.get("deleted_turns", 0),
+            metrics.get("deleted_empty_conversations", 0),
+        )
+        return {"status": "completed", "date": local_day, "metrics": metrics}
     except Exception:
         logger.exception("Scheduled Health Hack conversation cleanup failed")
         raise

@@ -1,6 +1,7 @@
 """Delete expired Health Hack dialogue while preserving contest/prize state."""
 
 from datetime import timedelta
+import logging
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -8,6 +9,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from hospital.models import SimConversation, SimConversationTurn
+
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -46,6 +50,13 @@ class Command(BaseCommand):
         existing_empty_count = empty_conversations.count()
 
         if options["dry_run"]:
+            logger.info(
+                "health_hack_retention dry_run=true expired_turns=%s "
+                "existing_empty_conversations=%s retention_days=%s",
+                turn_count,
+                existing_empty_count,
+                days,
+            )
             self.stdout.write(
                 self.style.WARNING(
                     "dry-run: expired_turns=%s existing_empty_conversations=%s cutoff=%s"
@@ -63,6 +74,13 @@ class Command(BaseCommand):
                 turns__isnull=True,
             ).delete()
 
+        logger.info(
+            "health_hack_retention dry_run=false deleted_turns=%s "
+            "deleted_empty_conversations=%s retention_days=%s",
+            turn_count,
+            deleted_conversations,
+            days,
+        )
         self.stdout.write(
             self.style.SUCCESS(
                 "deleted_turns=%s deleted_empty_conversations=%s retention_days=%s cutoff=%s"

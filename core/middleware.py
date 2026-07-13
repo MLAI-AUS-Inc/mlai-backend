@@ -11,20 +11,32 @@ logger = logging.getLogger(__name__)
 
 
 class RequestLoggingMiddleware:
+    _REDACT_QUERY_PATH_PREFIXES = (
+        "/api/v1/hackathons/hospital/sim-guess/status/",
+    )
+
     def __init__(self, get_response):
         self.get_response = get_response
+
+    @classmethod
+    def _safe_path(cls, request):
+        path = request.path
+        if any(path.startswith(prefix) for prefix in cls._REDACT_QUERY_PATH_PREFIXES):
+            return f"{path}?<redacted>" if request.META.get("QUERY_STRING") else path
+        return request.get_full_path()
 
     def __call__(self, request):
         started_at = time.monotonic()
         request_id = str(request.headers.get("X-Request-ID") or "").strip() or f"mlai-{uuid4().hex}"
         request.request_id = request_id
         worker_pid = os.getpid()
+        safe_path = self._safe_path(request)
         logger.info(
             "request_started request_id=%s worker_pid=%s method=%s path=%s",
             request_id,
             worker_pid,
             request.method,
-            request.get_full_path(),
+            safe_path,
         )
 
         try:
@@ -36,7 +48,7 @@ class RequestLoggingMiddleware:
                 request_id,
                 worker_pid,
                 request.method,
-                request.get_full_path(),
+                safe_path,
                 duration_ms,
                 exc.__class__.__name__,
             )
@@ -49,7 +61,7 @@ class RequestLoggingMiddleware:
             request_id,
             worker_pid,
             request.method,
-            request.get_full_path(),
+            safe_path,
             response.status_code,
             duration_ms,
         )

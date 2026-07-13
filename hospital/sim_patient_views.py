@@ -30,7 +30,7 @@ from .sim_security import (
     LimitedJSONParser,
     acquire_inflight,
     consume_rate_limits,
-    record_global_tokens,
+    read_limited_json,
     reserve_global_call,
     source_network_key,
 )
@@ -322,28 +322,7 @@ def _project_roo_reply(payload, role, active_case_id):
 
 def _read_limited_json(upstream):
     max_bytes = int(getattr(settings, "HEALTH_HACK_AI_UPSTREAM_MAX_BYTES", 32 * 1024))
-    headers = getattr(upstream, "headers", {}) or {}
-    declared = headers.get("content-length") or headers.get("Content-Length")
-    try:
-        if declared and int(declared) > max_bytes:
-            return None
-    except (TypeError, ValueError):
-        pass
-
-    chunks = []
-    total = 0
-    try:
-        iterator = upstream.iter_content(chunk_size=8192)
-        for chunk in iterator:
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                return None
-            chunks.append(chunk)
-        return json.loads(b"".join(chunks))
-    except (ValueError, TypeError, UnicodeDecodeError):
-        return None
+    return read_limited_json(upstream, max_bytes=max_bytes)
 
 
 def _existing_turn_disposition(turn, *, participant_id, case_id, role, question):
@@ -508,27 +487,13 @@ class SimPatientProxyView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        base_url = str(getattr(settings, "ROO_SERVICE_URL", "") or "").rstrip("/")
-        roo_key = str(getattr(settings, "ROO_SIM_PATIENT_KEY", "") or "")
-        if not base_url or not roo_key:
-            return _error_response(
-                "ai_not_configured",
-                "simulated patient service is not configured",
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
         participant_id = data["player_id"]
-        participant, _ = SimParticipant.objects.get_or_create(id=participant_id)
-        SimParticipant.objects.filter(pk=participant.pk).update(last_seen_at=timezone.now())
         # The Worker/Roo may still send a case_id during a rolling deployment,
         # but backend configuration is the only authority.
         case_id = int(getattr(settings, "HEALTH_HACK_ACTIVE_CASE_ID", 1))
-        conversation, _ = SimConversation.objects.get_or_create(
-            participant=participant,
-            case_id=case_id,
-            role=data["role"],
-        )
 
+        # A completed idempotent replay is a read-only fast path. It remains
+        # available when Roo is down and consumes neither quota nor DB writes.
         existing = (
             SimConversationTurn.objects.select_related("conversation")
             .filter(message_id=data["message_id"])
@@ -547,6 +512,15 @@ class SimPatientProxyView(APIView):
         else:
             retryable_turn = None
 
+        base_url = str(getattr(settings, "ROO_SERVICE_URL", "") or "").rstrip("/")
+        roo_key = str(getattr(settings, "ROO_SIM_PATIENT_KEY", "") or "")
+        if not base_url or not roo_key:
+            return _error_response(
+                "ai_not_configured",
+                "simulated patient service is not configured",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         # The underlying lease is participant-wide (the role is diagnostic
         # context only), preventing overlapping calls across NPCs and tabs.
         lease, lease_decision = acquire_inflight(str(participant_id), data["role"])
@@ -558,6 +532,8 @@ class SimPatientProxyView(APIView):
                 retry_after_seconds=lease_decision.retry_after_seconds,
             )
 
+        budget_reservation = None
+        upstream_attempted = False
         try:
             # Close the race between the first lookup and acquiring the lease.
             existing = (
@@ -592,7 +568,7 @@ class SimPatientProxyView(APIView):
                     retry_after_seconds=rate_decision.retry_after_seconds,
                 )
 
-            budget_decision = reserve_global_call()
+            budget_reservation, budget_decision = reserve_global_call()
             if not budget_decision.allowed:
                 return _error_response(
                     budget_decision.code,
@@ -602,6 +578,11 @@ class SimPatientProxyView(APIView):
                 )
 
             if retryable_turn is not None:
+                conversation = retryable_turn.conversation
+                participant = conversation.participant
+                SimParticipant.objects.filter(pk=participant.pk).update(
+                    last_seen_at=timezone.now(),
+                )
                 turn = _claim_retryable_turn(retryable_turn)
                 if turn is None:
                     return _error_response(
@@ -611,6 +592,17 @@ class SimPatientProxyView(APIView):
                         retry_after_seconds=2,
                     )
             else:
+                # Anonymous participant/transcript rows are created only after
+                # every cache-backed admission guard has passed.
+                participant, _ = SimParticipant.objects.get_or_create(id=participant_id)
+                SimParticipant.objects.filter(pk=participant.pk).update(
+                    last_seen_at=timezone.now(),
+                )
+                conversation, _ = SimConversation.objects.get_or_create(
+                    participant=participant,
+                    case_id=case_id,
+                    role=data["role"],
+                )
                 try:
                     turn = SimConversationTurn.objects.create(
                         conversation=conversation,
@@ -655,6 +647,7 @@ class SimPatientProxyView(APIView):
             started = time.monotonic()
             upstream = None
             try:
+                upstream_attempted = True
                 upstream = requests.post(
                     f"{base_url}{ROO_PATH}",
                     headers={
@@ -698,9 +691,23 @@ class SimPatientProxyView(APIView):
                         message="simulated patient service is unavailable",
                         http_status=status.HTTP_502_BAD_GATEWAY,
                     )
-                payload = _read_limited_json(upstream)
+                try:
+                    payload = _read_limited_json(upstream)
+                except requests.RequestException:
+                    logger.exception("Roo sim-patient response stream failed")
+                    return _fail_turn(
+                        turn,
+                        conversation,
+                        started=started,
+                        code="network_error",
+                        message="simulated patient service is unavailable",
+                        http_status=status.HTTP_502_BAD_GATEWAY,
+                    )
             finally:
-                upstream.close()
+                try:
+                    upstream.close()
+                except requests.RequestException:
+                    logger.warning("Roo sim-patient response close failed", exc_info=True)
 
             projected = _project_roo_reply(payload, data["role"], case_id)
             if projected is None:
@@ -743,10 +750,21 @@ class SimPatientProxyView(APIView):
             SimConversation.objects.filter(pk=conversation.pk).update(
                 last_turn_at=completed_at,
             )
-            record_global_tokens(
-                metadata["prompt_tokens"],
-                metadata["completion_tokens"],
-            )
+            if budget_reservation is not None:
+                if metadata["response_source"] == SimConversationTurn.SOURCE_DETERMINISTIC:
+                    budget_reservation.reconcile(0, 0)
+                else:
+                    budget_reservation.reconcile(
+                        metadata["prompt_tokens"],
+                        metadata["completion_tokens"],
+                    )
             return Response(public_response)
         finally:
+            if budget_reservation is not None and budget_reservation.active:
+                if upstream_attempted:
+                    # A timeout or malformed response may still have incurred
+                    # the full model cost, so missing usage stays worst-case.
+                    budget_reservation.finalize_unknown()
+                else:
+                    budget_reservation.cancel()
             lease.release()

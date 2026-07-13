@@ -18,6 +18,7 @@ Invariants:
 - Entirely separate from the Slack MedHack tables/gameplay.
 """
 import logging
+import unicodedata
 import uuid
 
 import requests
@@ -31,7 +32,7 @@ from rest_framework.views import APIView
 
 from core.permissions import HasHealthHackApiKey, HasStrictRooApiKey
 from .models import SimCaseWinner, SimDiagnosisGuess, SimParticipant
-from .sim_security import LimitedJSONParser, participant_log_id
+from .sim_security import LimitedJSONParser, participant_log_id, read_limited_json
 
 logger = logging.getLogger(__name__)
 
@@ -65,25 +66,76 @@ def _prize_url(prize_kind):
     return ''
 
 
-def _valid_roo_guess_reply(payload):
-    return (
-        isinstance(payload, dict)
-        and payload.get('result') in {
-            'correct_first', 'correct_beaten', 'incorrect', 'already_guessed',
-        }
-        and payload.get('outcome') in {
-            'pending_claim', 'incorrect', 'ticket', 'discount',
-        }
-        and payload.get('prize_kind') in {
-            'none', 'free_ticket', 'discount_30',
-        }
-        and isinstance(payload.get('winner_taken'), bool)
-        and isinstance(payload.get('case_id'), int)
-        and (
-            payload.get('diagnosis') is None
-            or isinstance(payload.get('diagnosis'), str)
+def _project_roo_guess_reply(payload, *, active_case_id):
+    """Validate coherent contest state and return only the public schema."""
+
+    expected_keys = {
+        'result', 'outcome', 'prize_kind', 'winner_taken', 'case_id', 'diagnosis',
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        return None
+    if (
+        isinstance(payload.get('case_id'), bool)
+        or payload.get('case_id') != active_case_id
+        or not isinstance(payload.get('winner_taken'), bool)
+    ):
+        return None
+
+    diagnosis = payload.get('diagnosis')
+    if diagnosis is not None:
+        if not isinstance(diagnosis, str):
+            return None
+        diagnosis = unicodedata.normalize('NFC', diagnosis).strip()
+        if (
+            not diagnosis
+            or len(diagnosis) > 200
+            or any(unicodedata.category(character) in {'Cc', 'Cf'} for character in diagnosis)
+        ):
+            return None
+
+    result = payload.get('result')
+    outcome = payload.get('outcome')
+    prize_kind = payload.get('prize_kind')
+    winner_taken = payload['winner_taken']
+    coherent = False
+    if result == 'correct_first':
+        coherent = (
+            outcome == 'pending_claim'
+            and prize_kind == 'free_ticket'
+            and winner_taken
+            and diagnosis is not None
         )
-    )
+    elif result == 'correct_beaten':
+        coherent = (
+            outcome == 'pending_claim'
+            and prize_kind == 'discount_30'
+            and winner_taken
+            and diagnosis is not None
+        )
+    elif result == 'incorrect':
+        coherent = outcome == 'incorrect' and prize_kind == 'none' and diagnosis is None
+    elif result == 'already_guessed':
+        allowed_resume_states = {
+            ('incorrect', 'none', False),
+            ('pending_claim', 'free_ticket', True),
+            ('pending_claim', 'discount_30', True),
+            ('ticket', 'free_ticket', True),
+            ('discount', 'discount_30', True),
+        }
+        coherent = (outcome, prize_kind, diagnosis is not None) in allowed_resume_states
+        if diagnosis is not None:
+            coherent = coherent and winner_taken
+    if not coherent:
+        return None
+
+    return {
+        'result': result,
+        'outcome': outcome,
+        'prize_kind': prize_kind,
+        'winner_taken': winner_taken,
+        'case_id': active_case_id,
+        'diagnosis': diagnosis,
+    }
 
 
 class SimGuessCheckView(APIView):
@@ -128,6 +180,7 @@ class SimGuessCheckView(APIView):
                 headers=headers,
                 json={'guess': data['guess'], 'client_id': client_id},
                 timeout=(ROO_CONNECT_TIMEOUT_SECONDS, ROO_READ_TIMEOUT_SECONDS),
+                stream=True,
             )
         except requests.Timeout:
             logger.warning('Roo diagnosis check timed out')
@@ -142,41 +195,43 @@ class SimGuessCheckView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        if not upstream.ok:
-            logger.warning('Roo diagnosis check returned HTTP %s', upstream.status_code)
-            return Response(
-                {'detail': 'diagnosis service is unavailable'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
         try:
-            payload = upstream.json()
-        except ValueError:
-            payload = None
+            if not upstream.ok:
+                logger.warning('Roo diagnosis check returned HTTP %s', upstream.status_code)
+                return Response(
+                    {'detail': 'diagnosis service is unavailable'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            try:
+                payload = read_limited_json(
+                    upstream,
+                    max_bytes=int(getattr(
+                        settings,
+                        'HEALTH_HACK_DIAGNOSIS_UPSTREAM_MAX_BYTES',
+                        8 * 1024,
+                    )),
+                )
+            except requests.RequestException:
+                logger.exception('Roo diagnosis response stream failed')
+                return Response(
+                    {'detail': 'diagnosis service is unavailable'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+        finally:
+            try:
+                upstream.close()
+            except requests.RequestException:
+                logger.warning('Roo diagnosis response close failed', exc_info=True)
 
-        if not _valid_roo_guess_reply(payload):
+        active_case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
+        projected = _project_roo_guess_reply(payload, active_case_id=active_case_id)
+        if projected is None:
             logger.warning('Roo diagnosis check returned a malformed response')
             return Response(
                 {'detail': 'diagnosis service returned an invalid response'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-
-        active_case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
-        if payload['case_id'] != active_case_id:
-            logger.warning('Roo diagnosis check returned a non-active case')
-            return Response(
-                {'detail': 'diagnosis service returned an invalid response'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        return Response({
-            'result': payload['result'],
-            'outcome': payload['outcome'],
-            'prize_kind': payload['prize_kind'],
-            'winner_taken': payload['winner_taken'],
-            'case_id': payload['case_id'],
-            'diagnosis': payload['diagnosis'],
-        })
+        return Response(projected)
 
 
 class SimGuessClaimThrottle(AnonRateThrottle):
@@ -219,7 +274,6 @@ class SimGuessStatusView(APIView):
         })
         serializer.is_valid(raise_exception=True)
         client_id = str(serializer.validated_data['client_id'])
-        _participant_for_client(client_id)
         case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
         guess = SimDiagnosisGuess.objects.filter(
             case_id=case_id,
