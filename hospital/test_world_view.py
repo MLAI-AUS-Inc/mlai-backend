@@ -143,16 +143,21 @@ class WorldStateViewTests(TestCase):
         self.assertEqual(cubes["team-1"]["meta"]["rank"], 1)
         self.assertEqual(cubes["team-2"]["meta"]["rank"], 2)
 
-    def test_build_query_count_is_constant_and_light(self):
+    def test_build_query_count_is_constant_and_independent_of_submissions(self):
         # REGRESSION (2026-07-13): the build previously materialised every
-        # Submission row — feedback blob included — per cache miss. The
-        # rewrite scans narrow values() rows in exactly three queries; any
-        # per-row attribute access would reintroduce N+1 and fail this.
-        for i in range(1, 7):
-            self._submit(self.team_a, 0.1 * i)
-            self._submit(self.team_b, 0.05 * i)
+        # Submission row — feedback blob included — per cache miss. It now
+        # runs in exactly two queries (a per-team correlated-subquery scan
+        # plus the recent-spheres window), and — critically — that count is
+        # independent of how many submissions exist: the cost scales with
+        # the number of TEAMS (≤100), not the submission table.
+        for i in range(1, 21):
+            self._submit(self.team_a, 0.1 * (i % 10))
+            self._submit(self.team_b, 0.05 * (i % 10))
         cache.clear()
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(2):
             response = self.client.get(WORLD_URL)
         self.assertEqual(response.status_code, 200)
+        # Each team still resolves to exactly one ranked cube.
+        cubes = [e for e in response.data["entities"] if e["kind"] == "cube"]
+        self.assertEqual(len(cubes), 2)
         self.assertTrue(response.data["entities"])
