@@ -14,6 +14,7 @@ def lead_payload(**overrides):
         'first_name': 'Jordan',
         'last_name': 'Taylor',
         'email': 'jordan@example.com',
+        'linkedin': 'https://linkedin.com/in/jordantaylor',
     }
     payload.update(overrides)
     return payload
@@ -51,7 +52,15 @@ class VictorApplicationApiTests(TestCase):
         self.assertEqual(application.first_name, 'Jordan')
         self.assertEqual(application.last_name, 'Taylor')
         self.assertEqual(application.email, 'jordan@example.com')
+        self.assertEqual(application.linkedin, 'https://linkedin.com/in/jordantaylor')
         self.assertFalse(application.consent)
+
+    def test_linkedin_is_optional(self):
+        payload = lead_payload()
+        payload.pop('linkedin')
+        response = self.client.post(URL, payload, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(VictorApplication.objects.get(client_ref='lead_abc123').linkedin, '')
 
     def test_complete_post_upserts_same_record(self):
         self.client.post(URL, lead_payload(), format='json')
