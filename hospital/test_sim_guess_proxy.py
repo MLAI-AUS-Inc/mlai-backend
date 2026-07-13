@@ -125,3 +125,47 @@ class SimGuessCheckProxyTests(SimpleTestCase):
 
         self.assertEqual(self.post().status_code, 502)
         self.assertEqual(self.post().status_code, 502)
+
+
+    @patch('hospital.sim_contest_views.requests.post')
+    def test_forwards_case_id_and_accepts_matching_echo(self, post):
+        post.return_value = upstream_response(roo_reply(
+            case_id=2, diagnosis='Acute Intermittent Porphyria',
+        ))
+
+        response = self.post({
+            'guess': 'acute intermittent porphyria',
+            'client_id': CLIENT_ID,
+            'case_id': 2,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['case_id'], 2)
+        self.assertEqual(post.call_args.kwargs['json'], {
+            'guess': 'acute intermittent porphyria',
+            'client_id': CLIENT_ID,
+            'case_id': 2,
+        })
+
+    def test_rejects_non_open_case_before_calling_roo(self):
+        with patch('hospital.sim_contest_views.requests.post') as post:
+            response = self.post({
+                'guess': 'anything', 'client_id': CLIENT_ID, 'case_id': 9,
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'case_not_open')
+        post.assert_not_called()
+
+    @patch('hospital.sim_contest_views.requests.post')
+    def test_case_echo_mismatch_is_502(self, post):
+        # An older roo that ignores case_id must never pass its default-case
+        # verdict off as the case the player targeted.
+        post.return_value = upstream_response(roo_reply(case_id=1))
+
+        response = self.post({
+            'guess': 'acute intermittent porphyria',
+            'client_id': CLIENT_ID,
+            'case_id': 2,
+        })
+
+        self.assertEqual(response.status_code, 502)

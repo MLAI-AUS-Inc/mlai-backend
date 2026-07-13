@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 import os
 import subprocess
 from datetime import timedelta
@@ -470,6 +471,30 @@ HEALTH_HACK_DISCOUNT_URL = os.getenv(
     'HEALTH_HACK_DISCOUNT_URL',
     'https://luma.com/mlai-8obe?coupon=ALMOSTGOTIT',
 )
+# The two-patient ward runs concurrent one-guess books. Guess/claim/status
+# accept exactly these case ids; each case's first solver gets its own ticket
+# coupon (falling back to HEALTH_HACK_FREE_TICKET_URL for unmapped cases),
+# while the runner-up discount stays global.
+HEALTH_HACK_OPEN_CASE_IDS = [
+    int(token)
+    for token in os.getenv('HEALTH_HACK_OPEN_CASE_IDS', '1,2').split(',')
+    if token.strip()
+]
+_HEALTH_HACK_DEFAULT_FREE_TICKET_URLS = {
+    1: 'https://luma.com/mlai-8obe?coupon=RQY4N0',
+    2: 'https://luma.com/mlai-8obe?coupon=7FS6FZ',
+}
+try:
+    HEALTH_HACK_FREE_TICKET_URLS = {
+        int(case_key): str(url)
+        for case_key, url in json.loads(
+            os.getenv('HEALTH_HACK_FREE_TICKET_URLS', '') or '{}'
+        ).items()
+    } or _HEALTH_HACK_DEFAULT_FREE_TICKET_URLS
+except (ValueError, TypeError):
+    raise ImproperlyConfigured(
+        'HEALTH_HACK_FREE_TICKET_URLS must be a JSON object of case_id -> URL'
+    )
 
 WATT_HACKATHON_CLASS_ID = os.getenv('WATT_HACKATHON_CLASS_ID', 'WATT')
 WATT_HACKATHON_API_BASE_URL = os.getenv('WATT_HACKATHON_API_BASE_URL', '')

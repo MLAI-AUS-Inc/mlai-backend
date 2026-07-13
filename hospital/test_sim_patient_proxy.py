@@ -651,3 +651,72 @@ class SimPatientProxyTests(TestCase):
         cache.set(lease.key, "replacement-owner", timeout=30)
         lease.release()
         self.assertEqual(cache.get(lease.key), "replacement-owner")
+
+
+@override_settings(
+    HEALTH_HACK_API_KEY=HEALTH_HACK_KEY,
+    ROO_SERVICE_URL=ROO_URL,
+    ROO_SIM_PATIENT_KEY=ROO_KEY,
+    HEALTH_HACK_ACTIVE_CASE_ID=1,
+    HEALTH_HACK_OPEN_CASE_IDS=[1, 2],
+    HEALTH_HACK_AI_RATE_LIMIT_MODE="observe",
+    HEALTH_HACK_AI_BUDGET_MODE="observe",
+    HEALTH_HACK_AI_KILL_SWITCH=False,
+)
+class SimPatientClerkMergedStateTests(TestCase):
+    """Nurse Paws' conversational contest_state spans every open case."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+
+    def _post_clerk(self):
+        return self.client.post(URL, {
+            "question": "Hello Paws",
+            "history": [],
+            "player_id": PLAYER_A,
+            "message_id": str(uuid.uuid4()),
+            "role": "clerk",
+        }, format="json", HTTP_AUTHORIZATION=f"Bearer {HEALTH_HACK_KEY}")
+
+    def _burn(self, participant, case_id):
+        from .models import SimDiagnosisGuess
+
+        SimDiagnosisGuess.objects.create(
+            case_id=case_id,
+            client_id=PLAYER_A,
+            participant=participant,
+            guess_text="gastro",
+            is_correct=False,
+            outcome=SimDiagnosisGuess.OUTCOME_INCORRECT,
+            prize_kind="none",
+        )
+
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_one_burnt_book_still_reads_eligible(self, post):
+        post.return_value = upstream_response(roo_reply(patient_name="Nurse Paws"))
+        participant = SimParticipant.objects.create(id=uuid.UUID(PLAYER_A))
+        self._burn(participant, 1)
+
+        response = self._post_clerk()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["contest_state"], {
+            "state": "eligible",
+            "outcome": None,
+        })
+
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_every_book_burnt_reads_locked(self, post):
+        post.return_value = upstream_response(roo_reply(patient_name="Nurse Paws"))
+        participant = SimParticipant.objects.create(id=uuid.UUID(PLAYER_A))
+        self._burn(participant, 1)
+        self._burn(participant, 2)
+
+        response = self._post_clerk()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["contest_state"], {
+            "state": "locked",
+            "outcome": "incorrect",
+        })
