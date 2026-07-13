@@ -6,7 +6,7 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from .models import SimCaseWinner, SimDiagnosisGuess
+from .models import SimCaseWinner, SimDiagnosisGuess, SimParticipant
 
 RECORD_URL = '/api/v1/hackathons/hospital/sim-guess/record/'
 CLAIM_URL = '/api/v1/hackathons/hospital/sim-guess/claim/'
@@ -75,6 +75,7 @@ class SimGuessRecordTests(TestCase):
         self.assertEqual(resp.data['outcome'], 'incorrect')
         self.assertFalse(resp.data['is_correct'])
 
+    @override_settings(HEALTH_HACK_ACTIVE_CASE_ID=7)
     def test_record_without_title_uses_rolling_deploy_fallback(self):
         resp = self._record(case_id=7, case_title=None)
         self.assertEqual(resp.status_code, 200)
@@ -99,9 +100,16 @@ class SimGuessRecordTests(TestCase):
         self.assertFalse(resp.data['is_first_solver'])
         self.assertEqual(resp.data['prize_kind'], 'discount_30')
         # Different case → fresh winner slot.
-        resp = self._record(case_id=2, client_id=CLIENT_B, is_correct=True)
+        with self.settings(HEALTH_HACK_ACTIVE_CASE_ID=2):
+            resp = self._record(case_id=2, client_id=CLIENT_B, is_correct=True)
         self.assertTrue(resp.data['winner_taken'])
         self.assertTrue(resp.data['is_first_solver'])
+
+    def test_record_rejects_inactive_case(self):
+        resp = self._record(case_id=2)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.data['code'], 'inactive_case')
+        self.assertEqual(SimDiagnosisGuess.objects.count(), 0)
 
     def test_record_validation(self):
         resp = self._record(client_id='short')  # too short / bad format
@@ -224,9 +232,20 @@ class SimGuessClaimTests(TestCase):
         self._seed_guess(case_id=1, client_id=CLIENT_A)
         self._seed_guess(case_id=2, client_id=CLIENT_B)
         self._claim(case_id=1, client_id=CLIENT_A, email='doc@example.com')
-        resp = self._claim(case_id=2, client_id=CLIENT_B, email='doc@example.com')
+        with self.settings(HEALTH_HACK_ACTIVE_CASE_ID=2):
+            resp = self._claim(case_id=2, client_id=CLIENT_B, email='doc@example.com')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['result'], 'ticket')  # fresh case, fresh slot
+
+    def test_claim_rejects_inactive_case(self):
+        self._seed_guess(case_id=2)
+        resp = self._claim(case_id=2)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.data['code'], 'inactive_case')
+        self.assertEqual(
+            SimDiagnosisGuess.objects.get(case_id=2).outcome,
+            SimDiagnosisGuess.OUTCOME_PENDING_CLAIM,
+        )
 
     def test_invalid_email_400s(self):
         self._seed_guess()
@@ -242,6 +261,7 @@ class SimGuessClaimTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['result'], 'discount')
 
+    @override_settings(HEALTH_HACK_ACTIVE_CASE_ID=7)
     def test_full_flow_through_record_endpoint(self):
         """record → claim wired end to end through both endpoints."""
         service = APIClient()
@@ -294,6 +314,7 @@ class SimGuessStatusTests(TestCase):
 
     def test_status_transitions_from_eligible_to_claim_to_completed(self):
         self.assertEqual(self._status().data['state'], 'eligible')
+        self.assertFalse(SimParticipant.objects.filter(id=CLIENT_A).exists())
 
         guess = SimDiagnosisGuess.objects.create(
             case_id=1,

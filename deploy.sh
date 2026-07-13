@@ -8,11 +8,44 @@ USER="root"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
+if [ -z "${ROO_SIM_PATIENT_KEY:-}" ]; then
+    echo "❌ ROO_SIM_PATIENT_KEY must be supplied by the deployment secret store."
+    exit 1
+fi
+if [ "${#ROO_SIM_PATIENT_KEY}" -lt 32 ]; then
+    echo "❌ ROO_SIM_PATIENT_KEY must contain at least 32 characters."
+    exit 1
+fi
+
 echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
 
 # 1. Sync files to the server
 echo "📦 Syncing files..."
 rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . $USER@$DROPLET_IP:$PROJECT_DIR
+
+# Send the credential over SSH stdin rather than a command-line argument. The
+# remote shell updates .env using builtins, so the value is neither echoed nor
+# exposed in a child-process argv. This happens before any service restart.
+echo "🔐 Updating Roo service credential (value redacted)..."
+printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
+    set -euo pipefail
+    project_dir="/root/mlai-backend"
+    mkdir -p "$project_dir"
+    cd "$project_dir"
+    umask 077
+    secret=$(cat)
+    if [ -z "$secret" ]; then
+        echo "Missing ROO_SIM_PATIENT_KEY payload" >&2
+        exit 1
+    fi
+    tmp=$(mktemp .env.roo-key.XXXXXX)
+    if [ -f .env ]; then
+        grep -v "^ROO_SIM_PATIENT_KEY=" .env > "$tmp" || true
+    fi
+    printf "ROO_SIM_PATIENT_KEY=%s\n" "$secret" >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+'
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
@@ -42,6 +75,13 @@ ssh $USER@$DROPLET_IP <<EOF
     env_has_value() {
         local key="\$1"
         grep -Eq "^\${key}=.+" .env
+    }
+
+    read_env_value() {
+        local key="\$1"
+        local line
+        line=\$(grep -m1 "^\${key}=" .env || true)
+        printf '%s' "\${line#*=}"
     }
 
     print_redacted_env_status() {
@@ -95,20 +135,39 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
+    upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
+    # Keep the atomic worst-case reservation aligned with Roo's enforced model
+    # request limits, including on hosts whose .env predates these defaults.
+    upsert_env_value HEALTH_HACK_AI_MAX_PROMPT_TOKENS "12000"
+    upsert_env_value HEALTH_HACK_AI_MAX_COMPLETION_TOKENS "2000"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL ROO_SERVICE_URL HEALTH_HACK_API_KEY
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
     require_env_value VALLEY_HARNESS_URL "Set VALLEY_HARNESS_URL to http://<valley-private-ip>:8080 for the cross-droplet Valley deployment."
+    require_env_value REDIS_URL "Set REDIS_URL to the managed Redis/Valkey connection string. Production AI guards refuse process-local cache state."
     if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
-    if ! env_has_value ROO_SERVICE_URL || ! env_has_value HEALTH_HACK_API_KEY; then
-        echo "WARNING: ROO_SERVICE_URL and HEALTH_HACK_API_KEY are both required for the Health Hack simulated-patient gateway."
+    require_env_value ROO_SERVICE_URL "Set ROO_SERVICE_URL to Roo's private VPC base URL."
+    require_env_value ROO_SIM_PATIENT_KEY "Set the GitHub Actions ROO_SIM_PATIENT_KEY repository secret to the same dedicated value configured on Roo."
+    require_env_value HEALTH_HACK_API_KEY "Set HEALTH_HACK_API_KEY to the dedicated Cloudflare Worker credential."
+    require_env_value ROO_API_KEY "Set ROO_API_KEY to the separate credential Roo uses to record diagnosis verdicts."
+    health_hack_key=\$(read_env_value HEALTH_HACK_API_KEY)
+    roo_sim_key=\$(read_env_value ROO_SIM_PATIENT_KEY)
+    roo_api_key=\$(read_env_value ROO_API_KEY)
+    if [ "\${#health_hack_key}" -lt 32 ] || [ "\${#roo_sim_key}" -lt 32 ] || [ "\${#roo_api_key}" -lt 32 ]; then
+        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must each contain at least 32 characters."
+        exit 1
     fi
+    if [ "\$health_hack_key" = "\$roo_sim_key" ] || [ "\$health_hack_key" = "\$roo_api_key" ] || [ "\$roo_sim_key" = "\$roo_api_key" ]; then
+        echo "❌ HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must be distinct credentials."
+        exit 1
+    fi
+    unset health_hack_key roo_sim_key roo_api_key
 
     runtime_services=(web scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
@@ -160,6 +219,9 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
 
     echo "🏗️ Building runtime images: \${runtime_services[*]}..."
     docker compose build "\${runtime_services[@]}"
+
+    echo "🧱 Validating shared Redis security state..."
+    compose_run_web python manage.py validate_health_hack_ai_cache
 
     echo "🔗 Validating production URL configuration and service connectivity..."
     compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8

@@ -227,9 +227,16 @@ class SimConversationTurn(models.Model):
     error_code = models.CharField(max_length=64, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    # Exact, strictly projected HTTP envelope used for idempotent replay. This
+    # never stores Roo's internal case metadata or tool traces.
+    public_response = models.JSONField(null=True, blank=True)
+    response_status = models.PositiveSmallIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['created_at'], name='sim_turn_created_idx'),
+        ]
 
     def __str__(self):
         return f"{self.conversation_id} · {self.response_source} · {self.created_at:%Y-%m-%d %H:%M}"
