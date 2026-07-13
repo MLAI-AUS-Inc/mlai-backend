@@ -37,6 +37,14 @@ class VictorApplication(models.Model):
     industry_sector = models.CharField(max_length=64, blank=True)
     location = models.CharField(max_length=255, blank=True)
 
+    # Team composition: total headcount including the applicant, plus
+    # first/last/email for each *other* member (list of dicts).
+    team_size = models.PositiveIntegerField(null=True, blank=True)
+    team_members = models.JSONField(default=list, blank=True)
+    # Monthly revenue (AUD) for the last three months, keyed 'YYYY-MM'.
+    # Only collected when startup_stage indicates paying users or funding.
+    revenue_last_3_months = models.JSONField(default=dict, blank=True)
+
     idea = models.TextField(blank=True)
     support = models.TextField(blank=True)
     consent = models.BooleanField(default=False)
