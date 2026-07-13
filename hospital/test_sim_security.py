@@ -11,7 +11,7 @@ from django.core.management import call_command
 from django.core.cache import cache
 from django.core.management.base import CommandError
 from django.core.exceptions import ImproperlyConfigured
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from mlai.settings import (
@@ -315,14 +315,8 @@ class SharedCacheConfigurationTests(TestCase):
         )
 
 
-class RooRecordCredentialRotationTests(TestCase):
-    """Pin the deploy wiring that rotates Roo's dedicated record credential.
-
-    Roo's deploy provisions its dedicated ROO_API_KEY from that repo's secret
-    store; this deploy must inject the same value (staged here as the
-    ROO_API_KEY_NEXT secret) or every sim-guess record call 403s and the ward
-    game's diagnosis submissions 502 end to end.
-    """
+class RooRecordCredentialRotationCleanupTests(SimpleTestCase):
+    """Keep the completed rotation's staging credential out of steady state."""
 
     @staticmethod
     def _read_repo_file(*parts):
@@ -330,20 +324,11 @@ class RooRecordCredentialRotationTests(TestCase):
 
         return (Path(__file__).resolve().parents[1].joinpath(*parts)).read_text()
 
-    def test_workflow_passes_staged_roo_key_to_deploy(self):
+    def test_workflow_no_longer_requires_staged_roo_key(self):
         workflow = self._read_repo_file('.github', 'workflows', 'deploy.yml')
-        self.assertIn('ROO_API_KEY_NEXT: ${{ secrets.ROO_API_KEY_NEXT }}', workflow)
-        self.assertIn(
-            'Required repository secret ROO_API_KEY_NEXT is not configured',
-            workflow,
-        )
+        self.assertNotIn('ROO_API_KEY_NEXT', workflow)
 
-    def test_deploy_script_rotates_key_and_preserves_previous_value(self):
+    def test_deploy_uses_persisted_dedicated_key_after_rotation(self):
         deploy = self._read_repo_file('deploy.sh')
-        self.assertIn('ROO_API_KEY_NEXT must be supplied', deploy)
-        self.assertIn('printf \'%s\' "$ROO_API_KEY_NEXT" | ssh', deploy)
-        # The rotation must land under the name HasRooApiKey reads first…
-        self.assertIn('printf "ROO_API_KEY=%s\\n" "$secret"', deploy)
-        # …and keep the previous shared value accepted (as MLAI_API_KEY) so
-        # callers that have not rotated yet do not lose access mid-migration.
-        self.assertIn('printf "MLAI_API_KEY=%s\\n" "$previous"', deploy)
+        self.assertNotIn('ROO_API_KEY_NEXT', deploy)
+        self.assertIn('require_env_value ROO_API_KEY', deploy)
