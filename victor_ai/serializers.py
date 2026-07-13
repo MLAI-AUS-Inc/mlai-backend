@@ -41,7 +41,7 @@ class VictorApplicationSerializer(serializers.ModelSerializer):
         model = VictorApplication
         fields = [
             'client_ref', 'stage',
-            'first_name', 'last_name', 'email',
+            'first_name', 'last_name', 'email', 'linkedin',
             'team_name', 'role', 'startup_stage', 'industry_sector', 'location',
             'team_size', 'team_members', 'revenue_last_3_months',
             'idea', 'support', 'consent',

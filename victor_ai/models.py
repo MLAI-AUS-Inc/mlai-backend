@@ -28,6 +28,8 @@ class VictorApplication(models.Model):
     last_name = models.CharField(max_length=255)
     # Not unique: people can register twice; client_ref is the upsert key.
     email = models.EmailField(db_index=True)
+    # Applicant's own LinkedIn (optional); captured in step 1 alongside contact.
+    linkedin = models.CharField(max_length=500, blank=True)
 
     team_name = models.CharField(max_length=255, blank=True)
     # Choice labels from the form ("Founder", "Idea stage"), not enums, so
