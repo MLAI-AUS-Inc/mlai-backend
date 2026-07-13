@@ -25,6 +25,7 @@ def complete_payload(**overrides):
         team_name='Team Sunrise',
         role='Founder',
         startup_stage='Prototype',
+        industry_sector='Software & Enterprise',
         location='Melbourne, AU',
         idea='An AI copilot for grant applications.',
         support='Intros to mentors.',
@@ -72,12 +73,17 @@ class VictorApplicationApiTests(TestCase):
         self.assertIn('consent', response.json())
         self.assertEqual(VictorApplication.objects.count(), 0)
 
-    def test_complete_requires_role_startup_stage_and_idea(self):
-        response = self.client.post(URL, complete_payload(role='', startup_stage='', idea=''), format='json')
+    def test_complete_requires_role_startup_stage_sector_and_idea(self):
+        response = self.client.post(
+            URL,
+            complete_payload(role='', startup_stage='', industry_sector='', idea=''),
+            format='json',
+        )
         self.assertEqual(response.status_code, 400)
         body = response.json()
         self.assertIn('role', body)
         self.assertIn('startup_stage', body)
+        self.assertIn('industry_sector', body)
         self.assertIn('idea', body)
         self.assertEqual(VictorApplication.objects.count(), 0)
 

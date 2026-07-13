@@ -34,6 +34,7 @@ class VictorApplication(models.Model):
     # the form options can change without a migration.
     role = models.CharField(max_length=64, blank=True)
     startup_stage = models.CharField(max_length=64, blank=True)
+    industry_sector = models.CharField(max_length=64, blank=True)
     location = models.CharField(max_length=255, blank=True)
 
     idea = models.TextField(blank=True)

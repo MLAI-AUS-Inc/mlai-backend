@@ -9,7 +9,7 @@ class VictorApplicationSerializer(serializers.ModelSerializer):
         fields = [
             'client_ref', 'stage',
             'first_name', 'last_name', 'email',
-            'team_name', 'role', 'startup_stage', 'location',
+            'team_name', 'role', 'startup_stage', 'industry_sector', 'location',
             'idea', 'support', 'consent',
         ]
 
@@ -23,7 +23,7 @@ class VictorApplicationSerializer(serializers.ModelSerializer):
         errors = {}
         if not self._current(attrs, 'consent', False):
             errors['consent'] = 'Consent is required to submit a registration.'
-        for field in ('role', 'startup_stage', 'idea'):
+        for field in ('role', 'startup_stage', 'industry_sector', 'idea'):
             if not str(self._current(attrs, field, '')).strip():
                 errors[field] = 'This field is required to submit a registration.'
         if errors:
