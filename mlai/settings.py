@@ -334,6 +334,67 @@ REST_FRAMEWORK = {
 }
 
 HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
+HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
+HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
+    os.getenv('HEALTH_HACK_AI_UPSTREAM_MAX_BYTES', str(32 * 1024))
+)
+HEALTH_HACK_AI_REPLY_MAX_CHARS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_CHARS', '1500'))
+HEALTH_HACK_AI_REPLY_MAX_WORDS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_WORDS', '160'))
+HEALTH_HACK_AI_MAX_PROMPT_TOKENS = int(
+    os.getenv('HEALTH_HACK_AI_MAX_PROMPT_TOKENS', '100000')
+)
+HEALTH_HACK_AI_MAX_COMPLETION_TOKENS = int(
+    os.getenv('HEALTH_HACK_AI_MAX_COMPLETION_TOKENS', '8192')
+)
+
+# AI abuse controls default to observation so they add no gameplay friction
+# during the first production measurement window. Set each mode to "enforce"
+# independently after thresholds have been verified against event traffic.
+HEALTH_HACK_AI_RATE_LIMIT_MODE = os.getenv(
+    'HEALTH_HACK_AI_RATE_LIMIT_MODE', 'observe'
+).strip().lower()
+HEALTH_HACK_AI_BUDGET_MODE = os.getenv(
+    'HEALTH_HACK_AI_BUDGET_MODE', 'observe'
+).strip().lower()
+if HEALTH_HACK_AI_RATE_LIMIT_MODE not in {'observe', 'enforce'}:
+    raise ImproperlyConfigured('HEALTH_HACK_AI_RATE_LIMIT_MODE must be observe or enforce')
+if HEALTH_HACK_AI_BUDGET_MODE not in {'observe', 'enforce'}:
+    raise ImproperlyConfigured('HEALTH_HACK_AI_BUDGET_MODE must be observe or enforce')
+
+HEALTH_HACK_AI_KILL_SWITCH = _env_is_true('HEALTH_HACK_AI_KILL_SWITCH', False)
+HEALTH_HACK_AI_PARTICIPANT_BURST_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_BURST_LIMIT', '3')
+)
+HEALTH_HACK_AI_PARTICIPANT_10M_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_10M_LIMIT', '40')
+)
+HEALTH_HACK_AI_PARTICIPANT_HOURLY_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_HOURLY_LIMIT', '100')
+)
+HEALTH_HACK_AI_NETWORK_BURST_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_BURST_LIMIT', '60')
+)
+HEALTH_HACK_AI_NETWORK_10M_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_10M_LIMIT', '400')
+)
+HEALTH_HACK_AI_NETWORK_HOURLY_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_HOURLY_LIMIT', '1000')
+)
+HEALTH_HACK_AI_INFLIGHT_TTL_SECONDS = int(
+    os.getenv('HEALTH_HACK_AI_INFLIGHT_TTL_SECONDS', '35')
+)
+HEALTH_HACK_AI_PENDING_TTL_SECONDS = int(
+    os.getenv('HEALTH_HACK_AI_PENDING_TTL_SECONDS', '35')
+)
+HEALTH_HACK_AI_DAILY_CALL_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_DAILY_CALL_LIMIT', '5000')
+)
+HEALTH_HACK_AI_DAILY_TOKEN_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_DAILY_TOKEN_LIMIT', '5000000')
+)
+HEALTH_HACK_CHAT_RETENTION_DAYS = int(
+    os.getenv('HEALTH_HACK_CHAT_RETENTION_DAYS', '30')
+)
 HEALTH_HACK_FREE_TICKET_URL = os.getenv(
     'HEALTH_HACK_FREE_TICKET_URL',
     'https://luma.com/mlai-8obe?coupon=RQY4N0',

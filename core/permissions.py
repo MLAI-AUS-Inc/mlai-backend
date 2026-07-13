@@ -172,9 +172,8 @@ class HasStrictRooApiKey(permissions.BasePermission):
             logger.error("HasStrictRooApiKey: No ROO_API_KEY configured on backend.")
             return False
 
-        if api_key in allowed_keys:
+        if any(secrets.compare_digest(api_key, allowed_key) for allowed_key in allowed_keys):
             return True
 
-        masked_key = api_key[:4] + "***" if len(api_key) > 4 else "***"
-        logger.warning("HasStrictRooApiKey: Invalid Roo API key received: %s", masked_key)
+        logger.warning("HasStrictRooApiKey: Invalid Roo API key received.")
         return False

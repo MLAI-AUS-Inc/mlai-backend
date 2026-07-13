@@ -10,7 +10,7 @@ The registration step stores the email on that guess and returns the assigned
 Luma URL directly; it does not send email.
 
 Invariants:
-- record/ is service-only (HasRooApiKey) — a browser can never assert "I was
+- record/ is service-only (HasStrictRooApiKey) — a browser can never assert "I was
   correct" to this backend.
 - One guess per (case_id, client_id): DB unique constraint, get_or_create.
 - One winner per case: SimCaseWinner.case_id unique constraint is claimed while
@@ -29,8 +29,9 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
-from core.permissions import HasHealthHackApiKey, HasRooApiKey
+from core.permissions import HasHealthHackApiKey, HasStrictRooApiKey
 from .models import SimCaseWinner, SimDiagnosisGuess, SimParticipant
+from .sim_security import LimitedJSONParser, participant_log_id
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ ROO_READ_TIMEOUT_SECONDS = 10
 
 class SimGuessCheckSerializer(serializers.Serializer):
     guess = serializers.CharField(max_length=200, trim_whitespace=True)
-    client_id = serializers.RegexField(regex=r'^[A-Za-z0-9-]{8,64}$', max_length=64)
+    client_id = serializers.UUIDField()
 
 
 def _participant_for_client(client_id):
@@ -95,11 +96,13 @@ class SimGuessCheckView(APIView):
 
     authentication_classes = []
     permission_classes = [HasHealthHackApiKey]
+    parser_classes = [LimitedJSONParser]
 
     def post(self, request):
         serializer = SimGuessCheckSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        client_id = str(data['client_id'])
 
         base_url = str(getattr(settings, 'ROO_SERVICE_URL', '') or '').rstrip('/')
         if not base_url:
@@ -108,16 +111,22 @@ class SimGuessCheckView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        headers = {'content-type': 'application/json'}
         roo_key = str(getattr(settings, 'ROO_SIM_PATIENT_KEY', '') or '')
-        if roo_key:
-            headers['authorization'] = f'Bearer {roo_key}'
+        if not roo_key:
+            return Response(
+                {'detail': 'diagnosis service credential is not configured'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        headers = {
+            'content-type': 'application/json',
+            'authorization': f'Bearer {roo_key}',
+        }
 
         try:
             upstream = requests.post(
                 f'{base_url}{ROO_DIAGNOSIS_PATH}',
                 headers=headers,
-                json={'guess': data['guess'], 'client_id': data['client_id']},
+                json={'guess': data['guess'], 'client_id': client_id},
                 timeout=(ROO_CONNECT_TIMEOUT_SECONDS, ROO_READ_TIMEOUT_SECONDS),
             )
         except requests.Timeout:
@@ -152,6 +161,14 @@ class SimGuessCheckView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        active_case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
+        if payload['case_id'] != active_case_id:
+            logger.warning('Roo diagnosis check returned a non-active case')
+            return Response(
+                {'detail': 'diagnosis service returned an invalid response'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
         return Response({
             'result': payload['result'],
             'outcome': payload['outcome'],
@@ -178,14 +195,14 @@ class SimGuessRecordSerializer(serializers.Serializer):
         required=False,
         default='',
     )
-    client_id = serializers.RegexField(regex=r'^[A-Za-z0-9-]{8,64}$', max_length=64)
+    client_id = serializers.UUIDField()
     guess_text = serializers.CharField(max_length=300)
     is_correct = serializers.BooleanField()
 
 
 class SimGuessClaimSerializer(serializers.Serializer):
     case_id = serializers.IntegerField(min_value=1)
-    client_id = serializers.RegexField(regex=r'^[A-Za-z0-9-]{8,64}$', max_length=64)
+    client_id = serializers.UUIDField()
     email = serializers.EmailField(max_length=254)
 
 
@@ -201,7 +218,7 @@ class SimGuessStatusView(APIView):
             'client_id': request.query_params.get('client_id', ''),
         })
         serializer.is_valid(raise_exception=True)
-        client_id = serializer.validated_data['client_id']
+        client_id = str(serializer.validated_data['client_id'])
         _participant_for_client(client_id)
         case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
         guess = SimDiagnosisGuess.objects.filter(
@@ -241,21 +258,29 @@ class SimGuessStatusView(APIView):
 class SimGuessRecordView(APIView):
     """POST sim-guess/record/ — Roo records an adjudicated guess (service-only)."""
     authentication_classes = []
-    permission_classes = [HasRooApiKey]
+    permission_classes = [HasStrictRooApiKey]
+    parser_classes = [LimitedJSONParser]
 
     def post(self, request):
         serializer = SimGuessRecordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        client_id = str(data['client_id'])
+        active_case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
+        if data['case_id'] != active_case_id:
+            return Response(
+                {'detail': 'case is not active', 'code': 'inactive_case'},
+                status=status.HTTP_409_CONFLICT,
+            )
 
-        participant = _participant_for_client(data['client_id'])
+        participant = _participant_for_client(client_id)
         with transaction.atomic():
             guess, created = SimDiagnosisGuess.objects.get_or_create(
-                case_id=data['case_id'],
-                client_id=data['client_id'],
+                case_id=active_case_id,
+                client_id=client_id,
                 defaults={
                     'participant': participant,
-                    'case_title': data['case_title'] or f"Case {data['case_id']}",
+                    'case_title': data['case_title'] or f"Case {active_case_id}",
                     'guess_text': data['guess_text'],
                     'is_correct': data['is_correct'],
                     'outcome': (
@@ -270,7 +295,7 @@ class SimGuessRecordView(APIView):
             if created and data['is_correct']:
                 try:
                     with transaction.atomic():
-                        SimCaseWinner.objects.create(case_id=data['case_id'], guess=guess)
+                        SimCaseWinner.objects.create(case_id=active_case_id, guess=guess)
                     guess.prize_kind = SimDiagnosisGuess.PRIZE_FREE_TICKET
                 except IntegrityError:
                     guess.prize_kind = SimDiagnosisGuess.PRIZE_DISCOUNT_30
@@ -287,7 +312,7 @@ class SimGuessRecordView(APIView):
             'outcome': guess.outcome,
             'prize_kind': guess.prize_kind,
             'is_first_solver': guess.prize_kind == SimDiagnosisGuess.PRIZE_FREE_TICKET,
-            'winner_taken': SimCaseWinner.objects.filter(case_id=data['case_id']).exists(),
+            'winner_taken': SimCaseWinner.objects.filter(case_id=active_case_id).exists(),
         })
 
 
@@ -302,18 +327,26 @@ class SimGuessClaimView(APIView):
     authentication_classes = []
     permission_classes = [HasHealthHackApiKey]
     throttle_classes = [SimGuessClaimThrottle]
+    parser_classes = [LimitedJSONParser]
 
     def post(self, request):
         serializer = SimGuessClaimSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        client_id = str(data['client_id'])
+        active_case_id = int(getattr(settings, 'HEALTH_HACK_ACTIVE_CASE_ID', 1))
+        if data['case_id'] != active_case_id:
+            return Response(
+                {'detail': 'case is not active', 'code': 'inactive_case'},
+                status=status.HTTP_409_CONFLICT,
+            )
         email = data['email'].strip().lower()
 
         with transaction.atomic():
             try:
                 guess = (
                     SimDiagnosisGuess.objects.select_for_update()
-                    .get(case_id=data['case_id'], client_id=data['client_id'], is_correct=True)
+                    .get(case_id=active_case_id, client_id=client_id, is_correct=True)
                 )
             except SimDiagnosisGuess.DoesNotExist:
                 return Response(
@@ -332,7 +365,7 @@ class SimGuessClaimView(APIView):
             # Anti double-dip: one prize per email per case (across devices).
             if (
                 SimDiagnosisGuess.objects
-                .filter(case_id=data['case_id'], email__iexact=email)
+                .filter(case_id=active_case_id, email__iexact=email)
                 .exclude(pk=guess.pk)
                 .exists()
             ):
@@ -366,8 +399,8 @@ class SimGuessClaimView(APIView):
                 )
 
         logger.info(
-            "sim-guess claim: case=%s client=%s… outcome=%s",
-            data['case_id'], data['client_id'][:8], guess.outcome,
+            "sim-guess claim: case=%s participant=%s outcome=%s",
+            active_case_id, participant_log_id(client_id), guess.outcome,
         )
         return Response({
             'result': guess.outcome,

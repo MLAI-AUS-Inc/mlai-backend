@@ -8,11 +8,40 @@ USER="root"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
+if [ -z "${ROO_SIM_PATIENT_KEY:-}" ]; then
+    echo "❌ ROO_SIM_PATIENT_KEY must be supplied by the deployment secret store."
+    exit 1
+fi
+
 echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
 
 # 1. Sync files to the server
 echo "📦 Syncing files..."
 rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . $USER@$DROPLET_IP:$PROJECT_DIR
+
+# Send the credential over SSH stdin rather than a command-line argument. The
+# remote shell updates .env using builtins, so the value is neither echoed nor
+# exposed in a child-process argv. This happens before any service restart.
+echo "🔐 Updating Roo service credential (value redacted)..."
+printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
+    set -euo pipefail
+    project_dir="/root/mlai-backend"
+    mkdir -p "$project_dir"
+    cd "$project_dir"
+    umask 077
+    secret=$(cat)
+    if [ -z "$secret" ]; then
+        echo "Missing ROO_SIM_PATIENT_KEY payload" >&2
+        exit 1
+    fi
+    tmp=$(mktemp .env.roo-key.XXXXXX)
+    if [ -f .env ]; then
+        grep -v "^ROO_SIM_PATIENT_KEY=" .env > "$tmp" || true
+    fi
+    printf "ROO_SIM_PATIENT_KEY=%s\n" "$secret" >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+'
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
@@ -98,7 +127,7 @@ ssh $USER@$DROPLET_IP <<EOF
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL ROO_SERVICE_URL HEALTH_HACK_API_KEY
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -106,9 +135,9 @@ ssh $USER@$DROPLET_IP <<EOF
     if ! grep -Eq '^(VALLEY_HARNESS_API_KEY|INTERNAL_API_KEY|ROO_API_KEY|MLAI_API_KEY)=.+' .env; then
         echo "WARNING: no Valley service API key is configured; Vibe Raising email draft runs will not reach Valley."
     fi
-    if ! env_has_value ROO_SERVICE_URL || ! env_has_value HEALTH_HACK_API_KEY; then
-        echo "WARNING: ROO_SERVICE_URL and HEALTH_HACK_API_KEY are both required for the Health Hack simulated-patient gateway."
-    fi
+    require_env_value ROO_SERVICE_URL "Set ROO_SERVICE_URL to Roo's private VPC base URL."
+    require_env_value ROO_SIM_PATIENT_KEY "Set the GitHub Actions ROO_SIM_PATIENT_KEY repository secret to the same dedicated value configured on Roo."
+    require_env_value HEALTH_HACK_API_KEY "Set HEALTH_HACK_API_KEY to the dedicated Cloudflare Worker credential."
 
     runtime_services=(web scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
