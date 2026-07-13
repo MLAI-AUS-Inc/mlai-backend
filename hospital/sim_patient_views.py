@@ -26,6 +26,7 @@ from .models import (
     SimDiagnosisGuess,
     SimParticipant,
 )
+from .sim_contest_views import _open_case_ids
 from .sim_security import (
     LimitedJSONParser,
     acquire_inflight,
@@ -513,9 +514,17 @@ class SimPatientProxyView(APIView):
         data = serializer.validated_data
 
         participant_id = data["player_id"]
-        # The Worker/Roo may still send a case_id during a rolling deployment,
-        # but backend configuration is the only authority.
-        case_id = int(getattr(settings, "HEALTH_HACK_ACTIVE_CASE_ID", 1))
+        # Backend configuration is the only authority on which cases are OPEN;
+        # within that set the Worker pins which ward patient this conversation
+        # is about (Sash = 1, Leila = 2 — each bed keeps its own transcript).
+        # Anything else falls back to the active case, so a stale or hostile
+        # case_id can never open an unreleased chart.
+        requested_case_id = data.get("case_id")
+        case_id = (
+            requested_case_id
+            if requested_case_id in _open_case_ids()
+            else int(getattr(settings, "HEALTH_HACK_ACTIVE_CASE_ID", 1))
+        )
 
         # A completed idempotent replay is a read-only fast path. It remains
         # available when Roo is down and consumes neither quota nor DB writes.

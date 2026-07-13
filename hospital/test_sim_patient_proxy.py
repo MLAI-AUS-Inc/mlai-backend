@@ -386,6 +386,25 @@ class SimPatientProxyTests(TestCase):
         self.assertNotIn("401", str(response.data))
 
     @patch("hospital.sim_patient_views.requests.post")
+    def test_open_case_pin_is_honored(self, post):
+        # The two-patient ward: Leila's route pins case 2; the gateway keeps
+        # her conversation, roo call, and echo validation on that case.
+        post.return_value = upstream_response(roo_reply(
+            case_id=2,
+            case_title="The Violet Trial",
+            patient_name="Leila Farouk",
+            presenting_complaint="Severe abdominal pain in waves.",
+        ))
+
+        response = self.post(self.payload(case_id=2))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["case_id"], 2)
+        self.assertEqual(response.data["patient_name"], "Leila Farouk")
+        self.assertEqual(post.call_args.kwargs["json"]["case_id"], 2)
+        self.assertEqual(SimConversation.objects.get().case_id, 2)
+
+    @patch("hospital.sim_patient_views.requests.post")
     def test_rejects_malformed_hidden_or_wrong_case_responses(self, post):
         invalid_payloads = [
             {"reply": ""},
