@@ -24,15 +24,6 @@ if [ "${#ROO_SIM_PATIENT_KEY}" -lt 32 ]; then
     echo "❌ ROO_SIM_PATIENT_KEY must contain at least 32 characters."
     exit 1
 fi
-if [ -z "${ROO_API_KEY_NEXT:-}" ]; then
-    echo "❌ ROO_API_KEY_NEXT must be supplied by the deployment secret store."
-    exit 1
-fi
-if [ "${#ROO_API_KEY_NEXT}" -lt 32 ]; then
-    echo "❌ ROO_API_KEY_NEXT must contain at least 32 characters."
-    exit 1
-fi
-
 echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
 
 # 1. Sync files to the server
@@ -59,36 +50,6 @@ printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
         grep -v "^ROO_SIM_PATIENT_KEY=" .env > "$tmp" || true
     fi
     printf "ROO_SIM_PATIENT_KEY=%s\n" "$secret" >> "$tmp"
-    chmod 600 "$tmp"
-    mv "$tmp" .env
-'
-
-# Roo's dedicated diagnosis-record credential rotates in from the secret store
-# (staged as ROO_API_KEY_NEXT). The previous shared ROO_API_KEY value is
-# preserved as MLAI_API_KEY so services still presenting the old credential
-# keep authenticating during the rotation — HasRooApiKey accepts either name.
-echo "🔐 Rotating Roo record credential (value redacted)..."
-printf '%s' "$ROO_API_KEY_NEXT" | ssh $USER@$DROPLET_IP '
-    set -euo pipefail
-    project_dir="/root/mlai-backend"
-    mkdir -p "$project_dir"
-    cd "$project_dir"
-    umask 077
-    secret=$(cat)
-    if [ -z "$secret" ]; then
-        echo "Missing ROO_API_KEY_NEXT payload" >&2
-        exit 1
-    fi
-    tmp=$(mktemp .env.roo-api-key.XXXXXX)
-    previous=""
-    if [ -f .env ]; then
-        previous=$(sed -n "s/^ROO_API_KEY=//p" .env | tail -n 1)
-        grep -v "^ROO_API_KEY=" .env > "$tmp" || true
-    fi
-    printf "ROO_API_KEY=%s\n" "$secret" >> "$tmp"
-    if [ -n "$previous" ] && [ "$previous" != "$secret" ] && ! grep -q "^MLAI_API_KEY=" "$tmp"; then
-        printf "MLAI_API_KEY=%s\n" "$previous" >> "$tmp"
-    fi
     chmod 600 "$tmp"
     mv "$tmp" .env
 '
