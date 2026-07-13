@@ -23,6 +23,7 @@ class TeamMemberSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=255)
     last_name = serializers.CharField(max_length=255)
     email = serializers.EmailField()
+    role = serializers.CharField(max_length=64)
 
 
 class VictorApplicationSerializer(serializers.ModelSerializer):

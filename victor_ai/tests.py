@@ -29,7 +29,7 @@ def complete_payload(**overrides):
         location='Melbourne, AU',
         team_size=2,
         team_members=[
-            {'first_name': 'Alex', 'last_name': 'Chen', 'email': 'alex@example.com'},
+            {'first_name': 'Alex', 'last_name': 'Chen', 'email': 'alex@example.com', 'role': 'CTO'},
         ],
         idea='An AI copilot for grant applications.',
         support='Intros to mentors.',
@@ -65,7 +65,7 @@ class VictorApplicationApiTests(TestCase):
         self.assertEqual(application.team_size, 2)
         self.assertEqual(
             application.team_members,
-            [{'first_name': 'Alex', 'last_name': 'Chen', 'email': 'alex@example.com'}],
+            [{'first_name': 'Alex', 'last_name': 'Chen', 'email': 'alex@example.com', 'role': 'CTO'}],
         )
         self.assertEqual(application.idea, 'An AI copilot for grant applications.')
         self.assertTrue(application.consent)
@@ -119,7 +119,13 @@ class VictorApplicationApiTests(TestCase):
         self.assertEqual(application.team_members, [])
 
     def test_team_member_email_validated(self):
-        members = [{'first_name': 'Alex', 'last_name': 'Chen', 'email': 'not-an-email'}]
+        members = [{'first_name': 'Alex', 'last_name': 'Chen', 'email': 'not-an-email', 'role': 'CTO'}]
+        response = self.client.post(URL, complete_payload(team_members=members), format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('team_members', response.json())
+
+    def test_team_member_role_required(self):
+        members = [{'first_name': 'Alex', 'last_name': 'Chen', 'email': 'alex@example.com'}]
         response = self.client.post(URL, complete_payload(team_members=members), format='json')
         self.assertEqual(response.status_code, 400)
         self.assertIn('team_members', response.json())
