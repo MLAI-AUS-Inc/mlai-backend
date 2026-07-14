@@ -66,7 +66,7 @@ class PatientTurnSerializer(serializers.Serializer):
 class SimPatientRequestSerializer(serializers.Serializer):
     question = serializers.CharField(max_length=500, trim_whitespace=True)
     history = PatientTurnSerializer(many=True, required=False, default=list)
-    # Accepted during a rolling Worker deployment but deliberately ignored.
+    # The Worker's per-bed pin; honored when it names an OPEN case (see post()).
     case_id = serializers.IntegerField(min_value=1, required=False)
     player_id = serializers.UUIDField(required=True)
     role = serializers.ChoiceField(
@@ -251,7 +251,18 @@ def _sanitized_action(payload, role):
     diagnosis = _clean_text(action.get("diagnosis"), max_length=200, multiline=False)
     if diagnosis is None:
         return None
-    return {"type": "confirm_diagnosis", "diagnosis": diagnosis}
+    sanitized = {"type": "confirm_diagnosis", "diagnosis": diagnosis}
+    # Optional cross-book target: Paws may prepare a confirmation for any OPEN
+    # case (the player can name Leila from Sash's bed thread). Unknown or
+    # closed cases are dropped, never forwarded to the browser.
+    target_case = action.get("case_id")
+    if (
+        isinstance(target_case, int)
+        and not isinstance(target_case, bool)
+        and target_case in _open_case_ids()
+    ):
+        sanitized["case_id"] = target_case
+    return sanitized
 
 
 def _sanitized_usage(payload):

@@ -275,6 +275,55 @@ class SimPatientProxyTests(TestCase):
         self.assertIsNone(SimConversationTurn.objects.get().suggested_action)
 
     @patch("hospital.sim_patient_views.requests.post")
+    def test_action_forwards_open_case_target(self, post):
+        # Paws can prepare a confirmation for another OPEN book than the one
+        # this thread is pinned to ("my final diagnosis for leila is …").
+        post.return_value = upstream_response(roo_reply(
+            patient_name="Nurse Paws",
+            suggested_action={
+                "type": "confirm_diagnosis",
+                "diagnosis": "acute intermittent porphyria",
+                "case_id": 2,
+            },
+        ))
+
+        with override_settings(HEALTH_HACK_OPEN_CASE_IDS=[1, 2]):
+            response = self.post(self.payload(
+                question="My final diagnosis for Leila is acute intermittent porphyria.",
+                role="clerk",
+            ))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["suggested_action"], {
+            "type": "confirm_diagnosis",
+            "diagnosis": "acute intermittent porphyria",
+            "case_id": 2,
+        })
+
+    @patch("hospital.sim_patient_views.requests.post")
+    def test_action_drops_unknown_or_closed_case_target(self, post):
+        for bad_case in (7, True, "2", None):
+            post.return_value = upstream_response(roo_reply(
+                patient_name="Nurse Paws",
+                suggested_action={
+                    "type": "confirm_diagnosis",
+                    "diagnosis": "adrenal crisis",
+                    "case_id": bad_case,
+                },
+            ))
+
+            response = self.post(self.payload(
+                question="My final answer is adrenal crisis.",
+                role="clerk",
+            ))
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["suggested_action"], {
+                "type": "confirm_diagnosis",
+                "diagnosis": "adrenal crisis",
+            })
+
+    @patch("hospital.sim_patient_views.requests.post")
     def test_backend_reconstructs_history_from_saved_turns(self, post):
         post.side_effect = [
             upstream_response(roo_reply(reply="First answer.")),
