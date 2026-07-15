@@ -60,6 +60,10 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
+from content_analytics.services.config import (
+    analytics_article_manifest,
+    analytics_config_for_content_factory,
+)
 from content_factory.article_publish_status import (
     advance_publish_status,
     article_bucket,
@@ -3193,6 +3197,7 @@ def _persist_article_memory_from_run(*, organization, run):
         return None
 
     result = run.result or {}
+    run_request = _run_mapping(run.run_request)
     title = str(content_package.get("title") or result.get("title") or "").strip()
     primary_keyword = str(
         content_package.get("targetKeyword")
@@ -3214,6 +3219,37 @@ def _persist_article_memory_from_run(*, organization, run):
     pr_number = coerce_pr_number(evidence.get("prNumber"))
     content_path = _pick_content_path(evidence, slug)
     derived_status = derive_publish_status_from_evidence(evidence)
+    analytics_id = None
+    raw_analytics_id = str(
+        run_request.get("analytics_article_id")
+        or run_request.get("analyticsArticleId")
+        or result.get("analytics_article_id")
+        or result.get("analyticsArticleId")
+        or ""
+    ).strip()
+    if raw_analytics_id:
+        try:
+            analytics_id = uuid.UUID(raw_analytics_id)
+        except (TypeError, ValueError, AttributeError):
+            logger.warning("invalid_article_analytics_id run_id=%s value=%s", run.run_id, raw_analytics_id)
+    canonical_url = str(
+        content_package.get("canonicalUrl")
+        or content_package.get("canonical_url")
+        or result.get("canonical_url")
+        or result.get("canonicalUrl")
+        or evidence.get("liveUrl")
+        or ""
+    ).strip()
+    canonical_path = str(
+        content_package.get("canonicalPath")
+        or content_package.get("canonical_path")
+        or result.get("canonical_path")
+        or result.get("canonicalPath")
+        or (urlsplit(canonical_url).path if canonical_url else "")
+        or ""
+    ).strip()
+    if canonical_path and not canonical_path.startswith("/"):
+        canonical_path = f"/{canonical_path}"
     article, created = WrittenArticle.objects.get_or_create(
         organization=organization,
         slug=slug,
@@ -3230,6 +3266,9 @@ def _persist_article_memory_from_run(*, organization, run):
             "published_at": timezone.now(),
             "publish_status": derived_status,
             "source_run_id": "" if _is_publish_child_run(run) else run.run_id,
+            **({"analytics_id": analytics_id} if analytics_id else {}),
+            "canonical_url": canonical_url,
+            "canonical_path": canonical_path,
         },
     )
     if not created:
@@ -3242,12 +3281,27 @@ def _persist_article_memory_from_run(*, organization, run):
             ("pr_url", pr_url),
             ("content_path", content_path),
             ("primary_keyword", primary_keyword),
+            ("canonical_url", canonical_url),
+            ("canonical_path", canonical_path),
         ):
             # Only overwrite with real values so a later evidence-less run
             # (e.g. a revision) can't wipe URLs we already captured.
             if value and getattr(article, field) != value:
                 setattr(article, field, value)
                 update_fields.add(field)
+        if analytics_id and article.analytics_id != analytics_id:
+            # The first persisted identity owns every historical aggregate for
+            # this article. A later retry/revision with the same slug must not
+            # silently re-key it; scaffold reconciliation can restore the
+            # existing id into the generated registry if an upstream run ever
+            # supplies a different value.
+            logger.warning(
+                "article_analytics_id_mismatch_preserved run_id=%s article_id=%s incoming=%s existing=%s",
+                run.run_id,
+                article.pk,
+                analytics_id,
+                article.analytics_id,
+            )
         if not article.published_at:
             article.published_at = timezone.now()
             update_fields.add("published_at")
@@ -6708,7 +6762,17 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
         "custom_title": run_request.get("custom_title") or run_request.get("customTitle") or title or None,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         "restart_source_run_id": run.run_id,
+        "analytics_article_id": str(
+            run_request.get("analytics_article_id")
+            or run_request.get("analyticsArticleId")
+            or uuid.uuid4()
+        ),
     }
+    payload["analytics_config"] = analytics_config_for_content_factory(
+        context.organization,
+        analytics_article_id=payload["analytics_article_id"],
+        provision_if_missing=True,
+    )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
     return payload
@@ -14541,6 +14605,11 @@ class VibeMarketingArticleSystemSetupView(APIView):
             "scan_run_id": pending.get("source_scan_run_id") or "",
             "article_surface_mode": article_surface_mode,
             "article_surface_hint": article_surface_hint,
+            "analytics_config": analytics_config_for_content_factory(
+                context.organization,
+                provision_if_missing=True,
+            ),
+            "analytics_article_manifest": analytics_article_manifest(context.organization),
         }
         _mark_roo_points_gate_authorized(
             payload,
@@ -15274,7 +15343,13 @@ class VibeMarketingArticleView(APIView):
                 "conflicts": selection_conflicts,
             },
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+            "analytics_article_id": str(uuid.uuid4()),
         }
+        payload["analytics_config"] = analytics_config_for_content_factory(
+            context.organization,
+            analytics_article_id=payload["analytics_article_id"],
+            provision_if_missing=True,
+        )
         if delivery_mode_explicit and delivery_mode:
             payload["delivery_mode"] = delivery_mode
         # Byline: resolve the per-article author pick (else the org default) and carry the resolved

@@ -7867,14 +7867,24 @@ class SEOWrittenArticleCreateView(APIView):
             'primary_keyword': primary_keyword,
             'article_url': serializer.validated_data.get('article_url'),
             'pr_url': serializer.validated_data.get('pr_url'),
+            'canonical_url': serializer.validated_data.get('canonical_url', ''),
+            'canonical_path': serializer.validated_data.get('canonical_path', ''),
             'job': job,
             'published_at': timezone.now(),
         }
-        article, created = WrittenArticle.objects.update_or_create(
-            organization=org,
-            slug=serializer.validated_data['slug'],
-            defaults=defaults,
-        )
+        incoming_analytics_id = serializer.validated_data.get('analytics_id')
+        # analytics_id is create-only. Replayed callbacks may refresh article
+        # metadata, but a later run must never replace the stable identity that
+        # already owns historical aggregates.
+        with transaction.atomic():
+            article, created = WrittenArticle.objects.update_or_create(
+                organization=org,
+                slug=serializer.validated_data['slug'],
+                defaults=defaults,
+            )
+            if created and incoming_analytics_id and article.analytics_id != incoming_analytics_id:
+                article.analytics_id = incoming_analytics_id
+                article.save(update_fields=['analytics_id'])
 
         # A PR URL only proves a PR exists; merge/live state is confirmed later
         # by the publish-status refresh. Never downgrade an existing status.

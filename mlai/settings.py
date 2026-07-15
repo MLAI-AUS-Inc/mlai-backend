@@ -204,6 +204,7 @@ INSTALLED_APPS = [
     'workflow_runs',
     'startup_updates',
     'content_factory',
+    'content_analytics',
     'founder_tools',
     'data_access',
     'core',
@@ -765,6 +766,52 @@ GOOGLE_OAUTH_IDENTITY_SCOPES = [
 GOOGLE_WEBSITE_BASELINE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
+
+# Content Factory page analytics. Umami remains the raw event store; this
+# service retains only daily, article-scoped aggregates.
+UMAMI_BASE_URL = os.environ.get("UMAMI_BASE_URL", "").strip().rstrip("/")
+UMAMI_API_TOKEN = os.environ.get("UMAMI_API_TOKEN", "").strip()
+UMAMI_USERNAME = os.environ.get("UMAMI_USERNAME", "").strip()
+UMAMI_PASSWORD = os.environ.get("UMAMI_PASSWORD", "").strip()
+UMAMI_TEAM_ID = os.environ.get("UMAMI_TEAM_ID", "").strip()
+CONTENT_ANALYTICS_TRACKER_SCRIPT_URL = os.environ.get("CONTENT_ANALYTICS_TRACKER_SCRIPT_URL", "").strip()
+# Public Umami host used as the tracker's data-host-url. This is not an event
+# endpoint; Umami's served tracker owns the configured collection path.
+CONTENT_ANALYTICS_HOST_URL = os.environ.get("CONTENT_ANALYTICS_HOST_URL", "").strip().rstrip("/")
+CONTENT_ANALYTICS_FIRST_PARTY_PROXY_ENABLED = _env_is_true(
+    "CONTENT_ANALYTICS_FIRST_PARTY_PROXY_ENABLED",
+    False,
+)
+CONTENT_ANALYTICS_SYNC_ENABLED = _env_is_true("CONTENT_ANALYTICS_SYNC_ENABLED", True)
+CONTENT_ANALYTICS_SYNC_LOOKBACK_DAYS = int(os.environ.get("CONTENT_ANALYTICS_SYNC_LOOKBACK_DAYS", "3") or 3)
+CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS = int(os.environ.get("CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS", "86400") or 86400)
+CONTENT_ANALYTICS_SYNC_MAX_BACKFILL_DAYS_PER_RUN = int(
+    os.environ.get("CONTENT_ANALYTICS_SYNC_MAX_BACKFILL_DAYS_PER_RUN", "30") or 30
+)
+CONTENT_ANALYTICS_UMAMI_SOURCE_ATTRIBUTION_LIMIT = int(
+    os.environ.get("CONTENT_ANALYTICS_UMAMI_SOURCE_ATTRIBUTION_LIMIT", "3") or 3
+)
+CONTENT_ANALYTICS_GSC_FINALIZATION_LAG_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_GSC_FINALIZATION_LAG_DAYS", "3") or 3
+)
+CONTENT_ANALYTICS_GSC_INITIAL_BACKFILL_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_GSC_INITIAL_BACKFILL_DAYS", "480") or 480
+)
+CONTENT_ANALYTICS_GSC_QUERY_LIMIT = int(os.environ.get("CONTENT_ANALYTICS_GSC_QUERY_LIMIT", "100") or 100)
+CONTENT_ANALYTICS_ARTICLE_MANIFEST_LIMIT = int(
+    os.environ.get("CONTENT_ANALYTICS_ARTICLE_MANIFEST_LIMIT", "500") or 500
+)
+CONTENT_ANALYTICS_UMAMI_RETENTION_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_UMAMI_RETENTION_DAYS", "120") or 120
+)
+GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
+    "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
+    "",
+).strip()
+GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE = os.environ.get(
+    "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE",
+    "",
+).strip()
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 # Google PageSpeed Insights key for website-baseline Lighthouse/Core Web Vitals.
 # Managed here and handed to the content-factory producer via
