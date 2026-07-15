@@ -1048,6 +1048,9 @@ class WrittenArticle(models.Model):
     Tracks the output of the content-factory pipeline.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Stable, public-safe identity embedded into generated article pages. Unlike
+    # the slug or source run, this survives URL changes and article revisions.
+    analytics_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
@@ -1062,6 +1065,8 @@ class WrittenArticle(models.Model):
     # URLs
     article_url = models.URLField(blank=True, null=True)
     pr_url = models.URLField(blank=True, null=True)
+    canonical_url = models.URLField(max_length=2048, blank=True, default="")
+    canonical_path = models.CharField(max_length=1024, blank=True, default="", db_index=True)
 
     # Publish lifecycle (see ArticlePublishStatus): written -> pr_open -> merged -> live.
     publish_status = models.CharField(

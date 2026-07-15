@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
@@ -51,6 +51,7 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
     path("company/avatar", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar-no-slash"),
     path("company/avatar/", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar"),
