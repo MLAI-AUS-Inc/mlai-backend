@@ -472,18 +472,21 @@ HEALTH_HACK_DISCOUNT_URL = os.getenv(
     'HEALTH_HACK_DISCOUNT_URL',
     'https://luma.com/mlai-8obe?coupon=ALMOSTGOTIT',
 )
-# The two-patient ward runs concurrent one-guess books. Guess/claim/status
+# The three-patient ward runs concurrent one-guess books. Guess/claim/status
 # accept exactly these case ids; each case's first solver gets its own ticket
 # coupon (falling back to HEALTH_HACK_FREE_TICKET_URL for unmapped cases),
 # while the runner-up discount stays global.
+# Rollout note: only widen this set AFTER the deployed game accepts the new
+# case count — its /api/contest projection rejects case sets it can't render.
 HEALTH_HACK_OPEN_CASE_IDS = [
     int(token)
-    for token in os.getenv('HEALTH_HACK_OPEN_CASE_IDS', '1,2').split(',')
+    for token in os.getenv('HEALTH_HACK_OPEN_CASE_IDS', '1,2,3').split(',')
     if token.strip()
 ]
 _HEALTH_HACK_DEFAULT_FREE_TICKET_URLS = {
     1: 'https://luma.com/mlai-8obe?coupon=RQY4N0',
     2: 'https://luma.com/mlai-8obe?coupon=7FS6FZ',
+    3: 'https://luma.com/mlai-8obe?coupon=CASE3_COUPON_PENDING',
 }
 try:
     HEALTH_HACK_FREE_TICKET_URLS = {

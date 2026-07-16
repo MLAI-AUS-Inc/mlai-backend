@@ -2,6 +2,7 @@
 Tests for the web ward-game diagnosis contest endpoints
 (hospital/sim_contest_views.py).
 """
+from django.conf import settings
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -417,7 +418,9 @@ class SimGuessTwoCaseContestTests(TestCase):
         self._record(case_id=2, correct=False)
         resp = self._status()
         by_case = {case['case_id']: case for case in resp.data['cases']}
-        self.assertEqual(set(by_case), {1, 2})
+        # Exactly the open set — no extra or missing books (the set is the
+        # class pin, so the three-case subclass keeps the same exactness).
+        self.assertEqual(set(by_case), set(settings.HEALTH_HACK_OPEN_CASE_IDS))
         self.assertEqual(by_case[1]['state'], 'eligible')
         self.assertEqual(by_case[2]['state'], 'locked')
         # Legacy top-level fields keep reporting the active case for a
@@ -433,3 +436,52 @@ class SimGuessTwoCaseContestTests(TestCase):
         self.assertEqual(by_case[2]['state'], 'completed')
         self.assertEqual(by_case[2]['redemption_url'], 'https://luma.test/leila')
         self.assertEqual(by_case[1]['state'], 'eligible')
+
+
+@override_settings(
+    ROO_API_KEY=ROO_KEY,
+    HEALTH_HACK_API_KEY=HEALTH_HACK_KEY,
+    HEALTH_HACK_ACTIVE_CASE_ID=1,
+    HEALTH_HACK_OPEN_CASE_IDS=[1, 2, 3],
+    HEALTH_HACK_FREE_TICKET_URL='https://luma.test/free',
+    HEALTH_HACK_DISCOUNT_URL='https://luma.test/discount',
+    HEALTH_HACK_FREE_TICKET_URLS={
+        1: 'https://luma.test/sash',
+        2: 'https://luma.test/leila',
+        3: 'https://luma.test/jordo',
+    },
+)
+class SimGuessThreeCaseContestTests(SimGuessTwoCaseContestTests):
+    """Three-patient ward: everything two-case holds, plus case 3's book.
+
+    Inherits the two-case tests (they only touch cases 1/2, which stay open)
+    and adds case-3 coverage — the views must be fully generic over the set.
+    """
+
+    def test_status_reports_all_three_books(self):
+        resp = self._status()
+        by_case = {case['case_id']: case for case in resp.data['cases']}
+        self.assertEqual(set(by_case), {1, 2, 3})
+        self.assertTrue(all(c['state'] == 'eligible' for c in by_case.values()))
+
+    def test_case_three_has_its_own_winner_slot_and_coupon(self):
+        self.assertEqual(self._record(case_id=3).data['prize_kind'], 'free_ticket')
+        self.assertEqual(
+            self._claim(case_id=3, email='c3@example.com').data['redemption_url'],
+            'https://luma.test/jordo',
+        )
+        # Its book locks independently of the other two.
+        resp = self._status()
+        by_case = {case['case_id']: case for case in resp.data['cases']}
+        self.assertEqual(by_case[3]['state'], 'completed')
+        self.assertEqual(by_case[1]['state'], 'eligible')
+        self.assertEqual(by_case[2]['state'], 'eligible')
+
+    def test_burning_case_three_leaves_the_others_open(self):
+        self._record(case_id=3, correct=False)
+        by_case = {
+            case['case_id']: case for case in self._status().data['cases']
+        }
+        self.assertEqual(by_case[3]['state'], 'locked')
+        self.assertEqual(by_case[1]['state'], 'eligible')
+        self.assertEqual(by_case[2]['state'], 'eligible')
