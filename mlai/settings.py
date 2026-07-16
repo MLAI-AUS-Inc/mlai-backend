@@ -486,7 +486,7 @@ HEALTH_HACK_OPEN_CASE_IDS = [
 _HEALTH_HACK_DEFAULT_FREE_TICKET_URLS = {
     1: 'https://luma.com/mlai-8obe?coupon=RQY4N0',
     2: 'https://luma.com/mlai-8obe?coupon=7FS6FZ',
-    3: 'https://luma.com/mlai-8obe?coupon=CASE3_COUPON_PENDING',
+    3: 'https://luma.com/mlai-8obe?coupon=5N5PHR',
 }
 try:
     HEALTH_HACK_FREE_TICKET_URLS = {
