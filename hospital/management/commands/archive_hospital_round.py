@@ -24,6 +24,7 @@ class Command(BaseCommand):
         parser.add_argument('--new-name', default='HealthHack 2026')
         parser.add_argument('--expected-teams', type=int)
         parser.add_argument('--expected-submissions', type=int)
+        parser.add_argument('--expected-announcements', type=int)
         parser.add_argument('--archived-by-email')
         parser.add_argument(
             '--notes',
@@ -54,6 +55,7 @@ class Command(BaseCommand):
 
             team_count = active_round.teams.count()
             submission_count = active_round.submissions.count()
+            announcement_count = active_round.announcements.count()
             team_names = list(
                 active_round.teams.order_by('team_id').values_list(
                     'team_name',
@@ -66,6 +68,7 @@ class Command(BaseCommand):
             )
             self.stdout.write(f'Teams to archive: {team_count}')
             self.stdout.write(f'Submissions to archive: {submission_count}')
+            self.stdout.write(f'Announcements to archive: {announcement_count}')
             if team_names:
                 self.stdout.write('Teams: ' + ', '.join(team_names))
 
@@ -77,9 +80,14 @@ class Command(BaseCommand):
                 )
                 return
 
-            if options['expected_teams'] is None or options['expected_submissions'] is None:
+            if (
+                options['expected_teams'] is None
+                or options['expected_submissions'] is None
+                or options['expected_announcements'] is None
+            ):
                 raise CommandError(
-                    '--expected-teams and --expected-submissions are required with --execute.'
+                    '--expected-teams, --expected-submissions, and '
+                    '--expected-announcements are required with --execute.'
                 )
             if options['expected_teams'] != team_count:
                 raise CommandError(
@@ -89,6 +97,11 @@ class Command(BaseCommand):
                 raise CommandError(
                     f"Expected {options['expected_submissions']} submissions but found "
                     f'{submission_count}; no changes made.'
+                )
+            if options['expected_announcements'] != announcement_count:
+                raise CommandError(
+                    f"Expected {options['expected_announcements']} announcements but found "
+                    f'{announcement_count}; no changes made.'
                 )
             if HospitalCompetitionRound.objects.filter(slug=options['new_slug']).exists():
                 raise CommandError(
@@ -125,6 +138,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Archived '{active_round.slug}' ({team_count} teams, "
-                f"{submission_count} submissions) and opened '{new_round.slug}'."
+                f"{submission_count} submissions, {announcement_count} announcements) "
+                f"and opened '{new_round.slug}'."
             )
         )

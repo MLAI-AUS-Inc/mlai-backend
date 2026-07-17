@@ -12,7 +12,7 @@ from .models import (
 class HospitalCompetitionRoundAdmin(admin.ModelAdmin):
     list_display = (
         'name', 'slug', 'status', 'team_count', 'submission_count',
-        'opened_at', 'archived_at', 'archived_by',
+        'announcement_count', 'opened_at', 'archived_at', 'archived_by',
     )
     list_filter = ('status',)
     search_fields = ('name', 'slug', 'notes')
@@ -29,6 +29,10 @@ class HospitalCompetitionRoundAdmin(admin.ModelAdmin):
     @admin.display(description='Submissions')
     def submission_count(self, obj):
         return obj.submissions.count()
+
+    @admin.display(description='Announcements')
+    def announcement_count(self, obj):
+        return obj.announcements.count()
 
     def has_add_permission(self, request):
         return False
@@ -66,11 +70,12 @@ class SubmissionAdmin(admin.ModelAdmin):
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):
-    list_display = ('title', 'author', 'requester', 'source_channel_id', 'created_at')
-    list_filter = ('created_at',)
+    list_display = ('title', 'round', 'author', 'requester', 'source_channel_id', 'created_at')
+    list_filter = ('round__status', 'round', 'created_at')
     search_fields = ('title', 'body', 'source_channel_id', 'source_message_ts')
     ordering = ('-created_at',)
     fields = (
+        'round',
         'title',
         'body',
         'author',
@@ -78,6 +83,7 @@ class AnnouncementAdmin(admin.ModelAdmin):
         'source_channel_id',
         'source_message_ts',
     )
+    readonly_fields = ('round',)
 
 
 @admin.register(MedHackCase)

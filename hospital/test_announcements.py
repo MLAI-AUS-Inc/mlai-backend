@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from .models import Announcement
+from .models import Announcement, HospitalCompetitionRound
 
 
 User = get_user_model()
@@ -67,6 +67,7 @@ class HealthHackAnnouncementTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertTrue(response.data["created"])
         announcement = Announcement.objects.get()
+        self.assertEqual(announcement.round, HospitalCompetitionRound.get_active())
         self.assertEqual(announcement.author, self.bot)
         self.assertEqual(announcement.requester, self.organiser)
         self.assertEqual(announcement.source_channel_id, "C0BHZ9NS21L")
