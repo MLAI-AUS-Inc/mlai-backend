@@ -209,9 +209,9 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'detail': 'CSV invalid'})
 
-    def test_hospital_leaderboard_forbidden_for_non_admin(self):
+    def test_hospital_leaderboard_is_available_to_participants(self):
         response = self.client.get('/api/v1/hackathons/hospital/leaderboard/')
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_hospital_leaderboard_endpoint_returns_ranked_results(self):
         admin_user = User.objects.create_user(

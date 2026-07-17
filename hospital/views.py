@@ -26,7 +26,6 @@ from dotenv import load_dotenv
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model
 from rest_framework import permissions, status
-from core.permissions import IsLeaderboardAdmin
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from core.user_compat import get_compat_user_role
@@ -290,7 +289,7 @@ class SubmissionListCreateView(APIView):
 
 
 class LeaderboardView(APIView):
-    permission_classes = [IsLeaderboardAdmin]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         # Best submission per team, in two phases: a light id scan (two
