@@ -262,4 +262,4 @@ class MedHackOnboardingFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['slug'], 'hospital')
-        self.assertEqual(response.data['name'], 'Medhack: Frontiers')
+        self.assertEqual(response.data['name'], 'HealthHack')

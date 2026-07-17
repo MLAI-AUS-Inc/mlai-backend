@@ -5,6 +5,7 @@ import datetime
 import re
 import json
 from pathlib import Path
+from django.conf import settings
 from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -472,7 +473,7 @@ def find_label_episodes(labels, target_labels, rows_per_encounter=720):
 
 
 def _announce_if_top_score(submission):
-    """Post a hype message to #medhack-frontiers if this submission is the new #1."""
+    """Post a HealthHack hype message when this submission is the new #1."""
     try:
         previous_best = (
             Submission.objects
@@ -487,9 +488,10 @@ def _announce_if_top_score(submission):
 
         from integrations.services.slack import SlackService
 
-        channel_id = SlackService.get_channel_id_by_name("medhack-frontiers")
+        channel_name = settings.HOSPITAL_SLACK_CHANNEL_NAME
+        channel_id = SlackService.get_channel_id_by_name(channel_name)
         if not channel_id:
-            logger.warning("Could not find #medhack-frontiers channel for leaderboard announcement")
+            logger.warning("Could not find #%s channel for leaderboard announcement", channel_name)
             return
 
         team_name = submission.team.team_name if submission.team else "an unnamed team"
@@ -538,7 +540,7 @@ def _announce_if_top_score(submission):
         )
 
         SlackService.send_message(channel_id, message)
-        logger.info(f"Announced new top score {submission.score} by {team_name} in #medhack-frontiers")
+        logger.info("Announced new top score %s by %s in #%s", submission.score, team_name, channel_name)
 
     except Exception as e:
         # Never let a Slack failure break the submission flow
@@ -563,7 +565,7 @@ def submit_predictions(request):
         if not team:
             return JsonResponse(
                 {
-                    **_error_payload('You must join a MedHack team before submitting.'),
+                    **_error_payload('You must join a HealthHack team before submitting.'),
                     'min_members': MEDHACK_TEAM_MIN_MEMBERS,
                     'max_members': MEDHACK_TEAM_MAX_MEMBERS,
                 },
@@ -854,10 +856,10 @@ class AnnouncementListView(generics.ListAPIView):
 
 
 class ChannelMessagesView(APIView):
-    """Read-only feed of messages from the #medhack-frontiers Slack channel."""
+    """Read-only feed of messages from the configured HealthHack Slack channel."""
     permission_classes = [permissions.IsAuthenticated]
 
-    CHANNEL_NAME = "medhack-frontiers"
+    CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 
     def get(self, request):
         from integrations.services.slack import SlackService
@@ -897,10 +899,10 @@ class ChannelMessagesView(APIView):
 
 
 class ThreadRepliesView(APIView):
-    """Read-only replies for a single thread in #medhack-frontiers."""
+    """Read-only replies for a single thread in the HealthHack Slack channel."""
     permission_classes = [permissions.IsAuthenticated]
 
-    CHANNEL_NAME = "medhack-frontiers"
+    CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 
     def get(self, request, thread_ts):
         from integrations.services.slack import SlackService
