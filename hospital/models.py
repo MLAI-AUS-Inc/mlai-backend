@@ -33,11 +33,30 @@ class Announcement(models.Model):
     title = models.CharField(max_length=255)
     body = models.TextField()
     author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='hospital_announcements')
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='requested_hospital_announcements',
+        null=True,
+        blank=True,
+    )
+    source_channel_id = models.CharField(max_length=32, null=True, blank=True)
+    source_message_ts = models.CharField(max_length=32, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_channel_id', 'source_message_ts'],
+                condition=(
+                    models.Q(source_channel_id__isnull=False)
+                    & models.Q(source_message_ts__isnull=False)
+                ),
+                name='uniq_hospital_announcement_slack_source',
+            ),
+        ]
 
     def __str__(self):
         return self.title

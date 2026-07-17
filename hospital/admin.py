@@ -22,11 +22,18 @@ class SubmissionAdmin(admin.ModelAdmin):
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):
-    list_display = ('title', 'author', 'created_at')
+    list_display = ('title', 'author', 'requester', 'source_channel_id', 'created_at')
     list_filter = ('created_at',)
-    search_fields = ('title', 'body')
+    search_fields = ('title', 'body', 'source_channel_id', 'source_message_ts')
     ordering = ('-created_at',)
-    fields = ('title', 'body', 'author')
+    fields = (
+        'title',
+        'body',
+        'author',
+        'requester',
+        'source_channel_id',
+        'source_message_ts',
+    )
 
 
 @admin.register(MedHackCase)

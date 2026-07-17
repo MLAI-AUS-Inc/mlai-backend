@@ -4,6 +4,7 @@ from . import views
 from . import world_views
 from . import sim_contest_views
 from . import sim_patient_views
+from .announcement_views import HealthHackAnnouncementListCreateView
 
 
 urlpatterns = [
@@ -21,7 +22,7 @@ urlpatterns = [
     path('get_submission/', views.get_submission, name='get_submission'),
     path('get_recent_submissions/', views.get_recent_submissions, name='get_recent_submissions'),
     path('get_submission/<int:submission_id>/', views.get_submission_by_id, name='get_submission_by_id'),
-    path('announcements/', views.AnnouncementListView.as_view(), name='hospital-announcement-list'),
+    path('announcements/', HealthHackAnnouncementListCreateView.as_view(), name='hospital-announcement-list'),
     path('channel/', views.ChannelMessagesView.as_view(), name='hospital-channel'),
     path('channel/thread/<str:thread_ts>/', views.ThreadRepliesView.as_view(), name='hospital-thread'),
 ]
