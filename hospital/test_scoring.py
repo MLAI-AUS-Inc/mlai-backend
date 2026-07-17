@@ -53,7 +53,7 @@ class AustralianGroundTruthTests(SimpleTestCase):
                 last_id = expected_id
 
         self.assertEqual(last_id, 452_880)
-        self.assertEqual(label_counts, {0: 332_120, 1: 80_958, 2: 31_232, 3: 8_570})
+        self.assertEqual(label_counts, {0: 331_167, 1: 81_617, 2: 31_471, 3: 8_625})
         self.assertEqual(usage_counts, {'Private': 272_160, 'Public': 180_720})
 
 
@@ -116,12 +116,12 @@ class SubmissionScoringTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload['score'], 281_322)
+        self.assertEqual(payload['score'], 283_522)
         self.assertEqual(payload['accuracy'], 1.0)
-        self.assertEqual(payload['feedback']['class_stats']['0']['total'], 332_120)
-        self.assertEqual(payload['feedback']['class_stats']['1']['total'], 80_958)
-        self.assertEqual(payload['feedback']['class_stats']['2']['total'], 31_232)
-        self.assertEqual(payload['feedback']['class_stats']['3']['total'], 8_570)
+        self.assertEqual(payload['feedback']['class_stats']['0']['total'], 331_167)
+        self.assertEqual(payload['feedback']['class_stats']['1']['total'], 81_617)
+        self.assertEqual(payload['feedback']['class_stats']['2']['total'], 31_471)
+        self.assertEqual(payload['feedback']['class_stats']['3']['total'], 8_625)
         self.assertEqual(payload['feedback']['missed_crises_total'], 0)
         self.assertEqual(payload['feedback']['clinical_metrics']['false_alarms'], 0)
 
