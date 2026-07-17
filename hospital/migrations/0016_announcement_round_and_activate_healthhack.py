@@ -70,6 +70,10 @@ def restore_legacy_round(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    # PostgreSQL must commit the round/announcement data updates before Django
+    # alters their foreign-key constraint, otherwise pending trigger events
+    # prevent the schema change.
+    atomic = False
 
     dependencies = [
         ('hospital', '0015_hospital_competition_round'),
