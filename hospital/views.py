@@ -11,7 +11,12 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.shortcuts import get_object_or_404
-from .models import Submission, Team
+from .models import HospitalCompetitionRound, Submission, Team
+from .rounds import (
+    active_hospital_submissions,
+    active_hospital_team_for,
+    active_hospital_teams,
+)
 from .serializers import TeamSerializer, SubmissionSerializer
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
@@ -51,7 +56,7 @@ class TeamListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        teams = Team.objects.all().order_by('team_id')
+        teams = active_hospital_teams().order_by('team_id')
         member_id = request.query_params.get('member_id')
         if member_id and member_id not in ('undefined', 'null'):
             try:
@@ -98,7 +103,11 @@ class TeamListView(APIView):
         if not team_name:
             return Response({"error": "team_name is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_team = Team.objects.filter(team_name__iexact=team_name).first()
+        competition_round = HospitalCompetitionRound.get_active()
+        existing_team = Team.objects.filter(
+            round=competition_round,
+            team_name__iexact=team_name,
+        ).first()
         created = False
 
         if existing_team:
@@ -107,7 +116,10 @@ class TeamListView(APIView):
                 team.avatar_url = requested_avatar_url
                 team.save(update_fields=['avatar_url'])
         else:
-            create_kwargs = {'team_name': team_name}
+            create_kwargs = {
+                'round': competition_round,
+                'team_name': team_name,
+            }
             requested_team_id = _extract_team_id_from_code(requested_code)
             if requested_code and requested_team_id is None:
                 return Response(
@@ -130,7 +142,7 @@ class TeamListView(APIView):
 
         # Keep one-team-per-user semantics for this hackathon.
         user = request.user
-        for current_team in user.hospital_teams.all():
+        for current_team in user.hospital_teams.filter(round=competition_round):
             current_team.members.remove(user)
 
         if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
@@ -160,13 +172,14 @@ class JoinTeamView(APIView):
 
         lookup_team_id = team_id
         team = None
+        teams = active_hospital_teams()
         if lookup_team_id is None and code:
             lookup_team_id = _extract_team_id_from_code(code)
             if lookup_team_id is not None:
-                team = Team.objects.filter(team_id=lookup_team_id).first()
+                team = teams.filter(team_id=lookup_team_id).first()
             else:
                 # Backward-compatible support where code is actually a team name.
-                team = Team.objects.filter(team_name__iexact=str(code).strip()).first()
+                team = teams.filter(team_name__iexact=str(code).strip()).first()
 
             if team is None:
                 return Response(
@@ -174,7 +187,7 @@ class JoinTeamView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
         elif lookup_team_id is not None:
-            team = get_object_or_404(Team, team_id=lookup_team_id)
+            team = get_object_or_404(teams, team_id=lookup_team_id)
         user = request.user
 
         if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
@@ -187,7 +200,7 @@ class JoinTeamView(APIView):
             )
 
         # Keep one-team-per-user semantics for this hackathon.
-        for current_team in user.hospital_teams.all():
+        for current_team in user.hospital_teams.filter(round=team.round):
             current_team.members.remove(user)
 
         team.members.add(user)
@@ -211,7 +224,7 @@ class SubmissionListCreateView(APIView):
 
     def get(self, request):
         submissions = (
-            Submission.objects.filter(user=request.user)
+            active_hospital_submissions().filter(user=request.user)
             .select_related('team')
             # The list serialises only light fields — leave the multi-KB
             # feedback JSON in the database.
@@ -277,7 +290,7 @@ class LeaderboardView(APIView):
         # 2026-07-13 event) on each request.
         best_ids = {}
         for sub in (
-            Submission.objects.filter(team__isnull=False)
+            active_hospital_submissions().filter(team__isnull=False)
             .order_by('-score', '-submitted_at')
             .values('id', 'team_id')
         ):
@@ -286,7 +299,7 @@ class LeaderboardView(APIView):
 
         winners = {
             sub.id: sub
-            for sub in Submission.objects.select_related('team').filter(
+            for sub in active_hospital_submissions().select_related('team').filter(
                 id__in=best_ids.values()
             )
         }
@@ -476,7 +489,7 @@ def _announce_if_top_score(submission):
     """Post a HealthHack hype message when this submission is the new #1."""
     try:
         previous_best = (
-            Submission.objects
+            Submission.objects.filter(round=submission.round)
             .exclude(id=submission.id)
             .order_by('-score')
             .values_list('score', flat=True)
@@ -561,7 +574,7 @@ def submit_predictions(request):
         # Instead of getting team_id from POST, retrieve it from the user.
         # This assumes each user belongs to at least one team. If they might not,
         # you can default to None.
-        team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') and user.hospital_teams.exists() else None
+        team = active_hospital_team_for(user)
         if not team:
             return JsonResponse(
                 {
@@ -736,6 +749,7 @@ def submit_predictions(request):
 
         # Create Submission with feedback — no Prediction rows needed
         submission = Submission.objects.create(
+            round=team.round,
             user=user,
             team=team,
             participant_name=participant_name,
@@ -767,7 +781,9 @@ def get_submission(request):
     if request.method == 'GET':
         if not request.user.is_authenticated:
             return JsonResponse({'error': 'Authentication required'}, status=401)
-        submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
+        submission = active_hospital_submissions().filter(
+            user=request.user,
+        ).order_by('-submitted_at').first()
         if not submission:
             return JsonResponse({'error': 'No submission found'}, status=404)
 
@@ -798,7 +814,10 @@ def get_submission_by_id(request, submission_id):
     
     try:
         # Ensure the submission belongs to the current user
-        submission = Submission.objects.get(id=submission_id, user=request.user)
+        submission = active_hospital_submissions().get(
+            id=submission_id,
+            user=request.user,
+        )
     except Submission.DoesNotExist:
         return JsonResponse({'error': 'Submission not found'}, status=404)
 
@@ -826,12 +845,14 @@ def get_submission_by_id(request, submission_id):
 @permission_classes([IsAuthenticated])
 def get_recent_submissions(request):
     user = request.user
-    team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
+    team = active_hospital_team_for(user)
     if not team:
         return JsonResponse({'error': 'User is not part of any team'}, status=400)
     
     # Retrieve the 5 most recent submissions for this team
-    submissions = Submission.objects.filter(team=team).order_by('-submitted_at')[:5]
+    submissions = active_hospital_submissions().filter(
+        team=team,
+    ).order_by('-submitted_at')[:5]
     
     submission_list = []
     for sub in submissions:

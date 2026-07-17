@@ -14,7 +14,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Submission, Team
+from .models import HospitalCompetitionRound, Submission, Team
 
 WORLD_CACHE_KEY = "hospital_world_state"
 # The build is now O(teams) not O(submissions), so freshness — not cost —
@@ -64,11 +64,16 @@ class WorldStateView(APIView):
         # ≈ 600MB) into memory on every cache miss and melting the workers.
         # This view is polled every ~5s per connected player.
         best = (
-            Submission.objects.filter(team=OuterRef("pk"))
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                team=OuterRef("pk"),
+            )
             .order_by("-score", "submitted_at")
         )
         teams = list(
-            Team.objects.annotate(
+            Team.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+            ).annotate(
                 best_score=Subquery(best.values("score")[:1]),
                 best_submitted=Subquery(best.values("submitted_at")[:1]),
             )
@@ -119,7 +124,10 @@ class WorldStateView(APIView):
 
         cutoff = timezone.now() - RECENT_SUBMISSION_WINDOW
         for sub in (
-            Submission.objects.filter(submitted_at__gte=cutoff)
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                submitted_at__gte=cutoff,
+            )
             .order_by("-submitted_at")
             .values("id", "accuracy", "team__team_name")[:RECENT_SUBMISSION_LIMIT]
         ):

@@ -27,9 +27,13 @@ class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             # Check hospital teams
             if hasattr(request.user, 'hospital_teams') and hasattr(obj, 'hospital_teams'):
-                user_teams = request.user.hospital_teams.all()
-                obj_teams = obj.hospital_teams.all()
-                if any(team in user_teams for team in obj_teams):
+                user_team_ids = request.user.hospital_teams.filter(
+                    round__status='active',
+                ).values_list('pk', flat=True)
+                if obj.hospital_teams.filter(
+                    round__status='active',
+                    pk__in=user_team_ids,
+                ).exists():
                     return True
             
             # Check esafety teams
