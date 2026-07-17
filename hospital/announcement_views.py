@@ -16,7 +16,8 @@ from core.slack_users import (
     validate_slack_id,
 )
 
-from .models import Announcement
+from .models import Announcement, HospitalCompetitionRound
+from .rounds import active_hospital_announcements
 from .serializers import AnnouncementSerializer
 
 
@@ -36,7 +37,7 @@ class HealthHackAnnouncementListCreateView(APIView):
         return [permissions.IsAuthenticated()]
 
     def get(self, request):
-        announcements = Announcement.objects.select_related("author").all()
+        announcements = active_hospital_announcements().select_related("author")
         return Response(
             AnnouncementSerializer(announcements, many=True).data,
             status=status.HTTP_200_OK,
@@ -126,16 +127,19 @@ class HealthHackAnnouncementListCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        competition_round = HospitalCompetitionRound.get_active()
         defaults = {
             "title": title,
             "body": body,
             "author": author,
             "requester": requester,
+            "round": competition_round,
         }
         if source_channel_id and source_message_ts:
             announcement, created = self._get_or_create_from_slack_source(
                 source_channel_id=source_channel_id,
                 source_message_ts=source_message_ts,
+                competition_round=competition_round,
                 defaults=defaults,
             )
             if not created and (
@@ -167,11 +171,13 @@ class HealthHackAnnouncementListCreateView(APIView):
         *,
         source_channel_id: str,
         source_message_ts: str,
+        competition_round: HospitalCompetitionRound,
         defaults: dict,
     ):
         try:
             with transaction.atomic():
                 return Announcement.objects.get_or_create(
+                    round=competition_round,
                     source_channel_id=source_channel_id,
                     source_message_ts=source_message_ts,
                     defaults=defaults,
@@ -179,6 +185,7 @@ class HealthHackAnnouncementListCreateView(APIView):
         except IntegrityError:
             return (
                 Announcement.objects.get(
+                    round=competition_round,
                     source_channel_id=source_channel_id,
                     source_message_ts=source_message_ts,
                 ),

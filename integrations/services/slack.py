@@ -256,7 +256,13 @@ class SlackService:
             return None
 
     @classmethod
-    def get_channel_history(cls, channel_id: str, limit: int = 50, cursor: str = None) -> Optional[Dict[str, Any]]:
+    def get_channel_history(
+        cls,
+        channel_id: str,
+        limit: int = 50,
+        cursor: str = None,
+        oldest: str = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Fetch messages from a public channel.
 
@@ -264,6 +270,7 @@ class SlackService:
             channel_id: The Slack channel ID.
             limit: Max messages to return (1-100).
             cursor: Pagination cursor from a previous response.
+            oldest: Optional Slack timestamp lower bound for the active event round.
 
         Returns:
             Dict with 'messages' list and 'next_cursor' for pagination, or None on error.
@@ -273,6 +280,8 @@ class SlackService:
             kwargs = {"channel": channel_id, "limit": limit}
             if cursor:
                 kwargs["cursor"] = cursor
+            if oldest:
+                kwargs["oldest"] = oldest
             response = client.conversations_history(**kwargs)
             messages = response.get("messages", [])
             next_cursor = response.get("response_metadata", {}).get("next_cursor")

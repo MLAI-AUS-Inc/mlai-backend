@@ -89,6 +89,11 @@ class Team(models.Model):
         return f"{self.team_name} (ID: {self.team_id}, round: {self.round.slug})"
 
 class Announcement(models.Model):
+    round = models.ForeignKey(
+        HospitalCompetitionRound,
+        on_delete=models.PROTECT,
+        related_name='announcements',
+    )
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=255)
     body = models.TextField()
@@ -105,16 +110,21 @@ class Announcement(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args, **kwargs):
+        if self.round_id is None:
+            self.round = HospitalCompetitionRound.get_active()
+        super().save(*args, **kwargs)
+
     class Meta:
         ordering = ['-created_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['source_channel_id', 'source_message_ts'],
+                fields=['round', 'source_channel_id', 'source_message_ts'],
                 condition=(
                     models.Q(source_channel_id__isnull=False)
                     & models.Q(source_message_ts__isnull=False)
                 ),
-                name='uniq_hospital_announcement_slack_source',
+                name='uniq_hospital_announcement_slack_source_per_round',
             ),
         ]
 

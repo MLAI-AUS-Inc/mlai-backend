@@ -4,6 +4,7 @@ import logging
 import datetime
 import re
 import json
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from django.conf import settings
 from django.utils import timezone
@@ -50,6 +51,15 @@ def _extract_team_id_from_code(code):
         return int(match.group('team_id'))
     except (TypeError, ValueError):
         return None
+
+
+def _slack_timestamp_is_current(timestamp_value, opened_at):
+    try:
+        message_timestamp = Decimal(str(timestamp_value))
+        round_timestamp = Decimal(f'{opened_at.timestamp():.6f}')
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return message_timestamp >= round_timestamp
 
 
 class TeamListView(APIView):
@@ -881,18 +891,30 @@ class ChannelMessagesView(APIView):
 
         cursor = request.query_params.get('cursor')
         limit = min(int(request.query_params.get('limit', 30)), 100)
+        competition_round = HospitalCompetitionRound.get_active()
+        oldest = f'{competition_round.opened_at.timestamp():.6f}'
 
         channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
         if not channel_id:
             return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        result = SlackService.get_channel_history(channel_id, limit=limit, cursor=cursor)
+        result = SlackService.get_channel_history(
+            channel_id,
+            limit=limit,
+            cursor=cursor,
+            oldest=oldest,
+        )
         if result is None:
             return Response({"error": "Failed to fetch messages from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
 
         user_cache = {}
         messages = []
         for msg in result["messages"]:
+            if not _slack_timestamp_is_current(
+                msg.get("ts"),
+                competition_round.opened_at,
+            ):
+                continue
             user_id = msg.get("user")
             if user_id and user_id not in user_cache:
                 user_cache[user_id] = SlackService.get_user_profile(user_id)
@@ -922,6 +944,13 @@ class ThreadRepliesView(APIView):
     def get(self, request, thread_ts):
         from integrations.services.slack import SlackService
 
+        competition_round = HospitalCompetitionRound.get_active()
+        if not _slack_timestamp_is_current(thread_ts, competition_round.opened_at):
+            return Response(
+                {"error": "Thread not found in the active HealthHack round"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
         if not channel_id:
             return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -933,6 +962,11 @@ class ThreadRepliesView(APIView):
         user_cache = {}
         enriched = []
         for msg in replies:
+            if not _slack_timestamp_is_current(
+                msg.get("ts"),
+                competition_round.opened_at,
+            ):
+                continue
             user_id = msg.get("user")
             if user_id and user_id not in user_cache:
                 user_cache[user_id] = SlackService.get_user_profile(user_id)
