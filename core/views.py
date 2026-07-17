@@ -64,6 +64,13 @@ def _team_member_payload_from_values(member):
     }
 
 
+def _active_hospital_team(user):
+    manager = getattr(user, 'hospital_teams', None)
+    if manager is None:
+        return None
+    return manager.filter(round__status='active').first()
+
+
 def _normalize_app_context(app_value, default='hospital'):
     app = str(app_value or '').strip().lower()
     if not app:
@@ -476,7 +483,7 @@ class CurrentUserView(APIView):
             return response
         
         # Retrieve hospital team
-        hospital_team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
+        hospital_team = _active_hospital_team(user)
         hospital_team_data = None
         if hospital_team:
             members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")
@@ -636,7 +643,7 @@ class UpdateProfileView(APIView):
         team_avatar_file = request.FILES.get('team_avatar')
         if team_avatar_file:
             if app_context == 'hospital':
-                team = user.hospital_teams.first()
+                team = _active_hospital_team(user)
             elif app_context == 'esafety':
                 team = user.esafety_teams.first()
             elif app_context == 'watt-the-hack':
@@ -652,7 +659,7 @@ class UpdateProfileView(APIView):
                     team = None
             else:
                 team = (
-                    user.hospital_teams.first()
+                    _active_hospital_team(user)
                     or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
                 )
             if team:
@@ -684,7 +691,7 @@ class UpdateProfileView(APIView):
 
         # Return the updated profile — team data is read-only here,
         # managed via /api/v1/hackathons/{app}/teams/ endpoints.
-        hospital_team = user.hospital_teams.first()
+        hospital_team = _active_hospital_team(user)
         hospital_team_data = None
         if hospital_team:
             members = hospital_team.members.all().values("first_name", "last_name", "avatar_url")

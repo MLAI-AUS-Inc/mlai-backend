@@ -2,23 +2,67 @@ import json
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    Team, Submission, Announcement, MedHackCase, MedHackGuess, MedHackWinner,
+    HospitalCompetitionRound, Team, Submission, Announcement, MedHackCase,
+    MedHackGuess, MedHackWinner,
     SimDiagnosisGuess, SimCaseWinner, SimParticipant, SimConversation,
     SimConversationTurn,
 )
 
+@admin.register(HospitalCompetitionRound)
+class HospitalCompetitionRoundAdmin(admin.ModelAdmin):
+    list_display = (
+        'name', 'slug', 'status', 'team_count', 'submission_count',
+        'opened_at', 'archived_at', 'archived_by',
+    )
+    list_filter = ('status',)
+    search_fields = ('name', 'slug', 'notes')
+    ordering = ('-opened_at',)
+    readonly_fields = (
+        'slug', 'name', 'status', 'opened_at', 'archived_at', 'archived_by',
+        'notes',
+    )
+
+    @admin.display(description='Teams')
+    def team_count(self, obj):
+        return obj.teams.count()
+
+    @admin.display(description='Submissions')
+    def submission_count(self, obj):
+        return obj.submissions.count()
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ('team_id', 'team_name', 'member_list', 'member_count')
+    list_display = ('team_id', 'team_name', 'round', 'member_list', 'member_count')
+    list_filter = ('round__status', 'round')
     search_fields = ('team_id', 'team_name')
-    ordering = ('team_id',)
+    ordering = ('-round__opened_at', 'team_id')
+    readonly_fields = ('round', 'team_id')
     filter_horizontal = ('members',)  # Easy widget for editing members
+
+    @admin.display(description='Members')
+    def member_list(self, obj):
+        return ', '.join(
+            member.full_name or member.email for member in obj.members.all()
+        )
+
+    @admin.display(description='Member count')
+    def member_count(self, obj):
+        return obj.members.count()
 
 
 @admin.register(Submission)
 class SubmissionAdmin(admin.ModelAdmin):
-    list_display = ('user', 'team', 'score', 'submitted_at')
-    list_filter = ('team', 'submitted_at')
+    list_display = ('user', 'team', 'round', 'score', 'submitted_at')
+    list_filter = ('round__status', 'round', 'team', 'submitted_at')
     search_fields = ('user__email', 'team__team_name')
+    readonly_fields = ('round',)
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):
