@@ -11,15 +11,15 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.shortcuts import get_object_or_404
-from .models import Submission, Team, Announcement
-from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
+from .models import Submission, Team
+from .serializers import TeamSerializer, SubmissionSerializer
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 import logging
 from dotenv import load_dotenv
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model
-from rest_framework import permissions, status, generics
+from rest_framework import permissions, status
 from core.permissions import IsLeaderboardAdmin
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -847,12 +847,6 @@ def get_recent_submissions(request):
             }
         })
     return JsonResponse(submission_list, safe=False)
-
-
-class AnnouncementListView(generics.ListAPIView):
-    queryset = Announcement.objects.all()
-    serializer_class = AnnouncementSerializer
-    permission_classes = [permissions.IsAuthenticated]
 
 
 class ChannelMessagesView(APIView):
