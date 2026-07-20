@@ -535,15 +535,35 @@ class XeroReconciliationWorkflowTests(TestCase):
         import_xero_statement_lines(
             organization=self.organization,
             bank_account_id="bank-1",
-            lines=[{
-                "statement_line_id": "jetstar-1",
-                "date": "20 Jul 2026",
-                "narration": "JETSTAR AIRWAYS Card xx1336",
-                "reference": "POS",
-                "direction": "debit",
-                "amount": "362.20",
-                "has_ok": False,
-            }],
+            lines=[
+                {
+                    "statement_line_id": "jetstar-1",
+                    "date": "20 Jul 2026",
+                    "narration": "JETSTAR AIRWAYS Card xx1336",
+                    "reference": "POS",
+                    "direction": "debit",
+                    "amount": "362.20",
+                    "has_ok": False,
+                },
+                {
+                    "statement_line_id": "city-1",
+                    "date": "20 Jul 2026",
+                    "narration": "CITY OF MELBOURN",
+                    "reference": "MIS",
+                    "direction": "credit",
+                    "amount": "74.80",
+                    "has_ok": False,
+                },
+                {
+                    "statement_line_id": "stone-1",
+                    "date": "20 Jul 2026",
+                    "narration": "STONE AND CHALK",
+                    "reference": "POS",
+                    "direction": "debit",
+                    "amount": "55.00",
+                    "has_ok": False,
+                },
+            ],
         )
         google_connection = GoogleConnection.objects.create(
             user=self.user,
@@ -588,15 +608,61 @@ class XeroReconciliationWorkflowTests(TestCase):
             subject="Unrelated software receipt",
             snippet="Total $362.20",
         )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-generic-melbourne",
+            gmail_thread_id="thread-generic-melbourne",
+            internal_date=datetime(2026, 7, 20, 11, tzinfo=timezone.utc),
+            subject="Melbourne update",
+            snippet="The total was $74.80.",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-city-of-melbourne",
+            gmail_thread_id="thread-city-of-melbourne",
+            internal_date=datetime(2026, 7, 19, 11, tzinfo=timezone.utc),
+            subject="City of Melbourne permit refund",
+            snippet="Refund total $74.80.",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-stone-and-chalk",
+            gmail_thread_id="thread-stone-and-chalk",
+            internal_date=datetime(2026, 7, 19, 12, tzinfo=timezone.utc),
+            subject="Stone & Chalk room booking",
+            snippet="The venue booking total was $55.00.",
+        )
+        SlackMessageArtifact.objects.create(
+            organization=self.organization,
+            connection=slack_connection,
+            channel_id="C-RANDOM",
+            channel_name="random",
+            slack_message_ts="1784455300.000002",
+            posted_at=datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+            author_name="Sam",
+            text="Catering and $55.00 in supplies.",
+        )
 
         context = build_statement_reconciliation_context(organization=self.organization)
-        candidate = context["statement_candidates"][0]
+        candidates = {item["statement_line_id"]: item for item in context["statement_candidates"]}
+        candidate = candidates["jetstar-1"]
         evidence = candidate["context_evidence"]
         self.assertEqual({item["source_provider"] for item in evidence}, {"gmail", "slack"})
         self.assertNotIn("gmail-unrelated", {item["source_record_id"] for item in evidence})
         gmail_evidence = next(item for item in evidence if item["source_provider"] == "gmail")
         self.assertIn("amount:362.20", gmail_evidence["match_reasons"])
         self.assertIn("Jetstar itinerary", gmail_evidence["summary"])
+        self.assertEqual(
+            {item["source_record_id"] for item in candidates["city-1"]["context_evidence"]},
+            {"gmail-city-of-melbourne"},
+        )
+        self.assertEqual(
+            {item["source_record_id"] for item in candidates["stone-1"]["context_evidence"]},
+            {"gmail-stone-and-chalk"},
+        )
 
 
 class ReconciliationWorkflowApiTests(APITestCase):
