@@ -30,9 +30,9 @@
           "ai_volume_display": "320/mo",         // may be ""
           "why_recommended": "Low difficulty...",// may be ""
           "recommended": true,
-          "confirm_url": "https://api.mlai.au/..." // one-click signed approve
+          "confirm_url": "https://api.mlai.au/..." // signed confirmation page
         }
-        // ...up to 4 topics
+        // ...exactly 3 topics for a normal daily run
       ]
     }
 
@@ -61,7 +61,7 @@
               {% if greeting_name != blank %}{{ greeting_name }}, your{% else %}Your{% endif %} topics for {{ site_domain }}
             </h1>
             <p style="margin:12px 0 0 0;font-size:15px;line-height:1.5;color:#4b5563;">
-              We researched today's best opportunities. Pick one and we'll write the article — one click, no login.
+              We researched today's best opportunities. Pick one, confirm your choice, and we'll start writing — no login required.
             </p>
           </td>
         </tr>
@@ -82,7 +82,7 @@
         {% for topic in topic_list %}
         <tr>
           <td style="padding:16px 32px 0 32px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;{% if topic.recommended %}border-color:#6366f1;box-shadow:0 0 0 1px #6366f1;{% endif %}">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;">
               <tr>
                 <td style="padding:20px 20px 16px 20px;">
                   {% if topic.recommended %}
@@ -156,7 +156,8 @@
     "unsubscribe_url": "https://api.mlai.au/example-unsubscribe",
     "topics": [
       {"rank": 1, "keyword": "ai code review", "display_title": "How AI Code Review Cuts PR Cycle Time", "volume_display": "1.2k/mo", "difficulty": 34, "opportunity_index": 82, "tier_label": "Quick win", "ai_volume_display": "320/mo", "why_recommended": "Low difficulty, high intent, and you already rank for adjacent terms.", "recommended": true, "confirm_url": "https://api.mlai.au/approve-1"},
-      {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "", "ai_volume_display": "", "why_recommended": "", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"}
+      {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "Authority Builder", "ai_volume_display": "", "why_recommended": "Strong audience fit and useful evergreen demand.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"},
+      {"rank": 3, "keyword": "ai workflow automation", "display_title": "AI Workflow Automation for Small Teams", "volume_display": "480/mo", "difficulty": 42, "opportunity_index": 57, "tier_label": "Long-tail Gem", "ai_volume_display": "90/mo", "why_recommended": "Focused intent with attainable competition.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-3"}
     ]
   }
 -->
