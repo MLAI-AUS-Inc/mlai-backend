@@ -6,7 +6,7 @@
   1. In Customer.io, create (or open) the transactional message whose id you set
      as CUSTOMERIO_TOPIC_TEMPLATE_ID in the mlai-backend env.
   2. Edit the message body as "Code"/HTML and paste this entire file in.
-  3. Set a subject, e.g.  Your {{ topics.size }} topics for today ✍️
+  3. Set a subject, e.g.  Your 3 article recommendations for {{ trigger.domain }} ✍️
   4. Send a test with the sample payload at the bottom of this file.
 
   DATA CONTRACT
@@ -36,18 +36,18 @@
       ]
     }
 
-  Customer.io's transactional API exposes message_data keys at the TOP LEVEL
-  ({{ topics }}, {{ first_name }}). The aliases below also accept a nested
-  {{ message_data.topics }} shape so the template renders either way.
+  Customer.io's transactional API exposes message_data beneath the `trigger`
+  object ({{ trigger.topics }}, {{ trigger.first_name }}). The aliases below
+  retain the historical top-level/nested fallbacks for previews and old sends.
 
   LIQUID GOTCHA: in Liquid an empty string AND an empty array are TRUTHY, so
-  `{% if x %}` fires even when x is "". Optional fields are guarded with
+  a simple truthiness branch fires even when x is "". Optional fields are guarded with
   `!= blank` and the empty-state with `== blank`. Do not "simplify" these.
 -->
-{%- assign topic_list = topics | default: message_data.topics -%}
-{%- assign greeting_name = first_name | default: message_data.first_name -%}
-{%- assign site_domain = domain | default: message_data.domain -%}
-{%- assign optout_url = unsubscribe_url | default: message_data.unsubscribe_url -%}
+{%- assign topic_list = trigger.topics | default: topics | default: message_data.topics -%}
+{%- assign greeting_name = trigger.first_name | default: first_name | default: message_data.first_name -%}
+{%- assign site_domain = trigger.domain | default: domain | default: message_data.domain -%}
+{%- assign optout_url = trigger.unsubscribe_url | default: unsubscribe_url | default: message_data.unsubscribe_url -%}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
   <tr>
     <td align="center">
