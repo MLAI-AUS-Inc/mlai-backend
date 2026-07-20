@@ -858,6 +858,10 @@ STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
 )
 STRIPE_OAUTH_SCOPES = _env_list("STRIPE_OAUTH_SCOPES", ["read_only"])
 STRIPE_API_VERSION = os.environ.get("STRIPE_API_VERSION", "2026-02-25.clover")
+RECONCILIATION_DEFAULT_DOMAIN = os.environ.get("RECONCILIATION_DEFAULT_DOMAIN", "mlai.au")
+RECONCILIATION_SCHEDULER_ENABLED = os.environ.get(
+    "RECONCILIATION_SCHEDULER_ENABLED", "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 XERO_CLIENT_ID = os.environ.get("XERO_CLIENT_ID", "")
 XERO_CLIENT_SECRET = os.environ.get("XERO_CLIENT_SECRET", "")
@@ -873,6 +877,9 @@ XERO_OAUTH_SCOPES = _env_list(
         "accounting.payments.read",
         "accounting.settings.read",
         "accounting.contacts.read",
+        # Required by the explicit Stripe-payout approval workflow. Existing
+        # connections must reconnect once to grant this additional scope.
+        "accounting.banktransactions",
     ],
 )
 

@@ -13,6 +13,7 @@ from integrations.services.github_installations import (
     run_github_installation_reconciliation_sweep,
 )
 from integrations.services.research_automations import run_research_automation_scheduler
+from integrations.services.xero_reconciliation import run_daily_payout_reconciliation
 from jobs.services.job_pipeline import run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 
@@ -81,6 +82,9 @@ class Command(BaseCommand):
             # "registry exists" guards. Self-throttling (min-age + probe
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
+            # Refreshes the durable Stripe payout ledger once per local day.
+            # This never posts to Xero; posting always requires admin approval.
+            ("stripe_payout_reconciliation", run_daily_payout_reconciliation),
             # Enforces the configured raw-dialogue retention window once per
             # local day. Its cache marker makes the minute scheduler tick cheap.
             ("health_hack_conversation_retention", run_scheduled_sim_conversation_cleanup),

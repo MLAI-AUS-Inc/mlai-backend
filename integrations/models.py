@@ -554,3 +554,160 @@ class CommunityBridgeDelivery(models.Model):
             f"{self.delivery_type}:{self.source_platform}:{self.source_message_id}"
             f" -> {self.target_platform} ({self.status})"
         )
+
+
+class ReconciliationProfile(models.Model):
+    """Per-organisation accounting policy for Stripe payout reconciliation.
+
+    Account codes and tax types are deliberately configuration, never inferred
+    from Stripe or Luma.  That keeps the integration from making tax decisions
+    on behalf of the organisation's accountant.
+    """
+
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_profile",
+    )
+    xero_connection = models.ForeignKey(
+        ExternalServiceConnection,
+        on_delete=models.SET_NULL,
+        related_name="reconciliation_profiles",
+        null=True,
+        blank=True,
+    )
+    stripe_account_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bank_account_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bank_account_name = models.CharField(max_length=255, blank=True, default="")
+    xero_contact_id = models.CharField(max_length=255, blank=True, default="")
+    xero_contact_name = models.CharField(max_length=255, default="Stripe Payments")
+    revenue_account_code = models.CharField(max_length=64, blank=True, default="")
+    fee_account_code = models.CharField(max_length=64, blank=True, default="")
+    refund_account_code = models.CharField(max_length=64, blank=True, default="")
+    revenue_tax_type = models.CharField(max_length=64, blank=True, default="")
+    fee_tax_type = models.CharField(max_length=64, blank=True, default="")
+    refund_tax_type = models.CharField(max_length=64, blank=True, default="")
+    line_amount_types = models.CharField(max_length=16, default="Inclusive")
+    event_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_category_name = models.CharField(max_length=255, default="Event Name")
+    project_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
+    standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
+    standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_profile"
+
+
+class ReconciliationMapping(models.Model):
+    """Maps an immutable Stripe/Luma source ID to approved Xero dimensions."""
+
+    SOURCE_LUMA_EVENT = "luma_event"
+    SOURCE_STRIPE_PRODUCT = "stripe_product"
+    SOURCE_STRIPE_INVOICE = "stripe_invoice"
+    SOURCE_STRIPE_METADATA = "stripe_metadata"
+    SOURCE_UNATTRIBUTED = "unattributed"
+    SOURCE_CHOICES = [
+        (SOURCE_LUMA_EVENT, "Luma event"),
+        (SOURCE_STRIPE_PRODUCT, "Stripe product"),
+        (SOURCE_STRIPE_INVOICE, "Stripe invoice"),
+        (SOURCE_STRIPE_METADATA, "Stripe metadata"),
+        (SOURCE_UNATTRIBUTED, "Unattributed Stripe transaction"),
+    ]
+    TREATMENT_REVENUE = "revenue"
+    TREATMENT_CLEARING = "clearing"
+    TREATMENT_CHOICES = [
+        (TREATMENT_REVENUE, "Recognise revenue"),
+        (TREATMENT_CLEARING, "Clear revenue recorded elsewhere"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_mappings",
+    )
+    source_type = models.CharField(max_length=32, choices=SOURCE_CHOICES)
+    source_id = models.CharField(max_length=255)
+    source_label = models.CharField(max_length=500, blank=True, default="")
+    accounting_treatment = models.CharField(
+        max_length=16,
+        choices=TREATMENT_CHOICES,
+        blank=True,
+        default="",
+    )
+    event_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    account_code = models.CharField(max_length=64, blank=True, default="")
+    tax_type = models.CharField(max_length=64, blank=True, default="")
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_mapping"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "source_type", "source_id"],
+                name="recon_mapping_org_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "active"], name="recon_mapping_org_active_idx"),
+        ]
+
+
+class StripePayoutReconciliation(models.Model):
+    """Durable, idempotent ledger and posting state for one Stripe payout."""
+
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_READY = "ready"
+    STATUS_POSTING = "posting"
+    STATUS_POSTED = "posted"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_NEEDS_REVIEW, "Needs review"),
+        (STATUS_READY, "Ready"),
+        (STATUS_POSTING, "Posting"),
+        (STATUS_POSTED, "Posted"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="stripe_payout_reconciliations",
+    )
+    stripe_account_id = models.CharField(max_length=255, blank=True, default="")
+    payout_id = models.CharField(max_length=255)
+    arrival_date = models.DateField(null=True, blank=True)
+    currency = models.CharField(max_length=12, blank=True, default="")
+    amount_cents = models.BigIntegerField(default=0)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    report_payload = models.JSONField(default=dict, blank=True)
+    preview_payload = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_NEEDS_REVIEW, db_index=True)
+    approved_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    xero_bank_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_payout_reconciliation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "stripe_account_id", "payout_id"],
+                name="recon_payout_org_account_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "arrival_date"], name="recon_payout_org_arrival_idx"),
+        ]
