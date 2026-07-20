@@ -98,6 +98,10 @@ from content_factory.topic_feedback import (
     serialize_topic_feedback,
 )
 from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
+from content_factory.vibe_marketing_workflows import (
+    DISCOVERY_WORKFLOWS,
+    VIBE_MARKETING_WORKFLOWS,
+)
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
@@ -173,24 +177,7 @@ class _AnyContentRenderer(BaseRenderer):
         return json.dumps(data or {}).encode("utf-8")
 
 
-VIBE_MARKETING_WORKFLOWS = {
-    "repo_scan",
-    "content_factory_scan",
-    "article_system_setup",
-    "auto_discovery",
-    "content_factory_discovery",
-    "article_generation",
-    "content_factory_article",
-    "direct_generate",
-    "confirmed_topic",
-    "article_revision",
-    "daily_discovery",
-    "startup_autofill",
-    "website_baseline",
-    "vibe_marketing_daily_replay",
-}
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
-DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
 ARTICLE_SYSTEM_SETUP_WORKFLOWS = {"article_system_setup"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
