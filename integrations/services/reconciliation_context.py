@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from integrations.models import ReconciliationMapping, ReconciliationSuggestion, StripePayoutReconciliation
+from integrations.services.xero_statement_reconciliation import build_statement_reconciliation_context
 from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
 
 
@@ -228,6 +229,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
                 }
             )
 
+    statement_context = build_statement_reconciliation_context(organization=organization)
     return {
         "organization_id": organization.id,
         "domain": organization.domain,
@@ -240,6 +242,7 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
         "candidates": candidates,
         "luma_events": luma_events,
         "linear_projects": linear_projects,
+        **statement_context,
     }
 
 
