@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Configuration
 DROPLET_IP="209.38.85.60"
-USER="root"
+DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-mlai-droplet}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
@@ -24,17 +24,17 @@ if [ "${#ROO_SIM_PATIENT_KEY}" -lt 32 ]; then
     echo "❌ ROO_SIM_PATIENT_KEY must contain at least 32 characters."
     exit 1
 fi
-echo "🚀 Deploying release $APP_RELEASE to $DROPLET_IP..."
+echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)..."
 
 # 1. Sync files to the server
 echo "📦 Syncing files..."
-rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . $USER@$DROPLET_IP:$PROJECT_DIR
+rsync -avz --delete --exclude 'venv' --exclude '.git' --exclude '__pycache__' --exclude '.env' . "$DEPLOY_SSH_TARGET:$PROJECT_DIR"
 
 # Send the credential over SSH stdin rather than a command-line argument. The
 # remote shell updates .env using builtins, so the value is neither echoed nor
 # exposed in a child-process argv. This happens before any service restart.
 echo "🔐 Updating Roo service credential (value redacted)..."
-printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
+printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh "$DEPLOY_SSH_TARGET" '
     set -euo pipefail
     project_dir="/root/mlai-backend"
     mkdir -p "$project_dir"
@@ -58,7 +58,7 @@ printf '%s' "$ROO_SIM_PATIENT_KEY" | ssh $USER@$DROPLET_IP '
 # over SSH stdin. This avoids relying on a manually edited production .env and
 # keeps the value out of shell arguments and deployment output.
 echo "🔐 Updating shared Redis credential (value redacted)..."
-printf '%s' "$REDIS_URL" | ssh $USER@$DROPLET_IP '
+printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
     set -euo pipefail
     project_dir="/root/mlai-backend"
     mkdir -p "$project_dir"
@@ -80,7 +80,7 @@ printf '%s' "$REDIS_URL" | ssh $USER@$DROPLET_IP '
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh $USER@$DROPLET_IP <<EOF
+ssh "$DEPLOY_SSH_TARGET" <<EOF
     set -euo pipefail
 
     upsert_env_value() {
@@ -160,6 +160,15 @@ ssh $USER@$DROPLET_IP <<EOF
     upsert_env_value GITHUB_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/github"
     upsert_env_value STRIPE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/stripe"
     upsert_env_value XERO_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/xero"
+    # Replace any malformed legacy settings-expression line with the literal
+    # Stripe API version expected by the production runtime.
+    sed -i '/^[[:space:]]*STRIPE_API_VERSION[[:space:]]*=/d' .env
+    upsert_env_value STRIPE_API_VERSION "2026-02-25.clover"
+    # Preserve reporting access and the granular write scopes required by the
+    # explicit payout approval workflow and tracking-option creation.
+    upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
+    upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
+    upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
     upsert_env_value GOOGLE_DRIVE_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-drive"
     upsert_env_value GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-analytics"

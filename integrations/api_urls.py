@@ -19,6 +19,13 @@ urlpatterns = [
     path('github/scaffold/decision', api_views.GithubScaffoldDecisionView.as_view(), name='github_scaffold_decision'),
     path('luma/attendee-report', api_views_luma.LumaAttendeeReportView.as_view(), name='luma_attendee_report'),
     path('reconciliation/report', api_views_reconciliation.ReconciliationReportView.as_view(), name='reconciliation_report'),
+    path('reconciliation/profile', api_views_reconciliation.ReconciliationProfileView.as_view(), name='reconciliation_profile'),
+    path('reconciliation/mappings', api_views_reconciliation.ReconciliationMappingView.as_view(), name='reconciliation_mappings'),
+    path('reconciliation/enrichment-context', api_views_reconciliation.ReconciliationEnrichmentContextView.as_view(), name='reconciliation_enrichment_context'),
+    path('reconciliation/suggestions/<int:suggestion_id>/decision', api_views_reconciliation.ReconciliationSuggestionDecisionView.as_view(), name='reconciliation_suggestion_decision'),
+    path('reconciliation/payouts', api_views_reconciliation.ReconciliationPayoutListView.as_view(), name='reconciliation_payouts'),
+    path('reconciliation/payouts/<str:payout_id>/preview', api_views_reconciliation.ReconciliationPayoutPreviewView.as_view(), name='reconciliation_payout_preview'),
+    path('reconciliation/payouts/<str:payout_id>/post', api_views_reconciliation.ReconciliationPayoutPostView.as_view(), name='reconciliation_payout_post'),
 
     # Pending Intents
     path('pending-intent/', api_views.IntentView.as_view(), name='pending_intent_list'), # POST save
