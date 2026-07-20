@@ -186,7 +186,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."
@@ -219,6 +219,20 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     else
         bridge_worker_enabled=0
         echo "ℹ️ Skipping bridge-worker startup because bridge tokens are not fully configured."
+    fi
+
+    # The Umami data plane (ops/content-analytics) is a separate Compose
+    # project; analytics-sync only aggregates from it, so it starts only once
+    # the full backend analytics contract is configured in .env.
+    if env_has_value UMAMI_BASE_URL \
+        && { env_has_value UMAMI_API_TOKEN || { env_has_value UMAMI_USERNAME && env_has_value UMAMI_PASSWORD; }; } \
+        && env_has_value CONTENT_ANALYTICS_TRACKER_SCRIPT_URL \
+        && env_has_value CONTENT_ANALYTICS_HOST_URL; then
+        runtime_services+=(analytics-sync)
+        analytics_sync_enabled=1
+    else
+        analytics_sync_enabled=0
+        echo "ℹ️ Skipping analytics-sync startup because the Umami analytics contract is not fully configured."
     fi
 
     migration_applied() {
@@ -334,6 +348,12 @@ print(index_name)
         echo "🧹 Stopping disabled bridge-worker service..."
         docker compose stop bridge-worker || true
         docker compose rm -f bridge-worker || true
+    fi
+
+    if [ "\$analytics_sync_enabled" != "1" ]; then
+        echo "🧹 Stopping disabled analytics-sync service..."
+        docker compose stop analytics-sync || true
+        docker compose rm -f analytics-sync || true
     fi
 
     echo "🔁 Verifying the running web container picked up APP_RELEASE..."
