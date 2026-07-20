@@ -4,7 +4,10 @@ set -euo pipefail
 
 # Configuration
 DROPLET_IP="209.38.85.60"
-DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-mlai-droplet}"
+# GitHub-hosted runners do not have the developer workstation's `mlai-droplet`
+# SSH alias. Keep local overrides supported, but default to the resolvable host
+# already added to known_hosts by the deployment workflow.
+DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
 
