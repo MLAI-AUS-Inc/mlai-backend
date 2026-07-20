@@ -7230,7 +7230,20 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 def _merge_django_owned_article_result(local_result, remote_result):
     local = _run_mapping(local_result)
     merged = dict(_run_mapping(remote_result))
+    remote_quality = _run_mapping(merged.get("article_preview_quality"))
+    remote_quality_status = str(remote_quality.get("status") or "").strip().lower()
     for key, value in local.items():
+        if key == "approval_blocker":
+            # A rejection is written locally before the next status poll. Keep
+            # it while Content Factory still reports the same blocking quality
+            # state, but let a queued/passed recheck clear the stale message.
+            if (
+                remote_quality_status == "blocking_findings"
+                and merged.get(key) in (None, "", {}, [])
+                and value not in (None, "", {}, [])
+            ):
+                merged[key] = value
+            continue
         django_owned = key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
             DJANGO_OWNED_ARTICLE_RESULT_PREFIXES
         )
@@ -12705,12 +12718,19 @@ def _call_content_factory_run_action(
         response_payload = response.json()
     except Exception:
         response_payload = {}
-    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    raw_detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    approval_blocker = raw_detail if isinstance(raw_detail, dict) else None
+    detail = (
+        raw_detail.get("message") or raw_detail.get("detail") or raw_detail.get("error")
+        if isinstance(raw_detail, dict)
+        else raw_detail
+    )
     return {
         "error": str(detail or f"Content Factory returned {response.status_code}."),
         "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
         "content_factory_status_code": response.status_code,
         "content_factory_response": response_payload,
+        **({"approval_blocker": approval_blocker} if approval_blocker else {}),
         "retryable": response.status_code >= 500,
     }
 
@@ -16655,7 +16675,13 @@ class VibeMarketingRunControlView(APIView):
             ).strip()
             result = dict(run.result or {})
             result["latest_control_response"] = remote_data
+            remote_blocker = remote_data.get("approval_blocker")
             result["approval_blocker"] = {
+                **(
+                    remote_blocker
+                    if isinstance(remote_blocker, dict)
+                    else {"detail": detail, "message": detail}
+                ),
                 "detail": detail,
                 "content_factory_status_code": remote_status_code,
                 "recorded_at": timezone.now().isoformat(),
@@ -16671,6 +16697,40 @@ class VibeMarketingRunControlView(APIView):
                     "contentFactoryStatusCode": remote_status_code,
                 },
                 status=remote_status_code,
+            )
+
+        if action == "retry-preview-quality":
+            if run.workflow not in ARTICLE_WORKFLOWS:
+                return Response(
+                    {"detail": "Preview quality can only be retried for an article run."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if remote_data.get("error"):
+                response_status = (
+                    status.HTTP_409_CONFLICT
+                    if remote_status_code in {400, 404, 409, 422}
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {
+                        "detail": str(remote_data.get("error")),
+                        "retryable": bool(remote_data.get("retryable")),
+                    },
+                    status=response_status,
+                )
+            result = dict(run.result or {})
+            remote_quality = remote_data.get("article_preview_quality")
+            if isinstance(remote_quality, dict):
+                result["article_preview_quality"] = remote_quality
+            result["latest_control_response"] = remote_data
+            result.pop("approval_blocker", None)
+            result.pop("preview_quality_warning", None)
+            result.pop("previewQualityWarning", None)
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(
+                _serialize_run(run, context=context),
+                status=status.HTTP_202_ACCEPTED,
             )
 
         if action == "revise":

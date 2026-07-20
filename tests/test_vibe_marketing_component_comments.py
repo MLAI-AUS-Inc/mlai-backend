@@ -2646,6 +2646,56 @@ class VibeMarketingComponentCommentTests(TestCase):
         ):
             self.assertNotIn(key, synced.result)
 
+    def test_article_status_poll_preserves_quality_approval_blocker_until_recheck(self):
+        blocker = {
+            "code": "article_preview_editorial_score_unavailable",
+            "message": "The editorial reviewer did not produce the required score.",
+        }
+        self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
+        self.run.current_step = "await_review"
+        self.run.result = {
+            "status": "preview_ready",
+            "approval_blocker": blocker,
+            "article_preview_quality": {
+                "status": "blocking_findings",
+                "findings": ["editorial:score_missing"],
+            },
+        }
+        self.run.save(update_fields=["status", "current_step", "result", "updated_at"])
+
+        synced = _sync_local_run_from_remote(
+            self.run,
+            {
+                "status": "approval_required",
+                "current_step": "await_review",
+                "result": {
+                    "status": "preview_ready",
+                    "article_preview_quality": {
+                        "status": "blocking_findings",
+                        "findings": ["editorial:score_missing"],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(synced.result["approval_blocker"], blocker)
+
+        synced = _sync_local_run_from_remote(
+            synced,
+            {
+                "status": "approval_required",
+                "current_step": "await_review",
+                "result": {
+                    "status": "preview_ready",
+                    "article_preview_quality": {
+                        "status": "queued",
+                        "findings": [],
+                    },
+                },
+            },
+        )
+        self.assertNotIn("approval_blocker", synced.result)
+
     def test_article_status_poll_does_not_resurrect_blocked_run_from_legacy_retry_marker(self):
         self.run.status = ContentFactoryRunStatus.BLOCKED
         self.run.current_step = "precondition_failed"
@@ -3494,9 +3544,14 @@ class VibeMarketingComponentCommentTests(TestCase):
             "The hosted preview loaded before its required deployment assets were available. "
             "Content Factory is rechecking the current preview automatically; try approval again shortly."
         )
+        blocker_detail = {
+            "code": "article_preview_quality_rechecking",
+            "message": blocker,
+            "retryable": False,
+        }
 
         def fake_post(url, json=None, headers=None, timeout=None):
-            return _Response(status_code=409, payload={"detail": blocker})
+            return _Response(status_code=409, payload={"detail": blocker_detail})
 
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(
@@ -3517,7 +3572,58 @@ class VibeMarketingComponentCommentTests(TestCase):
             self.run.result["latest_control_response"]["content_factory_status_code"],
             409,
         )
+        self.assertEqual(
+            self.run.result["approval_blocker"]["code"],
+            "article_preview_quality_rechecking",
+        )
         self.assertEqual(self.run.result["approval_blocker"]["detail"], blocker)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_retry_preview_quality_clears_blocker_and_preserves_review_state(self):
+        self.run.status = ContentFactoryRunStatus.APPROVAL_REQUIRED
+        self.run.current_step = "await_review"
+        self.run.approval_state = ContentFactoryApprovalState.APPROVAL_REQUIRED
+        self.run.result = {
+            "status": "preview_ready",
+            "approval_blocker": {"detail": "The editorial scorer did not finish."},
+            "preview_quality_warning": "Old warning",
+            "article_preview_quality": {
+                "status": "blocking_findings",
+                "findings": ["editorial:score_missing"],
+            },
+        }
+        self.run.save(
+            update_fields=["status", "current_step", "approval_state", "result", "updated_at"]
+        )
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            self.assertTrue(url.endswith(f"/{self.run.run_id}/retry-preview-quality"))
+            return _Response(
+                status_code=202,
+                payload={
+                    "status": "quality_review_queued",
+                    "run_id": self.run.run_id,
+                    "article_preview_quality": {
+                        "status": "queued",
+                        "findings": [],
+                        "trigger": "manual_retry",
+                    },
+                },
+            )
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                f"/api/v1/vibe-marketing/runs/{self.run.run_id}/retry-preview-quality",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, ContentFactoryRunStatus.APPROVAL_REQUIRED)
+        self.assertEqual(self.run.result["article_preview_quality"]["status"], "queued")
+        self.assertNotIn("approval_blocker", self.run.result)
+        self.assertNotIn("preview_quality_warning", self.run.result)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_promote_bundle_creates_local_publish_child_run(self):
