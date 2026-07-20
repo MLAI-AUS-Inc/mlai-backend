@@ -36,7 +36,10 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
 def merchant_key(value: Any) -> str:
     text = str(value or "").lower()
     text = re.sub(r"\bcard\s+xx\d+\b", " ", text)
-    text = re.sub(r"\b(?:aud|nzd|usd|pos|mis|npp|bpa|m\s*t)\b", " ", text)
+    # Xero truncates some Uber narrations after ``HELP.`` while others retain
+    # the processor suffix ``HELP.UB``. Treat that suffix like the other bank
+    # feed noise tokens so both variants share one exact merchant key.
+    text = re.sub(r"\b(?:aud|nzd|usd|pos|mis|npp|bpa|ub|m\s*t)\b", " ", text)
     text = re.sub(r"\b(?:commbank|app|payid|email)\b", " ", text)
     text = re.sub(r"\d{6,}", " ", text)
     return re.sub(r"[^a-z0-9]+", " ", text).strip()

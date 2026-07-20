@@ -473,6 +473,10 @@ class XeroReconciliationWorkflowTests(TestCase):
         context = build_statement_reconciliation_context(organization=self.organization)
         candidates = {item["statement_line_id"]: item for item in context["statement_candidates"]}
         self.assertEqual(candidates["blank-uber"]["allowed_historical_patterns"][0]["account_code"], "406")
+        self.assertEqual(
+            candidates["blank-uber"]["allowed_historical_patterns"][0]["example_statement_line_id"],
+            "ready-uber",
+        )
         self.assertEqual(candidates["blank-bill"]["matching_xero_bills"][0]["xero_bill_id"], "bill-print-locker")
 
         saved = save_statement_suggestions(
