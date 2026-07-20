@@ -42,13 +42,17 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
 STATEMENT_EVIDENCE_WINDOW_DAYS = 31
 STATEMENT_EVIDENCE_LIMIT = 5
 _MERCHANT_NOISE = {
+    "and",
     "app",
+    "air",
     "aus",
     "australia",
     "bank",
     "bpa",
+    "business",
     "card",
     "commbank",
+    "conte",
     "credit",
     "debit",
     "direct",
@@ -58,22 +62,42 @@ _MERCHANT_NOISE = {
     "fees",
     "from",
     "help",
+    "inc",
+    "inv",
     "international",
+    "lib",
+    "lin",
     "limited",
     "ltd",
     "mastercard",
     "mis",
+    "miss",
+    "mr",
+    "mrs",
     "npp",
     "online",
     "payment",
     "payments",
     "pos",
+    "pty",
     "purchase",
     "refund",
+    "return",
+    "stores",
     "stripe",
     "the",
     "transfer",
+    "trip",
     "visa",
+    "www",
+}
+_LOW_SIGNAL_MERCHANT_TERMS = {
+    "australia",
+    "city",
+    "melbourn",
+    "melbourne",
+    "sydney",
+    "university",
 }
 
 
@@ -134,13 +158,14 @@ def _evidence_excerpt(text: str, needles: list[str], *, limit: int = 700) -> str
 def _score_evidence(*, text: str, terms: list[str], markers: list[str], occurred_on, transaction_date):
     folded = text.casefold()
     vendor_hits = [term for term in terms if term in folded]
+    strong_vendor_hits = [term for term in vendor_hits if term not in _LOW_SIGNAL_MERCHANT_TERMS]
     amount_hit, amount_marker = _contains_amount(folded, markers)
     days = abs((occurred_on - transaction_date).days)
-    if vendor_hits and amount_hit:
+    if strong_vendor_hits and amount_hit:
         score = 120 + (10 * len(vendor_hits)) - days
     elif len(vendor_hits) >= 2:
         score = 80 + (8 * len(vendor_hits)) - days
-    elif vendor_hits and len(vendor_hits[0]) >= 5:
+    elif strong_vendor_hits and len(strong_vendor_hits[0]) >= 5:
         score = 55 - days
     else:
         return None
