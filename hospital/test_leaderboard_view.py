@@ -17,7 +17,7 @@ class LeaderboardViewTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
-        self.admin = User.objects.create_user(
+        self.admin = User.objects.create_superuser(
             email="hi@mlai.au",
             first_name="Leader",
             last_name="Board",
@@ -47,10 +47,12 @@ class LeaderboardViewTests(TestCase):
             sub.refresh_from_db()
         return sub
 
-    def test_requires_authentication_and_allows_participants(self):
+    def test_requires_health_hack_admin(self):
         self._submit(self.team_a, 0.5, {"patients_saved": 1})
         self.assertIn(self.client.get(LEADERBOARD_URL).status_code, (401, 403))
         self.client.force_authenticate(self.player)
+        self.assertEqual(self.client.get(LEADERBOARD_URL).status_code, 403)
+        self.client.force_authenticate(self.admin)
         response = self.client.get(LEADERBOARD_URL)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["team_name"], "Alpha")

@@ -75,6 +75,7 @@ jobs:
           tests.test_content_factory_callback_idempotency \
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
+          content_factory.tests_admin_metrics \
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           tests.test_teardown_company \
