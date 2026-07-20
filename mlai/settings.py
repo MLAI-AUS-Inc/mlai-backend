@@ -665,6 +665,11 @@ CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
 CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS = int(
     os.getenv('CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS', str(14 * 24 * 60 * 60))
 )
+# Daily email links are short-lived capability URLs. They render a read-only
+# confirmation page on GET and only execute after an explicit POST.
+CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
+    os.getenv('CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS', str(48 * 60 * 60))
+)
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
 # Customer.io App API key (already used for magic-link emails). When set, it is
@@ -678,7 +683,7 @@ CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
 # Transactional message id of the "Vibe Marketing Daily Reminder" template in
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.
-CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '')
+CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '3')
 # Twilio credentials drive WhatsApp sends (Messages API) and inbound webhook
 # validation (X-Twilio-Signature is HMAC-SHA1 keyed by the auth token).
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')

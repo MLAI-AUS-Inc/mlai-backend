@@ -48,6 +48,7 @@ NOTIFICATION_CONTEXT_KEYS = {
 }
 AUTOMATION_ACTION_SALT = "content-factory-research-automation-action"
 DEFAULT_ACTION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_EMAIL_ACTION_MAX_AGE_SECONDS = 48 * 60 * 60
 
 
 def normalize_notification_context(value: Optional[dict[str, Any]]) -> dict[str, str]:
@@ -155,9 +156,20 @@ def _action_token(run: AutomationRun, action: str, **kwargs: Any) -> str:
     return signing.dumps(payload, salt=AUTOMATION_ACTION_SALT)
 
 
-def build_action_url(run: AutomationRun, action: str, **kwargs: Any) -> str:
+def build_action_url(
+    run: AutomationRun,
+    action: str,
+    *,
+    confirmation_required: bool = False,
+    **kwargs: Any,
+) -> str:
     base_url = str(getattr(settings, "DEFAULT_BACKEND_URL", "") or "").rstrip("/")
     path = reverse("content_factory_automation_action")
+    if confirmation_required:
+        # Email security scanners commonly prefetch links. Stamp the safety
+        # requirement inside the signed payload so a GET can only render the
+        # confirmation page; the explicit POST performs the mutation.
+        kwargs["confirmation_required"] = True
     token = _action_token(run, action, **kwargs)
     return f"{base_url}{path}?{urlencode({'token': token})}"
 
@@ -251,7 +263,13 @@ def record_delivery_status(
     return delivery
 
 
-def _plain_topic_message(run: AutomationRun, data: dict[str, Any], channel: Optional[NotificationChannel] = None) -> str:
+def _plain_topic_message(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+    *,
+    confirmation_required: bool = False,
+) -> str:
     domain = data.get("domain") or run.automation.organization.domain
     lines = [f"Research topics are ready for {domain}:"]
     for index, option in enumerate(_topic_options(data), start=1):
@@ -260,14 +278,27 @@ def _plain_topic_message(run: AutomationRun, data: dict[str, Any], channel: Opti
         score = option.get("opportunity_index")
         score_suffix = f" (score {score})" if score not in (None, "") else ""
         lines.append(f"{index}. {title} - {keyword}{score_suffix}")
-        lines.append(f"Approve: {build_action_url(run, 'approve_topic', option_index=index - 1)}")
+        lines.append(
+            "Approve: "
+            + build_action_url(
+                run,
+                "approve_topic",
+                option_index=index - 1,
+                confirmation_required=confirmation_required,
+            )
+        )
     lines.append(f"Pause these notifications: {_unsubscribe_url(run, channel)}")
     return "\n".join(lines)
 
 
 def _unsubscribe_url(run: AutomationRun, channel: Optional[NotificationChannel] = None) -> str:
     if channel is not None:
-        return build_action_url(run, "unsubscribe", channel_id=str(channel.id))
+        return build_action_url(
+            run,
+            "unsubscribe",
+            channel_id=str(channel.id),
+            confirmation_required=channel.channel_type == NotificationChannelType.EMAIL,
+        )
     return build_action_url(run, "unsubscribe")
 
 
@@ -278,7 +309,14 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
         keyword = html.escape(_option_keyword(option))
         title = html.escape(_option_title(option))
         explanation = html.escape(str(option.get("explanation") or ""))
-        approve_url = html.escape(build_action_url(run, "approve_topic", option_index=index - 1))
+        approve_url = html.escape(
+            build_action_url(
+                run,
+                "approve_topic",
+                option_index=index - 1,
+                confirmation_required=True,
+            )
+        )
         rows.append(
             "<li>"
             f"<strong>{title}</strong><br>"
@@ -310,8 +348,9 @@ def _topic_email_message_data(
     """message_data for the Customer.io daily-topics transactional template.
 
     Field names match docs/customerio-daily-topics-email.html. Each topic's
-    confirm_url is the signed one-click approve action (same endpoint Slack and
-    the plain-HTML email use), so the template needs no signing logic.
+    confirm_url is a signed confirmation landing page. Its GET is read-only so
+    email link scanners cannot start an article; an explicit POST approves the
+    topic through the same endpoint used by the other channels.
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
     topics: list[dict[str, Any]] = []
@@ -328,7 +367,12 @@ def _topic_email_message_data(
                 "ai_volume_display": str(option.get("ai_volume_display") or ""),
                 "why_recommended": str(option.get("why_recommended") or option.get("explanation") or ""),
                 "recommended": bool(option.get("recommended")),
-                "confirm_url": build_action_url(run, "approve_topic", option_index=index),
+                "confirm_url": build_action_url(
+                    run,
+                    "approve_topic",
+                    option_index=index,
+                    confirmation_required=True,
+                ),
             }
         )
     return {
@@ -887,7 +931,12 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
         event_type="topic_selection",
         request_payload={"event_type": "topic_selection", "job_id": job_id, "options": _topic_options(data)},
         build_kwargs=lambda channel: {
-            "text": _plain_topic_message(run, data, channel),
+            "text": _plain_topic_message(
+                run,
+                data,
+                channel,
+                confirmation_required=channel.channel_type == NotificationChannelType.EMAIL,
+            ),
             "subject": f"Article topics for {run.automation.organization.domain}",
             "blocks": _topic_slack_blocks(run, data, channel),
             # Raw-HTML fallback used when no Customer.io template id is configured
@@ -1174,9 +1223,20 @@ def unsubscribe_channel_for_run(run: AutomationRun, *, channel_id: Optional[str]
     }
 
 
-def handle_automation_action_token(token: str) -> dict[str, Any]:
+def _resolve_automation_action_token(token: str) -> tuple[dict[str, Any], AutomationRun]:
     max_age = int(getattr(settings, "CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS", DEFAULT_ACTION_MAX_AGE_SECONDS))
     payload = signing.loads(token, salt=AUTOMATION_ACTION_SALT, max_age=max_age)
+    if payload.get("confirmation_required"):
+        email_max_age = int(
+            getattr(
+                settings,
+                "CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS",
+                DEFAULT_EMAIL_ACTION_MAX_AGE_SECONDS,
+            )
+        )
+        # Re-validate the same timestamped signature with the shorter lifetime
+        # used by daily email CTAs. Other channel actions keep the legacy TTL.
+        payload = signing.loads(token, salt=AUTOMATION_ACTION_SALT, max_age=email_max_age)
     run = (
         AutomationRun.objects.select_related(
             "automation",
@@ -1185,6 +1245,52 @@ def handle_automation_action_token(token: str) -> dict[str, Any]:
         )
         .get(id=payload["automation_run_id"])
     )
+    return payload, run
+
+
+def preview_automation_action_token(token: str) -> dict[str, Any]:
+    """Read-only details for the email confirmation landing page."""
+
+    payload, run = _resolve_automation_action_token(token)
+    action = str(payload.get("action") or "").strip()
+    preview: dict[str, Any] = {
+        "action": action,
+        "confirmation_required": bool(payload.get("confirmation_required")),
+        "automation_run_id": str(run.id),
+        "domain": run.automation.organization.domain,
+        "already_started": bool(run.article_content_factory_run_id),
+        "article_run_id": str(run.article_content_factory_run_id or ""),
+    }
+    if action == "approve_topic":
+        options = _topic_options(dict(run.callback_payload or {}))
+        option_index = int(payload.get("option_index") or 0)
+        if option_index < 0 or option_index >= len(options):
+            raise ValueError("Invalid topic option index.")
+        option = options[option_index]
+        preview.update(
+            {
+                "option_index": option_index,
+                "topic_title": _option_title(option),
+                "keyword": _option_keyword(option),
+            }
+        )
+    elif action == "unsubscribe":
+        channel_id = str(payload.get("channel_id") or "").strip()
+        channel = None
+        if channel_id:
+            channel = NotificationChannel.objects.filter(
+                id=channel_id,
+                organization_id=run.automation.organization_id,
+            ).first()
+        preview["channel_type"] = str(
+            getattr(channel, "channel_type", "")
+            or run.automation.notification_channel.channel_type
+        )
+    return preview
+
+
+def handle_automation_action_token(token: str) -> dict[str, Any]:
+    payload, run = _resolve_automation_action_token(token)
     action = str(payload.get("action") or "").strip()
     if action == "approve_topic":
         return approve_topic_for_run(

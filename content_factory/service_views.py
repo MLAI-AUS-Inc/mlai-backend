@@ -4,6 +4,7 @@ import os
 import time
 from datetime import date as calendar_date, datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -11,6 +12,7 @@ from django.core import signing
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseRedirect
+from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -1755,18 +1757,54 @@ class ResearchAutomationActionView(APIView):
     permission_classes = []
 
     def get(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
+
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if preview.get("confirmation_required"):
+            return render(
+                request,
+                "content_factory/automation_action_confirm.html",
+                {"token": token, **preview},
+            )
+        return self._handle(request, token=token)
 
     def post(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
 
-    def _handle(self, request):
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._handle(
+            request,
+            token=token,
+            render_browser_result=bool(preview.get("confirmation_required")),
+        )
+
+    @staticmethod
+    def _token(request) -> str:
+        return str(request.query_params.get("token") or request.data.get("token") or "").strip()
+
+    def _handle(self, request, *, token: str, render_browser_result: bool = False):
         from django.core import signing as django_signing
         from integrations.services.notification_adapters import handle_automation_action_token
 
-        token = str(request.query_params.get("token") or request.data.get("token") or "").strip()
-        if not token:
-            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             result = handle_automation_action_token(token)
         except django_signing.BadSignature:
@@ -1774,6 +1812,19 @@ class ResearchAutomationActionView(APIView):
         except Exception as exc:
             logger.warning("Research automation action failed: %s", exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if render_browser_result:
+            job_id = str(result.get("job_id") or result.get("run_id") or "").strip()
+            frontend_base = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
+            if job_id and frontend_base:
+                query = urlencode({"automationAction": "started"})
+                return HttpResponseRedirect(
+                    f"{frontend_base}/founder-tools/marketing/runs/{job_id}?{query}"
+                )
+            return render(
+                request,
+                "content_factory/automation_action_complete.html",
+                {"result": result},
+            )
         return Response(result, status=status.HTTP_200_OK)
 
 
