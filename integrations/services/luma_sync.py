@@ -85,6 +85,11 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
 
     synced_at = timezone.now()
     with transaction.atomic():
+        catalog_events = upsert_luma_event_catalog(
+            connection=connection,
+            events=events,
+            synced_at=synced_at,
+        )
         metrics = publish_luma_event_metrics(
             organization=organization,
             events=events,
@@ -108,6 +113,7 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
             **(connection.sync_cursor or {}),
             "last_synced_at": synced_at.isoformat(),
             "luma_events_synced": len(events),
+            "luma_catalog_events_synced": catalog_events,
             "luma_months_synced": months_synced,
             "luma_selected_metrics": metric_keys,
             "luma_selected_event_count": (len(event_ids) if event_ids is not None else None),
@@ -123,12 +129,49 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
         "status": "synced",
         "eventsSynced": len(events),
         "events_synced": len(events),
+        "catalogEventsSynced": catalog_events,
+        "catalog_events_synced": catalog_events,
         "monthsSynced": months_synced,
         "months_synced": months_synced,
         "metrics": metric_keys,
         "lastSyncedAt": synced_at.isoformat(),
         "last_synced_at": synced_at.isoformat(),
     }
+
+
+def upsert_luma_event_catalog(
+    *,
+    connection: ExternalServiceConnection,
+    events: list[dict[str, Any]],
+    synced_at: datetime,
+) -> int:
+    """Refresh reconciliation's Luma event catalogue from the metric sync payload.
+
+    ``selected`` is intentionally omitted from the defaults so a background sync
+    never changes the founder's event-selection preferences.
+    """
+    synced = 0
+    for item in events:
+        event = item.get("event") or {}
+        event_id = str(event.get("id") or "").strip()
+        if not event_id:
+            continue
+        start_at = item.get("start_at")
+        LumaEventSelection.objects.update_or_create(
+            connection=connection,
+            event_id=event_id,
+            defaults={
+                "user": connection.user,
+                "organization": connection.organization,
+                "event_name": str(event.get("name") or event_id).strip()[:255],
+                "event_url": str(event.get("url") or "").strip()[:512],
+                "start_at": start_at,
+                "raw_payload": event,
+                "last_synced_at": synced_at,
+            },
+        )
+        synced += 1
+    return synced
 
 
 def publish_luma_event_metrics(

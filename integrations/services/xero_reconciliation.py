@@ -29,6 +29,7 @@ from organizations.models import Organization
 XERO_API_URL = "https://api.xero.com/api.xro/2.0"
 XERO_BANK_TRANSACTION_SCOPE = "accounting.banktransactions"
 XERO_LEGACY_TRANSACTION_SCOPE = "accounting.transactions"
+XERO_SETTINGS_WRITE_SCOPE = "accounting.settings"
 
 
 class ReconciliationValidationError(RuntimeError):
@@ -47,6 +48,10 @@ def xero_has_bank_transaction_scope(scopes: Any) -> bool:
         XERO_BANK_TRANSACTION_SCOPE in normalized
         or XERO_LEGACY_TRANSACTION_SCOPE in normalized
     )
+
+
+def xero_has_settings_write_scope(scopes: Any) -> bool:
+    return XERO_SETTINGS_WRITE_SCOPE in normalize_xero_scopes(scopes)
 
 
 def resolve_xero_connection(organization, connection_id: int | None = None):
@@ -137,6 +142,9 @@ def serialize_mapping(mapping: ReconciliationMapping) -> dict[str, Any]:
         "event_tracking_option_name": mapping.event_tracking_option_name,
         "project_tracking_option_id": mapping.project_tracking_option_id,
         "project_tracking_option_name": mapping.project_tracking_option_name,
+        "project_source_type": mapping.project_source_type,
+        "project_source_id": mapping.project_source_id,
+        "reconciliation_note": mapping.reconciliation_note,
         "account_code": mapping.account_code,
         "tax_type": mapping.tax_type,
         "active": mapping.active,
@@ -158,6 +166,12 @@ def serialize_payout(record: StripePayoutReconciliation, *, include_payload: boo
         "posted_at": record.posted_at.isoformat() if record.posted_at else None,
         "last_error": record.last_error,
     }
+    from integrations.services.reconciliation_context import serialize_suggestion
+
+    result["contextual_suggestions"] = [
+        serialize_suggestion(suggestion)
+        for suggestion in record.suggestions.exclude(status="superseded").order_by("source_type", "source_id", "-created_at")
+    ]
     if include_payload:
         result["report"] = record.report_payload
         result["preview"] = record.preview_payload
@@ -198,6 +212,23 @@ def _xero_line(*, description: str, cents: int, account_code: str, tax_type: str
     return line
 
 
+def _contextual_description(prefix: str, source_label: str, mapping: ReconciliationMapping) -> str:
+    parts = [prefix, source_label]
+    if mapping.event_tracking_option_name and _normalized_description_part(mapping.event_tracking_option_name) not in {
+        _normalized_description_part(value) for value in parts
+    }:
+        parts.append(f"Event: {mapping.event_tracking_option_name}")
+    if mapping.project_tracking_option_name:
+        parts.append(f"Project: {mapping.project_tracking_option_name}")
+    if mapping.reconciliation_note:
+        parts.append(mapping.reconciliation_note.strip())
+    return " — ".join(value for value in parts if value)[:4000]
+
+
+def _normalized_description_part(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
 def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     try:
         profile = ReconciliationProfile.objects.select_related("xero_connection").get(
@@ -234,6 +265,7 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
     }
     report = record.report_payload or {}
     lines: list[dict[str, Any]] = []
+    context_notes: list[dict[str, Any]] = []
     line_total_cents = 0
 
     for group in report.get("revenue_groups") or report.get("events") or []:
@@ -256,7 +288,15 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         gross = int(group.get("gross_cents") or 0)
         group_fee = int(group.get("stripe_fee_cents") or 0)
         treatment_label = "clearing" if clearing else "revenue"
-        lines.append(_xero_line(description=f"Stripe {treatment_label} — {group.get('source_label') or group.get('event_name')}", cents=gross, account_code=mapping.account_code or profile.revenue_account_code, tax_type=mapping.tax_type or profile.revenue_tax_type, tracking=tracking))
+        source_label = str(group.get("source_label") or group.get("event_name") or source_key[1])
+        lines.append(_xero_line(description=_contextual_description(f"Stripe {treatment_label}", source_label, mapping), cents=gross, account_code=mapping.account_code or profile.revenue_account_code, tax_type=mapping.tax_type or profile.revenue_tax_type, tracking=tracking))
+        context_notes.append({
+            "source_type": source_key[0],
+            "source_id": source_key[1],
+            "event_name": mapping.event_tracking_option_name,
+            "project_name": mapping.project_tracking_option_name,
+            "review_note": mapping.reconciliation_note,
+        })
         line_total_cents += gross
         if group_fee:
             lines.append(_xero_line(description=f"Stripe processing fees — {group.get('source_label') or group.get('event_name')}", cents=-group_fee, account_code=profile.fee_account_code, tax_type=profile.fee_tax_type, tracking=tracking))
@@ -293,7 +333,8 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
             errors.append(f"Clearing treatment for refund {source_key[0]}:{source_key[1]} requires an explicit account code and tax type.")
             continue
         cents = int(adjustment.get("net_cents") or 0)
-        lines.append(_xero_line(description=f"Stripe refund/adjustment — {adjustment.get('source_label') or adjustment.get('description') or adjustment.get('id')}", cents=cents, account_code=mapping.account_code if clearing else (mapping.account_code or profile.refund_account_code), tax_type=mapping.tax_type if clearing else (mapping.tax_type or profile.refund_tax_type), tracking=_tracking(profile, mapping)))
+        adjustment_label = str(adjustment.get("source_label") or adjustment.get("description") or adjustment.get("id") or source_key[1])
+        lines.append(_xero_line(description=_contextual_description("Stripe refund/adjustment", adjustment_label, mapping), cents=cents, account_code=mapping.account_code if clearing else (mapping.account_code or profile.refund_account_code), tax_type=mapping.tax_type if clearing else (mapping.tax_type or profile.refund_tax_type), tracking=_tracking(profile, mapping)))
         line_total_cents += cents
 
     expected_cents = int(report.get("deposit_cents") or record.amount_cents)
@@ -321,6 +362,7 @@ def build_xero_preview(record: StripePayoutReconciliation) -> dict[str, Any]:
         "expected_total_cents": expected_cents,
         "line_total_cents": line_total_cents,
         "xero_payload": payload,
+        "context_notes": context_notes,
         "human_reconciliation_required": True,
         "note": "Posting creates a matching Receive Money transaction; a human must still click Match/OK on the Xero bank statement line.",
     }
@@ -340,6 +382,110 @@ def _xero_headers(connection: ExternalServiceConnection) -> dict[str, str]:
     }
 
 
+def _tracking_category_options(categories: list[dict[str, Any]], category_id: str) -> list[dict[str, Any]]:
+    for category in categories:
+        if str(category.get("TrackingCategoryID") or "") == category_id:
+            return [item for item in category.get("Options") or [] if isinstance(item, dict)]
+    return []
+
+
+def _created_tracking_option(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    options = payload.get("Options")
+    if isinstance(options, list) and options and isinstance(options[0], dict):
+        return options[0]
+    for category in payload.get("TrackingCategories") or []:
+        if isinstance(category, dict):
+            nested = category.get("Options") or []
+            if nested and isinstance(nested[0], dict):
+                return nested[0]
+    return {}
+
+
+def ensure_xero_tracking_options(
+    record: StripePayoutReconciliation,
+    *,
+    profile: ReconciliationProfile | None = None,
+) -> list[ReconciliationMapping]:
+    """Resolve/create approved Event and Project tracking options in Xero.
+
+    This is intentionally called only from the explicit posting operation.  A
+    monthly-update agent can propose a name, but it cannot mutate Xero merely by
+    generating or approving contextual suggestions.
+    """
+    profile = profile or ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=record.organization
+    )
+    connection = profile.xero_connection
+    if connection is None:
+        raise ReconciliationValidationError("A Xero connection must be selected.")
+
+    report = record.report_payload or {}
+    source_keys: set[tuple[str, str]] = set()
+    for group in [*(report.get("revenue_groups") or report.get("events") or []), *(report.get("refunds") or [])]:
+        if not isinstance(group, dict):
+            continue
+        source_type = str(group.get("source_type") or "luma_event")
+        source_id = str(group.get("source_id") or group.get("event_api_id") or group.get("id") or "")
+        if source_id:
+            source_keys.add((source_type, source_id))
+    mappings = list(
+        ReconciliationMapping.objects.filter(
+            organization=record.organization,
+            active=True,
+            source_type__in={item[0] for item in source_keys},
+            source_id__in={item[1] for item in source_keys},
+        )
+    )
+    mappings = [mapping for mapping in mappings if (mapping.source_type, mapping.source_id) in source_keys]
+    missing: list[tuple[ReconciliationMapping, str, str, str]] = []
+    for mapping in mappings:
+        if mapping.event_tracking_option_name and not mapping.event_tracking_option_id:
+            missing.append((mapping, "event_tracking_option_id", profile.event_tracking_category_id, mapping.event_tracking_option_name))
+        if mapping.project_tracking_option_name and not mapping.project_tracking_option_id:
+            missing.append((mapping, "project_tracking_option_id", profile.project_tracking_category_id, mapping.project_tracking_option_name))
+    if not missing:
+        return mappings
+    if not xero_has_settings_write_scope(connection.scopes):
+        raise ReconciliationValidationError(
+            "Reconnect Xero with accounting.settings before posting missing Event Name or Project Name options."
+        )
+    if any(not category_id for _mapping, _field, category_id, _name in missing):
+        raise ReconciliationValidationError("Configure the Xero Event Name and Project Name tracking category IDs.")
+
+    headers = _xero_headers(connection)
+    response = http_client.get(f"{XERO_API_URL}/TrackingCategories", headers=headers, timeout=(3, 30))
+    response.raise_for_status()
+    payload = response.json()
+    categories = payload.get("TrackingCategories") if isinstance(payload, dict) else []
+    categories = [item for item in categories or [] if isinstance(item, dict)]
+    for mapping, field_name, category_id, option_name in missing:
+        existing = next(
+            (
+                item for item in _tracking_category_options(categories, category_id)
+                if str(item.get("Name") or "").strip().casefold() == option_name.strip().casefold()
+            ),
+            None,
+        )
+        option = existing or {}
+        if not option:
+            create_response = http_client.put(
+                f"{XERO_API_URL}/TrackingCategories/{category_id}/Options",
+                headers=headers,
+                json={"Options": [{"Name": option_name}]},
+                timeout=(3, 30),
+            )
+            create_response.raise_for_status()
+            option = _created_tracking_option(create_response.json())
+        option_id = str(option.get("TrackingOptionID") or option.get("OptionID") or "").strip()
+        if not option_id:
+            raise XeroPostingError(f"Xero did not return an ID for tracking option {option_name}.")
+        setattr(mapping, field_name, option_id)
+        mapping.save(update_fields=[field_name, "updated_at"])
+    return mappings
+
+
 def post_xero_bank_transaction(record: StripePayoutReconciliation, *, approved_by_slack_id: str) -> StripePayoutReconciliation:
     current = StripePayoutReconciliation.objects.get(pk=record.pk)
     if current.xero_bank_transaction_id:
@@ -351,6 +497,9 @@ def post_xero_bank_transaction(record: StripePayoutReconciliation, *, approved_b
     connection = profile.xero_connection
     if connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
+    ensure_xero_tracking_options(record, profile=profile)
+    # Rebuild so the reviewed payload contains the resolved Xero option IDs.
+    preview = build_xero_preview(record)
 
     with transaction.atomic():
         locked = StripePayoutReconciliation.objects.select_for_update().get(pk=record.pk)

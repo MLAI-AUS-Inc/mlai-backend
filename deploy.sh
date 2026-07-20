@@ -164,9 +164,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # Stripe API version expected by the production runtime.
     sed -i '/^[[:space:]]*STRIPE_API_VERSION[[:space:]]*=/d' .env
     upsert_env_value STRIPE_API_VERSION "2026-02-25.clover"
-    # Preserve the existing reporting access and add the granular Xero write
-    # scope required by the explicit payout approval workflow.
-    upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
+    # Preserve reporting access and the granular write scopes required by the
+    # explicit payout approval workflow and tracking-option creation.
+    upsert_env_value XERO_OAUTH_SCOPES "offline_access accounting.invoices.read accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"

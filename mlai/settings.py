@@ -876,6 +876,9 @@ XERO_OAUTH_SCOPES = _env_list(
         "accounting.invoices.read",
         "accounting.payments.read",
         "accounting.settings.read",
+        # Creating missing Event Name / Project Name tracking options is part
+        # of the explicitly approved reconciliation posting operation.
+        "accounting.settings",
         "accounting.contacts.read",
         # Required by the explicit Stripe-payout approval workflow. Existing
         # connections must reconnect once to grant this additional scope.

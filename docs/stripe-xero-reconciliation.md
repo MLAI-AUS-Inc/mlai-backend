@@ -21,11 +21,45 @@ Match/OK in Xero.
    approves posting. Posting is deduplicated by payout ID locally and by Xero
    `Reference` before creation.
 
+## Monthly-update enrichment
+
+The Valley monthly-update workflow runs `reconciliation_enrichment` immediately
+after its Gmail, Slack, Linear, Luma and other source facts have been merged into
+the canonical timeline.
+
+- Luma is authoritative for **Event Name**. Stripe's immutable Luma event ID is
+  resolved only against the organisation's refreshed Luma event catalogue.
+- Linear is authoritative for **Project Name**. A Linear record whose normalized
+  name exactly matches a Luma event is marked as an `event_mirror`; it is useful
+  corroboration for the event but is not automatically assigned as a project.
+  Linear-only records are presented as project candidates.
+- Gmail and Slack can support a short reconciliation review note, but the note
+  must carry at least one concrete source evidence pointer. They never alter
+  payout membership, amounts, account codes, tax types or GST treatment.
+- Valley writes proposals into `ReconciliationSuggestion`. It cannot approve a
+  mapping or post to Xero. A Points Admin must approve a current proposal before
+  Event Name, Project Name and the note are copied into the deterministic
+  `ReconciliationMapping` used by the Xero preview.
+
+Machine endpoints used by Valley:
+
+- `GET /api/v1/integrations/reconciliation/enrichment-context` returns
+  outstanding Stripe source rows, Luma events, Linear projects and existing
+  approved mappings for a specific monthly-update run.
+- `POST /api/v1/integrations/reconciliation/enrichment-context` validates all
+  source IDs and stores evidence-backed proposals.
+
+The human decision endpoint is
+`POST /api/v1/integrations/reconciliation/suggestions/{id}/decision` with
+`decision: approve` or `decision: reject`. Approval is rejected if the Stripe
+source hash changed after the proposal was generated.
+
 ## First-time setup
 
-Run migration `integrations.0024_stripe_xero_reconciliation`, then reconnect the
-existing Xero app with `accounting.banktransactions`. The old read-only token is
-not sufficient.
+Run migrations `integrations.0024_stripe_xero_reconciliation` and
+`integrations.0025_reconciliation_context_suggestions`, then reconnect the
+existing Xero app with `accounting.banktransactions` and `accounting.settings`.
+The old read-only token is not sufficient.
 
 Configure `PUT /api/v1/integrations/reconciliation/profile` with:
 
@@ -46,8 +80,10 @@ source ID. Each mapping must explicitly choose:
   account code and tax type. This prevents Stripe invoices already entered in
   Xero from being counted as revenue twice.
 
-The mapping also selects the existing Xero Event Name/Project Name option. New
-tracking options are not created automatically.
+The mapping selects the approved Xero Event Name/Project Name option. During the
+explicit posting action, the service resolves the name against the configured
+tracking category and creates the option when it is missing. Monthly enrichment
+and suggestion approval never mutate Xero on their own.
 
 ## Operations
 
@@ -66,7 +102,8 @@ tracking options are not created automatically.
 A payout cannot be posted unless Stripe balance transaction nets equal the bank
 deposit, Xero line cents equal the same deposit, every source/refund is mapped,
 the accounting/tax configuration is complete, the Xero write scope is present,
-and no existing local or Xero transaction already uses that payout ID.
+missing tracking options can be resolved with `accounting.settings`, and no
+existing local or Xero transaction already uses that payout ID.
 
 The Stripe API version is pinned to `2026-02-25.clover`. If a malformed value is
 accidentally placed in the environment, reconciliation uses the pinned version

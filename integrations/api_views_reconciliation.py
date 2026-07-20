@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -9,9 +10,11 @@ from rest_framework.views import APIView
 from core.permissions import HasRooApiKey
 from roo.permissions import is_points_admin
 from organizations.models import Organization
+from workflow_runs.models import ContentFactoryRun
 from integrations.models import (
     ReconciliationMapping,
     ReconciliationProfile,
+    ReconciliationSuggestion,
     StripePayoutReconciliation,
 )
 from integrations.services.reconciliation import (
@@ -29,6 +32,12 @@ from integrations.services.xero_reconciliation import (
     serialize_mapping,
     serialize_payout,
     serialize_profile,
+)
+from integrations.services.reconciliation_context import (
+    approve_reconciliation_suggestion,
+    build_reconciliation_enrichment_context,
+    save_reconciliation_suggestions,
+    serialize_suggestion,
 )
 
 
@@ -58,6 +67,22 @@ def _organization_or_response(request, *, from_body: bool = False):
     if organization is None:
         return None, Response({"error": f"Unknown organisation domain: {domain}"}, status=status.HTTP_404_NOT_FOUND)
     return organization, None
+
+
+def _monthly_run_or_response(*, organization, run_id: str):
+    if not run_id:
+        return None, Response({"error": "run_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+    run = (
+        ContentFactoryRun.objects.filter(run_id=run_id, workflow="startup_monthly_update")
+        .filter(Q(organization=organization) | Q(organization__isnull=True, domain__iexact=organization.domain))
+        .first()
+    )
+    if run is None:
+        return None, Response(
+            {"error": "Monthly update run does not belong to this organisation"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return run, None
 
 
 class ReconciliationAdminView(APIView):
@@ -300,6 +325,9 @@ class ReconciliationMappingView(ReconciliationAdminView):
         "event_tracking_option_name",
         "project_tracking_option_id",
         "project_tracking_option_name",
+        "project_source_type",
+        "project_source_id",
+        "reconciliation_note",
         "account_code",
         "tax_type",
         "active",
@@ -340,6 +368,80 @@ class ReconciliationMappingView(ReconciliationAdminView):
             )
             saved.append(mapping)
         return Response({"mappings": [serialize_mapping(mapping) for mapping in saved]})
+
+
+class ReconciliationEnrichmentContextView(APIView):
+    """Machine-to-machine contract used by Valley after timeline merge."""
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request):
+        organization, error = _organization_or_response(request)
+        if error:
+            return error
+        run_id = str(request.query_params.get("run_id") or "").strip()
+        _, error = _monthly_run_or_response(organization=organization, run_id=run_id)
+        if error:
+            return error
+        return Response(build_reconciliation_enrichment_context(organization=organization, run_id=run_id))
+
+    def post(self, request):
+        organization, error = _organization_or_response(request, from_body=True)
+        if error:
+            return error
+        run_id = str(request.data.get("run_id") or "").strip()
+        _, error = _monthly_run_or_response(organization=organization, run_id=run_id)
+        if error:
+            return error
+        suggestions = request.data.get("suggestions")
+        if not isinstance(suggestions, list):
+            return Response({"error": "suggestions must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            saved = save_reconciliation_suggestions(
+                organization=organization,
+                run_id=run_id,
+                suggestions=suggestions,
+                model_name=str(request.data.get("model_name") or ""),
+            )
+        except (TypeError, ValueError) as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"suggestion_count": len(saved), "suggestions": [serialize_suggestion(item) for item in saved]})
+
+
+class ReconciliationSuggestionDecisionView(ReconciliationAdminView):
+    def post(self, request, suggestion_id: int):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        suggestion = ReconciliationSuggestion.objects.filter(
+            organization=organization,
+            id=suggestion_id,
+        ).select_related("payout").first()
+        if suggestion is None:
+            return Response({"error": "Suggestion was not found"}, status=status.HTTP_404_NOT_FOUND)
+        decision = str(request.data.get("decision") or "").strip().lower()
+        if decision == "reject":
+            if suggestion.status != ReconciliationSuggestion.STATUS_PROPOSED:
+                return Response(
+                    {"error": "Only a proposed reconciliation suggestion can be rejected."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            suggestion.status = ReconciliationSuggestion.STATUS_REJECTED
+            suggestion.reviewed_by_slack_id = slack_user_id
+            suggestion.reviewed_at = datetime.now(timezone.utc)
+            suggestion.save(update_fields=["status", "reviewed_by_slack_id", "reviewed_at", "updated_at"])
+            return Response({"suggestion": serialize_suggestion(suggestion)})
+        if decision != "approve":
+            return Response({"error": "decision must be approve or reject"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            approved, mapping = approve_reconciliation_suggestion(
+                suggestion,
+                reviewed_by_slack_id=slack_user_id,
+            )
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response({"suggestion": serialize_suggestion(approved), "mapping": serialize_mapping(mapping)})
 
 
 class ReconciliationPayoutListView(ReconciliationAdminView):

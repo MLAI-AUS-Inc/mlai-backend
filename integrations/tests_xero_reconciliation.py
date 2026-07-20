@@ -14,8 +14,10 @@ from integrations.models import (
     ExternalServiceProvider,
     ReconciliationMapping,
     ReconciliationProfile,
+    ReconciliationSuggestion,
     StripePayoutReconciliation,
 )
+from startup_updates.models import LinearProjectArtifact, LumaEventSelection
 from integrations.services.reconciliation import (
     DEFAULT_STRIPE_API_VERSION,
     ReconciliationReportService,
@@ -23,11 +25,18 @@ from integrations.services.reconciliation import (
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
     build_xero_preview,
+    ensure_xero_tracking_options,
     persist_report,
     post_xero_bank_transaction,
 )
+from integrations.services.reconciliation_context import (
+    approve_reconciliation_suggestion,
+    build_reconciliation_enrichment_context,
+    save_reconciliation_suggestions,
+)
 from integrations.tests_reconciliation import FakeSession
 from roo.models import PointsAdmin
+from workflow_runs.models import ContentFactoryRun
 
 
 User = get_user_model()
@@ -118,7 +127,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             refresh_token="refresh-token",
             token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             external_account_id="tenant-1",
-            scopes=["offline_access", "accounting.banktransactions"],
+            scopes=["offline_access", "accounting.banktransactions", "accounting.settings"],
         )
         self.profile = ReconciliationProfile.objects.create(
             organization=self.organization,
@@ -131,6 +140,10 @@ class XeroReconciliationWorkflowTests(TestCase):
             revenue_tax_type="EXEMPTOUTPUT",
             fee_tax_type="INPUT",
             refund_tax_type="EXEMPTOUTPUT",
+            event_tracking_category_id="event-category-1",
+            event_tracking_category_name="Event Name",
+            project_tracking_category_id="project-category-1",
+            project_tracking_category_name="Project Name",
         )
         self.mapping = ReconciliationMapping.objects.create(
             organization=self.organization,
@@ -138,7 +151,43 @@ class XeroReconciliationWorkflowTests(TestCase):
             source_id="evt_1",
             source_label="Luma Night",
             accounting_treatment="revenue",
+            event_tracking_option_id="event-option-1",
             event_tracking_option_name="Luma Night",
+        )
+        self.luma_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LUMA,
+            user=self.user,
+            organization=self.organization,
+            access_token="luma-token",
+            external_account_id="luma-main",
+        )
+        self.linear_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-token",
+            external_account_id="linear-main",
+        )
+        LumaEventSelection.objects.create(
+            connection=self.luma_connection,
+            user=self.user,
+            organization=self.organization,
+            event_id="evt_1",
+            event_name="Luma Night",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            linear_project_id="lin_event_1",
+            name="Luma Night",
+            description="Public event delivery project",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            linear_project_id="lin_project_1",
+            name="Community Events",
+            description="Parent project for community event delivery",
         )
         self.report = {
             "payouts": [{
@@ -220,6 +269,45 @@ class XeroReconciliationWorkflowTests(TestCase):
         body = put_mock.call_args.kwargs["json"]
         self.assertEqual(body["BankTransactions"][0]["Reference"], "po_ledger")
 
+    def test_explicit_post_creates_missing_project_tracking_option(self):
+        record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
+        self.mapping.project_source_type = "linear"
+        self.mapping.project_source_id = "lin_project_1"
+        self.mapping.project_tracking_option_name = "Community Events"
+        self.mapping.save(update_fields=[
+            "project_source_type",
+            "project_source_id",
+            "project_tracking_option_name",
+            "updated_at",
+        ])
+        categories = Mock()
+        categories.json.return_value = {
+            "TrackingCategories": [
+                {
+                    "TrackingCategoryID": "project-category-1",
+                    "Name": "Project Name",
+                    "Options": [],
+                }
+            ]
+        }
+        categories.raise_for_status.return_value = None
+        created = Mock()
+        created.json.return_value = {
+            "Options": [{"TrackingOptionID": "project-option-1", "Name": "Community Events"}]
+        }
+        created.raise_for_status.return_value = None
+        with patch("integrations.services.xero_reconciliation.http_client.get", return_value=categories), patch(
+            "integrations.services.xero_reconciliation.http_client.put", return_value=created
+        ) as put_mock:
+            ensure_xero_tracking_options(record, profile=self.profile)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.project_tracking_option_id, "project-option-1")
+        self.assertEqual(
+            put_mock.call_args.args[0],
+            "https://api.xero.com/api.xro/2.0/TrackingCategories/project-category-1/Options",
+        )
+        self.assertEqual(put_mock.call_args.kwargs["json"], {"Options": [{"Name": "Community Events"}]})
+
     def test_post_rejects_unready_payout_without_network_call(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
         self.mapping.delete()
@@ -245,10 +333,83 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(preview["line_total_cents"], 9100)
         self.assertEqual(preview["xero_payload"]["LineItems"][2]["Tracking"][0]["Option"], "Stripe General")
 
+    def test_monthly_context_suggestion_adds_linear_project_and_review_note(self):
+        record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
+        context = build_reconciliation_enrichment_context(
+            organization=self.organization,
+            run_id="monthly-1",
+        )
+        self.assertEqual(context["luma_events"][0]["source_id"], "evt_1")
+        self.assertEqual(context["luma_events"][0]["exact_linear_matches"][0]["source_id"], "lin_event_1")
+        projects = {item["source_id"]: item for item in context["linear_projects"]}
+        self.assertEqual(projects["lin_event_1"]["dimension_hint"], "event_mirror")
+        self.assertEqual(projects["lin_project_1"]["dimension_hint"], "project")
+
+        suggestion = save_reconciliation_suggestions(
+            organization=self.organization,
+            run_id="monthly-1",
+            model_name="reasoning-model",
+            suggestions=[{
+                "payout_id": "po_ledger",
+                "source_type": "luma_event",
+                "source_id": "evt_1",
+                "event": {"source_type": "luma", "source_id": "evt_1"},
+                "project": {"source_type": "linear", "source_id": "lin_project_1"},
+                "confidence": 0.96,
+                "rationale": "The Luma and Linear names match and Slack confirms the event workstream.",
+                "review_note": "Ticket revenue for the Luma Night project; confirmed in the event planning thread.",
+                "evidence": [{"source_provider": "slack", "source_record_id": "thread-1", "summary": "Event planning"}],
+            }],
+        )[0]
+        self.assertEqual(suggestion.status, ReconciliationSuggestion.STATUS_PROPOSED)
+        approved, mapping = approve_reconciliation_suggestion(suggestion, reviewed_by_slack_id="UFIN")
+        self.assertEqual(approved.status, ReconciliationSuggestion.STATUS_APPROVED)
+        self.assertEqual(mapping.project_source_id, "lin_project_1")
+        self.assertEqual(mapping.project_tracking_option_name, "Community Events")
+
+        retried = save_reconciliation_suggestions(
+            organization=self.organization,
+            run_id="monthly-1",
+            suggestions=[{
+                "payout_id": "po_ledger",
+                "source_type": "luma_event",
+                "source_id": "evt_1",
+                "event": {"source_type": "luma", "source_id": "evt_1"},
+                "confidence": 0.2,
+                "rationale": "A retry must not reset the approved decision.",
+            }],
+        )[0]
+        self.assertEqual(retried.status, ReconciliationSuggestion.STATUS_APPROVED)
+        self.assertEqual(retried.project_source_id, "lin_project_1")
+
+        preview = build_xero_preview(record)
+        revenue_line = preview["xero_payload"]["LineItems"][0]
+        self.assertEqual([item["Name"] for item in revenue_line["Tracking"]], ["Event Name", "Project Name"])
+        self.assertIn("Project: Community Events", revenue_line["Description"])
+        self.assertIn("confirmed in the event planning thread", revenue_line["Description"])
+        self.assertEqual(preview["context_notes"][0]["project_name"], "Community Events")
+
+    def test_contextual_review_note_requires_source_evidence(self):
+        persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")
+        with self.assertRaisesMessage(ValueError, "must cite source evidence"):
+            save_reconciliation_suggestions(
+                organization=self.organization,
+                run_id="monthly-ungrounded",
+                suggestions=[{
+                    "payout_id": "po_ledger",
+                    "source_type": "luma_event",
+                    "source_id": "evt_1",
+                    "event": {"source_type": "luma", "source_id": "evt_1"},
+                    "review_note": "This unsupported note must not reach Xero.",
+                    "evidence": [],
+                }],
+            )
+
 
 class ReconciliationWorkflowApiTests(APITestCase):
     def setUp(self):
         self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
+        self.user = User.objects.create_user(email="agent@example.com", slack_id="UAGENT")
         PointsAdmin.objects.create(slack_user_id="UADMIN", role="admin", is_active=True)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
@@ -290,3 +451,101 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_valley_context_submission_and_human_approval_contract(self, _permission):
+        ContentFactoryRun.objects.create(
+            run_id="monthly-agent",
+            workflow="startup_monthly_update",
+            domain=self.organization.domain,
+            organization=self.organization,
+        )
+        luma_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LUMA,
+            user=self.user,
+            organization=self.organization,
+            access_token="luma-token",
+            external_account_id="luma-agent",
+        )
+        linear_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.LINEAR,
+            user=self.user,
+            organization=self.organization,
+            access_token="linear-token",
+            external_account_id="linear-agent",
+        )
+        LumaEventSelection.objects.create(
+            connection=luma_connection,
+            user=self.user,
+            organization=self.organization,
+            event_id="evt_agent",
+            event_name="Agent Night",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="lin_agent",
+            name="Agent Night",
+        )
+        LinearProjectArtifact.objects.create(
+            connection=linear_connection,
+            organization=self.organization,
+            linear_project_id="lin_agent_project",
+            name="Community Events",
+        )
+        payout = StripePayoutReconciliation.objects.create(
+            organization=self.organization,
+            payout_id="po_agent",
+            source_hash="stable-hash",
+            amount_cents=9700,
+            currency="AUD",
+            report_payload={
+                "revenue_groups": [{
+                    "source_type": "luma_event",
+                    "source_id": "evt_agent",
+                    "source_label": "Agent Night",
+                    "gross_cents": 10000,
+                    "stripe_fee_cents": 300,
+                }],
+            },
+        )
+
+        context_response = self.client.get(
+            reverse("reconciliation_enrichment_context"),
+            {"domain": "mlai.au", "run_id": "monthly-agent"},
+        )
+        self.assertEqual(context_response.status_code, status.HTTP_200_OK)
+        projects = {item["source_id"]: item for item in context_response.data["linear_projects"]}
+        self.assertEqual(projects["lin_agent"]["dimension_hint"], "event_mirror")
+        self.assertEqual(projects["lin_agent_project"]["dimension_hint"], "project")
+
+        submission_response = self.client.post(
+            reverse("reconciliation_enrichment_context"),
+            {
+                "domain": "mlai.au",
+                "run_id": "monthly-agent",
+                "model_name": "gpt-reasoner",
+                "suggestions": [{
+                    "payout_id": payout.payout_id,
+                    "source_type": "luma_event",
+                    "source_id": "evt_agent",
+                    "event": {"source_type": "luma", "source_id": "evt_agent"},
+                    "project": {"source_type": "linear", "source_id": "lin_agent_project"},
+                    "confidence": 0.97,
+                    "review_note": "Agent Night ticket revenue, corroborated by Slack and email planning context.",
+                    "evidence": [{"source_provider": "gmail", "source_record_id": "thread-agent"}],
+                }],
+            },
+            format="json",
+        )
+        self.assertEqual(submission_response.status_code, status.HTTP_200_OK)
+        suggestion_id = submission_response.data["suggestions"][0]["id"]
+
+        decision_response = self.client.post(
+            reverse("reconciliation_suggestion_decision", kwargs={"suggestion_id": suggestion_id}),
+            {"domain": "mlai.au", "slack_user_id": "UADMIN", "decision": "approve"},
+            format="json",
+        )
+        self.assertEqual(decision_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(decision_response.data["mapping"]["project_source_id"], "lin_agent_project")
+        self.assertEqual(decision_response.data["mapping"]["project_tracking_option_name"], "Community Events")

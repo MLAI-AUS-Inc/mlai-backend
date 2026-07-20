@@ -642,6 +642,9 @@ class ReconciliationMapping(models.Model):
     event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
     project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    reconciliation_note = models.TextField(blank=True, default="")
     account_code = models.CharField(max_length=64, blank=True, default="")
     tax_type = models.CharField(max_length=64, blank=True, default="")
     active = models.BooleanField(default=True)
@@ -710,4 +713,69 @@ class StripePayoutReconciliation(models.Model):
         ]
         indexes = [
             models.Index(fields=["organization", "arrival_date"], name="recon_payout_org_arrival_idx"),
+        ]
+
+
+class ReconciliationSuggestion(models.Model):
+    """Evidence-backed Event/Project proposal produced by the monthly-update agent.
+
+    Suggestions are deliberately separate from approved mappings.  Valley can
+    propose dimensions and a review note, but only the reconciliation approval
+    endpoint may copy those values onto :class:`ReconciliationMapping`.
+    """
+
+    STATUS_PROPOSED = "proposed"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_SUPERSEDED, "Superseded"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_suggestions",
+    )
+    payout = models.ForeignKey(
+        StripePayoutReconciliation,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    run_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    source_type = models.CharField(max_length=32)
+    source_id = models.CharField(max_length=255)
+    source_label = models.CharField(max_length=500, blank=True, default="")
+    event_source_type = models.CharField(max_length=32, blank=True, default="")
+    event_source_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    confidence = models.FloatField(default=0.0)
+    rationale = models.TextField(blank=True, default="")
+    review_note = models.TextField(blank=True, default="")
+    evidence = models.JSONField(default=list, blank=True)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    model_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    reviewed_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_suggestion"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "payout", "run_id", "source_type", "source_id"],
+                name="recon_suggest_org_payout_run_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="recon_suggest_org_status_idx"),
+            models.Index(fields=["organization", "source_type", "source_id"], name="recon_suggest_org_source_idx"),
         ]
