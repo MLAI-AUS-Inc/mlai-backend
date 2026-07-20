@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_PERSONAS = {"hacker", "hustler", "hipster", "healer"}
 MEDHACK_TEAM_MIN_MEMBERS = 2
 MEDHACK_TEAM_MAX_MEMBERS = 6
+HEALTHHACK_ADMIN_ONLY_MESSAGE = "HealthHack has closed. Administrator access only."
 
 APP_CONTEXT_ALIASES = {
     "medhack": "hospital",
@@ -80,6 +81,21 @@ def _normalize_app_context(app_value, default='hospital'):
 
 def _unsupported_app_response():
     return Response({"error": "Unsupported app."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _healthhack_admin_only_requested(data, app):
+    raw_value = data.get('healthhack_admin_only')
+    requested = raw_value is True or str(raw_value or '').strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+    return app == 'hospital' and requested
+
+
+def _healthhack_admin_only_response():
+    return Response(
+        {"detail": HEALTHHACK_ADMIN_ONLY_MESSAGE},
+        status=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def _normalize_next_path(next_path):
@@ -157,8 +173,14 @@ class CheckUserView(APIView):
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        user = User.objects.filter(email__iexact=email).first()
+        if _healthhack_admin_only_requested(data, app) and not (
+            user and user.is_active and user.is_superuser
+        ):
+            return _healthhack_admin_only_response()
+
         return Response(
-            {"user_exists": User.objects.filter(email__iexact=email).exists()},
+            {"user_exists": user is not None},
             status=status.HTTP_200_OK,
         )
 
@@ -186,6 +208,11 @@ class SendMagicLinkView(APIView):
                     {"user_exists": False, "message": "User does not exist."}, 
                     status=status.HTTP_200_OK
                 )
+
+            if _healthhack_admin_only_requested(data, app) and not (
+                user.is_active and user.is_superuser
+            ):
+                return _healthhack_admin_only_response()
 
             # User exists, send magic link
             if not user.is_active:
@@ -228,6 +255,9 @@ class CreateUserView(APIView):
 
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if _healthhack_admin_only_requested(data, app):
+            return _healthhack_admin_only_response()
 
         try:
             with transaction.atomic():
@@ -313,6 +343,15 @@ class MagicLinkVerifyView(APIView):
 
                 user = User.objects.get(email__iexact=email)
                 logger.info("Verified magic link for existing user: %s", email)
+
+                if app_param == 'hospital' and not (
+                    user.is_active and user.is_superuser
+                ):
+                    logger.warning(
+                        "Rejected closed HealthHack login for non-admin user: %s",
+                        email,
+                    )
+                    return _healthhack_admin_only_response()
 
                 if not user.is_active:
                     user.is_active = True

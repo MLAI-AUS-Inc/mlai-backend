@@ -116,10 +116,19 @@ class HealthHackAnnouncementTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Announcement.objects.exists())
 
-    def test_participant_list_returns_roo_published_announcement(self):
+    def test_participant_cannot_list_roo_published_announcements(self):
         self.assertEqual(self.post().status_code, 201)
         viewer = APIClient()
         viewer.force_authenticate(user=self.participant)
+
+        response = viewer.get(self.canonical_url)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_superuser_can_list_roo_published_announcement(self):
+        self.assertEqual(self.post().status_code, 201)
+        viewer = APIClient()
+        viewer.force_authenticate(user=self.organiser)
 
         response = viewer.get(self.canonical_url)
 

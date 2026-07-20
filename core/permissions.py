@@ -59,6 +59,20 @@ class IsLeaderboardAdmin(permissions.BasePermission):
         )
 
 
+class IsHealthHackAdmin(permissions.BasePermission):
+    """Allow the closed HealthHack application to Django superusers only."""
+
+    message = "HealthHack has closed. Administrator access only."
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.is_active
+            and request.user.is_superuser
+        )
+
+
 class HasAPIKey(permissions.BasePermission):
     """
     Allows access if the X-API-Key header matches INTERNAL_API_KEY in settings.

@@ -1,4 +1,4 @@
-"""Public world-state endpoint for the health-hack 3D visualisation.
+"""Admin-only world-state endpoint for the closed HealthHack visualisation.
 
 Serves a render-ready entity list (cubes = teams placed by rank, spheres =
 recent submissions) that the health-hack frontend polls every 5 seconds.
@@ -10,9 +10,10 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.db.models import OuterRef, Subquery
 from django.utils import timezone
-from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from core.permissions import IsHealthHackAdmin
 
 from .models import HospitalCompetitionRound, Submission, Team
 
@@ -42,8 +43,7 @@ def rank_to_lat_lon(rank):
 
 
 class WorldStateView(APIView):
-    permission_classes = [permissions.AllowAny]
-    authentication_classes = []
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         payload = cache.get(WORLD_CACHE_KEY)

@@ -4,12 +4,12 @@ import re
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from rest_framework import permissions, status
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
-from core.permissions import HasAPIKey, HasRooApiKey
+from core.permissions import HasAPIKey, HasRooApiKey, IsHealthHackAdmin
 from core.slack_users import (
     resolve_existing_user,
     resolve_or_create_user,
@@ -27,14 +27,14 @@ SLACK_MESSAGE_TS_PATTERN = re.compile(r"^\d{10,20}\.\d{1,12}$")
 
 
 class HealthHackAnnouncementListCreateView(APIView):
-    """Participant list plus Roo-authenticated HealthHack announcement creation."""
+    """Admin list plus Roo-authenticated HealthHack announcement creation."""
 
     throttle_classes = [AnonRateThrottle]
 
     def get_permissions(self):
         if self.request.method == "POST":
             return [(HasAPIKey | HasRooApiKey)()]
-        return [permissions.IsAuthenticated()]
+        return [IsHealthHackAdmin()]
 
     def get(self, request):
         announcements = active_hospital_announcements().select_related("author")

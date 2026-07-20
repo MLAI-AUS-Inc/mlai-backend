@@ -19,15 +19,15 @@ from .rounds import (
     active_hospital_teams,
 )
 from .serializers import TeamSerializer, SubmissionSerializer
-from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 import logging
 from dotenv import load_dotenv
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model
-from rest_framework import permissions, status
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from core.permissions import IsHealthHackAdmin
 from core.user_compat import get_compat_user_role
 
 load_dotenv()
@@ -62,7 +62,7 @@ def _slack_timestamp_is_current(timestamp_value, opened_at):
 
 
 class TeamListView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         teams = active_hospital_teams().order_by('team_id')
@@ -170,7 +170,7 @@ class TeamListView(APIView):
 
 
 class JoinTeamView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def post(self, request):
         team_id = request.data.get('team_id')
@@ -229,7 +229,7 @@ class JoinTeamView(APIView):
 
 
 class SubmissionListCreateView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         submissions = (
@@ -289,7 +289,7 @@ class SubmissionListCreateView(APIView):
 
 
 class LeaderboardView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         # Best submission per team, in two phases: a light id scan (two
@@ -570,7 +570,7 @@ def _announce_if_top_score(submission):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def submit_predictions(request):
     if request.method == 'POST':
         if not request.user.is_authenticated:
@@ -785,7 +785,7 @@ def submit_predictions(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_submission(request):
     if request.method == 'GET':
         if not request.user.is_authenticated:
@@ -816,7 +816,7 @@ def get_submission(request):
     return JsonResponse({'error': 'Invalid request'}, status=405)
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_submission_by_id(request, submission_id):
     if not request.user.is_authenticated:
         return JsonResponse({'error': 'Authentication required'}, status=401)
@@ -851,7 +851,7 @@ def get_submission_by_id(request, submission_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_recent_submissions(request):
     user = request.user
     team = active_hospital_team_for(user)
@@ -881,7 +881,7 @@ def get_recent_submissions(request):
 
 class ChannelMessagesView(APIView):
     """Read-only feed of messages from the configured HealthHack Slack channel."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 
@@ -936,7 +936,7 @@ class ChannelMessagesView(APIView):
 
 class ThreadRepliesView(APIView):
     """Read-only replies for a single thread in the HealthHack Slack channel."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 

@@ -24,6 +24,8 @@ class MedHackOnboardingFlowTests(TestCase):
             last_name='User',
             role='participant',
         )
+        self.user.is_superuser = True
+        self.user.save(update_fields=['is_superuser'])
         self.client.force_authenticate(user=self.user)
 
     def _make_png_upload(self, name='team.png'):
@@ -209,14 +211,37 @@ class MedHackOnboardingFlowTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {'detail': 'CSV invalid'})
 
-    def test_hospital_leaderboard_is_available_to_participants(self):
-        response = self.client.get('/api/v1/hackathons/hospital/leaderboard/')
-        self.assertEqual(response.status_code, 200)
+    def test_closed_healthhack_endpoints_are_forbidden_for_non_admin(self):
+        participant = User.objects.create_user(
+            email='closed-participant@example.com',
+            password='password',
+            role='participant',
+        )
+        participant_client = APIClient()
+        participant_client.force_authenticate(user=participant)
+
+        closed_urls = [
+            '/api/v1/hackathons/hospital/teams/',
+            '/api/v1/hackathons/hospital/submissions/',
+            '/api/v1/hackathons/hospital/leaderboard/',
+            '/api/v1/hackathons/hospital/get_submission/',
+            '/api/v1/hackathons/hospital/get_recent_submissions/',
+            '/api/v1/hackathons/hospital/announcements/',
+            '/api/v1/hackathons/hospital/channel/',
+            '/api/v1/hackathons/hospital/world/',
+        ]
+
+        for url in closed_urls:
+            with self.subTest(url=url):
+                response = participant_client.get(url)
+                self.assertEqual(response.status_code, 403)
 
     def test_hospital_leaderboard_endpoint_returns_ranked_results(self):
         admin_user = User.objects.create_user(
             email='hi@mlai.au', password='password', role='participant',
         )
+        admin_user.is_superuser = True
+        admin_user.save(update_fields=['is_superuser'])
         admin_client = APIClient()
         admin_client.force_authenticate(user=admin_user)
 
