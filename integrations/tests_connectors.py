@@ -1217,6 +1217,24 @@ class ConnectorEndpointTests(TestCase):
                 ),
                 _json_response(
                     {
+                        "Invoices": [
+                            {
+                                "InvoiceID": "bill-1",
+                                "InvoiceNumber": "BILL-001",
+                                "Type": "ACCPAY",
+                                "Status": "AUTHORISED",
+                                "AmountDue": "1308.12",
+                                "Total": "1308.12",
+                                "CurrencyCode": "AUD",
+                                "DateString": "2026-04-02",
+                                "Contact": {"Name": "Print Locker"},
+                            }
+                        ],
+                        "pagination": {"page": 1, "pageCount": 1},
+                    }
+                ),
+                _json_response(
+                    {
                         "Payments": [
                             {
                                 "PaymentID": "pay-1",
@@ -1245,7 +1263,7 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data["status"], "synced")
         self.assertEqual(response.data["syncRuns"][0]["repeatingInvoicesSynced"], 1)
-        self.assertEqual(response.data["syncRuns"][0]["invoicesSynced"], 1)
+        self.assertEqual(response.data["syncRuns"][0]["invoicesSynced"], 2)
         self.assertEqual(response.data["syncRuns"][0]["paymentsSynced"], 1)
         self.assertFalse(response.data["syncRuns"][0]["hasReportScope"])
         self.assertFalse(response.data["syncRuns"][0]["needsReportReconnect"])
@@ -1258,10 +1276,11 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(connection.refresh_token, "new-xero-refresh")
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.CONNECTED)
         self.assertEqual(mock_post.call_args.kwargs["data"]["grant_type"], "refresh_token")
-        self.assertEqual(ExternalFinancialRecord.objects.filter(connection=connection).count(), 3)
+        self.assertEqual(ExternalFinancialRecord.objects.filter(connection=connection).count(), 4)
         for call in mock_get.call_args_list:
             self.assertEqual(call.kwargs["headers"]["Xero-Tenant-Id"], "tenant-123")
-            self.assertEqual(call.kwargs["headers"]["If-Modified-Since"], "2026-04-01T00:00:00+00:00")
+            if 'Type=="ACCPAY"' not in str(call.kwargs.get("params", {}).get("where", "")):
+                self.assertEqual(call.kwargs["headers"]["If-Modified-Since"], "2026-04-01T00:00:00+00:00")
 
         repeating_record = ExternalFinancialRecord.objects.get(
             connection=connection,
@@ -1275,6 +1294,12 @@ class ConnectorEndpointTests(TestCase):
         )
         self.assertEqual(invoice_record.external_record_id, "inv-1")
         self.assertEqual(invoice_record.merchant_name, "Customer Pty Ltd")
+        bill_record = ExternalFinancialRecord.objects.get(
+            connection=connection,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+        )
+        self.assertEqual(bill_record.external_record_id, "bill-1")
+        self.assertEqual(str(bill_record.amount), "1308.12")
         payment_record = ExternalFinancialRecord.objects.get(
             connection=connection,
             record_type=ExternalFinancialRecord.RECORD_XERO_PAYMENT,
@@ -1304,6 +1329,8 @@ class ConnectorEndpointTests(TestCase):
             if "RepeatingInvoices" in url:
                 return _json_response({"RepeatingInvoices": []})
             if "Invoices" in url:
+                if 'Type=="ACCPAY"' in str(kwargs.get("params", {}).get("where", "")):
+                    return _json_response({"Invoices": [], "pagination": {"page": 1, "pageCount": 1}})
                 return _json_response(
                     {
                         "Invoices": [

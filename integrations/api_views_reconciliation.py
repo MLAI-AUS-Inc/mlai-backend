@@ -16,6 +16,7 @@ from integrations.models import (
     ReconciliationProfile,
     ReconciliationSuggestion,
     StripePayoutReconciliation,
+    XeroStatementLineSnapshot,
 )
 from integrations.services.reconciliation import (
     ReconciliationReportService,
@@ -38,6 +39,11 @@ from integrations.services.reconciliation_context import (
     build_reconciliation_enrichment_context,
     save_reconciliation_suggestions,
     serialize_suggestion,
+)
+from integrations.services.xero_statement_reconciliation import (
+    save_statement_suggestions,
+    serialize_statement_line,
+    serialize_statement_suggestion,
 )
 
 
@@ -394,9 +400,13 @@ class ReconciliationEnrichmentContextView(APIView):
         _, error = _monthly_run_or_response(organization=organization, run_id=run_id)
         if error:
             return error
-        suggestions = request.data.get("suggestions")
-        if not isinstance(suggestions, list):
-            return Response({"error": "suggestions must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        suggestions = request.data.get("suggestions", [])
+        statement_suggestions = request.data.get("statement_suggestions", [])
+        if not isinstance(suggestions, list) or not isinstance(statement_suggestions, list):
+            return Response(
+                {"error": "suggestions and statement_suggestions must be lists"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             saved = save_reconciliation_suggestions(
                 organization=organization,
@@ -404,9 +414,32 @@ class ReconciliationEnrichmentContextView(APIView):
                 suggestions=suggestions,
                 model_name=str(request.data.get("model_name") or ""),
             )
+            saved_statements = save_statement_suggestions(
+                organization=organization,
+                run_id=run_id,
+                suggestions=statement_suggestions,
+                model_name=str(request.data.get("model_name") or ""),
+            )
         except (TypeError, ValueError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"suggestion_count": len(saved), "suggestions": [serialize_suggestion(item) for item in saved]})
+        return Response({
+            "suggestion_count": len(saved),
+            "suggestions": [serialize_suggestion(item) for item in saved],
+            "statement_suggestion_count": len(saved_statements),
+            "statement_suggestions": [serialize_statement_suggestion(item) for item in saved_statements],
+        })
+
+
+class ReconciliationStatementLineListView(ReconciliationAdminView):
+    def get(self, request):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        queryset = XeroStatementLineSnapshot.objects.filter(
+            organization=organization,
+            active=True,
+        ).order_by("transaction_date", "statement_line_id")
+        return Response({"statement_lines": [serialize_statement_line(line) for line in queryset]})
 
 
 class ReconciliationSuggestionDecisionView(ReconciliationAdminView):

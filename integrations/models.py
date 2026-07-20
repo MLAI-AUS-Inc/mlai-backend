@@ -195,12 +195,14 @@ class ExternalFinancialRecord(models.Model):
     RECORD_BANK_TRANSACTION = "bank_transaction"
     RECORD_XERO_REPEATING_INVOICE = "xero_repeating_invoice"
     RECORD_XERO_INVOICE = "xero_invoice"
+    RECORD_XERO_BILL = "xero_bill"
     RECORD_XERO_PAYMENT = "xero_payment"
 
     RECORD_TYPE_CHOICES = [
         (RECORD_BANK_TRANSACTION, "Bank Transaction"),
         (RECORD_XERO_REPEATING_INVOICE, "Xero Repeating Invoice"),
         (RECORD_XERO_INVOICE, "Xero Invoice"),
+        (RECORD_XERO_BILL, "Xero Bill"),
         (RECORD_XERO_PAYMENT, "Xero Payment"),
     ]
 
@@ -778,4 +780,127 @@ class ReconciliationSuggestion(models.Model):
         indexes = [
             models.Index(fields=["organization", "status"], name="recon_suggest_org_status_idx"),
             models.Index(fields=["organization", "source_type", "source_id"], name="recon_suggest_org_source_idx"),
+        ]
+
+
+class XeroStatementLineSnapshot(models.Model):
+    """A browser-observed unreconciled Xero statement line.
+
+    Xero's Accounting API does not expose the bank-reconciliation statement
+    queue, so explicit founder-run browser backfills import immutable line
+    identifiers and the visible draft fields.  No browser import posts or
+    reconciles anything.
+    """
+
+    DIRECTION_DEBIT = "debit"
+    DIRECTION_CREDIT = "credit"
+    DIRECTION_CHOICES = [
+        (DIRECTION_DEBIT, "Debit"),
+        (DIRECTION_CREDIT, "Credit"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_line_snapshots",
+    )
+    bank_account_id = models.CharField(max_length=255)
+    statement_line_id = models.CharField(max_length=255)
+    transaction_date = models.DateField()
+    narration = models.TextField(blank=True, default="")
+    reference = models.CharField(max_length=500, blank=True, default="")
+    direction = models.CharField(max_length=16, choices=DIRECTION_CHOICES)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=12, blank=True, default="AUD")
+    current_contact = models.CharField(max_length=255, blank=True, default="")
+    current_account = models.CharField(max_length=255, blank=True, default="")
+    current_description = models.TextField(blank=True, default="")
+    current_event_name = models.CharField(max_length=255, blank=True, default="")
+    current_project_name = models.CharField(max_length=255, blank=True, default="")
+    current_tax_type = models.CharField(max_length=255, blank=True, default="")
+    ready_in_xero = models.BooleanField(default=False, db_index=True)
+    active = models.BooleanField(default=True, db_index=True)
+    source_hash = models.CharField(max_length=64)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_line_snapshot"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "bank_account_id", "statement_line_id"],
+                name="xero_stmt_org_account_line_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "active", "ready_in_xero"], name="xero_stmt_org_queue_idx"),
+            models.Index(fields=["organization", "transaction_date"], name="xero_stmt_org_date_idx"),
+        ]
+
+
+class XeroStatementSuggestion(models.Model):
+    """Guarded proposal for prefilling one Xero bank-reconciliation row."""
+
+    ACTION_PREFILL_CREATE = "prefill_create"
+    ACTION_MATCH_BILL = "match_existing_bill"
+    ACTION_NEEDS_REVIEW = "needs_review"
+    ACTION_CHOICES = [
+        (ACTION_PREFILL_CREATE, "Prefill Create"),
+        (ACTION_MATCH_BILL, "Match Existing Bill"),
+        (ACTION_NEEDS_REVIEW, "Needs Review"),
+    ]
+    STATUS_PROPOSED = "proposed"
+    STATUS_APPLIED = "applied"
+    STATUS_REJECTED = "rejected"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_APPLIED, "Applied to Xero form"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_SUPERSEDED, "Superseded"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_suggestions",
+    )
+    statement_line = models.ForeignKey(
+        XeroStatementLineSnapshot,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    run_id = models.CharField(max_length=255, db_index=True)
+    proposed_action = models.CharField(max_length=32, choices=ACTION_CHOICES, default=ACTION_NEEDS_REVIEW)
+    contact_name = models.CharField(max_length=255, blank=True, default="")
+    account_code = models.CharField(max_length=64, blank=True, default="")
+    account_name = models.CharField(max_length=255, blank=True, default="")
+    tax_type = models.CharField(max_length=255, blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    event_source_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    matched_xero_bill_id = models.CharField(max_length=255, blank=True, default="")
+    confidence = models.FloatField(default=0.0)
+    rationale = models.TextField(blank=True, default="")
+    review_note = models.TextField(blank=True, default="")
+    evidence = models.JSONField(default=list, blank=True)
+    source_hash = models.CharField(max_length=64)
+    model_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_suggestion"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "statement_line", "run_id"],
+                name="xero_stmt_suggest_org_line_run_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="xero_stmt_suggest_status_idx"),
         ]

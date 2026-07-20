@@ -2326,7 +2326,8 @@ def _upsert_xero_repeating_invoices(connection: ExternalServiceConnection, invoi
 def _upsert_xero_invoices(connection: ExternalServiceConnection, invoices: list[dict[str, Any]]) -> int:
     upserted = 0
     for invoice in invoices:
-        if _nested_text(invoice, "Type", "type").upper() != "ACCREC":
+        invoice_type = _nested_text(invoice, "Type", "type").upper()
+        if invoice_type not in {"ACCREC", "ACCPAY"}:
             continue
         status_value = _nested_text(invoice, "Status", "status").upper()
         if status_value not in {"AUTHORISED", "PAID"}:
@@ -2334,22 +2335,23 @@ def _upsert_xero_invoices(connection: ExternalServiceConnection, invoices: list[
         external_record_id = _xero_record_external_id(invoice, "InvoiceID", "invoice_id")
         if not external_record_id:
             continue
+        is_bill = invoice_type == "ACCPAY"
         defaults = {
-            "record_type": ExternalFinancialRecord.RECORD_XERO_INVOICE,
+            "record_type": ExternalFinancialRecord.RECORD_XERO_BILL if is_bill else ExternalFinancialRecord.RECORD_XERO_INVOICE,
             "connection": connection,
             "financial_account": None,
             "user": connection.user,
             "organization": connection.organization,
             "currency": _xero_currency(invoice),
-            "amount": _xero_amount(invoice, "SubTotal", "sub_total", "Total", "total"),
-            "direction": "credit",
+            "amount": _xero_amount(invoice, "AmountDue", "amount_due", "Total", "total") if is_bill else _xero_amount(invoice, "SubTotal", "sub_total", "Total", "total"),
+            "direction": "debit" if is_bill else "credit",
             "status": status_value,
             "posted_at": _xero_datetime_or_none(invoice.get("UpdatedDateUTC") or invoice.get("updated_date_utc")),
             "transaction_date": _xero_date_or_none(invoice.get("DateString") or invoice.get("Date") or invoice.get("date")),
-            "description": _xero_invoice_description(invoice) or "Xero sales invoice",
+            "description": _xero_invoice_description(invoice) or ("Xero bill" if is_bill else "Xero sales invoice"),
             "merchant_name": _xero_contact_name(invoice),
-            "category": "sales_invoice",
-            "class_name": _nested_text(invoice, "Type", "type"),
+            "category": "bill" if is_bill else "sales_invoice",
+            "class_name": invoice_type,
             "raw_payload": invoice,
         }
         ExternalFinancialRecord.objects.update_or_create(
@@ -2509,6 +2511,19 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
         if_modified_since=if_modified_since,
         paginated=True,
     )
+    # Bills are required to distinguish "match the existing bill" from
+    # "create a new Spend Money transaction".  Use a separate first-run cursor
+    # so enabling this feature backfills historical ACCPAY records even when
+    # the sales-invoice connection has synced recently.
+    bill_if_modified_since = str(cursor.get("bills_if_modified_since") or (now - timedelta(days=395)).isoformat())
+    bills = _xero_collection(
+        connection,
+        "/Invoices",
+        "Invoices",
+        params={"where": 'Type=="ACCPAY"', "Statuses": "AUTHORISED,PAID", "pageSize": 100},
+        if_modified_since=bill_if_modified_since,
+        paginated=True,
+    )
     payments = _xero_collection(
         connection,
         "/Payments",
@@ -2520,7 +2535,7 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
 
     with transaction.atomic():
         repeating_synced = _upsert_xero_repeating_invoices(connection, repeating_invoices)
-        invoices_synced = _upsert_xero_invoices(connection, invoices)
+        invoices_synced = _upsert_xero_invoices(connection, [*invoices, *bills])
         payments_synced = _upsert_xero_payments(connection, payments)
         connection.status = ExternalServiceConnectionStatus.CONNECTED
         connection.last_error = ""
@@ -2530,6 +2545,8 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
             "if_modified_since": now.isoformat(),
             "repeating_invoices_synced": repeating_synced,
             "invoices_synced": invoices_synced,
+            "bills_if_modified_since": now.isoformat(),
+            "bills_synced": len(bills),
             "payments_synced": payments_synced,
         }
         connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])

@@ -10,12 +10,15 @@ from rest_framework.test import APITestCase
 
 from organizations.models import Organization
 from integrations.models import (
+    ExternalFinancialRecord,
     ExternalServiceConnection,
     ExternalServiceProvider,
     ReconciliationMapping,
     ReconciliationProfile,
     ReconciliationSuggestion,
     StripePayoutReconciliation,
+    XeroStatementLineSnapshot,
+    XeroStatementSuggestion,
 )
 from startup_updates.models import LinearProjectArtifact, LumaEventSelection
 from integrations.services.reconciliation import (
@@ -33,6 +36,11 @@ from integrations.services.reconciliation_context import (
     approve_reconciliation_suggestion,
     build_reconciliation_enrichment_context,
     save_reconciliation_suggestions,
+)
+from integrations.services.xero_statement_reconciliation import (
+    build_statement_reconciliation_context,
+    import_xero_statement_lines,
+    save_statement_suggestions,
 )
 from integrations.tests_reconciliation import FakeSession
 from roo.models import PointsAdmin
@@ -405,6 +413,114 @@ class XeroReconciliationWorkflowTests(TestCase):
                 }],
             )
 
+    def test_statement_backfill_uses_only_historical_patterns_or_matching_bills(self):
+        lines = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[
+                {
+                    "statement_line_id": "ready-uber",
+                    "date": "20 May 2026",
+                    "narration": "UBER *TRIP HELP.UB Card xx3532",
+                    "reference": "POS",
+                    "direction": "debit",
+                    "amount": "12.93",
+                    "contact": "uber",
+                    "account": "406 - Travel-national",
+                    "description": "uber trip",
+                    "tax_type": "GST on Expenses",
+                    "has_ok": True,
+                },
+                {
+                    "statement_line_id": "blank-uber",
+                    "date": "21 May 2026",
+                    "narration": "UBER *TRIP HELP.UB Card xx1336",
+                    "reference": "POS",
+                    "direction": "debit",
+                    "amount": "18.50",
+                    "has_ok": False,
+                },
+                {
+                    "statement_line_id": "blank-bill",
+                    "date": "1 Jun 2026",
+                    "narration": "PRINT LOCKER ALPHI",
+                    "reference": "POS",
+                    "direction": "debit",
+                    "amount": "1308.12",
+                    "has_ok": False,
+                },
+            ],
+        )
+        self.assertEqual(len(lines), 3)
+        ExternalFinancialRecord.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            external_record_id="bill-print-locker",
+            external_account_id="tenant-1",
+            currency="AUD",
+            amount="1308.12",
+            direction="debit",
+            status="AUTHORISED",
+            transaction_date=datetime(2026, 5, 27).date(),
+            description="BILL-101 · Print Locker",
+            merchant_name="Print Locker",
+            category="bill",
+            class_name="ACCPAY",
+        )
+        context = build_statement_reconciliation_context(organization=self.organization)
+        candidates = {item["statement_line_id"]: item for item in context["statement_candidates"]}
+        self.assertEqual(candidates["blank-uber"]["allowed_historical_patterns"][0]["account_code"], "406")
+        self.assertEqual(candidates["blank-bill"]["matching_xero_bills"][0]["xero_bill_id"], "bill-print-locker")
+
+        saved = save_statement_suggestions(
+            organization=self.organization,
+            run_id="monthly-statement-1",
+            suggestions=[
+                {
+                    "statement_line_id": "blank-uber",
+                    "proposed_action": "prefill_create",
+                    "contact_name": "uber",
+                    "account_code": "406",
+                    "account_name": "Travel-national",
+                    "tax_type": "GST on Expenses",
+                    "description": "Uber travel supported by the same Xero merchant rule.",
+                    "review_note": "Exact historical merchant pattern; human must click OK.",
+                    "confidence": 0.95,
+                    "evidence": [{"source_provider": "xero_ui", "source_record_id": "ready-uber"}],
+                },
+                {
+                    "statement_line_id": "blank-bill",
+                    "proposed_action": "match_existing_bill",
+                    "matched_xero_bill_id": "bill-print-locker",
+                    "description": "Exact amount matches the authorised Print Locker bill.",
+                    "confidence": 0.9,
+                    "evidence": [{"source_provider": "xero", "source_record_id": "bill-print-locker"}],
+                },
+            ],
+        )
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(saved[0].status, XeroStatementSuggestion.STATUS_PROPOSED)
+        self.assertEqual(saved[1].matched_xero_bill_id, "bill-print-locker")
+        self.assertEqual(XeroStatementLineSnapshot.objects.filter(ready_in_xero=False).count(), 2)
+
+        with self.assertRaisesMessage(ValueError, "not backed by an exact historical Xero pattern"):
+            save_statement_suggestions(
+                organization=self.organization,
+                run_id="monthly-statement-invalid",
+                suggestions=[{
+                    "statement_line_id": "blank-uber",
+                    "proposed_action": "prefill_create",
+                    "contact_name": "uber",
+                    "account_code": "999",
+                    "account_name": "Invented account",
+                    "tax_type": "GST on Expenses",
+                    "evidence": [{"source_provider": "xero_ui", "source_record_id": "ready-uber"}],
+                }],
+            )
+
 
 class ReconciliationWorkflowApiTests(APITestCase):
     def setUp(self):
@@ -507,8 +623,8 @@ class ReconciliationWorkflowApiTests(APITestCase):
                     "gross_cents": 10000,
                     "stripe_fee_cents": 300,
                 }],
-            },
-        )
+                },
+            )
 
         context_response = self.client.get(
             reverse("reconciliation_enrichment_context"),
