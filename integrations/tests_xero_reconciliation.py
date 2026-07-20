@@ -13,6 +13,7 @@ from integrations.models import (
     ExternalFinancialRecord,
     ExternalServiceConnection,
     ExternalServiceProvider,
+    GoogleConnection,
     ReconciliationMapping,
     ReconciliationProfile,
     ReconciliationSuggestion,
@@ -20,7 +21,12 @@ from integrations.models import (
     XeroStatementLineSnapshot,
     XeroStatementSuggestion,
 )
-from startup_updates.models import LinearProjectArtifact, LumaEventSelection
+from startup_updates.models import (
+    GmailMessageArtifact,
+    LinearProjectArtifact,
+    LumaEventSelection,
+    SlackMessageArtifact,
+)
 from integrations.services.reconciliation import (
     DEFAULT_STRIPE_API_VERSION,
     ReconciliationReportService,
@@ -524,6 +530,73 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "evidence": [{"source_provider": "xero_ui", "source_record_id": "ready-uber"}],
                 }],
             )
+
+    def test_statement_context_finds_date_amount_and_merchant_evidence(self):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "jetstar-1",
+                "date": "20 Jul 2026",
+                "narration": "JETSTAR AIRWAYS Card xx1336",
+                "reference": "POS",
+                "direction": "debit",
+                "amount": "362.20",
+                "has_ok": False,
+            }],
+        )
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_email="finance@example.com",
+            refresh_token="google-refresh-token",
+            scope="gmail.readonly",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-jetstar-receipt",
+            gmail_thread_id="thread-jetstar",
+            internal_date=datetime(2026, 7, 19, 9, tzinfo=timezone.utc),
+            subject="Your Jetstar itinerary and tax invoice",
+            from_address="itineraries@jetstar.com",
+            snippet="Total paid AUD $362.20 for Melbourne to Sydney.",
+        )
+        slack_connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.SLACK,
+            user=self.user,
+            organization=self.organization,
+            access_token="slack-token",
+            external_account_id="workspace-1",
+        )
+        SlackMessageArtifact.objects.create(
+            organization=self.organization,
+            connection=slack_connection,
+            channel_id="C-EVENTS",
+            channel_name="events",
+            slack_message_ts="1784455200.000001",
+            posted_at=datetime(2026, 7, 18, 10, tzinfo=timezone.utc),
+            author_name="Sam",
+            text="I booked the Jetstar flight for $362.20 for the Sydney event.",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-unrelated",
+            gmail_thread_id="thread-unrelated",
+            internal_date=datetime(2026, 7, 20, 9, tzinfo=timezone.utc),
+            subject="Unrelated software receipt",
+            snippet="Total $362.20",
+        )
+
+        context = build_statement_reconciliation_context(organization=self.organization)
+        candidate = context["statement_candidates"][0]
+        evidence = candidate["context_evidence"]
+        self.assertEqual({item["source_provider"] for item in evidence}, {"gmail", "slack"})
+        self.assertNotIn("gmail-unrelated", {item["source_record_id"] for item in evidence})
+        gmail_evidence = next(item for item in evidence if item["source_provider"] == "gmail")
+        self.assertIn("amount:362.20", gmail_evidence["match_reasons"])
+        self.assertIn("Jetstar itinerary", gmail_evidence["summary"])
 
 
 class ReconciliationWorkflowApiTests(APITestCase):

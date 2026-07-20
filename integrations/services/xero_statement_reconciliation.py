@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from integrations.models import (
@@ -18,7 +19,13 @@ from integrations.models import (
     XeroStatementLineSnapshot,
     XeroStatementSuggestion,
 )
-from startup_updates.models import LinearProjectArtifact, LinearProjectSelection, LumaEventSelection
+from startup_updates.models import (
+    GmailMessageArtifact,
+    LinearProjectArtifact,
+    LinearProjectSelection,
+    LumaEventSelection,
+    SlackMessageArtifact,
+)
 
 
 ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
@@ -32,6 +39,43 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
     "startup_memory",
 }
 
+STATEMENT_EVIDENCE_WINDOW_DAYS = 31
+STATEMENT_EVIDENCE_LIMIT = 5
+_MERCHANT_NOISE = {
+    "app",
+    "aus",
+    "australia",
+    "bank",
+    "bpa",
+    "card",
+    "commbank",
+    "credit",
+    "debit",
+    "direct",
+    "eftpos",
+    "fast",
+    "fee",
+    "fees",
+    "from",
+    "help",
+    "international",
+    "limited",
+    "ltd",
+    "mastercard",
+    "mis",
+    "npp",
+    "online",
+    "payment",
+    "payments",
+    "pos",
+    "purchase",
+    "refund",
+    "stripe",
+    "the",
+    "transfer",
+    "visa",
+}
+
 
 def merchant_key(value: Any) -> str:
     text = str(value or "").lower()
@@ -43,6 +87,182 @@ def merchant_key(value: Any) -> str:
     text = re.sub(r"\b(?:commbank|app|payid|email)\b", " ", text)
     text = re.sub(r"\d{6,}", " ", text)
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _merchant_terms(line: XeroStatementLineSnapshot) -> list[str]:
+    terms = {
+        token
+        for token in merchant_key(line.narration).split()
+        if len(token) >= 3 and not token.isdigit() and token not in _MERCHANT_NOISE
+    }
+    return sorted(terms, key=lambda item: (-len(item), item))[:8]
+
+
+def _amount_markers(amount: Decimal) -> list[str]:
+    fixed = f"{amount:,.2f}"
+    plain = fixed.replace(",", "")
+    markers = {fixed, plain}
+    if amount == amount.to_integral_value():
+        markers.update({f"{amount:,.0f}", f"{amount:.0f}"})
+    elif fixed.endswith("0"):
+        markers.update({fixed[:-1], plain[:-1]})
+    return sorted(markers, key=len, reverse=True)
+
+
+def _contains_amount(text: str, markers: list[str]) -> tuple[bool, str]:
+    for marker in markers:
+        if re.search(rf"(?<![\d.]){re.escape(marker)}(?![\d.])", text):
+            return True, marker
+    return False, ""
+
+
+def _evidence_excerpt(text: str, needles: list[str], *, limit: int = 700) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not compact:
+        return ""
+    folded = compact.casefold()
+    positions = [folded.find(item.casefold()) for item in needles if item and folded.find(item.casefold()) >= 0]
+    start = max(0, min(positions) - 180) if positions else 0
+    excerpt = compact[start : start + limit]
+    if start:
+        excerpt = f"…{excerpt}"
+    if start + limit < len(compact):
+        excerpt = f"{excerpt}…"
+    return excerpt
+
+
+def _score_evidence(*, text: str, terms: list[str], markers: list[str], occurred_on, transaction_date):
+    folded = text.casefold()
+    vendor_hits = [term for term in terms if term in folded]
+    amount_hit, amount_marker = _contains_amount(folded, markers)
+    days = abs((occurred_on - transaction_date).days)
+    if vendor_hits and amount_hit:
+        score = 120 + (10 * len(vendor_hits)) - days
+    elif len(vendor_hits) >= 2:
+        score = 80 + (8 * len(vendor_hits)) - days
+    elif vendor_hits and len(vendor_hits[0]) >= 5:
+        score = 55 - days
+    else:
+        return None
+    if score < 30:
+        return None
+    reasons = [f"merchant:{term}" for term in vendor_hits[:3]]
+    if amount_hit:
+        reasons.append(f"amount:{amount_marker}")
+    reasons.append(f"date_delta:{days}d")
+    return score, reasons, vendor_hits + ([amount_marker] if amount_marker else [])
+
+
+def _candidate_context_evidence(*, organization, line: XeroStatementLineSnapshot) -> list[dict[str, Any]]:
+    terms = _merchant_terms(line)
+    if not terms:
+        return []
+    start = line.transaction_date - timedelta(days=STATEMENT_EVIDENCE_WINDOW_DAYS)
+    end = line.transaction_date + timedelta(days=STATEMENT_EVIDENCE_WINDOW_DAYS + 1)
+    term_query = Q()
+    for term in terms:
+        term_query |= (
+            Q(subject__icontains=term)
+            | Q(from_address__icontains=term)
+            | Q(snippet__icontains=term)
+            | Q(cleaned_text__icontains=term)
+            | Q(body_preview__icontains=term)
+        )
+    markers = _amount_markers(line.amount)
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    gmail_rows = GmailMessageArtifact.objects.filter(
+        Q(organization=organization)
+        & Q(internal_date__date__gte=start)
+        & Q(internal_date__date__lt=end)
+        & term_query
+    ).values(
+        "gmail_message_id",
+        "internal_date",
+        "subject",
+        "from_address",
+        "snippet",
+        "cleaned_text",
+        "body_preview",
+        "attachment_manifest",
+    )[:250]
+    for row in gmail_rows:
+        attachment_names = " ".join(
+            str(item.get("filename") or "")
+            for item in row["attachment_manifest"] or []
+            if isinstance(item, dict)
+        )
+        body = "\n".join(
+            str(value or "")
+            for value in [
+                row["subject"],
+                row["from_address"],
+                row["snippet"],
+                row["cleaned_text"],
+                row["body_preview"],
+                attachment_names,
+            ]
+        )
+        scored = _score_evidence(
+            text=body,
+            terms=terms,
+            markers=markers,
+            occurred_on=row["internal_date"].date(),
+            transaction_date=line.transaction_date,
+        )
+        if not scored:
+            continue
+        score, reasons, needles = scored
+        ranked.append((score, {
+            "source_provider": "gmail",
+            "source_record_id": row["gmail_message_id"],
+            "occurred_at": row["internal_date"].isoformat(),
+            "subject": str(row["subject"] or "")[:500],
+            "sender": str(row["from_address"] or "")[:500],
+            "summary": _evidence_excerpt(body, needles),
+            "match_reasons": reasons,
+        }))
+
+    slack_term_query = Q()
+    for term in terms:
+        slack_term_query |= Q(text__icontains=term) | Q(cleaned_text__icontains=term)
+    slack_rows = SlackMessageArtifact.objects.filter(
+        Q(organization=organization)
+        & Q(posted_at__date__gte=start)
+        & Q(posted_at__date__lt=end)
+        & slack_term_query
+    ).values(
+        "channel_id",
+        "channel_name",
+        "slack_message_ts",
+        "author_name",
+        "posted_at",
+        "text",
+        "cleaned_text",
+    )[:250]
+    for row in slack_rows:
+        body = "\n".join(str(value or "") for value in [row["text"], row["cleaned_text"]])
+        scored = _score_evidence(
+            text=body,
+            terms=terms,
+            markers=markers,
+            occurred_on=row["posted_at"].date(),
+            transaction_date=line.transaction_date,
+        )
+        if not scored:
+            continue
+        score, reasons, needles = scored
+        ranked.append((score, {
+            "source_provider": "slack",
+            "source_record_id": f'{row["channel_id"]}:{row["slack_message_ts"]}',
+            "occurred_at": row["posted_at"].isoformat(),
+            "channel_name": str(row["channel_name"] or "")[:255],
+            "author_name": str(row["author_name"] or "")[:255],
+            "summary": _evidence_excerpt(body, needles),
+            "match_reasons": reasons,
+        }))
+
+    ranked.sort(key=lambda item: (-item[0], item[1]["occurred_at"], item[1]["source_record_id"]))
+    return [item for _score, item in ranked[:STATEMENT_EVIDENCE_LIMIT]]
 
 
 def _account_parts(value: str) -> tuple[str, str]:
@@ -230,7 +450,7 @@ def _bill_candidates(organization, line: XeroStatementLineSnapshot) -> list[dict
     ]
 
 
-def build_statement_reconciliation_context(*, organization) -> dict[str, Any]:
+def build_statement_reconciliation_context(*, organization, include_external_evidence: bool = True) -> dict[str, Any]:
     lines = list(
         XeroStatementLineSnapshot.objects.filter(organization=organization, active=True).order_by(
             "transaction_date", "statement_line_id"
@@ -260,6 +480,11 @@ def build_statement_reconciliation_context(*, organization) -> dict[str, Any]:
         serialized = serialize_statement_line(line)
         serialized["matching_xero_bills"] = _bill_candidates(organization, line)
         serialized["allowed_historical_patterns"] = allowed_patterns.get(serialized["merchant_key"], [])
+        serialized["context_evidence"] = (
+            _candidate_context_evidence(organization=organization, line=line)
+            if include_external_evidence
+            else []
+        )
         candidates.append(serialized)
     return {
         "statement_candidates": candidates,
@@ -300,7 +525,7 @@ def save_statement_suggestions(
         )
     }
     events, projects = _catalogs(organization)
-    context = build_statement_reconciliation_context(organization=organization)
+    context = build_statement_reconciliation_context(organization=organization, include_external_evidence=False)
     context_by_id = {item["statement_line_id"]: item for item in context["statement_candidates"]}
     saved: list[XeroStatementSuggestion] = []
     with transaction.atomic():
