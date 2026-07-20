@@ -227,23 +227,37 @@ class EmailVerificationTests(TestCase):
         self.org = Organization.objects.create(name="Email Co", domain="email.example.com")
         self.user = User.objects.create_user(email="founder@example.com")
 
+    def _legacy_pending_channel(self):
+        return NotificationChannel.objects.create(
+            organization=self.org,
+            user=self.user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id=self.user.email,
+            display_name=self.user.email,
+            consent_state=NotificationConsentState.PENDING,
+        )
+
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_initiate_sends_signed_link_via_resend(self, mock_post):
-        mock_post.return_value = _Response(200, {"id": "email-1"})
+    def test_initiate_activates_account_email_without_sending(self, mock_post):
         channel = initiate_email_channel(organization=self.org, user=self.user, route_id="Founder@Example.com")
         self.assertEqual(channel.route_id, "founder@example.com")
-        self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
+        self.assertEqual(channel.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(channel.delivery_enabled)
+        self.assertIsNotNone(channel.verified_at)
+        mock_post.assert_not_called()
 
-        from integrations.services.notification_channels import send_email_verification
-
-        send_email_verification(channel)
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["to"], ["founder@example.com"])
-        self.assertIn("/api/content-factory/notification-channels/verify-email", payload["text"])
-        self.assertIn("token=", payload["text"])
+    def test_initiate_rejects_an_address_other_than_the_account_email(self):
+        with self.assertRaises(ChannelActionError) as ctx:
+            initiate_email_channel(
+                organization=self.org,
+                user=self.user,
+                route_id="someone-else@example.com",
+            )
+        self.assertEqual(ctx.exception.code, "email_must_match_account")
+        self.assertFalse(NotificationChannel.objects.filter(organization=self.org).exists())
 
     def test_verify_link_activates_and_redirects(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         url = build_email_verification_url(channel)
         token = parse_qs(urlparse(url).query)["token"][0]
 
@@ -262,7 +276,7 @@ class EmailVerificationTests(TestCase):
 
     @override_settings(NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS=-1)
     def test_expired_link_redirects_expired(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
 
         response = self.client.get(
@@ -274,7 +288,7 @@ class EmailVerificationTests(TestCase):
         self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
 
     def test_route_mismatch_or_garbage_token_redirects_invalid(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
         channel.route_id = "changed@example.com"
         channel.save(update_fields=["route_id"])
@@ -288,6 +302,49 @@ class EmailVerificationTests(TestCase):
             reverse("content_factory_notification_channel_verify"), {"token": "garbage"}
         )
         self.assertTrue(response["Location"].endswith("emailChannel=invalid"))
+
+
+class AccountEmailChannelMigrationTests(TestCase):
+    def test_backfill_activates_only_pending_channels_matching_the_account_email(self):
+        from django.apps import apps as django_apps
+        from importlib import import_module
+
+        org = Organization.objects.create(name="Migration Co", domain="migration.example.com")
+        matching_user = User.objects.create_user(email="matching@example.com")
+        alternate_user = User.objects.create_user(email="account@example.com")
+        matching = NotificationChannel.objects.create(
+            organization=org,
+            user=matching_user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="MATCHING@example.com",
+            consent_state=NotificationConsentState.PENDING,
+            delivery_enabled=False,
+            verification_code_hash="old-code",
+            verification_expires_at=timezone.now() + timedelta(hours=1),
+            verification_attempts=2,
+        )
+        alternate = NotificationChannel.objects.create(
+            organization=org,
+            user=alternate_user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="alternate@example.com",
+            consent_state=NotificationConsentState.PENDING,
+        )
+
+        migration = import_module(
+            "content_factory.migrations.0033_activate_account_email_notification_channels"
+        )
+        migration.activate_account_email_channels(django_apps, None)
+
+        matching.refresh_from_db()
+        alternate.refresh_from_db()
+        self.assertEqual(matching.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(matching.delivery_enabled)
+        self.assertIsNotNone(matching.verified_at)
+        self.assertEqual(matching.verification_code_hash, "")
+        self.assertIsNone(matching.verification_expires_at)
+        self.assertEqual(matching.verification_attempts, 0)
+        self.assertEqual(alternate.consent_state, NotificationConsentState.PENDING)
 
 
 class SlackLinkTests(TestCase):
@@ -508,19 +565,19 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertIsNone(response.data["automation"])
 
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_create_email_channel_sends_verification(self, mock_post):
-        mock_post.return_value = _Response(200, {"id": "email-1"})
+    def test_create_email_channel_activates_account_email_without_sending(self, mock_post):
         response = self.client.post(
             reverse("vibe-marketing-notification-channels"),
             {"channelType": "email"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], "verification_sent")
+        self.assertEqual(response.data["status"], "active")
         channel = response.data["channel"]
         self.assertEqual(channel["routeId"], "founder@example.com")
-        self.assertEqual(channel["consentState"], "pending")
-        self.assertIsNotNone(channel["pendingVerification"])
+        self.assertEqual(channel["consentState"], "active")
+        self.assertIsNone(channel["pendingVerification"])
+        mock_post.assert_not_called()
 
     def test_create_whatsapp_channel_without_template_returns_503(self):
         response = self.client.post(
@@ -731,15 +788,16 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertTrue(slack.delivery_enabled)
 
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_delivery_enable_email_sends_verification(self, mock_post):
-        mock_post.return_value = _Response(200, {"id": "email-1"})
+    def test_delivery_enable_email_activates_without_sending(self, mock_post):
         response = self.client.post(
             self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], "verification_sent")
+        self.assertEqual(response.data["status"], "active")
         email = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.EMAIL)
-        self.assertEqual(email.consent_state, NotificationConsentState.PENDING)
+        self.assertEqual(email.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(email.delivery_enabled)
+        mock_post.assert_not_called()
 
     def test_delivery_enable_email_when_active_enables_delivery(self):
         email = NotificationChannel.objects.create(
