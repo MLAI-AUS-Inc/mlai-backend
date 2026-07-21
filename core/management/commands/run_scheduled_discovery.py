@@ -4,6 +4,7 @@ from datetime import date as calendar_date
 
 from django.core.management.base import BaseCommand, CommandError
 
+from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
@@ -88,6 +89,12 @@ class Command(BaseCommand):
             # Enforces the configured raw-dialogue retention window once per
             # local day. Its cache marker makes the minute scheduler tick cheap.
             ("health_hack_conversation_retention", run_scheduled_sim_conversation_cleanup),
+            # Generates each analytics-enabled org's immutable daily article
+            # performance brief once per org-local date after the configured
+            # local hour. Gated by CONTENT_ANALYTICS_REPORTS_ENABLED; the
+            # report's unique constraint makes every later tick a cheap
+            # existence check.
+            ("article_performance_reports", run_daily_article_report_scheduler),
         ):
             try:
                 results[name] = runner()

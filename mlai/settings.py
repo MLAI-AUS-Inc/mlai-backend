@@ -832,6 +832,16 @@ CONTENT_ANALYTICS_REPORT_HIGH_ENGAGED_RATE = float(
 CONTENT_ANALYTICS_REPORT_LOW_CTA_REACH_RATE = float(
     os.environ.get("CONTENT_ANALYTICS_REPORT_LOW_CTA_REACH_RATE", "0.50") or 0.50
 )
+# Scheduler for the daily brief: generates each enabled org's report once per
+# org-local date, after the configured local hour. Off until the pilot passes.
+CONTENT_ANALYTICS_REPORTS_ENABLED = _env_is_true("CONTENT_ANALYTICS_REPORTS_ENABLED", False)
+CONTENT_ANALYTICS_REPORT_LOCAL_HOUR = int(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_LOCAL_HOUR", "7") or 7
+)
+CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE = (
+    os.environ.get("CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE", "").strip()
+    or "Australia/Melbourne"
+)
 GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
     "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
     "",
