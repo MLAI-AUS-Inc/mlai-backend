@@ -45,8 +45,10 @@ from integrations.services.reconciliation_context import (
 )
 from integrations.services.xero_statement_reconciliation import (
     build_statement_reconciliation_context,
+    format_statement_browser_comment,
     import_xero_statement_lines,
     save_statement_suggestions,
+    serialize_statement_suggestion,
 )
 from integrations.tests_reconciliation import FakeSession
 from roo.models import PointsAdmin
@@ -57,6 +59,14 @@ User = get_user_model()
 
 
 class StripeAttributionTests(SimpleTestCase):
+    def test_browser_comment_is_short_and_puts_confidence_last(self):
+        comment = format_statement_browser_comment(
+            description="AI reconciliation draft (92% confidence): uber trip",
+            review_note="Human approval required.",
+            confidence=0.92,
+        )
+        self.assertEqual(comment, "Uber trip. Confidence: 92%.")
+
     def test_malformed_api_version_env_is_repaired(self):
         service = ReconciliationReportService(
             stripe_api_key="rk_test",
@@ -515,8 +525,23 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(saved[0].status, XeroStatementSuggestion.STATUS_PROPOSED)
         self.assertEqual(saved[1].matched_xero_bill_id, "bill-print-locker")
         self.assertEqual(XeroStatementLineSnapshot.objects.filter(ready_in_xero=False).count(), 2)
+        serialized = serialize_statement_suggestion(saved[0])
+        self.assertEqual(serialized["browser_comment"], "Uber travel supported by the same Xero merchant rule. Confidence: 95%.")
+        self.assertEqual(
+            serialized["create_fields"],
+            {
+                "contact_name": "uber",
+                "account_code": "406",
+                "account_name": "Travel-national",
+                "account_display": "406 - Travel-national",
+                "description": "Uber travel supported by the same Xero merchant rule.",
+                "event_name": "",
+                "project_name": "",
+                "tax_type": "GST on Expenses",
+            },
+        )
 
-        with self.assertRaisesMessage(ValueError, "not backed by an exact historical Xero pattern"):
+        with self.assertRaisesMessage(ValueError, "not backed by exact merchant history or an approved accounting option"):
             save_statement_suggestions(
                 organization=self.organization,
                 run_id="monthly-statement-invalid",
@@ -530,6 +555,37 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "evidence": [{"source_provider": "xero_ui", "source_record_id": "ready-uber"}],
                 }],
             )
+
+        approved = save_statement_suggestions(
+            organization=self.organization,
+            run_id="monthly-statement-approved-option",
+            suggestions=[{
+                "statement_line_id": "blank-uber",
+                "proposed_action": "prefill_create",
+                "contact_name": "Uber for Business",
+                "account_code": "406",
+                "account_name": "Travel-national",
+                "tax_type": "GST on Expenses",
+                "description": "Likely business transport.",
+                "confidence": 0.8,
+                "evidence": [{"source_provider": "xero_ui", "source_record_id": "blank-uber"}],
+            }],
+        )[0]
+        self.assertEqual(approved.contact_name, "Uber for Business")
+
+        partial = save_statement_suggestions(
+            organization=self.organization,
+            run_id="monthly-statement-partial-contact",
+            suggestions=[{
+                "statement_line_id": "blank-uber",
+                "proposed_action": "needs_review",
+                "contact_name": "Uber",
+                "description": "Likely an Uber trip.",
+                "confidence": 0.6,
+                "evidence": [{"source_provider": "xero_ui", "source_record_id": "blank-uber"}],
+            }],
+        )[0]
+        self.assertEqual(partial.contact_name, "Uber")
 
     def test_statement_context_finds_date_amount_and_merchant_evidence(self):
         import_xero_statement_lines(

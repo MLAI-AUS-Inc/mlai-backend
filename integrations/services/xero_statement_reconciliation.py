@@ -398,7 +398,38 @@ def _serialize_evidence(raw_evidence: Any) -> list[dict[str, str]]:
     return result
 
 
+_COMMENT_PREFIX_RE = re.compile(
+    r"^(?:ai\s+reconciliation\s+draft(?:\s*\([^)]*\))?\s*:?\s*|review\s*:\s*)",
+    re.IGNORECASE,
+)
+_COMMENT_META_RE = re.compile(
+    r"\b(?:human approval required|human must click ok|no account/tax change proposed)\b[.;:]?",
+    re.IGNORECASE,
+)
+
+
+def format_statement_browser_comment(*, description: str, review_note: str, confidence: float) -> str:
+    """Return the short, conversational comment shown in Xero Discuss."""
+
+    summary = str(description or "").strip() or str(review_note or "").strip()
+    summary = _COMMENT_PREFIX_RE.sub("", summary)
+    summary = _COMMENT_META_RE.sub("", summary)
+    summary = re.sub(r"\s+", " ", summary).strip(" -;:.")
+    summary = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0].strip()
+    if not summary:
+        summary = "Not enough context to identify this payment"
+    if len(summary) > 220:
+        summary = f"{summary[:217].rstrip()}…"
+    if summary and summary[0].islower():
+        summary = f"{summary[0].upper()}{summary[1:]}"
+    percentage = int(round(max(0.0, min(float(confidence or 0.0), 1.0)) * 100))
+    return f"{summary}. Confidence: {percentage}%."
+
+
 def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[str, Any]:
+    account_display = " - ".join(
+        value for value in (suggestion.account_code, suggestion.account_name) if value
+    )
     return {
         "id": suggestion.id,
         "statement_line_id": suggestion.statement_line.statement_line_id,
@@ -415,6 +446,21 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "confidence": suggestion.confidence,
         "rationale": suggestion.rationale,
         "review_note": suggestion.review_note,
+        "browser_comment": format_statement_browser_comment(
+            description=suggestion.description,
+            review_note=suggestion.review_note,
+            confidence=suggestion.confidence,
+        ),
+        "create_fields": {
+            "contact_name": suggestion.contact_name,
+            "account_code": suggestion.account_code,
+            "account_name": suggestion.account_name,
+            "account_display": account_display,
+            "description": suggestion.description,
+            "event_name": suggestion.event_tracking_option_name,
+            "project_name": suggestion.project_tracking_option_name,
+            "tax_type": suggestion.tax_type,
+        },
         "evidence": suggestion.evidence or [],
         "source_hash": suggestion.source_hash,
         "model_name": suggestion.model_name,
@@ -511,11 +557,38 @@ def build_statement_reconciliation_context(*, organization, include_external_evi
             else []
         )
         candidates.append(serialized)
+    approved_options: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for example in examples:
+        key = tuple(
+            str(example.get(field) or "").strip()
+            for field in ("account_code", "account_name", "tax_type")
+        )
+        if not all(key):
+            continue
+        option = approved_options.setdefault(
+            key,
+            {
+                "account_code": key[0],
+                "account_name": key[1],
+                "tax_type": key[2],
+                "examples": [],
+            },
+        )
+        if len(option["examples"]) < 5:
+            option["examples"].append(
+                {
+                    "statement_line_id": example["statement_line_id"],
+                    "merchant_key": example["merchant_key"],
+                    "contact_name": example["contact_name"],
+                    "description": example["description"],
+                }
+            )
     return {
         "statement_candidates": candidates,
         "prior_xero_examples": examples,
+        "approved_accounting_options": list(approved_options.values()),
         "statement_policy": {
-            "prefill": "Account and tax values may only be copied from an exact merchant_key historical Xero pattern.",
+            "prefill": "Prefer an exact merchant_key pattern. Otherwise copy one complete account/tax tuple from approved_accounting_options when the evidence strongly supports it.",
             "bill_match": "An existing bill may only be proposed from matching_xero_bills on the same candidate.",
             "approval": "Suggestions prefill the browser form only; the human remains the only actor who clicks OK.",
         },
@@ -585,7 +658,7 @@ def save_statement_suggestions(
             tax_type = str(item.get("tax_type") or "").strip()[:255]
             if action == XeroStatementSuggestion.ACTION_PREFILL_CREATE:
                 proposed = (contact_name.casefold(), account_code.casefold(), account_name.casefold(), tax_type.casefold())
-                allowed = {
+                exact_allowed = {
                     (
                         str(pattern.get("contact_name") or "").casefold(),
                         str(pattern.get("account_code") or "").casefold(),
@@ -594,10 +667,23 @@ def save_statement_suggestions(
                     )
                     for pattern in candidate.get("allowed_historical_patterns") or []
                 }
-                if not all(proposed) or proposed not in allowed:
-                    raise ValueError(f"Prefill fields for {line_id} are not backed by an exact historical Xero pattern")
+                approved_accounting = {
+                    (
+                        str(option.get("account_code") or "").casefold(),
+                        str(option.get("account_name") or "").casefold(),
+                        str(option.get("tax_type") or "").casefold(),
+                    )
+                    for option in context.get("approved_accounting_options") or []
+                }
+                proposed_accounting = proposed[1:]
+                if not all(proposed) or (
+                    proposed not in exact_allowed and proposed_accounting not in approved_accounting
+                ):
+                    raise ValueError(
+                        f"Prefill fields for {line_id} are not backed by exact merchant history or an approved accounting option"
+                    )
             elif action == XeroStatementSuggestion.ACTION_NEEDS_REVIEW and any(
-                [contact_name, account_code, account_name, tax_type]
+                [account_code, account_name, tax_type]
             ):
                 raise ValueError(f"Needs-review suggestion for {line_id} cannot contain unverified accounting fields")
             matched_bill_id = str(item.get("matched_xero_bill_id") or "").strip()[:255]
