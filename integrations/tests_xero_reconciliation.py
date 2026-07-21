@@ -599,6 +599,50 @@ class XeroReconciliationWorkflowTests(TestCase):
         )[0]
         self.assertEqual(partial.contact_name, "Uber")
 
+    def test_statement_backfill_accepts_snapshot_field_aliases(self):
+        imported = import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "ready-snapshot-shape",
+                "date": "20 Jul 2026",
+                "narration": "UBER *TRIP HELP.",
+                "reference": "POS",
+                "direction": "debit",
+                "amount": "31.07",
+                "current_contact": "uber",
+                "current_account": "406 - Travel-national",
+                "current_description": "Uber trip",
+                "current_event_name": "HealthHack | Sydney",
+                "current_project_name": "MedHack: Sydney",
+                "current_tax_type": "GST on Expenses",
+                "has_ok": True,
+            }],
+        )
+
+        line = imported[0]
+        self.assertEqual(line.current_contact, "uber")
+        self.assertEqual(line.current_account, "406 - Travel-national")
+        self.assertEqual(line.current_description, "Uber trip")
+        self.assertEqual(line.current_event_name, "HealthHack | Sydney")
+        self.assertEqual(line.current_project_name, "MedHack: Sydney")
+        self.assertEqual(line.current_tax_type, "GST on Expenses")
+        context = build_statement_reconciliation_context(organization=self.organization)
+        self.assertEqual(
+            context["approved_accounting_options"][0],
+            {
+                "account_code": "406",
+                "account_name": "Travel-national",
+                "tax_type": "GST on Expenses",
+                "examples": [{
+                    "statement_line_id": "ready-snapshot-shape",
+                    "merchant_key": "uber trip help",
+                    "contact_name": "uber",
+                    "description": "Uber trip",
+                }],
+            },
+        )
+
     def test_statement_context_finds_date_amount_and_merchant_evidence(self):
         import_xero_statement_lines(
             organization=self.organization,
