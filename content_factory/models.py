@@ -783,13 +783,27 @@ class AutomationRun(models.Model):
 
 
 class NotificationDelivery(models.Model):
-    """Provider delivery attempt for an automation event."""
+    """Provider delivery attempt for an automation or analytics-report event.
+
+    Exactly one of ``automation_run`` / ``performance_report`` references the
+    subject (DB check constraint enforces at least one). ``idempotency_key``
+    stays the global once-per-subject-per-channel-per-event guard for both.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     automation_run = models.ForeignKey(
         AutomationRun,
         on_delete=models.CASCADE,
         related_name="deliveries",
+        null=True,
+        blank=True,
+    )
+    performance_report = models.ForeignKey(
+        "content_analytics.ArticlePerformanceReport",
+        on_delete=models.SET_NULL,
+        related_name="notification_deliveries",
+        null=True,
+        blank=True,
     )
     channel = models.ForeignKey(
         NotificationChannel,
@@ -818,6 +832,13 @@ class NotificationDelivery(models.Model):
         indexes = [
             models.Index(fields=["event_type", "status"], name="cf_notify_delivery_event_idx"),
             models.Index(fields=["channel", "status"], name="cf_notify_delivery_channel_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(automation_run__isnull=False)
+                | models.Q(performance_report__isnull=False),
+                name="cf_notify_delivery_has_subject",
+            ),
         ]
 
     def __str__(self):
