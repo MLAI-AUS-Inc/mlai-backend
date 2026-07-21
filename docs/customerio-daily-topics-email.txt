@@ -15,6 +15,8 @@ No topics were ready this morning. We'll try again at the next scheduled run.
 Keyword: {{ topic.keyword }}
 {% if topic.why_recommended != blank %}Why this topic: {{ topic.why_recommended }}
 {% endif %}Start writing: {{ topic.confirm_url }}
+{% if topic.trend_summary != blank %}Demand trend: {{ topic.trend_summary }}
+{% endif %}
 
 {% endfor %}
 {% endif %}

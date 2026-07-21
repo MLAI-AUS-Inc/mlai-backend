@@ -953,6 +953,17 @@ class FanOutDeliveryTests(TestCase):
         mock_cio.return_value = client
         self.email.user = self.user
         self.email.save(update_fields=["user"])
+        self.callback_data["selection"]["options"][0].update(
+            {
+                "trend_source_label": "Google Trends interest",
+                "trend_period_label": "past 30 days",
+                "trend_summary": "Google Trends interest over the past 30 days is rising.",
+                "trend_percent": 24,
+                "chart_url": "https://storage.example.test/topic-one.png",
+                "chart_alt": "Demand trend for Topic One, up 24%.",
+            }
+        )
+        self.callback_data["selection"]["options"][1]["chart_url"] = "javascript:alert(1)"
 
         deliveries = send_topic_selection(self.callback_data)
 
@@ -974,6 +985,11 @@ class FanOutDeliveryTests(TestCase):
         self.assertEqual(len(topics), 3)
         self.assertEqual(topics[0]["display_title"], "Topic One")
         self.assertEqual(topics[0]["rank"], 1)
+        self.assertEqual(topics[0]["chart_url"], "https://storage.example.test/topic-one.png")
+        self.assertEqual(topics[0]["chart_alt"], "Demand trend for Topic One, up 24%.")
+        self.assertEqual(topics[0]["trend_period_label"], "past 30 days")
+        self.assertEqual(topics[0]["trend_percent"], 24)
+        self.assertEqual(topics[1]["chart_url"], "")
         # Each topic carries its own signed, scanner-safe confirmation URL.
         self.assertIn("token=", topics[0]["confirm_url"])
         self.assertNotEqual(topics[0]["confirm_url"], topics[1]["confirm_url"])

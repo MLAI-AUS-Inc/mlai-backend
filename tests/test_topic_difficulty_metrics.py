@@ -5,7 +5,7 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from content_factory.models import ResearchedKeyword
+from content_factory.models import KeywordVelocity, ResearchedKeyword
 from content_factory.vibe_marketing_views import _topic_candidate_from_keyword
 from organizations.models import Organization
 
@@ -34,6 +34,16 @@ class TopicDifficultyMetricsTests(TestCase):
                         "difficulty_source": "dataforseo_bulk",
                         "related_keywords": ["startup equity guide"],
                         "monthly_searches": [120, 160, 220, 320],
+                        "velocity_data": {
+                            "absolute_volume": 320,
+                            "velocity_score": 0.35,
+                            "trend_status": "rising",
+                            "daily_volumes": [120, 160, 220, 320],
+                            "source": "dataforseo_ai",
+                            "basis": "ai_search_volume",
+                            "period_label": "past 4 months",
+                            "is_estimated": False,
+                        },
                     }
                 ],
             },
@@ -46,6 +56,16 @@ class TopicDifficultyMetricsTests(TestCase):
         self.assertEqual(keyword.difficulty_source, "dataforseo_bulk")
         self.assertEqual(keyword.related_keywords, ["startup equity guide"])
         self.assertEqual(keyword.monthly_searches, [120, 160, 220, 320])
+        velocity = KeywordVelocity.objects.get(keyword=keyword)
+        self.assertEqual(velocity.source, "dataforseo_ai")
+        self.assertEqual(velocity.basis, "ai_search_volume")
+        self.assertEqual(velocity.period_label, "past 4 months")
+        self.assertFalse(velocity.is_estimated)
+        candidate = _topic_candidate_from_keyword(keyword)
+        self.assertEqual(candidate["trendSource"], "dataforseo_ai")
+        self.assertEqual(candidate["trendBasis"], "ai_search_volume")
+        self.assertEqual(candidate["trendPeriodLabel"], "past 4 months")
+        self.assertFalse(candidate["trendIsEstimated"])
 
     def test_bulk_upsert_marks_missing_source_as_legacy_default(self):
         response = self.client.post(
