@@ -229,7 +229,11 @@ def build_reconciliation_enrichment_context(*, organization, run_id: str = "") -
                 }
             )
 
-    statement_context = build_statement_reconciliation_context(organization=organization)
+    statement_context = build_statement_reconciliation_context(
+        organization=organization,
+        luma_events=luma_events,
+        linear_projects=linear_projects,
+    )
     return {
         "organization_id": organization.id,
         "domain": organization.domain,

@@ -776,6 +776,67 @@ class XeroReconciliationWorkflowTests(TestCase):
             {"gmail-stone-and-chalk"},
         )
 
+    def test_statement_context_links_indirect_purchase_to_nearby_event_and_project_context(self):
+        import_xero_statement_lines(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            lines=[{
+                "statement_line_id": "uber-watt-1",
+                "date": "22 May 2026",
+                "narration": "UBER *TRIP HELP.",
+                "reference": "POS",
+                "direction": "debit",
+                "amount": "26.08",
+                "has_ok": False,
+            }],
+        )
+        LumaEventSelection.objects.create(
+            connection=self.luma_connection,
+            user=self.user,
+            organization=self.organization,
+            event_id="evt-watt",
+            event_name="[AI Week] Watt The Hack - Energy & AI Hackathon",
+            start_at=datetime(2026, 6, 5, 17, 30, tzinfo=timezone.utc),
+        )
+        LinearProjectArtifact.objects.create(
+            connection=self.linear_connection,
+            organization=self.organization,
+            linear_project_id="project-watt",
+            name="[AI Week] Watt The Hack",
+            target_date=datetime(2026, 6, 5).date(),
+        )
+        google_connection = GoogleConnection.objects.create(
+            user=self.user,
+            organization=self.organization,
+            google_email="events@example.com",
+            refresh_token="google-refresh-token",
+            scope="gmail.readonly",
+        )
+        GmailMessageArtifact.objects.create(
+            organization=self.organization,
+            google_connection=google_connection,
+            gmail_message_id="gmail-watt-prep",
+            gmail_thread_id="thread-watt-prep",
+            internal_date=datetime(2026, 5, 24, 22, 46, tzinfo=timezone.utc),
+            subject="RE: BESP event submission",
+            cleaned_text="Watt The Hack - Energy & AI Hackathon at Stone & Chalk on 5 June.",
+        )
+
+        context = build_reconciliation_enrichment_context(organization=self.organization)
+        candidate = next(
+            item for item in context["statement_candidates"]
+            if item["statement_line_id"] == "uber-watt-1"
+        )
+
+        self.assertEqual(candidate["nearby_events"][0]["source_id"], "evt-watt")
+        self.assertEqual(candidate["nearby_projects"][0]["source_id"], "project-watt")
+        evidence = candidate["event_project_context_evidence"]
+        self.assertEqual([item["source_record_id"] for item in evidence], ["gmail-watt-prep"])
+        self.assertEqual(
+            {(item["source_type"], item["source_id"]) for item in evidence[0]["matched_entities"]},
+            {("luma", "evt-watt"), ("linear", "project-watt")},
+        )
+
     def _statement_suggestion(
         self,
         *,

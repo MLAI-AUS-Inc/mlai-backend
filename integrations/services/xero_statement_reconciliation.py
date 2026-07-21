@@ -41,6 +41,9 @@ ALLOWED_STATEMENT_EVIDENCE_PROVIDERS = {
 
 STATEMENT_EVIDENCE_WINDOW_DAYS = 31
 STATEMENT_EVIDENCE_LIMIT = 5
+STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS = 14
+STATEMENT_ENTITY_EVIDENCE_LIMIT = 5
+STATEMENT_NEARBY_EVENT_WINDOW_DAYS = 45
 _MERCHANT_NOISE = {
     "and",
     "app",
@@ -288,6 +291,218 @@ def _candidate_context_evidence(*, organization, line: XeroStatementLineSnapshot
 
     ranked.sort(key=lambda item: (-item[0], item[1]["occurred_at"], item[1]["source_record_id"]))
     return [item for _score, item in ranked[:STATEMENT_EVIDENCE_LIMIT]]
+
+
+def _entity_aliases(value: Any) -> list[str]:
+    """Return distinctive phrases that can link private context to a catalog entity."""
+    raw = re.sub(r"\[[^\]]+\]", " ", str(value or "")).strip()
+    candidates = [raw, *re.split(r"\s+(?:-|\||:)\s+", raw)]
+    aliases: set[str] = set()
+    for candidate in candidates:
+        normalized = merchant_key(candidate)
+        tokens = normalized.split()
+        if len(normalized) >= 6 and len(tokens) >= 2:
+            aliases.add(normalized)
+    return sorted(aliases, key=lambda item: (-len(item), item))
+
+
+def _catalog_date(value: Any):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+def _candidate_entity_catalogs(
+    *,
+    line: XeroStatementLineSnapshot,
+    luma_events: list[dict[str, Any]],
+    linear_projects: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    nearby_events: list[dict[str, Any]] = []
+    entity_entries: list[dict[str, Any]] = []
+    nearby_event_aliases: set[str] = set()
+    for event in luma_events:
+        event_date = _catalog_date(event.get("start_at"))
+        if event_date is None:
+            continue
+        days = (event_date - line.transaction_date).days
+        if abs(days) > STATEMENT_NEARBY_EVENT_WINDOW_DAYS:
+            continue
+        aliases = _entity_aliases(event.get("name"))
+        if not aliases:
+            continue
+        nearby_event_aliases.update(aliases)
+        serialized = {
+            "source_type": "luma",
+            "source_id": str(event.get("source_id") or ""),
+            "name": str(event.get("name") or ""),
+            "start_at": event.get("start_at"),
+            "date_delta_days": days,
+        }
+        nearby_events.append(serialized)
+        entity_entries.append({**serialized, "aliases": aliases})
+    nearby_events.sort(key=lambda item: (abs(item["date_delta_days"]), item["name"], item["source_id"]))
+    nearby_events = nearby_events[:12]
+
+    nearby_projects: list[dict[str, Any]] = []
+    for project in linear_projects:
+        aliases = _entity_aliases(project.get("name"))
+        if not aliases:
+            continue
+        project_dates = [
+            value
+            for value in (_catalog_date(project.get("start_date")), _catalog_date(project.get("target_date")))
+            if value is not None
+        ]
+        date_delta = min(
+            ((value - line.transaction_date).days for value in project_dates),
+            key=abs,
+            default=None,
+        )
+        mirrors_nearby_event = any(
+            alias in event_alias or event_alias in alias
+            for alias in aliases
+            for event_alias in nearby_event_aliases
+        )
+        if not mirrors_nearby_event and (
+            date_delta is None or abs(date_delta) > STATEMENT_NEARBY_EVENT_WINDOW_DAYS
+        ):
+            continue
+        serialized = {
+            "source_type": "linear",
+            "source_id": str(project.get("source_id") or ""),
+            "name": str(project.get("name") or ""),
+            "status": project.get("status"),
+            "start_date": project.get("start_date"),
+            "target_date": project.get("target_date"),
+            "date_delta_days": date_delta,
+        }
+        nearby_projects.append(serialized)
+        entity_entries.append({**serialized, "aliases": aliases})
+    nearby_projects.sort(
+        key=lambda item: (
+            abs(item["date_delta_days"]) if item["date_delta_days"] is not None else 10_000,
+            item["name"],
+            item["source_id"],
+        )
+    )
+    return nearby_events, nearby_projects[:20], entity_entries
+
+
+def _matched_catalog_entities(text: str, entity_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = merchant_key(text)
+    matched: list[dict[str, Any]] = []
+    for entity in entity_entries:
+        aliases = [alias for alias in entity["aliases"] if alias in normalized]
+        if not aliases:
+            continue
+        matched.append({
+            "source_type": entity["source_type"],
+            "source_id": entity["source_id"],
+            "name": entity["name"],
+            "matched_alias": aliases[0],
+        })
+    return matched
+
+
+def _candidate_event_project_evidence(
+    *,
+    organization,
+    line: XeroStatementLineSnapshot,
+    entity_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Find nearby Gmail/Slack context naming a canonical event or project.
+
+    This deliberately complements merchant matching. Indirect purchases such as
+    transport, catering, hardware and printing often never name the event in the
+    bank narration, while nearby operating messages do.
+    """
+    if not entity_entries:
+        return []
+    start = line.transaction_date - timedelta(days=STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS)
+    end = line.transaction_date + timedelta(days=STATEMENT_ENTITY_EVIDENCE_WINDOW_DAYS + 1)
+    ranked: list[tuple[float, dict[str, Any]]] = []
+
+    gmail_rows = GmailMessageArtifact.objects.filter(
+        organization=organization,
+        internal_date__date__gte=start,
+        internal_date__date__lt=end,
+    ).values(
+        "gmail_message_id",
+        "internal_date",
+        "subject",
+        "from_address",
+        "snippet",
+        "cleaned_text",
+        "body_preview",
+        "attachment_manifest",
+    ).order_by("-internal_date")[:500]
+    for row in gmail_rows:
+        attachment_names = " ".join(
+            str(item.get("filename") or "")
+            for item in row["attachment_manifest"] or []
+            if isinstance(item, dict)
+        )
+        body = "\n".join(str(value or "") for value in [
+            row["subject"], row["from_address"], row["snippet"], row["cleaned_text"],
+            row["body_preview"], attachment_names,
+        ])
+        matched = _matched_catalog_entities(body, entity_entries)
+        if not matched:
+            continue
+        days = abs((row["internal_date"].date() - line.transaction_date).days)
+        aliases = [item["matched_alias"] for item in matched]
+        ranked.append((100 + (15 * len(matched)) + max(len(item) for item in aliases) - days, {
+            "source_provider": "gmail",
+            "source_record_id": row["gmail_message_id"],
+            "occurred_at": row["internal_date"].isoformat(),
+            "subject": str(row["subject"] or "")[:500],
+            "sender": str(row["from_address"] or "")[:500],
+            "summary": _evidence_excerpt(body, aliases),
+            "match_reasons": [
+                *[f'{item["source_type"]}:{item["source_id"]}' for item in matched[:4]],
+                f"date_delta:{days}d",
+            ],
+            "matched_entities": matched[:4],
+        }))
+
+    slack_rows = SlackMessageArtifact.objects.filter(
+        organization=organization,
+        posted_at__date__gte=start,
+        posted_at__date__lt=end,
+    ).values(
+        "channel_id", "channel_name", "slack_message_ts", "author_name", "posted_at", "text", "cleaned_text",
+    ).order_by("-posted_at")[:500]
+    for row in slack_rows:
+        body = "\n".join(str(value or "") for value in [row["text"], row["cleaned_text"]])
+        matched = _matched_catalog_entities(body, entity_entries)
+        if not matched:
+            continue
+        days = abs((row["posted_at"].date() - line.transaction_date).days)
+        aliases = [item["matched_alias"] for item in matched]
+        ranked.append((100 + (15 * len(matched)) + max(len(item) for item in aliases) - days, {
+            "source_provider": "slack",
+            "source_record_id": f'{row["channel_id"]}:{row["slack_message_ts"]}',
+            "occurred_at": row["posted_at"].isoformat(),
+            "channel_name": str(row["channel_name"] or "")[:255],
+            "author_name": str(row["author_name"] or "")[:255],
+            "summary": _evidence_excerpt(body, aliases),
+            "match_reasons": [
+                *[f'{item["source_type"]}:{item["source_id"]}' for item in matched[:4]],
+                f"date_delta:{days}d",
+            ],
+            "matched_entities": matched[:4],
+        }))
+
+    ranked.sort(key=lambda item: (-item[0], item[1]["occurred_at"], item[1]["source_record_id"]))
+    return [item for _score, item in ranked[:STATEMENT_ENTITY_EVIDENCE_LIMIT]]
 
 
 def _account_parts(value: str) -> tuple[str, str]:
@@ -575,7 +790,15 @@ def _bill_candidates(organization, line: XeroStatementLineSnapshot) -> list[dict
     ]
 
 
-def build_statement_reconciliation_context(*, organization, include_external_evidence: bool = True) -> dict[str, Any]:
+def build_statement_reconciliation_context(
+    *,
+    organization,
+    include_external_evidence: bool = True,
+    luma_events: list[dict[str, Any]] | None = None,
+    linear_projects: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    luma_events = luma_events or []
+    linear_projects = linear_projects or []
     lines = list(
         XeroStatementLineSnapshot.objects.filter(organization=organization, active=True).order_by(
             "transaction_date", "statement_line_id"
@@ -605,8 +828,24 @@ def build_statement_reconciliation_context(*, organization, include_external_evi
         serialized = serialize_statement_line(line)
         serialized["matching_xero_bills"] = _bill_candidates(organization, line)
         serialized["allowed_historical_patterns"] = allowed_patterns.get(serialized["merchant_key"], [])
+        nearby_events, nearby_projects, entity_entries = _candidate_entity_catalogs(
+            line=line,
+            luma_events=luma_events,
+            linear_projects=linear_projects,
+        )
+        serialized["nearby_events"] = nearby_events
+        serialized["nearby_projects"] = nearby_projects
         serialized["context_evidence"] = (
             _candidate_context_evidence(organization=organization, line=line)
+            if include_external_evidence
+            else []
+        )
+        serialized["event_project_context_evidence"] = (
+            _candidate_event_project_evidence(
+                organization=organization,
+                line=line,
+                entity_entries=entity_entries,
+            )
             if include_external_evidence
             else []
         )
