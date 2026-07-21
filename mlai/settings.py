@@ -842,6 +842,14 @@ CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE = (
     os.environ.get("CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE", "").strip()
     or "Australia/Melbourne"
 )
+# Report-ready delivery through the consented notification channels. Separate
+# switch so briefs can accumulate silently before delivery is turned on.
+CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED = _env_is_true(
+    "CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED", False
+)
+# Customer.io transactional template for the report email; inline HTML is the
+# fallback when unset (and Resend below that).
+CUSTOMERIO_REPORT_TEMPLATE_ID = os.environ.get("CUSTOMERIO_REPORT_TEMPLATE_ID", "").strip()
 GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
     "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
     "",
