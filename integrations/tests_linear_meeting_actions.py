@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 
@@ -88,6 +88,9 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                                 {
                                     "id": "project-1",
                                     "name": "Mlai Core",
+                                    "description": "Founder Games and other founder programs.",
+                                    "content": "Run sheets, applications, and program operations.",
+                                    "slackChannelId": "CFOUNDERS",
                                     "completedAt": None,
                                     "canceledAt": None,
                                     "status": {"name": "In Progress", "type": "started"},
@@ -113,6 +116,17 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
                                     },
                                     "teams": {
                                         "nodes": [{"id": "team-1", "key": "ENG", "name": "Engineering"}]
+                                    },
+                                    "members": {
+                                        "nodes": [
+                                            {
+                                                "id": "user-1",
+                                                "name": "Sam",
+                                                "displayName": "Sam",
+                                                "email": "sam@example.com",
+                                                "active": True,
+                                            }
+                                        ]
                                     },
                                 },
                                 {
@@ -144,6 +158,9 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(payload["projects"][0]["id"], "project-1")
         self.assertEqual(payload["projects"][0]["lastUpdate"]["id"], "update-1")
         self.assertEqual(payload["projects"][0]["lastUpdate"]["user"]["email"], "sam@example.com")
+        self.assertEqual(payload["projects"][0]["description"], "Founder Games and other founder programs.")
+        self.assertEqual(payload["projects"][0]["slackChannelId"], "CFOUNDERS")
+        self.assertEqual(payload["projects"][0]["membersSource"], "project")
         self.assertEqual(len(payload["projects"]), 1)
         self.assertEqual(
             [member["id"] for member in payload["projects"][0]["members"]["nodes"]],
@@ -162,7 +179,10 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertIn("canceledAt", project_request["query"])
         self.assertIn("lastUpdate", project_request["query"])
         self.assertNotIn("\n          state\n", project_request["query"])
-        self.assertNotIn("\n          members", project_request["query"])
+        self.assertIn("\n          members", project_request["query"])
+        self.assertIn("description", project_request["query"])
+        self.assertIn("content", project_request["query"])
+        self.assertIn("slackChannelId", project_request["query"])
 
     @patch("integrations.services.linear_meeting_actions.http_requests.post")
     def test_project_graphql_errors_include_operation(self, mock_post):
@@ -362,3 +382,81 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.json()["retryAfter"], 7)
         self.assertEqual(response["Retry-After"], "7")
+
+
+@override_settings(
+    LINEAR_API_KEY="lin-api-key",
+    ROO_API_KEY="roo-api-key",
+    INTERNAL_API_KEY="",
+    MLAI_API_KEY="",
+)
+class LinearMeetingIssueIdempotencyTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.auth_headers = {"HTTP_X_API_KEY": "roo-api-key"}
+
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_repeated_idempotency_key_returns_original_issue(self, mock_post):
+        from integrations.models import LinearIssueCreationReceipt
+
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "issue-1",
+                            "identifier": "ENG-123",
+                            "title": "Send Founder Games run sheet to Jess",
+                            "url": "https://linear.app/acme/issue/ENG-123",
+                        },
+                    }
+                }
+            }
+        )
+        payload = {
+            "title": "Send Founder Games run sheet to Jess",
+            "team_id": "team-1",
+            "assignee_id": "user-sam",
+            "project_id": "project-founder-program",
+            "due_date": "2026-07-24",
+            "idempotency_key": "a" * 64,
+        }
+
+        first = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            payload,
+            format="json",
+            **self.auth_headers,
+        )
+        second = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            payload,
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.json()["identifier"], "ENG-123")
+        self.assertTrue(second.json()["idempotentReplay"])
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(LinearIssueCreationReceipt.objects.count(), 1)
+        receipt = LinearIssueCreationReceipt.objects.get()
+        self.assertEqual(receipt.status, LinearIssueCreationReceipt.Status.COMPLETED)
+        self.assertEqual(receipt.linear_issue_payload["identifier"], "ENG-123")
+
+    def test_invalid_idempotency_key_is_rejected(self):
+        response = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            {
+                "title": "Invalid key",
+                "team_id": "team-1",
+                "idempotency_key": "short",
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("idempotency_key", response.json()["detail"])

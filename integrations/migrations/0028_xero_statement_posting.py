@@ -7,7 +7,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("integrations", "0026_xero_statement_reconciliation"),
+        ("integrations", "0027_linear_issue_creation_receipt"),
     ]
 
     operations = [
