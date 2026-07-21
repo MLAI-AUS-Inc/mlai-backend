@@ -20,6 +20,10 @@ from content_analytics.models import (
     AnalyticsSite,
     ArticlePerformanceReport,
 )
+from content_analytics.services.report_notifications import (
+    report_notifications_enabled,
+    send_report_ready,
+)
 from content_analytics.services.reports import generate_article_performance_report
 from content_factory.models import OrganizationContentConfig
 from organizations.models import Organization
@@ -67,7 +71,7 @@ def run_daily_article_report_scheduler(*, now=None) -> dict:
     timezones = _timezones_by_organization([site.organization_id for site in sites])
     local_hour = int(settings.CONTENT_ANALYTICS_REPORT_LOCAL_HOUR)
 
-    generated = existing = not_due = failed = 0
+    generated = existing = not_due = failed = notified = notify_failed = 0
     results: list[dict] = []
     for site in sites:
         organization = site.organization
@@ -82,7 +86,7 @@ def run_daily_article_report_scheduler(*, now=None) -> dict:
             existing += 1
             continue
         try:
-            _, created = generate_article_performance_report(organization, report_date)
+            report, created = generate_article_performance_report(organization, report_date)
         except Exception as exc:
             logger.exception(
                 "Daily article report generation failed for %s.", organization.domain
@@ -100,6 +104,18 @@ def run_daily_article_report_scheduler(*, now=None) -> dict:
             continue
         if created:
             generated += 1
+            # A delivery problem must never fail the tick or block other orgs;
+            # unsent deliveries retry on the next explicit send, not next tick
+            # (the report exists, so the tick skips it as "existing").
+            if report_notifications_enabled():
+                try:
+                    send_report_ready(report)
+                    notified += 1
+                except Exception:
+                    logger.exception(
+                        "Report-ready notification failed for %s.", organization.domain
+                    )
+                    notify_failed += 1
         else:
             existing += 1
         if len(results) < MAX_RESULT_ROWS:
@@ -117,6 +133,8 @@ def run_daily_article_report_scheduler(*, now=None) -> dict:
         "existing": existing,
         "not_due": not_due,
         "failed": failed,
+        "notified": notified,
+        "notify_failed": notify_failed,
         "results": results,
     }
 
@@ -126,9 +144,12 @@ def generate_report_for_domain(
     *,
     report_date: date | None = None,
     force: bool = False,
+    notify: bool = False,
 ) -> dict:
-    """Manual/pilot generation for one org. Bypasses the kill switch and the
-    local-hour gate — invoking it is the explicit operator intent."""
+    """Manual/pilot generation for one org. Bypasses the kill switches and the
+    local-hour gate — invoking it is the explicit operator intent. ``notify``
+    additionally delivers the report-ready notification (idempotent: already
+    SENT channel deliveries are not resent)."""
     organization = Organization.objects.filter(domain=str(domain or "").strip()).first()
     if organization is None:
         return {"status": "failed", "error": f"Unknown organization domain: {domain!r}"}
@@ -146,10 +167,22 @@ def generate_report_for_domain(
     except Exception as exc:
         logger.exception("Manual article report generation failed for %s.", domain)
         return {"status": "failed", "error": str(exc)}
-    return {
+    result = {
         "status": "generated" if created else ("regenerated" if force else "existing"),
         "domain": organization.domain,
         "report_date": report.report_date.isoformat(),
         "report_id": report.pk,
         "articles": len(report.payload.get("articles", [])),
     }
+    if notify:
+        try:
+            deliveries = send_report_ready(report)
+        except Exception as exc:
+            logger.exception("Manual report notification failed for %s.", domain)
+            result["notify_error"] = str(exc)
+        else:
+            result["deliveries"] = [
+                {"channel_type": d.channel.channel_type, "status": d.status}
+                for d in deliveries
+            ]
+    return result
