@@ -904,3 +904,32 @@ class XeroStatementSuggestion(models.Model):
         indexes = [
             models.Index(fields=["organization", "status"], name="xero_stmt_suggest_status_idx"),
         ]
+
+
+class LinearIssueCreationReceipt(models.Model):
+    """Durable idempotency receipt for Roo-created Linear issues."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    idempotency_key = models.CharField(max_length=64, unique=True, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    request_payload = models.JSONField(default=dict, blank=True)
+    linear_issue_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_issue_creation_receipt"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.idempotency_key}:{self.status}"
