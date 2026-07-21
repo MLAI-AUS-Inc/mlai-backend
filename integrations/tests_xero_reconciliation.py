@@ -849,6 +849,43 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(body["Contact"], {"ContactID": "contact-uber"})
         self.assertEqual(body["LineItems"][0]["UnitAmount"], 31.07)
 
+    def test_statement_post_translates_xero_tax_rate_label_to_api_code(self):
+        suggestion = self._statement_suggestion(line_id="tax-label")
+        suggestion.tax_type = "GST Free Expenses"
+        suggestion.save(update_fields=["tax_type", "updated_at"])
+
+        empty = Mock()
+        empty.json.return_value = {"BankTransactions": []}
+        empty.raise_for_status.return_value = None
+        contacts = Mock()
+        contacts.json.return_value = {"Contacts": [{"ContactID": "contact-uber", "Name": "uber"}]}
+        contacts.raise_for_status.return_value = None
+        tax_rates = Mock()
+        tax_rates.json.return_value = {"TaxRates": [{
+            "Name": "GST Free Expenses",
+            "TaxType": "EXEMPTEXPENSES",
+            "Status": "ACTIVE",
+            "CanApplyToExpenses": True,
+            "CanApplyToRevenue": False,
+        }]}
+        tax_rates.raise_for_status.return_value = None
+        created = Mock()
+        created.json.return_value = {"BankTransactions": [{"BankTransactionID": "bt-tax-label"}]}
+        created.raise_for_status.return_value = None
+
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=[empty, contacts, tax_rates],
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put",
+            return_value=created,
+        ) as put_mock:
+            posting = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+
+        self.assertEqual(posting.status, XeroStatementPosting.STATUS_MATCH_READY)
+        body = put_mock.call_args.kwargs["json"]["BankTransactions"][0]
+        self.assertEqual(body["LineItems"][0]["TaxType"], "EXEMPTEXPENSES")
+
     def test_preview_does_not_reset_an_inflight_posting(self):
         suggestion = self._statement_suggestion(line_id="posting-race")
         first = build_statement_posting_preview(suggestion)

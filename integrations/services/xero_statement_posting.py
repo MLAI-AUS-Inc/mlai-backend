@@ -210,7 +210,7 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
 
     payload = _posting_payload(suggestion=suggestion, profile=profile, operation=operation) if operation else {}
     payload_hash = _hash_payload(payload)
-    idempotency_key = f"mlai-statement-{line.id}-{line.source_hash[:16]}-{operation or 'review'}"
+    idempotency_key = f"mlai-statement-v2-{line.id}-{line.source_hash[:16]}-{operation or 'review'}"
     posting = None
     if operation:
         posting, _created = XeroStatementPosting.objects.get_or_create(
@@ -238,11 +238,12 @@ def build_statement_posting_preview(suggestion: XeroStatementSuggestion) -> dict
             posting.operation = operation
             posting.status = XeroStatementPosting.STATUS_READY if not errors else XeroStatementPosting.STATUS_PREVIEWED
             posting.payload_hash = payload_hash
+            posting.idempotency_key = idempotency_key
             posting.preview_payload = payload
             posting.warnings = warnings
             posting.last_error = ""
             posting.save(update_fields=[
-                "suggestion", "operation", "status", "payload_hash", "preview_payload",
+                "suggestion", "operation", "status", "payload_hash", "idempotency_key", "preview_payload",
                 "warnings", "last_error", "updated_at",
             ])
     return {
@@ -278,6 +279,41 @@ def _resolve_contact_id(connection, contact_name: str) -> str:
     if len(exact) != 1 or not exact[0].get("ContactID"):
         raise XeroPostingError(f"Xero does not contain one exact contact named {contact_name}.")
     return str(exact[0]["ContactID"])
+
+
+def _resolve_tax_type(connection, tax_type: str, direction: str) -> str:
+    """Translate a Xero UI tax-rate name into its BankTransactions API code."""
+
+    requested = str(tax_type or "").strip()
+    if requested and requested == requested.upper() and not any(char.isspace() for char in requested):
+        return requested
+
+    response = http_client.get(
+        f"{XERO_API_URL}/TaxRates",
+        headers=_xero_headers(connection),
+        timeout=(3, 30),
+    )
+    response.raise_for_status()
+    matches = []
+    for row in response.json().get("TaxRates", []):
+        if str(row.get("Name") or "").strip().casefold() != requested.casefold():
+            continue
+        if str(row.get("Status") or "").upper() != "ACTIVE":
+            continue
+        applies = (
+            row.get("CanApplyToExpenses")
+            if direction == XeroStatementLineSnapshot.DIRECTION_DEBIT
+            else row.get("CanApplyToRevenue")
+        )
+        if applies is False:
+            continue
+        if row.get("TaxType"):
+            matches.append(row)
+    if len(matches) != 1:
+        raise XeroPostingError(
+            f"Xero does not contain one active tax rate named {requested} for this transaction."
+        )
+    return str(matches[0]["TaxType"])
 
 
 def _resolved_tracking(connection, profile, suggestion) -> list[dict[str, str]]:
@@ -441,6 +477,11 @@ def execute_statement_posting(
                 payload["Contact"] = {
                     "ContactID": _resolve_contact_id(connection, suggestion.contact_name)
                 }
+                payload["LineItems"][0]["TaxType"] = _resolve_tax_type(
+                    connection,
+                    suggestion.tax_type,
+                    posting.statement_line.direction,
+                )
                 tracking = _resolved_tracking(connection, profile, suggestion)
                 if tracking:
                     payload["LineItems"][0]["Tracking"] = tracking
