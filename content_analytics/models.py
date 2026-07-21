@@ -384,3 +384,53 @@ class AnalyticsSyncState(models.Model):
         indexes = [
             models.Index(fields=["source", "status", "updated_at"], name="analytics_sync_due_idx"),
         ]
+
+
+class ArticlePerformanceReportCategory(models.TextChoices):
+    TOP_PERFORMER = "top_performer", "Top performer"
+    HIGH_INTEREST = "high_interest", "High-interest opportunity"
+    NEEDS_ATTENTION = "needs_attention", "Needs attention"
+    GATHERING_DATA = "gathering_data", "Gathering data"
+
+
+class ArticlePerformanceReport(models.Model):
+    """Immutable point-in-time daily performance brief for one organization.
+
+    The payload is a self-contained snapshot: once a row exists for an
+    (organization, report_date) pair it is never recomputed, so historical
+    briefs stay exactly as first delivered even after sync backfills or
+    metric-definition changes. Regeneration requires an explicit force.
+    """
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="article_performance_reports",
+    )
+    report_date = models.DateField(db_index=True)
+    window_start = models.DateField()
+    window_end = models.DateField()
+    prior_window_start = models.DateField()
+    prior_window_end = models.DateField()
+    # Latest behavior-data date actually available when the report was built;
+    # earlier than window_end when the nightly sync had not caught up yet.
+    data_through_date = models.DateField(null=True, blank=True)
+    schema_version = models.PositiveSmallIntegerField(default=1)
+    payload = models.JSONField(default=dict, blank=True)
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "content_analytics_performance_report"
+        ordering = ["-report_date", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "report_date"],
+                name="perf_report_org_day_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "-report_date"], name="perf_report_org_recent_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.domain}:{self.report_date.isoformat()}"
