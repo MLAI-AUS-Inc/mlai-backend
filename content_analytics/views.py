@@ -12,6 +12,7 @@ from content_analytics.models import (
     AnalyticsProvisionStatus,
     AnalyticsSite,
     AnalyticsSyncSource,
+    ArticlePerformanceReport,
     SearchConsoleProperty,
 )
 from content_analytics.services.config import (
@@ -362,3 +363,59 @@ class VibeMarketingAnalyticsSyncView(APIView):
             },
             status=status.HTTP_207_MULTI_STATUS if failures and results else status.HTTP_502_BAD_GATEWAY if failures else status.HTTP_200_OK,
         )
+
+
+def _report_summary_payload(report: ArticlePerformanceReport) -> dict:
+    payload = report.payload if isinstance(report.payload, dict) else {}
+    return {
+        "id": report.pk,
+        "reportDate": report.report_date.isoformat(),
+        "generatedAt": report.generated_at.isoformat() if report.generated_at else None,
+        "windowStart": report.window_start.isoformat(),
+        "windowEnd": report.window_end.isoformat(),
+        "dataThroughDate": (
+            report.data_through_date.isoformat() if report.data_through_date else None
+        ),
+        "schemaVersion": report.schema_version,
+        "headline": payload.get("headline") or {},
+        "categoriesSummary": payload.get("categoriesSummary") or {},
+    }
+
+
+class VibeMarketingAnalyticsReportsView(APIView):
+    """Newest-first daily brief summaries for the active company."""
+
+    def get(self, request):
+        context, error = _context(request)
+        if error:
+            return error
+        try:
+            limit = int(request.query_params.get("limit") or 30)
+        except (TypeError, ValueError):
+            limit = 30
+        limit = max(1, min(limit, 90))
+        reports = ArticlePerformanceReport.objects.filter(
+            organization=context.organization
+        ).order_by("-report_date")[:limit]
+        return Response(
+            {"reports": [_report_summary_payload(report) for report in reports]},
+            status=status.HTTP_200_OK,
+        )
+
+
+class VibeMarketingAnalyticsReportDetailView(APIView):
+    """One immutable brief: summary fields plus the stored payload verbatim."""
+
+    def get(self, request, report_id: int):
+        context, error = _context(request)
+        if error:
+            return error
+        report = ArticlePerformanceReport.objects.filter(
+            organization=context.organization,
+            pk=report_id,
+        ).first()
+        if report is None:
+            return Response({"detail": "Report not found."}, status=status.HTTP_404_NOT_FOUND)
+        body = _report_summary_payload(report)
+        body["payload"] = report.payload if isinstance(report.payload, dict) else {}
+        return Response(body, status=status.HTTP_200_OK)
