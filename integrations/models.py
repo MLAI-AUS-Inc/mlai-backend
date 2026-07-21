@@ -841,10 +841,16 @@ class XeroStatementLineSnapshot(models.Model):
 class XeroStatementSuggestion(models.Model):
     """Guarded proposal for prefilling one Xero bank-reconciliation row."""
 
+    ACTION_CREATE_BANK_TRANSACTION = "create_bank_transaction"
+    ACTION_PAY_EXISTING_BILL = "pay_existing_bill"
+    # Legacy values remain readable while older Valley runs and browser
+    # backfills drain from the queue. New runs use the explicit API actions.
     ACTION_PREFILL_CREATE = "prefill_create"
     ACTION_MATCH_BILL = "match_existing_bill"
     ACTION_NEEDS_REVIEW = "needs_review"
     ACTION_CHOICES = [
+        (ACTION_CREATE_BANK_TRANSACTION, "Create Bank Transaction"),
+        (ACTION_PAY_EXISTING_BILL, "Pay Existing Bill"),
         (ACTION_PREFILL_CREATE, "Prefill Create"),
         (ACTION_MATCH_BILL, "Match Existing Bill"),
         (ACTION_NEEDS_REVIEW, "Needs Review"),
@@ -903,4 +909,76 @@ class XeroStatementSuggestion(models.Model):
         ]
         indexes = [
             models.Index(fields=["organization", "status"], name="xero_stmt_suggest_status_idx"),
+        ]
+
+
+class XeroStatementPosting(models.Model):
+    """Idempotent Xero write for one observed bank-statement line.
+
+    The public Xero API can create the matching accounting object but cannot
+    reconcile a bank-statement line. ``match_ready`` therefore means the API
+    write succeeded and the row is ready for the founder's final Xero "OK".
+    """
+
+    OPERATION_BANK_TRANSACTION = "bank_transaction"
+    OPERATION_BILL_PAYMENT = "bill_payment"
+    OPERATION_CHOICES = [
+        (OPERATION_BANK_TRANSACTION, "Bank Transaction"),
+        (OPERATION_BILL_PAYMENT, "Bill Payment"),
+    ]
+    STATUS_PREVIEWED = "previewed"
+    STATUS_READY = "ready"
+    STATUS_POSTING = "posting"
+    STATUS_MATCH_READY = "match_ready"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PREVIEWED, "Previewed"),
+        (STATUS_READY, "Ready"),
+        (STATUS_POSTING, "Posting"),
+        (STATUS_MATCH_READY, "Ready to Match"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_postings",
+    )
+    statement_line = models.ForeignKey(
+        XeroStatementLineSnapshot,
+        on_delete=models.PROTECT,
+        related_name="postings",
+    )
+    suggestion = models.ForeignKey(
+        XeroStatementSuggestion,
+        on_delete=models.PROTECT,
+        related_name="postings",
+    )
+    operation = models.CharField(max_length=32, choices=OPERATION_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PREVIEWED, db_index=True)
+    source_hash = models.CharField(max_length=64)
+    payload_hash = models.CharField(max_length=64)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    preview_payload = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    requested_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    automatic = models.BooleanField(default=False)
+    xero_bank_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    xero_payment_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bill_id = models.CharField(max_length=255, blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_posting"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "statement_line", "source_hash"],
+                name="xero_stmt_post_org_line_hash_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="xero_stmt_post_status_idx"),
         ]

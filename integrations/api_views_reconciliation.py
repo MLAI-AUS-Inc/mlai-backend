@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+from django.conf import settings
 from django.db.models import Q
 from rest_framework import status
 from rest_framework.response import Response
@@ -17,6 +18,7 @@ from integrations.models import (
     ReconciliationSuggestion,
     StripePayoutReconciliation,
     XeroStatementLineSnapshot,
+    XeroStatementSuggestion,
 )
 from integrations.services.reconciliation import (
     ReconciliationReportService,
@@ -44,6 +46,10 @@ from integrations.services.xero_statement_reconciliation import (
     save_statement_suggestions,
     serialize_statement_line,
     serialize_statement_suggestion,
+)
+from integrations.services.xero_statement_posting import (
+    build_statement_posting_preview,
+    execute_statement_posting,
 )
 
 
@@ -422,11 +428,41 @@ class ReconciliationEnrichmentContextView(APIView):
             )
         except (TypeError, ValueError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        automatic_postings = []
+        if getattr(settings, "XERO_STATEMENT_AUTO_POST_ENABLED", False):
+            for suggestion in saved_statements:
+                try:
+                    posting = execute_statement_posting(
+                        suggestion,
+                        requested_by_slack_id=f"monthly-update:{run_id}"[:100],
+                        automatic=True,
+                    )
+                    automatic_postings.append({
+                        "suggestion_id": suggestion.id,
+                        "posting_id": posting.id,
+                        "status": posting.status,
+                    })
+                except ReconciliationValidationError as exc:
+                    automatic_postings.append({
+                        "suggestion_id": suggestion.id,
+                        "status": "not_ready",
+                        "errors": exc.errors,
+                    })
+                except XeroPostingError as exc:
+                    automatic_postings.append({
+                        "suggestion_id": suggestion.id,
+                        "status": "failed",
+                        "errors": [str(exc)],
+                    })
         return Response({
             "suggestion_count": len(saved),
             "suggestions": [serialize_suggestion(item) for item in saved],
             "statement_suggestion_count": len(saved_statements),
             "statement_suggestions": [serialize_statement_suggestion(item) for item in saved_statements],
+            "automatic_posting_enabled": bool(
+                getattr(settings, "XERO_STATEMENT_AUTO_POST_ENABLED", False)
+            ),
+            "automatic_postings": automatic_postings,
         })
 
 
@@ -440,6 +476,126 @@ class ReconciliationStatementLineListView(ReconciliationAdminView):
             active=True,
         ).order_by("transaction_date", "statement_line_id")
         return Response({"statement_lines": [serialize_statement_line(line) for line in queryset]})
+
+
+class ReconciliationStatementSuggestionPreviewView(ReconciliationAdminView):
+    def get(self, request, suggestion_id: int):
+        _, organization, error = self.context(request)
+        if error:
+            return error
+        suggestion = XeroStatementSuggestion.objects.filter(
+            organization=organization,
+            id=suggestion_id,
+        ).select_related("statement_line").first()
+        if suggestion is None:
+            return Response({"error": "Statement suggestion was not found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            preview = build_statement_posting_preview(suggestion)
+        except ReconciliationValidationError as exc:
+            return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
+        return Response({"suggestion": serialize_statement_suggestion(suggestion), "preview": preview})
+
+
+class ReconciliationStatementSuggestionExecuteView(ReconciliationAdminView):
+    def post(self, request, suggestion_id: int):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        if request.data.get("confirm") is not True:
+            return Response({"error": "confirm must be true to write to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        suggestion = XeroStatementSuggestion.objects.filter(
+            organization=organization,
+            id=suggestion_id,
+        ).select_related("statement_line").first()
+        if suggestion is None:
+            return Response({"error": "Statement suggestion was not found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            posting = execute_statement_posting(
+                suggestion,
+                requested_by_slack_id=slack_user_id,
+                automatic=request.data.get("automatic") is True,
+            )
+        except ReconciliationValidationError as exc:
+            return Response({"error": str(exc), "errors": exc.errors}, status=status.HTTP_409_CONFLICT)
+        except XeroPostingError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        suggestion.refresh_from_db()
+        return Response({"suggestion": serialize_statement_suggestion(suggestion), "posting_id": posting.id})
+
+
+class ReconciliationStatementSafeBatchView(ReconciliationAdminView):
+    """Preview or execute the latest safe suggestion for each active row."""
+
+    def post(self, request):
+        slack_user_id, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        dry_run = request.data.get("dry_run", True) is not False
+        if not dry_run and request.data.get("confirm") is not True:
+            return Response({"error": "confirm must be true to write to Xero"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            max_count = max(1, min(int(request.data.get("max_count") or 50), 100))
+        except (TypeError, ValueError):
+            return Response({"error": "max_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        suggestions = XeroStatementSuggestion.objects.filter(
+            organization=organization,
+            status=XeroStatementSuggestion.STATUS_PROPOSED,
+            statement_line__active=True,
+            statement_line__ready_in_xero=False,
+        ).select_related("statement_line").order_by(
+            "statement_line_id", "-created_at"
+        )
+        latest = []
+        seen_lines = set()
+        for suggestion in suggestions:
+            if suggestion.statement_line_id in seen_lines:
+                continue
+            seen_lines.add(suggestion.statement_line_id)
+            latest.append(suggestion)
+            if len(latest) >= max_count:
+                break
+
+        results = []
+        for suggestion in latest:
+            try:
+                preview = build_statement_posting_preview(suggestion)
+                result = {
+                    "suggestion_id": suggestion.id,
+                    "statement_line_id": suggestion.statement_line.statement_line_id,
+                    "ready": preview["ready"],
+                    "operation": preview["operation"],
+                    "errors": preview["errors"],
+                }
+                if preview["ready"] and not dry_run:
+                    posting = execute_statement_posting(
+                        suggestion,
+                        requested_by_slack_id=slack_user_id,
+                        automatic=request.data.get("automatic") is True,
+                    )
+                    result.update({"posted": True, "posting_id": posting.id, "status": posting.status})
+                results.append(result)
+            except ReconciliationValidationError as exc:
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "statement_line_id": suggestion.statement_line.statement_line_id,
+                    "ready": False,
+                    "errors": exc.errors,
+                })
+            except XeroPostingError as exc:
+                results.append({
+                    "suggestion_id": suggestion.id,
+                    "statement_line_id": suggestion.statement_line.statement_line_id,
+                    "ready": False,
+                    "posted": False,
+                    "errors": [str(exc)],
+                })
+        return Response({
+            "dry_run": dry_run,
+            "candidate_count": len(results),
+            "ready_count": sum(1 for item in results if item.get("ready")),
+            "posted_count": sum(1 for item in results if item.get("posted")),
+            "results": results,
+        })
 
 
 class ReconciliationSuggestionDecisionView(ReconciliationAdminView):

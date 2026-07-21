@@ -22,7 +22,7 @@ from integrations.models import (
     StripePayoutReconciliation,
 )
 from integrations.services.external_connectors import _xero_required_token
-from integrations.services.xero_scopes import normalize_xero_scopes
+from integrations.services.xero_scopes import normalize_xero_scopes, xero_has_payment_write_scope
 from organizations.models import Organization
 
 
@@ -105,6 +105,7 @@ def persist_report(*, organization, report: dict[str, Any], stripe_account_id: s
 
 
 def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
+    scopes = profile.xero_connection.scopes if profile.xero_connection else []
     return {
         "organization_id": profile.organization_id,
         "xero_connection_id": profile.xero_connection_id,
@@ -127,7 +128,17 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "standalone_fee_project_option_id": profile.standalone_fee_project_option_id,
         "standalone_fee_project_option_name": profile.standalone_fee_project_option_name,
         "enabled": profile.enabled,
-        "xero_write_scope": bool(profile.xero_connection and xero_has_bank_transaction_scope(profile.xero_connection.scopes)),
+        # Keep the original field for clients already using the payout flow.
+        "xero_write_scope": bool(profile.xero_connection and xero_has_bank_transaction_scope(scopes)),
+        "can_create_bank_transactions": bool(
+            profile.xero_connection and xero_has_bank_transaction_scope(scopes)
+        ),
+        "can_create_bill_payments": bool(
+            profile.xero_connection and xero_has_payment_write_scope(scopes)
+        ),
+        "can_create_tracking_options": bool(
+            profile.xero_connection and xero_has_settings_write_scope(scopes)
+        ),
     }
 
 

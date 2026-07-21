@@ -19,6 +19,7 @@ from integrations.models import (
     ReconciliationSuggestion,
     StripePayoutReconciliation,
     XeroStatementLineSnapshot,
+    XeroStatementPosting,
     XeroStatementSuggestion,
 )
 from startup_updates.models import (
@@ -50,6 +51,11 @@ from integrations.services.xero_statement_reconciliation import (
     save_statement_suggestions,
     serialize_statement_suggestion,
 )
+from integrations.services.xero_statement_posting import (
+    build_statement_posting_preview,
+    execute_statement_posting,
+)
+from integrations.services.external_connectors import _upsert_xero_payments
 from integrations.tests_reconciliation import FakeSession
 from roo.models import PointsAdmin
 from workflow_runs.models import ContentFactoryRun
@@ -151,7 +157,13 @@ class XeroReconciliationWorkflowTests(TestCase):
             refresh_token="refresh-token",
             token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             external_account_id="tenant-1",
-            scopes=["offline_access", "accounting.banktransactions", "accounting.settings"],
+            scopes=[
+                "offline_access",
+                "accounting.banktransactions",
+                "accounting.payments",
+                "accounting.settings",
+                "accounting.contacts.read",
+            ],
         )
         self.profile = ReconciliationProfile.objects.create(
             organization=self.organization,
@@ -501,7 +513,7 @@ class XeroReconciliationWorkflowTests(TestCase):
             suggestions=[
                 {
                     "statement_line_id": "blank-uber",
-                    "proposed_action": "prefill_create",
+                    "proposed_action": "create_bank_transaction",
                     "contact_name": "uber",
                     "account_code": "406",
                     "account_name": "Travel-national",
@@ -513,7 +525,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                 },
                 {
                     "statement_line_id": "blank-bill",
-                    "proposed_action": "match_existing_bill",
+                    "proposed_action": "pay_existing_bill",
                     "matched_xero_bill_id": "bill-print-locker",
                     "description": "Exact amount matches the authorised Print Locker bill.",
                     "confidence": 0.9,
@@ -720,6 +732,224 @@ class XeroReconciliationWorkflowTests(TestCase):
             {"gmail-stone-and-chalk"},
         )
 
+    def _statement_suggestion(
+        self,
+        *,
+        line_id="api-uber",
+        amount="31.07",
+        action=XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+        matched_bill_id="",
+        confidence=0.99,
+        direction=XeroStatementLineSnapshot.DIRECTION_DEBIT,
+    ):
+        line = XeroStatementLineSnapshot.objects.create(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            statement_line_id=line_id,
+            transaction_date=datetime(2026, 7, 16).date(),
+            narration="UBER *TRIP HELP.",
+            reference="POS",
+            direction=direction,
+            amount=amount,
+            currency="AUD",
+            source_hash=f"source-{line_id}",
+        )
+        return XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=line,
+            run_id=f"run-{line_id}",
+            proposed_action=action,
+            contact_name="uber",
+            account_code="406",
+            account_name="Travel-national",
+            tax_type="INPUT",
+            description="Uber trip for the Sydney event.",
+            matched_xero_bill_id=matched_bill_id,
+            confidence=confidence,
+            evidence=[{"source_provider": "xero_ui", "source_record_id": "prior-uber"}],
+            source_hash=line.source_hash,
+        )
+
+    def test_statement_bank_transaction_preview_and_post_are_idempotent(self):
+        suggestion = self._statement_suggestion()
+        preview = build_statement_posting_preview(suggestion)
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["operation"], "bank_transaction")
+        self.assertEqual(preview["xero_payload"]["Type"], "SPEND")
+        self.assertNotIn("IsReconciled", preview["xero_payload"])
+
+        empty = Mock()
+        empty.json.return_value = {"BankTransactions": []}
+        empty.raise_for_status.return_value = None
+        contacts = Mock()
+        contacts.json.return_value = {"Contacts": [{"ContactID": "contact-uber", "Name": "uber"}]}
+        contacts.raise_for_status.return_value = None
+        created = Mock()
+        created.json.return_value = {"BankTransactions": [{"BankTransactionID": "bt-statement-1"}]}
+        created.raise_for_status.return_value = None
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=[empty, contacts],
+        ) as get_mock, patch(
+            "integrations.services.xero_statement_posting.http_client.put",
+            return_value=created,
+        ) as put_mock:
+            posting = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+            again = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+        self.assertEqual(posting.status, XeroStatementPosting.STATUS_MATCH_READY)
+        self.assertEqual(posting.xero_bank_transaction_id, "bt-statement-1")
+        self.assertEqual(again.id, posting.id)
+        self.assertEqual(get_mock.call_count, 2)
+        self.assertEqual(put_mock.call_count, 1)
+        body = put_mock.call_args.kwargs["json"]["BankTransactions"][0]
+        self.assertEqual(body["Contact"], {"ContactID": "contact-uber"})
+        self.assertEqual(body["LineItems"][0]["UnitAmount"], 31.07)
+
+    def test_preview_does_not_reset_an_inflight_posting(self):
+        suggestion = self._statement_suggestion(line_id="posting-race")
+        first = build_statement_posting_preview(suggestion)
+        posting = XeroStatementPosting.objects.get(pk=first["posting_id"])
+        posting.status = XeroStatementPosting.STATUS_POSTING
+        posting.save(update_fields=["status", "updated_at"])
+
+        second = build_statement_posting_preview(suggestion)
+
+        posting.refresh_from_db()
+        self.assertFalse(second["ready"])
+        self.assertEqual(posting.status, XeroStatementPosting.STATUS_POSTING)
+        self.assertIn("already being posted", second["errors"][0])
+
+    def test_credit_statement_preview_creates_receive_money(self):
+        suggestion = self._statement_suggestion(
+            line_id="api-receive",
+            direction=XeroStatementLineSnapshot.DIRECTION_CREDIT,
+        )
+        preview = build_statement_posting_preview(suggestion)
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["xero_payload"]["Type"], "RECEIVE")
+
+    def test_retry_recovers_existing_xero_transaction_by_stable_reference(self):
+        suggestion = self._statement_suggestion(line_id="api-recovery")
+        preview = build_statement_posting_preview(suggestion)
+        posting = XeroStatementPosting.objects.get(pk=preview["posting_id"])
+        posting.status = XeroStatementPosting.STATUS_FAILED
+        posting.save(update_fields=["status", "updated_at"])
+        existing = Mock()
+        existing.json.return_value = {"BankTransactions": [{
+            "BankTransactionID": "bt-recovered",
+            "Type": "SPEND",
+            "Total": 31.07,
+            "BankAccount": {"AccountID": "bank-1"},
+        }]}
+        existing.raise_for_status.return_value = None
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            return_value=existing,
+        ), patch("integrations.services.xero_statement_posting.http_client.put") as put_mock:
+            recovered = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+        self.assertEqual(recovered.status, XeroStatementPosting.STATUS_MATCH_READY)
+        self.assertEqual(recovered.xero_bank_transaction_id, "bt-recovered")
+        put_mock.assert_not_called()
+
+    def test_existing_bill_creates_payment_not_spend_money(self):
+        bill = ExternalFinancialRecord.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            external_record_id="bill-uber",
+            external_account_id="tenant-1",
+            currency="AUD",
+            amount="31.07",
+            direction="debit",
+            status="AUTHORISED",
+            transaction_date=datetime(2026, 7, 10).date(),
+            merchant_name="uber",
+            class_name="ACCPAY",
+        )
+        spend_suggestion = self._statement_suggestion(line_id="bill-spend-blocked")
+        bill.amount = spend_suggestion.statement_line.amount
+        bill.save(update_fields=["amount", "updated_at"])
+        blocked = build_statement_posting_preview(spend_suggestion)
+        self.assertFalse(blocked["ready"])
+        self.assertTrue(any("pay the bill" in error for error in blocked["errors"]))
+
+        bill.delete()
+        bill = ExternalFinancialRecord.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            record_type=ExternalFinancialRecord.RECORD_XERO_BILL,
+            connection=self.connection,
+            user=self.user,
+            organization=self.organization,
+            external_record_id="bill-uber",
+            external_account_id="tenant-1",
+            currency="AUD",
+            amount="31.07",
+            direction="debit",
+            status="AUTHORISED",
+            transaction_date=datetime(2026, 7, 10).date(),
+            merchant_name="uber",
+            class_name="ACCPAY",
+        )
+        suggestion = self._statement_suggestion(
+            line_id="bill-payment",
+            action=XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL,
+            matched_bill_id=bill.external_record_id,
+        )
+        preview = build_statement_posting_preview(suggestion)
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["operation"], "bill_payment")
+
+        no_payment = Mock()
+        no_payment.json.return_value = {"Payments": []}
+        no_payment.raise_for_status.return_value = None
+        live_bill = Mock()
+        live_bill.json.return_value = {"Invoices": [{
+            "InvoiceID": "bill-uber",
+            "Type": "ACCPAY",
+            "Status": "AUTHORISED",
+            "AmountDue": 31.07,
+            "CurrencyCode": "AUD",
+        }]}
+        live_bill.raise_for_status.return_value = None
+        payment = Mock()
+        payment.json.return_value = {"Payments": [{"PaymentID": "payment-1"}]}
+        payment.raise_for_status.return_value = None
+        with patch(
+            "integrations.services.xero_statement_posting.http_client.get",
+            side_effect=[no_payment, live_bill],
+        ), patch(
+            "integrations.services.xero_statement_posting.http_client.put",
+            return_value=payment,
+        ) as put_mock:
+            posting = execute_statement_posting(suggestion, requested_by_slack_id="UFIN")
+        self.assertEqual(posting.xero_payment_id, "payment-1")
+        self.assertEqual(posting.xero_bill_id, "bill-uber")
+        self.assertIn("/Payments", put_mock.call_args.args[0])
+        body = put_mock.call_args.kwargs["json"]["Payments"][0]
+        self.assertEqual(body["Invoice"], {"InvoiceID": "bill-uber"})
+        self.assertNotIn("IsReconciled", body)
+
+    def test_xero_sync_keeps_accounts_payable_payments(self):
+        count = _upsert_xero_payments(self.connection, [{
+            "PaymentID": "ap-payment-1",
+            "Status": "AUTHORISED",
+            "Amount": 31.07,
+            "Date": "2026-07-16",
+            "Invoice": {
+                "InvoiceID": "bill-1",
+                "Type": "ACCPAY",
+                "CurrencyCode": "AUD",
+                "Contact": {"Name": "Uber"},
+            },
+        }])
+        self.assertEqual(count, 1)
+        record = ExternalFinancialRecord.objects.get(external_record_id="ap-payment-1")
+        self.assertEqual(record.direction, "debit")
+        self.assertEqual(record.category, "bill_payment")
+        self.assertEqual(record.class_name, "ACCPAY")
+
 
 class ReconciliationWorkflowApiTests(APITestCase):
     def setUp(self):
@@ -766,6 +996,69 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    def test_statement_preview_and_safe_batch_are_admin_guarded(self, _permission):
+        connection = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO,
+            user=self.user,
+            organization=self.organization,
+            access_token="access-token",
+            external_account_id="tenant-1",
+            scopes=["accounting.banktransactions", "accounting.payments"],
+        )
+        ReconciliationProfile.objects.create(
+            organization=self.organization,
+            xero_connection=connection,
+            xero_bank_account_id="bank-1",
+        )
+        line = XeroStatementLineSnapshot.objects.create(
+            organization=self.organization,
+            bank_account_id="bank-1",
+            statement_line_id="api-statement-1",
+            transaction_date=datetime(2026, 7, 16).date(),
+            narration="UBER *TRIP HELP.",
+            direction="debit",
+            amount="31.07",
+            currency="AUD",
+            source_hash="api-statement-hash",
+        )
+        suggestion = XeroStatementSuggestion.objects.create(
+            organization=self.organization,
+            statement_line=line,
+            run_id="api-run",
+            proposed_action="create_bank_transaction",
+            contact_name="uber",
+            account_code="406",
+            account_name="Travel-national",
+            tax_type="INPUT",
+            description="Uber trip.",
+            confidence=0.99,
+            source_hash=line.source_hash,
+        )
+
+        preview = self.client.get(
+            reverse("reconciliation_statement_suggestion_preview", kwargs={"suggestion_id": suggestion.id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au"},
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertTrue(preview.data["preview"]["ready"])
+
+        unconfirmed = self.client.post(
+            reverse("reconciliation_statement_suggestion_execute", kwargs={"suggestion_id": suggestion.id}),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au", "confirm": False},
+            format="json",
+        )
+        self.assertEqual(unconfirmed.status_code, status.HTTP_400_BAD_REQUEST)
+
+        batch = self.client.post(
+            reverse("reconciliation_statement_safe_batch"),
+            {"slack_user_id": "UADMIN", "domain": "mlai.au", "dry_run": True},
+            format="json",
+        )
+        self.assertEqual(batch.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch.data["ready_count"], 1)
+        self.assertEqual(batch.data["posted_count"], 0)
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_valley_context_submission_and_human_approval_contract(self, _permission):
@@ -854,6 +1147,8 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(submission_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(submission_response.data["automatic_posting_enabled"])
+        self.assertEqual(submission_response.data["automatic_postings"], [])
         suggestion_id = submission_response.data["suggestions"][0]["id"]
 
         decision_response = self.client.post(

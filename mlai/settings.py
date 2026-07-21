@@ -880,6 +880,9 @@ XERO_OAUTH_SCOPES = _env_list(
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
+        # Applying a bank payment to an existing ACCPAY bill is a write and
+        # deliberately uses the narrow payments scope, not invoices.write.
+        "accounting.payments",
         "accounting.settings.read",
         # Creating missing Event Name / Project Name tracking options is part
         # of the explicitly approved reconciliation posting operation.
@@ -889,6 +892,19 @@ XERO_OAUTH_SCOPES = _env_list(
         # connections must reconnect once to grant this additional scope.
         "accounting.banktransactions",
     ],
+)
+
+# Automatic API writes are opt-in. Admin/Roo calls can still explicitly
+# confirm one preview while the final statement-line reconciliation stays in
+# Xero for a human to approve.
+XERO_STATEMENT_AUTO_POST_ENABLED = os.environ.get(
+    "XERO_STATEMENT_AUTO_POST_ENABLED", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE = float(
+    os.environ.get("XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE", "0.92")
+)
+XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE = float(
+    os.environ.get("XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE", "0.98")
 )
 
 NOTION_CLIENT_ID = os.environ.get("NOTION_CLIENT_ID", "")

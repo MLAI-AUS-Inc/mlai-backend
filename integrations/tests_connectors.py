@@ -156,8 +156,11 @@ def _xero_balance_sheet_report(*, total_bank: str) -> dict:
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
+        "accounting.payments",
         "accounting.settings.read",
+        "accounting.settings",
         "accounting.contacts.read",
+        "accounting.banktransactions",
     ],
     NOTION_CLIENT_ID="notion-client-id",
     NOTION_CLIENT_SECRET="notion-client-secret",
@@ -709,6 +712,8 @@ class ConnectorEndpointTests(TestCase):
                 self.assertIn("offline_access", params["scope"][0])
                 self.assertIn("accounting.invoices.read", params["scope"][0])
                 self.assertIn("accounting.payments.read", params["scope"][0])
+                self.assertIn("accounting.payments", params["scope"][0].split())
+                self.assertIn("accounting.banktransactions", params["scope"][0].split())
                 self.assertNotIn("accounting.reports.profitandloss.read", params["scope"][0])
                 self.assertNotIn("accounting.reports.balancesheet.read", params["scope"][0])
             if slug == "linear":

@@ -6,6 +6,7 @@ XERO_REPORT_SCOPE = "accounting.reports.read"
 XERO_LEGACY_REPORT_SCOPE = "accounting.reports"
 XERO_PROFIT_AND_LOSS_REPORT_SCOPE = "accounting.reports.profitandloss.read"
 XERO_BALANCE_SHEET_REPORT_SCOPE = "accounting.reports.balancesheet.read"
+XERO_PAYMENT_WRITE_SCOPE = "accounting.payments"
 XERO_REQUIRED_OPERATIONAL_SCOPES = (
     "offline_access",
     "accounting.invoices.read",
@@ -55,3 +56,7 @@ def xero_can_request_report_scopes(value: Any) -> bool:
 
 def xero_needs_report_reconnect(value: Any) -> bool:
     return not xero_has_report_scope(value)
+
+
+def xero_has_payment_write_scope(value: Any) -> bool:
+    return XERO_PAYMENT_WRITE_SCOPE in normalize_xero_scopes(value)

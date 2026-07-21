@@ -2369,7 +2369,7 @@ def _upsert_xero_payments(connection: ExternalServiceConnection, payments: list[
     for payment in payments:
         invoice = _as_dict(payment.get("Invoice") or payment.get("invoice"))
         invoice_type = _nested_text(invoice, "Type", "type").upper()
-        if invoice_type and invoice_type != "ACCREC":
+        if invoice_type and invoice_type not in {"ACCREC", "ACCPAY"}:
             continue
         status_value = _nested_text(payment, "Status", "status").upper()
         if status_value in {"DELETED", "VOIDED"}:
@@ -2385,13 +2385,15 @@ def _upsert_xero_payments(connection: ExternalServiceConnection, payments: list[
             "organization": connection.organization,
             "currency": _xero_currency(payment) or _xero_currency(invoice),
             "amount": _xero_amount(payment, "Amount", "amount"),
-            "direction": "credit",
+            "direction": "debit" if invoice_type == "ACCPAY" else "credit",
             "status": status_value or "AUTHORISED",
             "posted_at": _xero_datetime_or_none(payment.get("UpdatedDateUTC") or payment.get("updated_date_utc")),
             "transaction_date": _xero_date_or_none(payment.get("Date") or payment.get("date")),
-            "description": _xero_invoice_description(invoice) or "Xero invoice payment",
+            "description": _xero_invoice_description(invoice) or (
+                "Xero bill payment" if invoice_type == "ACCPAY" else "Xero invoice payment"
+            ),
             "merchant_name": _xero_contact_name(invoice),
-            "category": "payment",
+            "category": "bill_payment" if invoice_type == "ACCPAY" else "payment",
             "class_name": invoice_type or "ACCREC",
             "raw_payload": payment,
         }

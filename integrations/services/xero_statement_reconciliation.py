@@ -435,6 +435,7 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "statement_line_id": suggestion.statement_line.statement_line_id,
         "run_id": suggestion.run_id,
         "proposed_action": suggestion.proposed_action,
+        "execution_action": normalize_statement_action(suggestion.proposed_action),
         "contact_name": suggestion.contact_name,
         "account_code": suggestion.account_code,
         "account_name": suggestion.account_name,
@@ -465,6 +466,38 @@ def serialize_statement_suggestion(suggestion: XeroStatementSuggestion) -> dict[
         "source_hash": suggestion.source_hash,
         "model_name": suggestion.model_name,
         "status": suggestion.status,
+        "posting": serialize_statement_posting(suggestion.postings.order_by("-created_at").first()),
+    }
+
+
+def normalize_statement_action(action: str) -> str:
+    if action in {
+        XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION,
+        XeroStatementSuggestion.ACTION_PREFILL_CREATE,
+    }:
+        return XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION
+    if action in {
+        XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL,
+        XeroStatementSuggestion.ACTION_MATCH_BILL,
+    }:
+        return XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL
+    return XeroStatementSuggestion.ACTION_NEEDS_REVIEW
+
+
+def serialize_statement_posting(posting) -> dict[str, Any] | None:
+    if posting is None:
+        return None
+    return {
+        "id": posting.id,
+        "operation": posting.operation,
+        "status": posting.status,
+        "warnings": posting.warnings or [],
+        "xero_bank_transaction_id": posting.xero_bank_transaction_id,
+        "xero_payment_id": posting.xero_payment_id,
+        "xero_bill_id": posting.xero_bill_id,
+        "automatic": posting.automatic,
+        "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
+        "last_error": posting.last_error,
     }
 
 
@@ -588,9 +621,10 @@ def build_statement_reconciliation_context(*, organization, include_external_evi
         "prior_xero_examples": examples,
         "approved_accounting_options": list(approved_options.values()),
         "statement_policy": {
-            "prefill": "Prefer an exact merchant_key pattern. Otherwise copy one complete account/tax tuple from approved_accounting_options when the evidence strongly supports it.",
-            "bill_match": "An existing bill may only be proposed from matching_xero_bills on the same candidate.",
-            "approval": "Suggestions prefill the browser form only; the human remains the only actor who clicks OK.",
+            "create_bank_transaction": "Prefer an exact merchant_key pattern. Otherwise copy one complete account/tax tuple from approved_accounting_options when the evidence strongly supports it.",
+            "pay_existing_bill": "Prefer paying a supplied matching_xero_bill over creating a Spend Money transaction. Never invent a bill ID.",
+            "execution": "The backend rechecks confidence, current Xero state and idempotency before any API write.",
+            "approval": "The human remains the only actor who clicks Match/OK on the Xero bank statement line.",
         },
     }
 
@@ -656,7 +690,8 @@ def save_statement_suggestions(
             account_code = str(item.get("account_code") or "").strip()[:64]
             account_name = str(item.get("account_name") or "").strip()[:255]
             tax_type = str(item.get("tax_type") or "").strip()[:255]
-            if action == XeroStatementSuggestion.ACTION_PREFILL_CREATE:
+            normalized_action = normalize_statement_action(action)
+            if normalized_action == XeroStatementSuggestion.ACTION_CREATE_BANK_TRANSACTION:
                 proposed = (contact_name.casefold(), account_code.casefold(), account_name.casefold(), tax_type.casefold())
                 exact_allowed = {
                     (
@@ -682,12 +717,12 @@ def save_statement_suggestions(
                     raise ValueError(
                         f"Prefill fields for {line_id} are not backed by exact merchant history or an approved accounting option"
                     )
-            elif action == XeroStatementSuggestion.ACTION_NEEDS_REVIEW and any(
+            elif normalized_action == XeroStatementSuggestion.ACTION_NEEDS_REVIEW and any(
                 [account_code, account_name, tax_type]
             ):
                 raise ValueError(f"Needs-review suggestion for {line_id} cannot contain unverified accounting fields")
             matched_bill_id = str(item.get("matched_xero_bill_id") or "").strip()[:255]
-            if action == XeroStatementSuggestion.ACTION_MATCH_BILL:
+            if normalized_action == XeroStatementSuggestion.ACTION_PAY_EXISTING_BILL:
                 allowed_bills = {str(bill["xero_bill_id"]) for bill in candidate.get("matching_xero_bills") or []}
                 if not matched_bill_id or matched_bill_id not in allowed_bills:
                     raise ValueError(f"Bill match for {line_id} is not in the supplied Xero candidates")
