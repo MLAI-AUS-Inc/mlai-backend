@@ -7457,6 +7457,10 @@ class SEOKeywordBulkUpsertView(APIView):
                         velocity_score=velocity.get('velocity_score', 0.0),
                         trend_status=velocity.get('trend_status', 'stable'),
                         daily_volumes=velocity.get('daily_volumes', []),
+                        source=velocity.get('source', 'unknown'),
+                        basis=velocity.get('basis', 'unknown'),
+                        period_label=velocity.get('period_label', ''),
+                        is_estimated=velocity.get('is_estimated', True),
                     )
 
                 # Create AI saturation snapshot if provided

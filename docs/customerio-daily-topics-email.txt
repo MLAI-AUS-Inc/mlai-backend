@@ -1,7 +1,7 @@
-{%- assign topic_list = topics | default: message_data.topics -%}
-{%- assign greeting_name = first_name | default: message_data.first_name -%}
-{%- assign site_domain = domain | default: message_data.domain -%}
-{%- assign optout_url = unsubscribe_url | default: message_data.unsubscribe_url -%}
+{%- assign topic_list = trigger.topics | default: topics | default: message_data.topics -%}
+{%- assign greeting_name = trigger.first_name | default: first_name | default: message_data.first_name -%}
+{%- assign site_domain = trigger.domain | default: domain | default: message_data.domain -%}
+{%- assign optout_url = trigger.unsubscribe_url | default: unsubscribe_url | default: message_data.unsubscribe_url -%}
 {% if greeting_name != blank %}Hi {{ greeting_name }},{% else %}Your daily research is ready.{% endif %}
 
 We researched today's best article opportunities for {{ site_domain }}.
@@ -15,6 +15,8 @@ No topics were ready this morning. We'll try again at the next scheduled run.
 Keyword: {{ topic.keyword }}
 {% if topic.why_recommended != blank %}Why this topic: {{ topic.why_recommended }}
 {% endif %}Start writing: {{ topic.confirm_url }}
+{% if topic.trend_summary != blank %}Demand trend: {{ topic.trend_summary }}
+{% endif %}
 
 {% endfor %}
 {% endif %}

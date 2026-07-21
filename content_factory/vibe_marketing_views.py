@@ -1536,6 +1536,11 @@ def _extract_topic_candidates_from_result(result):
                 "trendPercent": raw.get("trend_percent") or raw.get("trendPercent"),
                 "trendDescription": raw.get("trend_description") or raw.get("trendDescription") or raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "trendLabel": raw.get("trending_label") or raw.get("trendLabel"),
+                "trendSource": raw.get("trend_source") or raw.get("trendSource"),
+                "trendSourceLabel": raw.get("trend_source_label") or raw.get("trendSourceLabel"),
+                "trendBasis": raw.get("trend_basis") or raw.get("trendBasis"),
+                "trendPeriodLabel": raw.get("trend_period_label") or raw.get("trendPeriodLabel"),
+                "trendIsEstimated": raw.get("trend_is_estimated") if "trend_is_estimated" in raw else raw.get("trendIsEstimated"),
                 "statsMeaning": raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "whyRecommended": raw.get("why_recommended") or raw.get("whyRecommended"),
                 "recommendationReason": raw.get("recommendation_reason") or raw.get("recommendationReason"),
@@ -1601,6 +1606,10 @@ def _latest_keyword_velocity(keyword):
         "trendStatus": snapshot.trend_status,
         "absoluteVolume": snapshot.absolute_volume,
         "dailyVolumes": snapshot.daily_volumes or [],
+        "source": snapshot.source,
+        "basis": snapshot.basis,
+        "periodLabel": snapshot.period_label,
+        "isEstimated": snapshot.is_estimated,
     }
 
 
@@ -1732,6 +1741,10 @@ def _topic_candidate_from_keyword(keyword):
         "trendStatus": trend_status,
         "trendPercent": trend_percent,
         "trendDescription": _trend_description(trend_status),
+        "trendSource": (velocity or {}).get("source"),
+        "trendBasis": (velocity or {}).get("basis"),
+        "trendPeriodLabel": (velocity or {}).get("periodLabel"),
+        "trendIsEstimated": (velocity or {}).get("isEstimated"),
         "aiSaturation": _latest_keyword_saturation(keyword),
         "relatedKeywords": _keyword_related_keywords(keyword),
         "paaQuestions": _keyword_paa_questions(keyword),

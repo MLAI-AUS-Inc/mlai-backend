@@ -1315,6 +1315,10 @@ class KeywordVelocity(models.Model):
         blank=True,
         help_text="Raw daily volume data from Glimpse/pytrends"
     )
+    source = models.CharField(max_length=32, default="unknown")
+    basis = models.CharField(max_length=32, default="unknown")
+    period_label = models.CharField(max_length=64, blank=True, default="")
+    is_estimated = models.BooleanField(default=True)
 
     # Snapshot timestamp
     captured_at = models.DateTimeField(default=timezone.now)

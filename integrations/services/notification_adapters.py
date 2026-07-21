@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from datetime import timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from typing import Any, Optional
 
 from django.conf import settings
@@ -278,6 +278,9 @@ def _plain_topic_message(
         score = option.get("opportunity_index")
         score_suffix = f" (score {score})" if score not in (None, "") else ""
         lines.append(f"{index}. {title} - {keyword}{score_suffix}")
+        trend_summary = str(option.get("trend_summary") or "").strip()
+        if trend_summary:
+            lines.append(f"Trend: {trend_summary}")
         lines.append(
             "Approve: "
             + build_action_url(
@@ -307,8 +310,20 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
     rows = []
     for index, option in enumerate(_topic_options(data), start=1):
         keyword = html.escape(_option_keyword(option))
-        title = html.escape(_option_title(option))
+        raw_title = _option_title(option)
+        title = html.escape(raw_title)
         explanation = html.escape(str(option.get("explanation") or ""))
+        trend_summary = html.escape(str(option.get("trend_summary") or "").strip())
+        chart_url = html.escape(_https_image_url(option.get("chart_url")))
+        chart_alt = html.escape(str(option.get("chart_alt") or f"Demand trend for {raw_title}"))
+        explanation_html = f"<p>{explanation}</p>" if explanation else ""
+        trend_html = f"<p>{trend_summary}</p>" if trend_summary else ""
+        chart_html = (
+            f'<p><img src="{chart_url}" alt="{chart_alt}" width="480" '
+            'style="display:block;width:100%;max-width:480px;height:auto"></p>'
+            if chart_url
+            else ""
+        )
         approve_url = html.escape(
             build_action_url(
                 run,
@@ -321,7 +336,9 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
             "<li>"
             f"<strong>{title}</strong><br>"
             f"<code>{keyword}</code>"
-            f"{'<p>' + explanation + '</p>' if explanation else ''}"
+            f"{explanation_html}"
+            f"{trend_html}"
+            f"{chart_html}"
             f'<p><a href="{approve_url}">Approve this topic</a></p>'
             "</li>"
         )
@@ -338,6 +355,17 @@ def _recipient_first_name(run: AutomationRun) -> str:
     if user is None:
         return ""
     return str(getattr(user, "first_name", "") or "").strip()
+
+
+def _https_image_url(value: Any) -> str:
+    """Allow only absolute HTTPS image URLs into outbound email markup."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return raw
 
 
 def _topic_email_message_data(
@@ -367,6 +395,12 @@ def _topic_email_message_data(
                 "ai_volume_display": str(option.get("ai_volume_display") or ""),
                 "why_recommended": str(option.get("why_recommended") or option.get("explanation") or ""),
                 "recommended": bool(option.get("recommended")),
+                "trend_source_label": str(option.get("trend_source_label") or ""),
+                "trend_period_label": str(option.get("trend_period_label") or ""),
+                "trend_summary": str(option.get("trend_summary") or ""),
+                "trend_percent": option.get("trend_percent"),
+                "chart_url": _https_image_url(option.get("chart_url")),
+                "chart_alt": str(option.get("chart_alt") or ""),
                 "confirm_url": build_action_url(
                     run,
                     "approve_topic",

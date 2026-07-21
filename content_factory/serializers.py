@@ -55,7 +55,8 @@ class KeywordVelocitySerializer(serializers.ModelSerializer):
         model = KeywordVelocity
         fields = [
             'absolute_volume', 'velocity_score', 'trend_status',
-            'daily_volumes', 'captured_at'
+            'daily_volumes', 'source', 'basis', 'period_label',
+            'is_estimated', 'captured_at'
         ]
 
 
@@ -112,7 +113,11 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
         if snapshot:
             return {
                 'velocity_score': snapshot.velocity_score,
-                'trend_status': snapshot.trend_status
+                'trend_status': snapshot.trend_status,
+                'source': snapshot.source,
+                'basis': snapshot.basis,
+                'period_label': snapshot.period_label,
+                'is_estimated': snapshot.is_estimated,
             }
         return None
 
