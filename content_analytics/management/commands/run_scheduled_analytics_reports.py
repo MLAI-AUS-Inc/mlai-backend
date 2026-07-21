@@ -27,14 +27,23 @@ class Command(BaseCommand):
             action="store_true",
             help="Rebuild an existing snapshot in place. Requires --domain.",
         )
+        parser.add_argument(
+            "--notify",
+            action="store_true",
+            help=(
+                "Also send the report-ready notification to the org's active "
+                "channels (idempotent per channel). Requires --domain."
+            ),
+        )
 
     def handle(self, *args, **options):
         domain = options.get("domain")
         date_raw = options.get("date")
         force = bool(options.get("force"))
+        notify = bool(options.get("notify"))
 
-        if (date_raw or force) and not domain:
-            raise CommandError("--date and --force require --domain.")
+        if (date_raw or force or notify) and not domain:
+            raise CommandError("--date, --force, and --notify require --domain.")
 
         if domain:
             report_date = None
@@ -43,7 +52,9 @@ class Command(BaseCommand):
                     report_date = calendar_date.fromisoformat(str(date_raw))
                 except ValueError as exc:
                     raise CommandError("--date must use YYYY-MM-DD format.") from exc
-            result = generate_report_for_domain(domain, report_date=report_date, force=force)
+            result = generate_report_for_domain(
+                domain, report_date=report_date, force=force, notify=notify
+            )
         else:
             result = run_daily_article_report_scheduler()
 
