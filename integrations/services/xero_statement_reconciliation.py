@@ -312,6 +312,21 @@ def _line_source_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(immutable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _browser_field(raw: dict[str, Any], canonical: str, snapshot_alias: str) -> Any:
+    """Read a browser backfill field without silently dropping snapshot-shaped keys.
+
+    The public snapshot serializer names the visible form fields ``current_*``
+    while the original management-command contract used shorter names.  Keep
+    the original keys canonical, but accept serializer-shaped payloads so a
+    Chrome backfill cannot erase the approved Xero examples used by later
+    reconciliation runs.
+    """
+
+    if canonical in raw:
+        return raw.get(canonical)
+    return raw.get(snapshot_alias)
+
+
 def import_xero_statement_lines(
     *, organization, bank_account_id: str, lines: list[dict[str, Any]], currency: str = "AUD"
 ) -> list[XeroStatementLineSnapshot]:
@@ -354,12 +369,18 @@ def import_xero_statement_lines(
             }
             defaults = {
                 **values,
-                "current_contact": str(raw.get("contact") or "").strip()[:255],
-                "current_account": str(raw.get("account") or "").strip()[:255],
-                "current_description": str(raw.get("description") or "").strip()[:4000],
-                "current_event_name": str(raw.get("event_name") or "").strip()[:255],
-                "current_project_name": str(raw.get("project_name") or "").strip()[:255],
-                "current_tax_type": str(raw.get("tax_type") or "").strip()[:255],
+                "current_contact": str(_browser_field(raw, "contact", "current_contact") or "").strip()[:255],
+                "current_account": str(_browser_field(raw, "account", "current_account") or "").strip()[:255],
+                "current_description": str(
+                    _browser_field(raw, "description", "current_description") or ""
+                ).strip()[:4000],
+                "current_event_name": str(
+                    _browser_field(raw, "event_name", "current_event_name") or ""
+                ).strip()[:255],
+                "current_project_name": str(
+                    _browser_field(raw, "project_name", "current_project_name") or ""
+                ).strip()[:255],
+                "current_tax_type": str(_browser_field(raw, "tax_type", "current_tax_type") or "").strip()[:255],
                 "ready_in_xero": bool(raw.get("has_ok")),
                 "active": True,
                 "source_hash": _line_source_hash(values),
