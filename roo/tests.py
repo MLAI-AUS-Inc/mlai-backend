@@ -700,6 +700,69 @@ class CoworkingMonthlyUpdateDiscountTests(TestCase):
             4,
         )
 
+    def test_ready_update_does_not_discount_ineligible_binding(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
+
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        UserStartupBinding.objects.filter(user=self.user, organization=self.org).update(
+            coworking_discount_eligible=False
+        )
+
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_rebinding_does_not_restore_discount_eligibility(self):
+        from startup_updates.models import MonthlyUpdateDraftStatus, UserStartupBinding
+        from startup_updates.services import bind_user_to_startup
+
+        today = date.today()
+        self._make_update(today, MonthlyUpdateDraftStatus.READY)
+        binding = UserStartupBinding.objects.get(user=self.user, organization=self.org)
+        binding.coworking_discount_eligible = False
+        binding.save(update_fields=['coworking_discount_eligible', 'updated_at'])
+
+        rebound = bind_user_to_startup(
+            user=self.user,
+            organization=self.org,
+            role='founder',
+            is_default_for_gmail=True,
+        )
+
+        self.assertFalse(rebound.coworking_discount_eligible)
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            8,
+        )
+
+    def test_ineligible_binding_does_not_block_discount_from_eligible_binding(self):
+        from organizations.models import Organization
+        from startup_updates.models import (
+            MonthlyUpdateDraft,
+            MonthlyUpdateDraftStatus,
+            UserStartupBinding,
+        )
+
+        UserStartupBinding.objects.filter(user=self.user, organization=self.org).update(
+            coworking_discount_eligible=False
+        )
+        second_org = Organization.objects.create(name='Beta', domain='eligible-beta.example')
+        UserStartupBinding.objects.create(user=self.user, organization=second_org)
+        self._company_for(second_org, name='Beta Pty Ltd', verified=True)
+        today = date.today()
+        MonthlyUpdateDraft.objects.create(
+            organization=second_org,
+            month=today.replace(day=1),
+            status=MonthlyUpdateDraftStatus.READY,
+        )
+
+        self.assertEqual(
+            CoworkingService.get_coworking_cost(user=self.user, booking_date=today),
+            4,
+        )
+
     def test_update_ready_within_window_discounts_across_month_boundary(self):
         # The window is time-based: a previous-month update that became ready
         # 20 days ago still discounts a booking today (no start-of-month cliff).

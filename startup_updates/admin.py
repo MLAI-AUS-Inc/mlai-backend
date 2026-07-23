@@ -31,9 +31,17 @@ class StartupProfileAdmin(admin.ModelAdmin):
 
 @admin.register(UserStartupBinding)
 class UserStartupBindingAdmin(admin.ModelAdmin):
-    list_display = ("user", "organization", "google_connection", "role", "is_default_for_gmail", "updated_at")
+    list_display = (
+        "user",
+        "organization",
+        "google_connection",
+        "role",
+        "is_default_for_gmail",
+        "coworking_discount_eligible",
+        "updated_at",
+    )
     search_fields = ("user__email", "organization__domain", "role")
-    list_filter = ("is_default_for_gmail", "updated_at")
+    list_filter = ("is_default_for_gmail", "coworking_discount_eligible", "updated_at")
 
 
 @admin.register(StartupManualDocument)
