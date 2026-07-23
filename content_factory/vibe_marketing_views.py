@@ -15811,10 +15811,17 @@ class VibeMarketingArticleSystemRevisionsView(APIView):
             }
             run.result = result
             run.save(update_fields=["result", "updated_at"])
-            if retryable:
-                return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
+            # A retryable failure (CF 5xx / network / worker unavailable) must NOT be
+            # reported as 202: the frontend redirects on any 2xx, so a 202 here silently
+            # drops the reviewer's comments and looks like a successful send. Return 502 so
+            # the error surfaces; the batch is still persisted as submitted/retryable above,
+            # so "Retry revision comments" resends the same batch once CF recovers.
             return Response(
-                {"detail": remote_data.get("error") or "Content Factory could not queue setup changes.", "remote": remote_data},
+                {
+                    "detail": remote_data.get("error") or "Content Factory could not queue setup changes; you can retry.",
+                    "remote": remote_data,
+                    "retryable": retryable,
+                },
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
