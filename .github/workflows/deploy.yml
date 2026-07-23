@@ -81,6 +81,7 @@ jobs:
           integrations.tests_xero_reconciliation \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
+          startup_updates.tests_monthly_update_reminders \
           hospital.test_sim_contest \
           hospital.test_sim_guess_proxy \
           hospital.test_sim_patient_proxy \

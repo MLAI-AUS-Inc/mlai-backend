@@ -1,0 +1,55 @@
+<!--
+  Customer.io transactional template: monthly update reminder, one day out.
+
+  Suggested subject: Your coworking discount is due to renew
+  Suggested preheader: Your current 4-point rate expires tomorrow.
+
+  Set this transactional message's id as CUSTOMERIO_MONTHLY_UPDATE_1D_TEMPLATE_ID.
+  Keep Customer.io's workspace preference/unsubscribe footer enabled. The API
+  request also sets send_to_unsubscribed=false. The message_data contract is
+  identical to docs/customerio-monthly-update-reminder-7-day.html, with
+  reminder_type="one_day".
+-->
+{%- assign greeting_name = trigger.first_name | default: first_name | default: message_data.first_name -%}
+{%- assign startup_list = trigger.startups | default: startups | default: message_data.startups -%}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr>
+          <td style="padding:32px;">
+            <p style="margin:0;font-size:14px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Roo · Monthly update</p>
+            <h1 style="margin:8px 0 0;font-size:24px;line-height:1.25;color:#111827;">A gentle reminder{% if greeting_name != blank %}, {{ greeting_name }}{% endif %}</h1>
+            <p style="margin:12px 0 0;font-size:15px;line-height:1.6;color:#4b5563;">
+              Your current 4-point coworking rate expires tomorrow. If you would like to keep it active, you can share a short update whenever it suits you today.
+            </p>
+          </td>
+        </tr>
+        {% for startup in startup_list %}
+        <tr>
+          <td style="padding:0 32px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;background:#fafafa;">
+              <tr>
+                <td style="padding:20px;">
+                  <h2 style="margin:0;font-size:18px;line-height:1.4;color:#111827;">{{ startup.name }}</h2>
+                  {% if startup.domain != blank %}<p style="margin:3px 0 0;font-size:13px;color:#6b7280;">{{ startup.domain }}</p>{% endif %}
+                  <p style="margin:12px 0 0;font-size:14px;line-height:1.5;color:#4b5563;">Your current rate is active through <strong>{{ startup.valid_through_display }}</strong> and expires on {{ startup.expires_on_display }}.</p>
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0 0;">
+                    <tr><td bgcolor="#2563eb" style="border-radius:8px;"><a href="{{ startup.update_url }}" style="display:inline-block;padding:13px 22px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">Add a monthly update</a></td></tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        {% endfor %}
+        <tr>
+          <td style="padding:4px 32px 32px;">
+            <p style="margin:0;font-size:14px;line-height:1.6;color:#6b7280;">No pressure if now is not the right time. Your standard rate will apply after expiry, and an eligible update later will restart the discount once it is ready.</p>
+            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">You are receiving this service reminder because a ready monthly update currently gives your registered company the Roo coworking rate.</p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

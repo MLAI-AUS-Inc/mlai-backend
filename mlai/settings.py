@@ -684,6 +684,26 @@ CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.
 CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '3')
+# Friendly monthly-update renewal reminders. Production delivery stays off
+# until both Customer.io templates have been reviewed and their ids configured.
+MONTHLY_UPDATE_REMINDERS_ENABLED = _env_is_true('MONTHLY_UPDATE_REMINDERS_ENABLED', False)
+MONTHLY_UPDATE_REMINDER_TIMEZONE = os.getenv(
+    'MONTHLY_UPDATE_REMINDER_TIMEZONE', 'Australia/Melbourne'
+)
+MONTHLY_UPDATE_REMINDER_HOUR = int(os.getenv('MONTHLY_UPDATE_REMINDER_HOUR', '9'))
+MONTHLY_UPDATE_REMINDER_MINUTE = int(os.getenv('MONTHLY_UPDATE_REMINDER_MINUTE', '0'))
+MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT = _env_is_true(
+    'MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT', True
+)
+CUSTOMERIO_MONTHLY_UPDATE_7D_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_MONTHLY_UPDATE_7D_TEMPLATE_ID', ''
+)
+CUSTOMERIO_MONTHLY_UPDATE_1D_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_MONTHLY_UPDATE_1D_TEMPLATE_ID', ''
+)
+MONTHLY_UPDATE_REMINDER_APP_URL = os.getenv(
+    'MONTHLY_UPDATE_REMINDER_APP_URL', 'https://mlai.au'
+).rstrip('/')
 # Twilio credentials drive WhatsApp sends (Messages API) and inbound webhook
 # validation (X-Twilio-Signature is HMAC-SHA1 keyed by the auth token).
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
