@@ -34,6 +34,7 @@ from integrations.services.reconciliation import (
 )
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
+    build_event_cashflow_validation,
     build_event_revenue_rollup,
     build_xero_correction_preview,
     build_xero_preview,
@@ -342,6 +343,99 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(row["refunds_cents"], -500)
         self.assertEqual(row["stripe_fee_cents"], 300)
         self.assertEqual(row["net_cash_contribution_cents"], 9200)
+
+    def test_event_cashflow_validation_excludes_stripe_payout_and_flags_loss(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        revenue = build_event_revenue_rollup([record])
+        validation = build_event_cashflow_validation(
+            event_revenue=revenue,
+            bank_transactions=[
+                {
+                    "BankTransactionID": "stripe-payout",
+                    "Type": "RECEIVE",
+                    "Status": "AUTHORISED",
+                    "LineItems": [{
+                        "UnitAmount": 92.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "TrackingCategoryID": "event-category-1",
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
+                        }],
+                    }],
+                },
+                {
+                    "BankTransactionID": "sponsor-income",
+                    "Type": "RECEIVE",
+                    "Status": "AUTHORISED",
+                    "LineItems": [{
+                        "UnitAmount": 100.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "TrackingCategoryID": "event-category-1",
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
+                        }],
+                    }],
+                },
+                {
+                    "BankTransactionID": "event-cost",
+                    "Type": "SPEND",
+                    "Status": "AUTHORISED",
+                    "LineItems": [{
+                        "UnitAmount": 250.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "TrackingCategoryID": "event-category-1",
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
+                        }],
+                    }],
+                },
+                {
+                    "BankTransactionID": "unmatched-cost",
+                    "Type": "SPEND",
+                    "Status": "AUTHORISED",
+                    "LineItems": [{
+                        "UnitAmount": 30.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "Name": "Event Name",
+                            "Option": "Costs Only Event",
+                        }],
+                    }],
+                },
+            ],
+            payout_previews=[{
+                "existing_transactions": [{
+                    "bank_transaction_id": "stripe-payout",
+                }],
+            }],
+            profile=self.profile,
+        )
+        row = validation["rows"][0]
+        self.assertEqual(row["xero_other_income_cents"], 10000)
+        self.assertEqual(row["xero_cost_cents"], 25000)
+        self.assertEqual(row["xero_current_stripe_net_cents"], 9200)
+        self.assertEqual(row["xero_stripe_variance_cents"], 0)
+        self.assertEqual(row["xero_stripe_coding_status"], "mismatch")
+        self.assertIn("xero_stripe_coding_incomplete", row["validation_flags"])
+        self.assertEqual(row["estimated_cashflow_cents"], -5800)
+        self.assertEqual(row["profitability_status"], "negative")
+        self.assertIn("negative_cashflow", row["validation_flags"])
+        self.assertEqual(validation["negative_count"], 1)
+        self.assertEqual(
+            validation["unmatched_xero_tracking"][0]["event_name"],
+            "Costs Only Event",
+        )
+        self.assertEqual(
+            validation["unmatched_xero_tracking"][0]["xero_cost_cents"],
+            3000,
+        )
 
     def test_preview_blocks_missing_mapping_and_missing_write_scope(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
