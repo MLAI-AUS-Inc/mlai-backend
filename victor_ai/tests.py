@@ -282,6 +282,7 @@ class VictorRegistrationEmailTests(TestCase):
                     'full_name': 'Jordan Taylor',
                     'team_name': 'Team Sunrise',
                     'startup_stage': 'Prototype / MVP',
+                    'application_deadline': '6 August 2026',
                     'website_url': 'https://victorai.win',
                 },
                 'to': 'jordan@example.com',
