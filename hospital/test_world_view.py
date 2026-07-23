@@ -22,26 +22,52 @@ class WorldStateViewTests(TestCase):
             first_name="World",
             last_name="Tester",
         )
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        self.client.force_authenticate(user=self.user)
         self.team_a = Team.objects.create(team_id=1, team_name="Alpha")
         self.team_b = Team.objects.create(team_id=2, team_name="Beta")
         self.team_a.members.add(self.user)
 
-    def _submit(self, team, score, accuracy=0.9):
-        return Submission.objects.create(
+    def _submit(self, team, score, accuracy=0.9, submitted_at=None):
+        sub = Submission.objects.create(
             user=self.user,
             team=team,
             participant_name="World Tester",
             score=score,
             accuracy=accuracy,
+            # Every real submission carries a multi-KB scoring blob. The
+            # world payload must never depend on it (2026-07-13 meltdown:
+            # materialising feedback for the whole table on every poll).
+            feedback={
+                "confusion_matrix": [[123] * 4] * 4,
+                "per_class": {
+                    str(i): {"precision": 0.5, "recall": 0.5} for i in range(4)
+                },
+                "row_details": [{"row": i, "ok": bool(i % 2)} for i in range(100)],
+            },
         )
+        if submitted_at is not None:
+            Submission.objects.filter(pk=sub.pk).update(submitted_at=submitted_at)
+            sub.refresh_from_db()
+        return sub
 
-    def test_anonymous_get_returns_world_state(self):
+    def test_admin_get_returns_world_state(self):
         self._submit(self.team_a, 0.5)
         response = self.client.get(WORLD_URL)
         self.assertEqual(response.status_code, 200)
         self.assertIn("updated_at", response.data)
         self.assertEqual(response.data["world"], {"radius": 30})
         self.assertTrue(response.data["entities"])
+
+    def test_non_admin_get_is_forbidden(self):
+        participant = User.objects.create_user(email="world-participant@example.com")
+        participant_client = APIClient()
+        participant_client.force_authenticate(user=participant)
+
+        response = participant_client.get(WORLD_URL)
+
+        self.assertEqual(response.status_code, 403)
 
     def test_teams_ranked_by_best_score(self):
         self._submit(self.team_a, 0.4)
@@ -115,3 +141,35 @@ class WorldStateViewTests(TestCase):
         cache.clear()
         third = self.client.get(WORLD_URL)
         self.assertNotEqual(first.data, third.data)
+
+    def test_tie_break_prefers_the_earliest_best_submission(self):
+        now = timezone.now()
+        self._submit(self.team_b, 0.9, submitted_at=now)
+        self._submit(
+            self.team_a, 0.9, submitted_at=now - timezone.timedelta(minutes=5)
+        )
+        cache.clear()
+        response = self.client.get(WORLD_URL)
+        cubes = {e["id"]: e for e in response.data["entities"] if e["kind"] == "cube"}
+        # Equal best scores: the team that got there first outranks.
+        self.assertEqual(cubes["team-1"]["meta"]["rank"], 1)
+        self.assertEqual(cubes["team-2"]["meta"]["rank"], 2)
+
+    def test_build_query_count_is_constant_and_independent_of_submissions(self):
+        # REGRESSION (2026-07-13): the build previously materialised every
+        # Submission row — feedback blob included — per cache miss. It now
+        # runs in exactly two queries (a per-team correlated-subquery scan
+        # plus the recent-spheres window), and — critically — that count is
+        # independent of how many submissions exist: the cost scales with
+        # the number of TEAMS (≤100), not the submission table.
+        for i in range(1, 21):
+            self._submit(self.team_a, 0.1 * (i % 10))
+            self._submit(self.team_b, 0.05 * (i % 10))
+        cache.clear()
+        with self.assertNumQueries(2):
+            response = self.client.get(WORLD_URL)
+        self.assertEqual(response.status_code, 200)
+        # Each team still resolves to exactly one ranked cube.
+        cubes = [e for e in response.data["entities"] if e["kind"] == "cube"]
+        self.assertEqual(len(cubes), 2)
+        self.assertTrue(response.data["entities"])

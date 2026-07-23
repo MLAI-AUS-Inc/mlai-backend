@@ -9,10 +9,11 @@ older than the run's last synced event, while staying fully compatible with
 older content-factory versions that send neither field.
 """
 import os
-from datetime import datetime, timezone as datetime_timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -152,6 +153,131 @@ class CallbackEventIdIdempotencyTests(ContentFactoryCallbackGuardTestCase):
         replay = self.client.post(CALLBACK_URL, payload, format="json")
         self.assertEqual(replay.status_code, status.HTTP_200_OK)
         self.assertEqual(replay.json()["status"], "duplicate")
+
+
+class CallbackClaimLeaseTests(ContentFactoryCallbackGuardTestCase):
+    """
+    The claim row is a lease, not a tombstone. A hard process death
+    (SIGKILL/OOM/deploy restart) after the claim but before processing leaves
+    a row with claimed_at set and processed_at null; the sender's retries
+    must be deferred (non-2xx) while the claim could still be live, and must
+    reclaim + reprocess once the lease TTL has elapsed. Soft failures keep
+    the existing release path and are covered above.
+    """
+
+    def test_successful_processing_stamps_processed_at(self):
+        payload = _setup_progress_payload(
+            "lease-ok-1", step="prepare_branch", event_id="evt-lease-ok-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "received")
+        marker = ContentFactoryCallbackEvent.objects.get(event_id="evt-lease-ok-1")
+        self.assertIsNotNone(marker.claimed_at)
+        self.assertIsNotNone(marker.processed_at)
+
+    def test_retry_against_live_claim_is_deferred_not_acked(self):
+        # Another worker claimed the event seconds ago and is still inside
+        # its handler. Acking the retry 200 would let the sender's outbox
+        # stop retrying — if that worker then dies, the event is lost.
+        ContentFactoryCallbackEvent.objects.create(
+            event_id="evt-lease-live-1",
+            job_id="lease-live-1",
+            event_type="article_system_setup_progress",
+            claimed_at=timezone.now() - timedelta(seconds=30),
+        )
+        payload = _setup_progress_payload(
+            "lease-live-1", step="prepare_branch", event_id="evt-lease-live-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.json()["status"], "pending")
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="lease-live-1").exists())
+        marker = ContentFactoryCallbackEvent.objects.get(event_id="evt-lease-live-1")
+        self.assertIsNone(marker.processed_at)
+
+    def test_hard_death_after_claim_reprocesses_after_ttl(self):
+        # Simulates the worker being SIGKILLed after claiming: the row was
+        # never processed and never released. Once the lease TTL elapses the
+        # sender's retry must reclaim and actually process the event.
+        ContentFactoryCallbackEvent.objects.create(
+            event_id="evt-lease-dead-1",
+            job_id="lease-dead-1",
+            event_type="article_system_setup_progress",
+            claimed_at=timezone.now() - timedelta(seconds=601),
+        )
+        payload = _setup_progress_payload(
+            "lease-dead-1", step="prepare_branch", event_id="evt-lease-dead-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "received")
+        run = ContentFactoryRun.objects.get(run_id="lease-dead-1")
+        self.assertEqual(run.current_step, "prepare_branch")
+        marker = ContentFactoryCallbackEvent.objects.get(event_id="evt-lease-dead-1")
+        self.assertIsNotNone(marker.processed_at)
+
+    def test_processed_event_is_never_reclaimed_even_after_ttl(self):
+        stamp = timezone.now() - timedelta(hours=5)
+        ContentFactoryCallbackEvent.objects.create(
+            event_id="evt-lease-done-1",
+            job_id="lease-done-1",
+            event_type="article_system_setup_progress",
+            claimed_at=stamp,
+            processed_at=stamp,
+        )
+        payload = _setup_progress_payload(
+            "lease-done-1", step="prepare_branch", event_id="evt-lease-done-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "duplicate")
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="lease-done-1").exists())
+
+    def test_legacy_row_without_lease_stamps_stays_duplicate(self):
+        # Rows written before the lease columns existed only ever recorded
+        # 2xx-acknowledged deliveries (the migration also backfills them as
+        # processed). One with neither stamp must dedupe, not reclaim.
+        ContentFactoryCallbackEvent.objects.create(
+            event_id="evt-lease-legacy-1",
+            job_id="lease-legacy-1",
+            event_type="article_system_setup_progress",
+        )
+        payload = _setup_progress_payload(
+            "lease-legacy-1", step="prepare_branch", event_id="evt-lease-legacy-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "duplicate")
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="lease-legacy-1").exists())
+
+    @override_settings(CONTENT_FACTORY_CALLBACK_CLAIM_TTL_SECONDS=60)
+    def test_lease_ttl_is_configurable(self):
+        ContentFactoryCallbackEvent.objects.create(
+            event_id="evt-lease-ttl-1",
+            job_id="lease-ttl-1",
+            event_type="article_system_setup_progress",
+            claimed_at=timezone.now() - timedelta(seconds=90),
+        )
+        payload = _setup_progress_payload(
+            "lease-ttl-1", step="prepare_branch", event_id="evt-lease-ttl-1"
+        )
+
+        response = self.client.post(CALLBACK_URL, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "received")
+        self.assertTrue(ContentFactoryRun.objects.filter(run_id="lease-ttl-1").exists())
 
 
 class CallbackEmittedAtStalenessTests(ContentFactoryCallbackGuardTestCase):

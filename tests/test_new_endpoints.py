@@ -2805,6 +2805,172 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
 
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_research_shortfall_refunds_and_suppresses_resume(self, mock_send_dm):
+        from workflow_runs.models import ContentFactoryRun
+
+        user = User.objects.create_user(email="shortfall@example.com", password="password", slack_id="U123")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="research-shortfall-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U123",
+            status="researching",
+            client_request_id="research-shortfall-request-1",
+            billing_source_job_id="research-shortfall-run-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "research-shortfall-request-1",
+            },
+        )
+
+        payload = {
+            "event_type": "generation_failed",
+            "job_id": "research-shortfall-run-1",
+            "run_id": "research-shortfall-run-1",
+            "workflow": "confirmed_topic",
+            "domain": "golden-vite-router-baseline.com",
+            "slack_user_id": "U123",
+            "failed_step": "collect_research_bundle",
+            "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+            "error": (
+                "This topic looks too narrow to research well — we found only 3 of the 4 "
+                "quality source pages needed to write a well-grounded article. Try a broader topic."
+            ),
+            # content-factory owns refundability + the true resume decision.
+            "refundable": True,
+            "resume_available": False,
+            "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+        }
+
+        response = self.client.post(reverse('content_factory_callback'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Deterministic content shortfall produced no article → topic charge refunded.
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+        job = ContentFactoryJob.objects.get(job_id="research-shortfall-run-1")
+        self.assertEqual(job.billing_status, "refunded")
+        mock_send_dm.assert_called_once()
+        self.assertIn("refunded automatically", mock_send_dm.call_args[0][1])
+
+        # The failed run must NOT advertise a blind Resume.
+        run = ContentFactoryRun.objects.get(run_id="research-shortfall-run-1")
+        self.assertFalse(run.resume_available)
+
+        # Re-delivery of the same callback must not double-refund.
+        response = self.client.post(reverse('content_factory_callback'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_insufficient_sources_without_refundable_is_not_refunded(self, mock_send_dm):
+        # The ground_section evidence-starved path and transient scrape storms share the
+        # INSUFFICIENT_SOURCE_SUPPORT code but are resumable, value-producing failures:
+        # without the explicit refundable hint they must NOT be refunded.
+        from workflow_runs.models import ContentFactoryRun
+
+        user = User.objects.create_user(email="notrefund@example.com", password="password", slack_id="U555")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="insufficient-not-refundable-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U555",
+            status="generating",
+            client_request_id="insufficient-not-refundable-req-1",
+            billing_source_job_id="insufficient-not-refundable-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "insufficient-not-refundable-req-1",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "insufficient-not-refundable-1",
+                "run_id": "insufficient-not-refundable-1",
+                "workflow": "confirmed_topic",
+                "domain": "golden-vite-router-baseline.com",
+                "slack_user_id": "U555",
+                "failed_step": "ground_section:intro",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "error": "Section intro is evidence starved.",
+                # No refundable hint and no resume_available=False → resumable + charged.
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 14)
+        job = ContentFactoryJob.objects.get(job_id="insufficient-not-refundable-1")
+        self.assertEqual(job.billing_status, "charged")
+        run = ContentFactoryRun.objects.get(run_id="insufficient-not-refundable-1")
+        self.assertTrue(run.resume_available)
+
+    def test_maybe_auto_refund_honors_explicit_refundable_flag_outside_allowlist(self):
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+
+        user = User.objects.create_user(email="refundable@example.com", password="password", slack_id="U777")
+        PointsAccount.objects.create(user=user, balance=10)
+        job = ContentFactoryJob.objects.create(
+            job_id="explicit-refundable-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U777",
+            status="error",
+            client_request_id="explicit-refundable-request-1",
+            billing_source_job_id="explicit-refundable-run-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "explicit-refundable-request-1",
+            },
+        )
+
+        # A code NOT in AUTO_REFUND_ERROR_CODES still refunds when content-factory
+        # flags the failure refundable explicitly.
+        refunded, points = maybe_auto_refund_terminal_failure(
+            job,
+            error_code="SOME_FUTURE_NO_VALUE_CODE",
+            error_message="No value produced.",
+            refundable=True,
+        )
+        self.assertTrue(refunded)
+        self.assertEqual(points, 6)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 16)
+
+        # Without the flag and outside the allowlist, no refund.
+        other_job = ContentFactoryJob.objects.create(
+            job_id="not-refundable-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U777",
+            status="error",
+            client_request_id="not-refundable-request-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "not-refundable-request-1",
+            },
+        )
+        refunded, points = maybe_auto_refund_terminal_failure(
+            other_job,
+            error_code="SOME_FUTURE_NO_VALUE_CODE",
+            error_message="No value produced.",
+        )
+        self.assertFalse(refunded)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 16)
+
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')
     def test_generation_failed_scheduled_daily_updates_dispatch_and_suppresses_user_message(self, mock_send_dm, mock_send_message):

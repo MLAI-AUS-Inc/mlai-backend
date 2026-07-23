@@ -90,6 +90,33 @@ def carry_reset_markers(source, target):
     return target
 
 
+def article_setup_reset_marker(article_system) -> str:
+    """The reset watermark, if the founder has explicitly reset this setup.
+
+    Reads the *stored* article_system: ``normalize_article_system`` drops these
+    non-template keys, so callers holding a resolved/normalized article_system must
+    pass ``config.article_system`` (the raw field) here, not the normalized copy.
+    """
+    if not isinstance(article_system, dict):
+        return ""
+    for key in ("article_setup_reset_at", "articleSetupResetAt"):
+        value = str(article_system.get(key) or "").strip()
+        if value:
+            return value
+    info = article_system.get("article_setup_reset")
+    if isinstance(info, dict):
+        return str(info.get("reset_at") or info.get("resetAt") or "").strip()
+    return ""
+
+
+def clear_article_setup_reset_markers(article_system):
+    if not isinstance(article_system, dict):
+        return article_system
+    for key in ARTICLE_SETUP_RESET_KEYS:
+        article_system.pop(key, None)
+    return article_system
+
+
 def article_setup_reset_ignores_run(config, run) -> bool:
     if not run or getattr(run, "workflow", "") != "article_system_setup":
         return False

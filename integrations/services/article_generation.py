@@ -56,6 +56,12 @@ AUTO_REFUND_ERROR_CODES = {
     "NO_OPPORTUNITIES",
     "PUBLISH_TARGET_ACTION_REQUIRED",
 }
+# A deterministic research shortfall (topic too narrow to source) is refunded via the
+# explicit `refundable` hint content-factory sends, NOT via this error-code allowlist:
+# the INSUFFICIENT_SOURCE_SUPPORT code is also emitted by resumable, value-producing
+# failures (ground_section evidence-starved, transient scrape storms) that must NOT be
+# refunded. content-factory owns the refundability decision; keying off the shared code
+# here would over-refund those.
 AUTH_REQUIRED_ERROR_CODE = "AUTH_REQUIRED"
 AUTH_REQUIRED_MISSING_STEP = "github_auth"
 AUTH_REQUIRED_NEXT_ACTION = "reconnect_github"
@@ -1097,12 +1103,21 @@ def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) 
     return payload
 
 
-def maybe_auto_refund_terminal_failure(job, *, error_code: Optional[str], error_message: Optional[str]) -> tuple[bool, int]:
+def maybe_auto_refund_terminal_failure(
+    job,
+    *,
+    error_code: Optional[str],
+    error_message: Optional[str],
+    refundable: Optional[bool] = None,
+) -> tuple[bool, int]:
     if not job:
         return False, 0
 
+    # content-factory owns the refundability decision and may flag a no-value
+    # terminal failure `refundable` explicitly; the error-code allowlist is the
+    # fallback for that signal. Either path requires an actually-charged job below.
     resolved_error_code = str(error_code or "").strip().upper()
-    if resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+    if not bool(refundable) and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
     client_request_id = str(getattr(job, "client_request_id", "") or "").strip()

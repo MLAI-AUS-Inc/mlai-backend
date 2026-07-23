@@ -1585,7 +1585,11 @@ class VibeMarketingAutofillTests(TestCase):
         self.company.save(update_fields=["organization", "updated_at"])
         OrganizationContentConfig.objects.get_or_create(organization=organization)
 
-        with patch.object(http_client, "post", side_effect=http_client.RequestException("connection refused")):
+        with patch.object(
+            http_client, "post", side_effect=http_client.RequestException("connection refused")
+        ), patch.object(
+            http_client, "get", side_effect=http_client.RequestException("connection refused")
+        ):
             response = self.client.post(
                 "/api/v1/vibe-marketing/discovery/",
                 {
@@ -1610,8 +1614,17 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.workflow, "auto_discovery")
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
+        # The dispatch outcome is ambiguous (the POST may have landed on the
+        # content-factory side despite the transport error) and the key lookup
+        # could not prove it absent, so the charge is WITHHELD, not refunded —
+        # refunding here while the real run starts is the refund-then-ghost bug
+        # (Phase 4.1). The poll path refunds once the key confirms absent.
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 20)
+        self.assertEqual(self.user.points_account.balance, 19)
+        self.assertEqual(
+            run.run_request["pending_billing_refund"]["charged_user_id"], self.user.pk
+        )
+        self.assertTrue(run.run_request["dispatch_pending_resolution"])
 
     def test_bootstrap_returns_first_article_mode_without_domain(self):
         self.company.domain = ""
@@ -3359,6 +3372,100 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(config.github_repo, "acme/site")
         self.assertEqual(config.connected_slack_user_id, f"mlai_user:{self.user.id}")
         self.assertNotIn("github_token", response.data)
+
+    def test_github_mutation_requires_explicit_scope_for_multi_company_founder(self):
+        second_org = Organization.objects.create(domain="second.example", name="Second")
+        VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=second_org,
+            name="Second Company",
+            domain="second.example",
+            registered=True,
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"], "company_context_required")
+        repos_response = self.client.get("/api/v1/vibe-marketing/github/repos/")
+        self.assertEqual(repos_response.status_code, 409)
+        self.assertEqual(repos_response.data["error"], "company_context_required")
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization__domain="acme.com").exists())
+
+    def test_github_mutations_reject_repo_connected_to_sibling_company(self):
+        current_org = Organization.objects.create(domain="acme.com", name="Acme")
+        self.company.organization = current_org
+        self.company.save(update_fields=["organization", "updated_at"])
+        current_config = OrganizationContentConfig.objects.create(organization=current_org)
+
+        sibling_org = Organization.objects.create(domain="sheldon.example", name="Sheldon")
+        sibling = VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=sibling_org,
+            name="Sheldon Health",
+            domain="sheldon.example",
+            registered=True,
+        )
+        OrganizationContentConfig.objects.create(
+            organization=sibling_org,
+            github_repo="sheldonhealth/site",
+        )
+
+        requests = (
+            ("/api/v1/vibe-marketing/github/connect/", {}),
+            ("/api/v1/vibe-marketing/scan/", {"scanPurpose": "inventory"}),
+            (
+                "/api/v1/vibe-marketing/article-system-setup/",
+                {
+                    "articleSurfaceMode": "none",
+                    "articleSurfaceUrl": "https://acme.com/articles",
+                },
+            ),
+        )
+        for endpoint, extra in requests:
+            with self.subTest(endpoint=endpoint):
+                response = self.client.post(
+                    endpoint,
+                    {
+                        "companyId": str(self.company.id),
+                        "githubRepo": "sheldonhealth/site",
+                        **extra,
+                    },
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data["error"], "repository_company_conflict")
+                self.assertEqual(response.data["connectedCompany"]["id"], str(sibling.id))
+                self.assertIn("Sheldon Health", response.data["detail"])
+
+        current_config.refresh_from_db()
+        self.assertFalse(current_config.github_repo)
+        self.assertFalse(ContentFactoryRun.objects.filter(organization=current_org).exists())
+
+    def test_explicit_company_scope_allows_unbound_repo_for_multi_company_founder(self):
+        second_org = Organization.objects.create(domain="second.example", name="Second")
+        VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=second_org,
+            name="Second Company",
+            domain="second.example",
+            registered=True,
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"companyId": str(self.company.id), "githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "auth_required")
+        config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
+        self.assertEqual(config.github_repo, "acme/site")
 
     def test_github_connect_reuses_valid_org_credentials(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

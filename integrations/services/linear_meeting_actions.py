@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from integrations import http_client as http_requests
+from integrations.models import LinearIssueCreationReceipt
 
 
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
@@ -29,14 +32,23 @@ class LinearMeetingRateLimitError(Exception):
         super().__init__(f"Linear rate limit exceeded; retry after {self.retry_after_seconds}s.")
 
 
+class LinearMeetingIdempotencyConflictError(Exception):
+    pass
+
+
 def get_linear_meeting_context() -> dict[str, Any]:
     teams = list_teams()
+    users = list_users()
+    projects = list_active_projects(teams=teams)
+    labels = list_issue_labels()
+    recent_issues = list_recent_open_issues()
+    projects = _enrich_projects_with_recent_issues(projects, recent_issues)
     return {
         "teams": teams,
-        "users": list_users(),
-        "projects": list_active_projects(teams=teams),
-        "labels": list_issue_labels(),
-        "recentIssues": list_recent_open_issues(),
+        "users": users,
+        "projects": projects,
+        "labels": labels,
+        "recentIssues": recent_issues,
     }
 
 
@@ -120,6 +132,9 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
           name
           slugId
           url
+          description
+          content
+          slackChannelId
           completedAt
           canceledAt
           status {
@@ -153,11 +168,34 @@ def list_active_projects(limit: int = 100, teams: list[dict[str, Any]] | None = 
               name
             }
           }
+          members(first: 50) {
+            nodes {
+              id
+              name
+              displayName
+              email
+              active
+            }
+          }
         }
       }
     }
     """
-    data = _graphql(query, {"first": limit}, operation_name="LinearProjects")
+    try:
+        data = _graphql(query, {"first": limit}, operation_name="LinearProjects")
+    except LinearMeetingGraphQLError as exc:
+        if not _project_context_query_unsupported(exc):
+            raise
+        logger.warning(
+            "linear_meeting_actions_project_context_unavailable operation=%s detail=%s",
+            exc.operation,
+            str(exc),
+        )
+        data = _graphql(
+            _basic_projects_query(),
+            {"first": limit},
+            operation_name="LinearProjectsBasic",
+        )
     inactive_states = {"completed", "canceled", "cancelled", "archived"}
     active_projects = [
         project
@@ -185,11 +223,13 @@ def list_issue_labels(limit: int = 100) -> list[dict[str, Any]]:
 def list_recent_open_issues(limit: int = 100) -> list[dict[str, Any]]:
     query = """
     query LinearRecentIssues($first: Int!) {
-      issues(first: $first) {
+      issues(first: $first, orderBy: updatedAt) {
         nodes {
           id
           identifier
           title
+          description
+          updatedAt
           url
           state {
             name
@@ -225,6 +265,15 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("title is required.")
     if not team_id:
         raise ValueError("team_id is required.")
+
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    receipt = None
+    if idempotency_key:
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{16,64}", idempotency_key):
+            raise ValueError("idempotency_key must be 16-64 safe characters.")
+        receipt, replay = _claim_linear_issue_receipt(idempotency_key, payload)
+        if replay is not None:
+            return {**replay, "idempotentReplay": True}
 
     input_data: dict[str, Any] = {
         "title": title,
@@ -266,15 +315,32 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
       }
     }
     """
-    data = _graphql(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
-    result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
-    if not result.get("success"):
-        raise LinearMeetingGraphQLError(
-            "Linear issueCreate returned success=false.",
-            operation="CreateLinearMeetingIssue",
+    try:
+        data = _graphql(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
+        result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
+        if not result.get("success"):
+            raise LinearMeetingGraphQLError(
+                "Linear issueCreate returned success=false.",
+                operation="CreateLinearMeetingIssue",
+            )
+        issue = result.get("issue")
+        issue_payload = issue if isinstance(issue, dict) else {}
+    except Exception as exc:
+        if receipt is not None:
+            LinearIssueCreationReceipt.objects.filter(pk=receipt.pk).update(
+                status=LinearIssueCreationReceipt.Status.FAILED,
+                last_error=f"{exc.__class__.__name__}: {exc}"[:2000],
+                updated_at=timezone.now(),
+            )
+        raise
+    if receipt is not None:
+        LinearIssueCreationReceipt.objects.filter(pk=receipt.pk).update(
+            status=LinearIssueCreationReceipt.Status.COMPLETED,
+            linear_issue_payload=issue_payload,
+            last_error="",
+            updated_at=timezone.now(),
         )
-    issue = result.get("issue")
-    return issue if isinstance(issue, dict) else {}
+    return issue_payload
 
 
 def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +410,39 @@ def _team_members_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
     )
 
 
+def _project_context_query_unsupported(exc: LinearMeetingGraphQLError) -> bool:
+    message = str(exc).lower()
+    contextual_fields = {"content", "description", "members", "slackchannelid"}
+    return "query too complex" in message or (
+        any(field in message for field in contextual_fields)
+        and ("cannot query field" in message or "unknown argument" in message)
+    )
+
+
+def _basic_projects_query() -> str:
+    return """
+    query LinearProjectsBasic($first: Int!) {
+      projects(first: $first) {
+        nodes {
+          id
+          name
+          slugId
+          url
+          completedAt
+          canceledAt
+          status { name type }
+          lead { id name displayName email }
+          lastUpdate {
+            id url body health createdAt updatedAt
+            user { id name displayName email }
+          }
+          teams { nodes { id key name } }
+        }
+      }
+    }
+    """
+
+
 def _project_is_inactive(project: dict[str, Any], inactive_states: set[str]) -> bool:
     if project.get("completedAt") or project.get("canceledAt"):
         return True
@@ -361,6 +460,18 @@ def _enrich_projects_with_members(
     enriched_projects: list[dict[str, Any]] = []
     for project in projects:
         enriched_project = dict(project)
+        direct_members = [
+            member
+            for member in _nodes(project, "members")
+            if member.get("active") is not False
+        ]
+        if direct_members:
+            lead = project.get("lead") if isinstance(project.get("lead"), dict) else None
+            participants = direct_members + ([lead] if lead else [])
+            enriched_project["members"] = {"nodes": _dedupe_users(participants)}
+            enriched_project["membersSource"] = "project"
+            enriched_projects.append(enriched_project)
+            continue
         members: list[dict[str, Any]] = []
         project_teams = _nodes(project, "teams")
         for team in project_teams:
@@ -370,8 +481,68 @@ def _enrich_projects_with_members(
         if lead:
             members.append(lead)
         enriched_project["members"] = {"nodes": _dedupe_users(members)}
+        enriched_project["membersSource"] = "team_fallback"
         enriched_projects.append(enriched_project)
     return enriched_projects
+
+
+def _enrich_projects_with_recent_issues(
+    projects: list[dict[str, Any]],
+    recent_issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    issues_by_project: dict[str, list[dict[str, Any]]] = {}
+    for issue in recent_issues:
+        project_id = str(((issue.get("project") or {}).get("id")) or "")
+        if not project_id:
+            continue
+        issues_by_project.setdefault(project_id, []).append(issue)
+
+    enriched: list[dict[str, Any]] = []
+    for project in projects:
+        item = dict(project)
+        item["recentIssues"] = issues_by_project.get(str(project.get("id") or ""), [])[:20]
+        enriched.append(item)
+    return enriched
+
+
+def _claim_linear_issue_receipt(
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> tuple[LinearIssueCreationReceipt, dict[str, Any] | None]:
+    with transaction.atomic():
+        receipt, created = LinearIssueCreationReceipt.objects.select_for_update().get_or_create(
+            idempotency_key=idempotency_key,
+            defaults={
+                "status": LinearIssueCreationReceipt.Status.PENDING,
+                "request_payload": dict(payload),
+            },
+        )
+        if not created and receipt.status == LinearIssueCreationReceipt.Status.COMPLETED:
+            replay = (
+                dict(receipt.linear_issue_payload)
+                if isinstance(receipt.linear_issue_payload, dict)
+                else {}
+            )
+            return receipt, replay
+        if not created and receipt.status == LinearIssueCreationReceipt.Status.PENDING:
+            raise LinearMeetingIdempotencyConflictError(
+                "An identical Linear issue creation is already in progress."
+            )
+        if not created:
+            receipt.status = LinearIssueCreationReceipt.Status.PENDING
+            receipt.request_payload = dict(payload)
+            receipt.linear_issue_payload = {}
+            receipt.last_error = ""
+            receipt.save(
+                update_fields=[
+                    "status",
+                    "request_payload",
+                    "linear_issue_payload",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+        return receipt, None
 
 
 def _team_members_by_id(teams: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

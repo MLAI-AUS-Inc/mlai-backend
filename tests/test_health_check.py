@@ -139,6 +139,21 @@ class RequestLoggingMiddlewareTests(SimpleTestCase):
         self.assertEqual(finish_log.args[1], "mlai-test-request")
         self.assertIsInstance(finish_log.args[2], int)
 
+    @patch("core.middleware.logger")
+    def test_request_logging_redacts_health_hack_participant_query(self, mock_logger):
+        middleware = RequestLoggingMiddleware(lambda request: HttpResponse("ok"))
+        request = self.factory.get(
+            "/api/v1/hackathons/hospital/sim-guess/status/",
+            {"client_id": "aaaaaaaa-1111-4111-8111-111111111111"},
+        )
+
+        middleware(request)
+
+        for log_call in mock_logger.info.call_args_list:
+            rendered_arguments = " ".join(str(value) for value in log_call.args[1:])
+            self.assertNotIn("aaaaaaaa-1111-4111-8111-111111111111", rendered_arguments)
+            self.assertIn("?<redacted>", rendered_arguments)
+
 
 class PointsEndpointTimeoutMiddlewareTests(SimpleTestCase):
     def setUp(self):

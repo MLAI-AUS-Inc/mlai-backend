@@ -32,7 +32,6 @@ from integrations.services.notification_channels import (
     initiate_whatsapp_channel,
     link_slack_channel,
     list_org_channels,
-    send_email_verification,
     send_whatsapp_otp,
     serialize_automation,
     serialize_channel,
@@ -98,12 +97,7 @@ class VibeMarketingNotificationChannelsView(APIView):
                 channel = initiate_email_channel(
                     organization=organization, user=request.user, route_id=route_id
                 )
-                if channel.consent_state == NotificationConsentState.ACTIVE:
-                    result_status = "active"
-                else:
-                    send_email_verification(channel)
-                    channel.refresh_from_db()
-                    result_status = "verification_sent"
+                result_status = "active"
             elif channel_type == NotificationChannelType.WHATSAPP:
                 channel = initiate_whatsapp_channel(
                     organization=organization, user=request.user, phone=route_id
@@ -188,8 +182,12 @@ class VibeMarketingNotificationChannelResendView(APIView):
                 send_whatsapp_otp(channel)
                 result_status = "otp_sent"
             elif channel.channel_type == NotificationChannelType.EMAIL:
-                send_email_verification(channel)
-                result_status = "verification_sent"
+                channel = initiate_email_channel(
+                    organization=context.organization,
+                    user=request.user,
+                    route_id=channel.route_id,
+                )
+                result_status = "active"
             else:
                 return Response(
                     {"detail": "This channel type has nothing to resend.", "code": "invalid_channel_type"},
@@ -291,8 +289,8 @@ class VibeMarketingNotificationChannelDeliveryView(APIView):
 
     Unlike the id-based toggle (which needs an already-connected channel), this
     connects on first enable where the method allows it: Slack links instantly,
-    Email sends a verification link (delivery starts once confirmed), and WhatsApp
-    still needs its number + OTP setup first. Disable flips delivery_enabled off
+    Email uses the authenticated account address immediately, and WhatsApp still
+    needs its number + OTP setup first. Disable flips delivery_enabled off
     for the type's active channels, keeping the connection intact.
     """
 
@@ -353,16 +351,12 @@ class VibeMarketingNotificationChannelDeliveryView(APIView):
                 )
                 result_status = "active"
             elif channel_type == NotificationChannelType.EMAIL:
-                channel = initiate_email_channel(
+                initiate_email_channel(
                     organization=organization,
                     user=request.user,
                     route_id=str(request.data.get("routeId") or request.data.get("route_id") or ""),
                 )
-                if channel.consent_state == NotificationConsentState.ACTIVE:
-                    result_status = "active"
-                else:
-                    send_email_verification(channel)
-                    result_status = "verification_sent"
+                result_status = "active"
             else:  # whatsapp needs the number + OTP setup flow first
                 return Response(
                     {

@@ -1,7 +1,7 @@
 """User-facing lifecycle for research notification channels.
 
 Owns connect/verify/disable flows for the three channel types:
-- email: signed magic-link sent via Resend
+- email: activated from the authenticated user's account email
 - whatsapp: 6-digit OTP sent via an approved Twilio authentication Content template
 - slack: auto-linked from the signed-in user (login already proves the email)
 
@@ -226,16 +226,25 @@ def _enforce_send_limits(channel: NotificationChannel, now) -> None:
 # ---------------------------------------------------------------------------
 
 def initiate_email_channel(*, organization, user, route_id: str = "") -> NotificationChannel:
-    email = str(route_id or "").strip().lower() or str(getattr(user, "email", "") or "").strip().lower()
-    if not email or "@" not in email:
-        raise ChannelActionError("invalid_email", "Enter a valid email address.")
-    return _prepare_pending_channel(
+    account_email = str(getattr(user, "email", "") or "").strip().lower()
+    requested_email = str(route_id or "").strip().lower() or account_email
+    if not account_email or "@" not in account_email:
+        raise ChannelActionError("invalid_email", "Your account needs a valid email address.")
+    if requested_email != account_email:
+        raise ChannelActionError(
+            "email_must_match_account",
+            "Daily reminder email must match your signed-in account email.",
+        )
+    channel = _prepare_pending_channel(
         organization=organization,
         user=user,
         channel_type=NotificationChannelType.EMAIL,
-        route_id=email,
-        display_name=email,
+        route_id=account_email,
+        display_name=account_email,
     )
+    if channel.consent_state != NotificationConsentState.ACTIVE:
+        _activate_channel(channel)
+    return channel
 
 
 def build_email_verification_url(channel: NotificationChannel) -> str:

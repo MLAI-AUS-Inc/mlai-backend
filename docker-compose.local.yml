@@ -42,6 +42,47 @@ services:
           - mlai-backend-scheduler
     restart: unless-stopped
 
+  analytics-sync:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        case "$${CONTENT_ANALYTICS_SYNC_POLL_SECONDS}" in
+          ""|*[!0-9]*) echo "CONTENT_ANALYTICS_SYNC_POLL_SECONDS must be an integer" >&2; exit 64 ;;
+        esac;
+        case "$${CONTENT_ANALYTICS_SYNC_BATCH_LIMIT}" in
+          ""|*[!0-9]*) echo "CONTENT_ANALYTICS_SYNC_BATCH_LIMIT must be an integer" >&2; exit 64 ;;
+        esac;
+        while true; do
+          if ! python manage.py sync_content_analytics --limit "$${CONTENT_ANALYTICS_SYNC_BATCH_LIMIT}"; then
+            echo "Content analytics sync failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${CONTENT_ANALYTICS_SYNC_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: local
+      CONTENT_ANALYTICS_SYNC_ENABLED: ${CONTENT_ANALYTICS_SYNC_ENABLED:-true}
+      CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS: ${CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS:-86400}
+      CONTENT_ANALYTICS_SYNC_POLL_SECONDS: ${CONTENT_ANALYTICS_SYNC_POLL_SECONDS:-3600}
+      CONTENT_ANALYTICS_SYNC_BATCH_LIMIT: ${CONTENT_ANALYTICS_SYNC_BATCH_LIMIT:-10}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-analytics-sync
+    restart: unless-stopped
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
