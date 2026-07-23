@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+import requests
 from django.conf import settings
 from django.db.models import Q
 from rest_framework import status
@@ -28,6 +29,7 @@ from integrations.services.reconciliation import (
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
     XeroPostingError,
+    build_xero_correction_batch,
     build_xero_preview,
     persist_report,
     post_xero_bank_transaction,
@@ -640,6 +642,68 @@ class ReconciliationPayoutListView(ReconciliationAdminView):
             return error
         records = StripePayoutReconciliation.objects.filter(organization=organization).order_by("-arrival_date", "-id")[:250]
         return Response({"payouts": [serialize_payout(record) for record in records]})
+
+
+class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
+    """Build a read-only Stripe/Luma-to-Xero correction pack.
+
+    The preview fetches Xero's accounting transactions but never creates,
+    edits, voids, unreconciles, or reconciles anything.
+    """
+
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        try:
+            max_count = max(1, min(int(request.data.get("max_count") or 250), 250))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_count must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queryset = StripePayoutReconciliation.objects.filter(
+            organization=organization,
+        ).order_by("arrival_date", "id")
+        for field_name, lookup in (("since", "arrival_date__gte"), ("until", "arrival_date__lte")):
+            raw_value = str(request.data.get(field_name) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                parsed_value = datetime.fromisoformat(raw_value).date()
+            except ValueError:
+                return Response(
+                    {"error": f"{field_name} must use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            queryset = queryset.filter(**{lookup: parsed_value})
+
+        records = list(queryset[:max_count])
+        try:
+            preview = build_xero_correction_batch(records)
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {"error": "Unable to read Xero bank transactions for the correction preview."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {
+                "dry_run": True,
+                "xero_writes": False,
+                **preview,
+            }
+        )
 
 
 class ReconciliationPayoutPreviewView(ReconciliationAdminView):
