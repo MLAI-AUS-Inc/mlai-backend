@@ -122,6 +122,10 @@ class UserStartupBinding(models.Model):
     )
     role = models.CharField(max_length=64, blank=True, default="")
     is_default_for_gmail = models.BooleanField(default=False)
+    # Per-user override for coworking pricing. Company registration proves the
+    # company is eligible, but it does not prove every bound user is entitled
+    # to claim the founder/director discount.
+    coworking_discount_eligible = models.BooleanField(default=True)
     # Opt-in for automated monthly investor-update generation. When set, this
     # (user, organization) becomes a scheduled monthly-dispatch target — the
     # valley scheduler reads it from the monthly-dispatch-targets endpoint

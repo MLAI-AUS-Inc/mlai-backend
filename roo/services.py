@@ -695,9 +695,10 @@ class CoworkingService:
         )
 
         org_ids = list(
-            UserStartupBinding.objects.filter(user=user).values_list(
-                'organization_id', flat=True
-            )
+            UserStartupBinding.objects.filter(
+                user=user,
+                coworking_discount_eligible=True,
+            ).values_list('organization_id', flat=True)
         )
         if not org_ids:
             return False
