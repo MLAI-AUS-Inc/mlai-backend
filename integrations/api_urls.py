@@ -28,6 +28,7 @@ urlpatterns = [
     path('reconciliation/statement-suggestions/execute-safe', api_views_reconciliation.ReconciliationStatementSafeBatchView.as_view(), name='reconciliation_statement_safe_batch'),
     path('reconciliation/suggestions/<int:suggestion_id>/decision', api_views_reconciliation.ReconciliationSuggestionDecisionView.as_view(), name='reconciliation_suggestion_decision'),
     path('reconciliation/payouts', api_views_reconciliation.ReconciliationPayoutListView.as_view(), name='reconciliation_payouts'),
+    path('reconciliation/payouts/correction-preview', api_views_reconciliation.ReconciliationPayoutCorrectionPreviewView.as_view(), name='reconciliation_payout_correction_preview'),
     path('reconciliation/payouts/<str:payout_id>/preview', api_views_reconciliation.ReconciliationPayoutPreviewView.as_view(), name='reconciliation_payout_preview'),
     path('reconciliation/payouts/<str:payout_id>/post', api_views_reconciliation.ReconciliationPayoutPostView.as_view(), name='reconciliation_payout_post'),
 

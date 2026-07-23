@@ -34,6 +34,8 @@ from integrations.services.reconciliation import (
 )
 from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
+    build_event_revenue_rollup,
+    build_xero_correction_preview,
     build_xero_preview,
     ensure_xero_tracking_options,
     persist_report,
@@ -210,6 +212,9 @@ class XeroReconciliationWorkflowTests(TestCase):
             organization=self.organization,
             event_id="evt_1",
             event_name="Luma Night",
+            event_url="https://lu.ma/evt_1",
+            registration_count=18,
+            checked_in_count=14,
         )
         LinearProjectArtifact.objects.create(
             connection=self.linear_connection,
@@ -265,6 +270,79 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(preview["xero_payload"]["Reference"], "po_ledger")
         self.assertTrue(preview["human_reconciliation_required"])
 
+    def test_correction_preview_identifies_reconciled_legacy_net_transaction(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        preview = build_xero_correction_preview(
+            record,
+            bank_transactions=[{
+                "BankTransactionID": "legacy-net-1",
+                "Type": "RECEIVE",
+                "Reference": "po_ledger",
+                "DateString": "2026-07-10",
+                "Total": 92.00,
+                "IsReconciled": True,
+                "BankAccount": {"AccountID": "bank-1"},
+                "LineItems": [{
+                    "Description": "Stripe payout",
+                    "Quantity": 1,
+                    "UnitAmount": 92.00,
+                    "AccountCode": "200",
+                    "TaxType": "EXEMPTOUTPUT",
+                    "Tracking": [],
+                }],
+            }],
+        )
+        self.assertEqual(preview["classification"], "legacy_net_only")
+        self.assertEqual(preview["recommended_action"], "unreconcile_then_replace")
+        self.assertTrue(preview["requires_manual_unreconcile"])
+        self.assertFalse(preview["automatic_action_allowed"])
+        self.assertEqual(preview["differences"]["current_line_count"], 1)
+        self.assertEqual(preview["differences"]["proposed_line_count"], 3)
+
+    def test_correction_preview_recognises_exact_split_transaction(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        proposed = build_xero_preview(record)["xero_payload"]
+        preview = build_xero_correction_preview(
+            record,
+            bank_transactions=[{
+                "BankTransactionID": "split-1",
+                "Type": "RECEIVE",
+                "Reference": "po_ledger",
+                "DateString": "2026-07-10",
+                "Total": 92.00,
+                "IsReconciled": True,
+                "BankAccount": {"AccountID": "bank-1"},
+                "LineItems": proposed["LineItems"],
+            }],
+        )
+        self.assertEqual(preview["classification"], "already_correct")
+        self.assertEqual(preview["recommended_action"], "no_action")
+        self.assertTrue(preview["differences"]["line_items_match"])
+
+    def test_event_revenue_rollup_combines_stripe_and_luma_evidence(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        row = build_event_revenue_rollup([record])[0]
+        self.assertEqual(row["event_name"], "Luma Night")
+        self.assertEqual(row["luma_registration_count"], 18)
+        self.assertEqual(row["luma_checked_in_count"], 14)
+        self.assertEqual(row["stripe_charge_count"], 0)
+        self.assertEqual(row["gross_cents"], 10000)
+        self.assertEqual(row["refunds_cents"], -500)
+        self.assertEqual(row["stripe_fee_cents"], 300)
+        self.assertEqual(row["net_cash_contribution_cents"], 9200)
+
     def test_preview_blocks_missing_mapping_and_missing_write_scope(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
         self.mapping.delete()
@@ -304,6 +382,41 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(put_mock.call_count, 1)
         body = put_mock.call_args.kwargs["json"]
         self.assertEqual(body["BankTransactions"][0]["Reference"], "po_ledger")
+
+    def test_explicit_post_refuses_to_accept_existing_legacy_net_transaction(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        existing = Mock()
+        existing.json.return_value = {
+            "BankTransactions": [{
+                "BankTransactionID": "legacy-net-1",
+                "Reference": "po_ledger",
+                "Total": 92.00,
+                "IsReconciled": True,
+                "LineItems": [{
+                    "Quantity": 1,
+                    "UnitAmount": 92.00,
+                    "AccountCode": "200",
+                    "TaxType": "EXEMPTOUTPUT",
+                }],
+            }]
+        }
+        existing.raise_for_status.return_value = None
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=existing,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put"
+        ) as put_mock:
+            with self.assertRaisesMessage(
+                ReconciliationValidationError,
+                "already exists for this payout",
+            ):
+                post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
+        put_mock.assert_not_called()
 
     def test_explicit_post_creates_missing_project_tracking_option(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
@@ -1138,6 +1251,42 @@ class ReconciliationWorkflowApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch("integrations.api_views_reconciliation.build_xero_correction_batch")
+    def test_payout_correction_preview_is_read_only_and_admin_guarded(
+        self,
+        build_batch,
+        _permission,
+    ):
+        StripePayoutReconciliation.objects.create(
+            organization=self.organization,
+            payout_id="po_correction",
+            arrival_date=datetime(2026, 6, 30).date(),
+            amount_cents=9200,
+            currency="AUD",
+        )
+        build_batch.return_value = {
+            "payout_count": 1,
+            "classification_counts": {"legacy_net_only": 1},
+            "payouts": [{"payout_id": "po_correction"}],
+            "event_revenue": [],
+        }
+        response = self.client.post(
+            reverse("reconciliation_payout_correction_preview"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+                "since": "2026-01-01",
+                "until": "2026-06-30",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["dry_run"])
+        self.assertFalse(response.data["xero_writes"])
+        records = build_batch.call_args.args[0]
+        self.assertEqual([record.payout_id for record in records], ["po_correction"])
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_statement_preview_and_safe_batch_are_admin_guarded(self, _permission):

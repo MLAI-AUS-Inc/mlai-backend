@@ -5081,6 +5081,10 @@ def _serialize_luma_event_selection(selection: LumaEventSelection) -> dict[str, 
         "event_url": selection.event_url,
         "startAt": selection.start_at.isoformat() if selection.start_at else None,
         "start_at": selection.start_at.isoformat() if selection.start_at else None,
+        "registrationCount": selection.registration_count,
+        "registration_count": selection.registration_count,
+        "checkedInCount": selection.checked_in_count,
+        "checked_in_count": selection.checked_in_count,
         "selected": bool(selection.selected),
     }
 

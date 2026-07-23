@@ -614,6 +614,8 @@ class LumaEventSelection(models.Model):
     event_name = models.CharField(max_length=255, blank=True, default="")
     event_url = models.CharField(max_length=512, blank=True, default="")
     start_at = models.DateTimeField(null=True, blank=True)
+    registration_count = models.PositiveIntegerField(null=True, blank=True)
+    checked_in_count = models.PositiveIntegerField(null=True, blank=True)
     selected = models.BooleanField(default=False, db_index=True)
     raw_payload = models.JSONField(default=dict, blank=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
