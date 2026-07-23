@@ -26,9 +26,15 @@ from content_factory.models import (
     ResearchAutomation,
     ResearchAutomationStatus,
 )
+from content_analytics.models import ArticlePerformanceReport
 from core.models import User
 from integrations.services.notification_adapters import (
     AUTOMATION_ACTION_SALT,
+    _article_performance_digest,
+    _plain_topic_message,
+    _topic_email_html,
+    _topic_email_message_data,
+    _topic_slack_blocks,
     build_action_url,
     notification_context_for_run,
     preview_automation_action_token,
@@ -1444,4 +1450,197 @@ class ManualRunNowTests(TestCase):
             AutomationRun.objects.filter(
                 automation=automation, slot_index__gte=MANUAL_SLOT_BASE
             ).exists()
+        )
+
+
+class ReminderPerformanceDigestTests(TestCase):
+    """The daily reminder leads with the article-performance digest."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Digest Lead Co", domain="digestlead.example.com"
+        )
+        self.user = User.objects.create_user(email="digest-writer@example.com")
+        self.slack = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.SLACK,
+            route_id="U777",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=self.slack,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        self.run = AutomationRun.objects.create(
+            automation=self.automation,
+            scheduled_for_at=timezone.now(),
+            local_date=timezone.now().date(),
+            slot_index=0,
+            status=AutomationRunStatus.QUEUED,
+            idempotency_key="research-automation:digestlead:0",
+        )
+        self.callback_data = {
+            "event_type": "topic_selection",
+            "job_id": "discovery-run-9",
+            "domain": "digestlead.example.com",
+            "notification_context": notification_context_for_run(self.run),
+            "selection": {
+                "options": [
+                    {"keyword": "topic one", "suggested_title": "Topic One"},
+                    {"keyword": "topic two", "suggested_title": "Topic Two"},
+                    {"keyword": "topic three", "suggested_title": "Topic Three"},
+                ]
+            },
+        }
+
+    def _create_report(self):
+        report_date = timezone.localdate()
+        return ArticlePerformanceReport.objects.create(
+            organization=self.org,
+            report_date=report_date,
+            window_start=report_date - timedelta(days=7),
+            window_end=report_date - timedelta(days=1),
+            prior_window_start=report_date - timedelta(days=14),
+            prior_window_end=report_date - timedelta(days=8),
+            payload={
+                "window": {"days": 7},
+                "headline": {
+                    "humanVisits": 11,
+                    "engagedReaderRate": 0.4545,
+                    "ctaClickers": 2,
+                    "ctaConversionRate": 0.1818,
+                    "visitsDelta": 4,
+                },
+                "articles": [
+                    {
+                        "title": "Winning Guide",
+                        "slug": "winning-guide",
+                        "canonicalUrl": "https://digestlead.example.com/articles/winning-guide",
+                        "metrics": {
+                            "visits": 5,
+                            "engaged30Visits": 3,
+                            "engagedReaderRate": 0.6,
+                            "ctaClickVisits": 2,
+                        },
+                        "priorVisits": 2,
+                        "visitsDelta": 3,
+                        "category": "top_performer",
+                        "categoryLabel": "Top performer",
+                        "reasons": ["Strong landing-to-CTA conversion."],
+                    },
+                    {
+                        "title": "Slipping Page",
+                        "slug": "slipping-page",
+                        "canonicalUrl": "https://digestlead.example.com/articles/slipping-page",
+                        "metrics": {
+                            "visits": 4,
+                            "engaged30Visits": 0,
+                            "engagedReaderRate": 0.0,
+                            "ctaClickVisits": 0,
+                        },
+                        "priorVisits": 9,
+                        "visitsDelta": -5,
+                        "category": "needs_attention",
+                        "categoryLabel": "Needs attention",
+                        "reasons": ["Visitors arrive but leave without engaging."],
+                    },
+                ],
+            },
+        )
+
+    @patch(
+        "integrations.services.notification_adapters.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    def test_slack_reminder_leads_with_performance_then_topics(self, mock_dm):
+        self._create_report()
+
+        deliveries = send_topic_selection(self.callback_data)
+
+        self.assertEqual(
+            [delivery.status for delivery in deliveries], [NotificationDeliveryStatus.SENT]
+        )
+        text = mock_dm.call_args.args[1]
+        self.assertIn("Article performance for digestlead.example.com", text)
+        self.assertIn("Top pages:", text)
+        self.assertIn(
+            "1. Winning Guide — 5 visits (+3) · 60% engaged · 2 CTA clicks · Top performer",
+            text,
+        )
+        self.assertIn("Needs attention:", text)
+        self.assertIn("- Slipping Page — Visitors arrive but leave without engaging.", text)
+        self.assertLess(
+            text.index("Article performance"),
+            text.index("Research topics are ready for digestlead.example.com:"),
+        )
+
+        blocks = mock_dm.call_args.kwargs["blocks"]
+        self.assertIn(
+            "*Article performance — digestlead.example.com*", blocks[0]["text"]["text"]
+        )
+        divider_index = next(
+            index for index, block in enumerate(blocks) if block["type"] == "divider"
+        )
+        header_index = next(
+            index for index, block in enumerate(blocks) if block["type"] == "header"
+        )
+        self.assertLess(divider_index, header_index)
+
+    def test_plain_message_without_report_is_unchanged(self):
+        message = _plain_topic_message(self.run, self.callback_data)
+        self.assertTrue(
+            message.startswith("Research topics are ready for digestlead.example.com:")
+        )
+
+    def test_email_html_places_performance_before_topics(self):
+        self._create_report()
+        digest = _article_performance_digest(self.run)
+        body = _topic_email_html(self.run, self.callback_data, self.slack, digest=digest)
+        self.assertIn(
+            "<strong>Article performance for digestlead.example.com</strong>", body
+        )
+        self.assertLess(
+            body.index("Article performance"), body.index("Research topics are ready")
+        )
+        self.assertIn("Needs attention", body)
+
+    def test_email_message_data_carries_analytics_block(self):
+        self._create_report()
+        digest = _article_performance_digest(self.run)
+        message_data = _topic_email_message_data(
+            self.run, self.callback_data, self.slack, digest=digest
+        )
+        analytics = message_data["analytics"]
+        self.assertTrue(analytics["available"])
+        self.assertEqual(analytics["human_visits"], 11)
+        self.assertEqual(analytics["top_pages"][0]["title"], "Winning Guide")
+        self.assertEqual(analytics["attention_pages"][0]["title"], "Slipping Page")
+        self.assertEqual(
+            _topic_email_message_data(self.run, self.callback_data, self.slack)["analytics"],
+            {"available": False},
+        )
+
+    def test_slack_blocks_without_digest_are_unchanged(self):
+        blocks = _topic_slack_blocks(self.run, self.callback_data, self.slack)
+        self.assertEqual(blocks[0]["type"], "header")
+
+    @patch(
+        "integrations.services.notification_adapters.SlackService.send_dm",
+        return_value=(True, "1.0"),
+    )
+    def test_digest_failure_degrades_to_topics_only(self, mock_dm):
+        self._create_report()
+        with patch(
+            "content_analytics.services.report_digest.latest_report_digest",
+            side_effect=RuntimeError("analytics database offline"),
+        ):
+            deliveries = send_topic_selection(self.callback_data)
+
+        self.assertEqual(
+            [delivery.status for delivery in deliveries], [NotificationDeliveryStatus.SENT]
+        )
+        text = mock_dm.call_args.args[1]
+        self.assertTrue(
+            text.startswith("Research topics are ready for digestlead.example.com:")
         )

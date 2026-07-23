@@ -18,6 +18,25 @@
       "first_name": "Sam",                      // may be ""
       "domain": "example.com",
       "unsubscribe_url": "https://api.mlai.au/...",
+      "analytics": {                             // article-performance digest; leads the email
+        "available": true,                       // false → whole section hidden
+        "report_date": "2026-07-23",
+        "window_days": 7,
+        "human_visits": 11,
+        "visits_delta_display": "+4",
+        "engaged_rate_display": "45%",
+        "cta_clickers": 2,
+        "conversion_display": "18.2%",
+        "summary_line": "11 visits (+4 vs prior) · 45% engaged · 2 CTA clickers",
+        "top_pages": [                           // up to 3, visits-desc; may be []
+          {"rank": 1, "title": "…", "url": "https://…", "summary": "5 visits · 60% engaged · 2 CTA clicks · Top performer"}
+        ],
+        "attention_pages": [                     // up to 3 needing an update; may be []
+          {"title": "…", "url": "https://…", "summary": "Visitors arrive but leave without engaging…"}
+        ],
+        "extra_attention_count": 0,
+        "brief_url": "https://mlai.au/founder-tools/marketing#analytics"
+      },
       "topics": [
         {
           "rank": 1,
@@ -54,6 +73,7 @@
 {%- assign greeting_name = trigger.first_name | default: first_name | default: message_data.first_name -%}
 {%- assign site_domain = trigger.domain | default: domain | default: message_data.domain -%}
 {%- assign optout_url = trigger.unsubscribe_url | default: unsubscribe_url | default: message_data.unsubscribe_url -%}
+{%- assign perf = trigger.analytics | default: analytics | default: message_data.analytics -%}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
   <tr>
     <td align="center">
@@ -71,6 +91,45 @@
             </p>
           </td>
         </tr>
+
+        {% if perf.available %}
+        <!-- Article performance digest (leads the email; topics follow) -->
+        <tr>
+          <td style="padding:20px 32px 0 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;">
+              <tr>
+                <td style="padding:20px;">
+                  <p style="margin:0;font-size:12px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Article performance · last {{ perf.window_days }} days</p>
+                  <p style="margin:8px 0 0 0;font-size:15px;line-height:1.5;color:#111827;font-weight:600;">{{ perf.summary_line }}</p>
+
+                  {% if perf.top_pages != blank %}
+                  <p style="margin:14px 0 4px 0;font-size:13px;color:#374151;font-weight:700;">Top pages</p>
+                  {% for page in perf.top_pages %}
+                  <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;">
+                    {{ page.rank }}. {% if page.url != blank %}<a href="{{ page.url }}" style="color:#4f46e5;text-decoration:none;font-weight:600;">{{ page.title }}</a>{% else %}<strong>{{ page.title }}</strong>{% endif %} — {{ page.summary }}
+                  </p>
+                  {% endfor %}
+                  {% endif %}
+
+                  {% if perf.attention_pages != blank %}
+                  <p style="margin:14px 0 4px 0;font-size:13px;color:#b45309;font-weight:700;">Needs attention</p>
+                  {% for page in perf.attention_pages %}
+                  <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;"><strong>{{ page.title }}</strong> — {{ page.summary }}</p>
+                  {% endfor %}
+                  {% if perf.extra_attention_count > 0 %}
+                  <p style="margin:6px 0 0 0;font-size:12px;color:#9ca3af;">…and {{ perf.extra_attention_count }} more in the full brief.</p>
+                  {% endif %}
+                  {% endif %}
+
+                  {% if perf.brief_url != blank %}
+                  <p style="margin:14px 0 0 0;font-size:13px;"><a href="{{ perf.brief_url }}" style="color:#4f46e5;text-decoration:underline;">Open the full brief</a></p>
+                  {% endif %}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        {% endif %}
 
         {% if topic_list == blank %}
         <!-- Empty state -->
@@ -170,6 +229,7 @@
     "first_name": "Sam",
     "domain": "example.com",
     "unsubscribe_url": "https://api.mlai.au/example-unsubscribe",
+    "analytics": {"available": true, "report_date": "2026-07-23", "window_days": 7, "human_visits": 11, "visits_delta_display": "+4", "engaged_rate_display": "45%", "cta_clickers": 2, "conversion_display": "18.2%", "summary_line": "11 visits (+4 vs prior) · 45% engaged · 2 CTA clickers", "top_pages": [{"rank": 1, "title": "How AI Code Review Cuts PR Cycle Time", "url": "https://example.com/articles/ai-code-review", "summary": "5 visits · 60% engaged · 2 CTA clicks · Top performer"}, {"rank": 2, "title": "A Practical Guide to LLM Evals", "url": "https://example.com/articles/llm-evals", "summary": "3 visits · 67% engaged"}, {"rank": 3, "title": "AI Workflow Automation for Small Teams", "url": "", "summary": "2 visits"}], "attention_pages": [{"title": "Old Launch Announcement", "url": "https://example.com/articles/launch", "summary": "Visitors arrive but leave without engaging (5% reach 30 active seconds, 0.0% CTA conversion)."}], "extra_attention_count": 0, "brief_url": "https://mlai.au/founder-tools/marketing#analytics"},
     "topics": [
       {"rank": 1, "keyword": "ai code review", "display_title": "How AI Code Review Cuts PR Cycle Time", "volume_display": "1.2k/mo", "difficulty": 34, "opportunity_index": 82, "tier_label": "Quick win", "ai_volume_display": "320/mo", "why_recommended": "Low difficulty, high intent, and you already rank for adjacent terms.", "recommended": true, "trend_source_label": "Google Trends interest", "trend_period_label": "past 30 days", "trend_summary": "Google Trends interest over the past 30 days is rising.", "trend_percent": 24, "chart_url": "https://placehold.co/960x240/png?text=Demand+trend", "chart_alt": "Demand trend for AI Code Review, up 24%.", "confirm_url": "https://api.mlai.au/approve-1"},
       {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "Authority Builder", "ai_volume_display": "", "why_recommended": "Strong audience fit and useful evergreen demand.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"},
