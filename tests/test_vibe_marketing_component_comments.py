@@ -2256,8 +2256,11 @@ class VibeMarketingComponentCommentTests(TestCase):
             )
 
         # A retryable (5xx) failure keeps the batch SUBMITTED for the retry path — pins are NOT
-        # rolled back (only definitive 4xx rejections restore drafts).
-        self.assertEqual(response.status_code, 202)
+        # rolled back (only definitive 4xx rejections restore drafts). It still returns a 502 so
+        # the frontend shows its error state instead of treating the submission as successful.
+        self.assertEqual(response.status_code, 502)
+        self.assertTrue(response.data["retryable"])
+        self.assertIn("upstream unavailable", response.data["detail"])
         comment.refresh_from_db()
         self.assertEqual(comment.status, "submitted")
         self.assertNotEqual(comment.batch_id, "")
