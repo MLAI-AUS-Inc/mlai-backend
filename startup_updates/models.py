@@ -49,6 +49,20 @@ class MonthlyUpdateDraftStatus(models.TextChoices):
     ERROR = "error", "Error"
 
 
+class MonthlyUpdateReminderKind(models.TextChoices):
+    SEVEN_DAY = "seven_day", "Seven days before expiry"
+    ONE_DAY = "one_day", "One day before expiry"
+
+
+class MonthlyUpdateReminderStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SENDING = "sending", "Sending"
+    SENT = "sent", "Sent"
+    DRAFTED = "drafted", "Queued as Customer.io draft"
+    UNKNOWN = "unknown", "Delivery unknown"
+    SUPPRESSED = "suppressed", "Suppressed"
+
+
 class GroundednessStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     PASSED = "passed", "Passed"
@@ -1018,6 +1032,50 @@ class MonthlyUpdateDraft(models.Model):
 
     def __str__(self):
         return f"{self.organization.domain}:{self.month}"
+
+
+class MonthlyUpdateReminderDelivery(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="monthly_update_reminder_deliveries",
+    )
+    reminder_kind = models.CharField(max_length=20, choices=MonthlyUpdateReminderKind.choices)
+    reminder_date = models.DateField()
+    status = models.CharField(
+        max_length=20,
+        choices=MonthlyUpdateReminderStatus.choices,
+        default=MonthlyUpdateReminderStatus.PENDING,
+        db_index=True,
+    )
+    idempotency_key = models.CharField(max_length=255, unique=True)
+    recipient_email = models.EmailField()
+    template_id = models.CharField(max_length=255)
+    target_snapshot = models.JSONField(default=list, blank=True)
+    customerio_delivery_id = models.CharField(max_length=255, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    last_error = models.TextField(blank=True, default="")
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "integrations_monthlyupdatereminderdelivery"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "reminder_kind", "reminder_date"],
+                name="monthly_reminder_user_kind_date_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["reminder_date", "status"], name="mon_rem_date_status_idx"),
+            models.Index(fields=["user", "reminder_date"], name="mon_rem_user_date_idx"),
+        ]
+        ordering = ["-reminder_date", "user_id", "reminder_kind"]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.reminder_kind}:{self.reminder_date}"
 
 
 class StartupDataDeletionRequest(models.Model):
