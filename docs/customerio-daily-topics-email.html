@@ -69,7 +69,10 @@
   storage mangled literal UTF-8 (Mac-Roman mojibake in received emails), so
   use HTML entities in markup (&middot; &mdash; &#9733; ...) and \uXXXX
   escapes inside the sample JSON. tests/test_customerio_template_docs.py
-  enforces this.
+  enforces this. Verified 2026-07-23: BMP entities (&middot; &mdash; &#9733;)
+  render correctly in delivered mail, but astral 4-byte emoji (&#128269; etc.)
+  are silently DROPPED by Customer.io's pipeline -- the emoji entities below
+  are decorative-only and currently vanish in delivery without garbage.
 
   LIQUID GOTCHA: in Liquid an empty string AND an empty array are TRUTHY, so
   a simple truthiness branch fires even when x is "". Optional fields are guarded with
