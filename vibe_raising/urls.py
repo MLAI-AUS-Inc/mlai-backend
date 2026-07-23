@@ -24,6 +24,7 @@ from .views import (
     VibeRaisingVideoUploadView,
 )
 from .admin_views import (
+    VibeRaisingAdminMonthlyUpdateUsageView,
     VibeRaisingAdminOverviewView,
     VibeRaisingAdminUpdateDetailView,
     VibeRaisingAdminUpdatesView,
@@ -32,6 +33,11 @@ from .admin_views import (
 
 urlpatterns = [
     path("admin/overview/", VibeRaisingAdminOverviewView.as_view(), name="vibe-raising-admin-overview"),
+    path(
+        "admin/monthly-update-usage/",
+        VibeRaisingAdminMonthlyUpdateUsageView.as_view(),
+        name="vibe-raising-admin-monthly-update-usage",
+    ),
     path("admin/updates/", VibeRaisingAdminUpdatesView.as_view(), name="vibe-raising-admin-updates"),
     path(
         "admin/updates/<int:update_id>/",

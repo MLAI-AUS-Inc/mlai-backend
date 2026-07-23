@@ -489,16 +489,26 @@ class ContentFactoryCallbackEvent(models.Model):
 
     content-factory stamps each callback with a unique event_id and retries
     failed deliveries from a durable outbox, so the same event can arrive more
-    than once. A row here means the event was already acknowledged with a 2xx
-    response; replays return 200 without reprocessing. This must be a DB table
-    rather than Django cache: production uses per-process LocMemCache, which
-    is invisible to other workers and lost on restart.
+    than once. This must be a DB table rather than Django cache: production
+    uses per-process LocMemCache, which is invisible to other workers and lost
+    on restart.
+
+    Rows are leases, not just tombstones: `claimed_at` is stamped when a
+    delivery claims the event and `processed_at` only after its handler
+    succeeded. A row with `processed_at` set is done — replays return 200
+    without reprocessing. A row claimed but never processed means the worker
+    died mid-handler (SIGKILL/OOM/deploy restart — soft failures release the
+    claim in the view); once the claim is older than the lease TTL, the
+    sender's retry reclaims and reprocesses it instead of being falsely acked
+    as a duplicate.
     """
 
     event_id = models.CharField(max_length=100, unique=True, db_index=True)
     job_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     event_type = models.CharField(max_length=100, blank=True, default="")
     emitted_at = models.DateTimeField(blank=True, null=True)
+    claimed_at = models.DateTimeField(blank=True, null=True)
+    processed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -773,13 +783,27 @@ class AutomationRun(models.Model):
 
 
 class NotificationDelivery(models.Model):
-    """Provider delivery attempt for an automation event."""
+    """Provider delivery attempt for an automation or analytics-report event.
+
+    Exactly one of ``automation_run`` / ``performance_report`` references the
+    subject (DB check constraint enforces at least one). ``idempotency_key``
+    stays the global once-per-subject-per-channel-per-event guard for both.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     automation_run = models.ForeignKey(
         AutomationRun,
         on_delete=models.CASCADE,
         related_name="deliveries",
+        null=True,
+        blank=True,
+    )
+    performance_report = models.ForeignKey(
+        "content_analytics.ArticlePerformanceReport",
+        on_delete=models.SET_NULL,
+        related_name="notification_deliveries",
+        null=True,
+        blank=True,
     )
     channel = models.ForeignKey(
         NotificationChannel,
@@ -809,6 +833,13 @@ class NotificationDelivery(models.Model):
             models.Index(fields=["event_type", "status"], name="cf_notify_delivery_event_idx"),
             models.Index(fields=["channel", "status"], name="cf_notify_delivery_channel_idx"),
         ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(automation_run__isnull=False)
+                | models.Q(performance_report__isnull=False),
+                name="cf_notify_delivery_has_subject",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.event_type}:{self.channel_id}:{self.status}"
@@ -836,6 +867,11 @@ class ContentFactoryHealingRecord(models.Model):
     github_repo = models.CharField(max_length=255, blank=True, default="", db_index=True)
     failure_kind = models.CharField(max_length=100, db_index=True)
     failure_family_key = models.CharField(max_length=64, db_index=True)
+    # Framework/stack the healed failure belongs to (e.g. "nextjs", "react-router").
+    # Empty for legacy org-scoped records. Framework-scoped promoted rules (cross-site
+    # learning) will carry framework with an empty domain/github_repo, which is why the
+    # column participates in the upsert key below.
+    framework = models.CharField(max_length=64, blank=True, default="", db_index=True)
     exact_signature = models.CharField(max_length=64, blank=True, default="")
     summary = models.TextField(blank=True, default="")
     normalized_failure = models.JSONField(default=dict, blank=True)
@@ -859,15 +895,69 @@ class ContentFactoryHealingRecord(models.Model):
     class Meta:
         db_table = "content_factory_healing_record"
         ordering = ["-updated_at"]
+        # framework is "" for all org-scoped records, so this behaves exactly like the
+        # historical 4-tuple for them while keeping framework-scoped rows distinct.
         unique_together = (
             "domain",
             "github_repo",
             "failure_kind",
             "failure_family_key",
+            "framework",
         )
 
     def __str__(self):
         return f"{self.domain}:{self.github_repo}:{self.failure_kind}:{self.failure_family_key}"
+
+
+class ContentFactoryLearningScope(models.TextChoices):
+    REPO = "repo", "Repo"
+    FRAMEWORK = "framework", "Framework"
+
+
+class ContentFactoryLearningEntry(models.Model):
+    """Durable home for Content Factory's per-repo learning stores.
+
+    Content Factory previously persisted these as JSON files inside its own
+    container image (wiped on every deploy). Each row is one entry from one of
+    its stores ("error_fix_pairs", "build_failures"); the payload is the exact
+    dict Content Factory reads and writes, so merge semantics stay client-side.
+    Framework-scoped rows (scope="framework", empty repo_name) are reserved for
+    cross-site rule promotion; nothing writes them yet.
+    """
+
+    store = models.CharField(max_length=64, db_index=True)
+    scope = models.CharField(
+        max_length=32,
+        choices=ContentFactoryLearningScope.choices,
+        default=ContentFactoryLearningScope.REPO,
+        db_index=True,
+    )
+    repo_name = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    framework = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    entry_key = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict, blank=True)
+    # Mirrored from payload["occurrences"] on upsert for ops queries/ordering.
+    occurrences = models.IntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_learning_entry"
+        ordering = ["-updated_at"]
+        unique_together = (
+            "store",
+            "scope",
+            "repo_name",
+            "framework",
+            "entry_key",
+        )
+        indexes = [
+            models.Index(fields=["store", "repo_name"], name="cf_learning_store_repo_idx"),
+            models.Index(fields=["store", "scope", "framework"], name="cf_learning_store_fw_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.store}:{self.scope}:{self.repo_name or self.framework}:{self.entry_key}"
 
 
 class VibeMarketingComponentCommentStatus(models.TextChoices):
@@ -979,6 +1069,9 @@ class WrittenArticle(models.Model):
     Tracks the output of the content-factory pipeline.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Stable, public-safe identity embedded into generated article pages. Unlike
+    # the slug or source run, this survives URL changes and article revisions.
+    analytics_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
@@ -993,6 +1086,8 @@ class WrittenArticle(models.Model):
     # URLs
     article_url = models.URLField(blank=True, null=True)
     pr_url = models.URLField(blank=True, null=True)
+    canonical_url = models.URLField(max_length=2048, blank=True, default="")
+    canonical_path = models.CharField(max_length=1024, blank=True, default="", db_index=True)
 
     # Publish lifecycle (see ArticlePublishStatus): written -> pr_open -> merged -> live.
     publish_status = models.CharField(
@@ -1241,6 +1336,10 @@ class KeywordVelocity(models.Model):
         blank=True,
         help_text="Raw daily volume data from Glimpse/pytrends"
     )
+    source = models.CharField(max_length=32, default="unknown")
+    basis = models.CharField(max_length=32, default="unknown")
+    period_label = models.CharField(max_length=64, blank=True, default="")
+    is_estimated = models.BooleanField(default=True)
 
     # Snapshot timestamp
     captured_at = models.DateTimeField(default=timezone.now)

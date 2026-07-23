@@ -30,7 +30,7 @@ from workflow_runs.models import (
     ContentFactoryRunStep,
     ContentFactoryStepStatus,
 )
-from integrations.models import UserIntegration
+from integrations.models import GitHubInstallation, UserIntegration
 from roo.models import ChannelFirstPost, PointsAccount
 
 User = get_user_model()
@@ -244,6 +244,172 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             repository="acme/site",
             permission_mode="write",
         )
+
+    def test_content_factory_token_resolves_repo_from_founder_registry_and_self_heals_stale_config(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        founder = User.objects.create_user(email="mark@example.com", slack_id="U_MARK")
+        organization = Organization.objects.create(name="Inner Expert", domain="innerx.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_MARK",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145611291",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+            account_type="User",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145558994",
+            account_login="sheldonhealth",
+            account_type="User",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_sheldon",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="145558994",
+            repository="sheldonhealth/v0-sheldon-health-app",
+            permissions={"contents": "write", "pull_requests": "write"},
+        )
+
+        with patch(
+            "integrations.services.github_app.github_app_credentials_configured",
+            return_value=True,
+        ), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {
+                    "domain": "innerx.example",
+                    "slack_user_id": "U_MARK",
+                    "github_repo": "sheldonhealth/v0-sheldon-health-app",
+                },
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_token"], "ghs_sheldon")
+        self.assertEqual(response.data["github_installation_id"], "145558994")
+        create_token.assert_called_once_with(
+            installation_id="145558994",
+            repository="sheldonhealth/v0-sheldon-health-app",
+            permission_mode="write",
+        )
+        config.refresh_from_db()
+        self.assertEqual(config.github_installation_id, "145558994")
+
+    def test_content_factory_token_rejects_repo_not_owned_by_registered_installations(self):
+        founder = User.objects.create_user(email="founder@example.com", slack_id="U_FOUNDER")
+        organization = Organization.objects.create(name="Acme", domain="acme.example")
+        OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_FOUNDER",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145611291",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+            account_type="User",
+        )
+
+        with patch(
+            "integrations.services.github_app.create_installation_access_token"
+        ) as create_token:
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "acme.example", "github_repo": "sheldonhealth/v0-sheldon-health-app"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data["reason_code"],
+            "repository_not_accessible_by_registered_installations",
+        )
+        self.assertIn("sheldonhealth/v0-sheldon-health-app", response.data["message"])
+        create_token.assert_not_called()
+
+    def test_content_factory_token_does_not_rebind_config_for_one_off_requested_repo(self):
+        from integrations.services.github_app import GitHubInstallationToken
+
+        founder = User.objects.create_user(email="multi@example.com", slack_id="U_MULTI")
+        organization = Organization.objects.create(name="Multi", domain="multi.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            connected_slack_user_id="U_MULTI",
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            github_installation_id="145558994",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145611291",
+            account_login="msinclair123",
+        )
+        GitHubInstallation.objects.create(
+            user=founder,
+            installation_id="145558994",
+            account_login="sheldonhealth",
+        )
+        app_token = GitHubInstallationToken(
+            token="ghs_innerx",
+            expires_at=timezone.now() + timedelta(minutes=50),
+            installation_id="145611291",
+            repository="msinclair123/v0-innerx-ai",
+            permissions={"contents": "write", "pull_requests": "write"},
+        )
+
+        with patch(
+            "integrations.services.github_app.github_app_credentials_configured",
+            return_value=True,
+        ), patch(
+            "integrations.services.github_app.create_installation_access_token",
+            return_value=app_token,
+        ):
+            response = self.client.get(
+                reverse("content_factory_token"),
+                {"domain": "multi.example", "github_repo": "msinclair123/v0-innerx-ai"},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["github_installation_id"], "145611291")
+        config.refresh_from_db()
+        self.assertEqual(config.github_repo, "sheldonhealth/v0-sheldon-health-app")
+        self.assertEqual(config.github_installation_id, "145558994")
+
+    def test_github_app_token_error_includes_github_repository_scope_message(self):
+        from django.core.cache import cache
+
+        from integrations.services.github_app import (
+            GitHubAppTokenError,
+            create_installation_access_token,
+        )
+
+        cache.clear()
+        response = MagicMock(status_code=422)
+        response.json.return_value = {
+            "message": "There is at least one repository that does not exist or is not accessible to the parent installation."
+        }
+
+        with patch("integrations.services.github_app._github_app_jwt", return_value="jwt"), patch(
+            "integrations.services.github_app.http_requests.post",
+            return_value=response,
+        ):
+            with self.assertRaises(GitHubAppTokenError) as raised:
+                create_installation_access_token(
+                    installation_id="145611291",
+                    repository="sheldonhealth/v0-sheldon-health-app",
+                    permission_mode="write",
+                    use_cache=False,
+                )
+
+        self.assertIn("GitHub returned 422", str(raised.exception))
+        self.assertIn("not accessible to the parent installation", str(raised.exception))
 
     def test_github_app_installation_token_cache_preserves_permissions(self):
         from django.core.cache import cache
@@ -1454,6 +1620,124 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertTrue(pending["previewRuntimeUnsupported"])
 
     @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_baseline_block_is_code_review_ready_not_unsupported(self, mock_send_dm):
+        organization = Organization.objects.create(name="Sheldon Health", domain="sheldonhealth.com.au")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="sheldonhealth/v0-sheldon-health-app",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "preview_building",
+                    "setup_run_id": "setup-baseline-blocked",
+                }
+            },
+        )
+        reason = "Build error: Error: supabaseUrl is required. Failed to collect page data for /api/ai/summarize."
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_code_review_ready",
+                "job_id": "setup-baseline-blocked",
+                "run_id": "setup-baseline-blocked",
+                "workflow": "article_system_setup",
+                "domain": "sheldonhealth.com.au",
+                "github_repo": "sheldonhealth/v0-sheldon-health-app",
+                "approve_url": "/api/runs/setup-baseline-blocked/approve",
+                "deny_url": "/api/runs/setup-baseline-blocked/deny",
+                "baseline_build_blocked": True,
+                "preview_runtime_unsupported": False,
+                "code_review_reason": reason,
+                "article_system_setup": {
+                    "status": "code_review_ready",
+                    "setup_run_id": "setup-baseline-blocked",
+                    "branch_name": "feature/articles-publish-route-baseline",
+                    "baseline_build_blocked": True,
+                    "code_review_reason": reason,
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-baseline-blocked")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.AWAITING_APPROVAL)
+        self.assertEqual(setup_run.current_step, "await_review")
+        self.assertTrue(setup_run.result["baseline_build_blocked"])
+        self.assertFalse(setup_run.result["preview_runtime_unsupported"])
+        self.assertIn("supabaseUrl is required", setup_run.result["code_review_reason"])
+
+        config.refresh_from_db()
+        pending = config.article_system["pending_article_system_setup"]
+        self.assertTrue(pending["baselineBuildBlocked"])
+        self.assertFalse(pending["previewRuntimeUnsupported"])
+        self.assertIn("supabaseUrl is required", pending["codeReviewReason"])
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_article_system_setup_cancelled_callback_is_terminal_and_clears_owned_config(self, mock_send_dm):
+        organization = Organization.objects.create(name="Cancel Co", domain="cancel.example")
+        config = OrganizationContentConfig.objects.create(
+            organization=organization,
+            github_repo="acme/site",
+            article_system={
+                "pending_article_system_setup": {
+                    "status": "running",
+                    "setup_run_id": "setup-callback-cancel",
+                }
+            },
+            article_system_setup_cache={"setup_run_id": "setup-callback-cancel"},
+            publish_targets=[
+                {
+                    "target_id": "setup-target",
+                    "source": "scaffold_cache",
+                    "setup_run_id": "setup-callback-cancel",
+                }
+            ],
+            default_publish_target_id="setup-target",
+        )
+        ContentFactoryRun.objects.create(
+            run_id="setup-callback-cancel",
+            workflow="article_system_setup",
+            domain="cancel.example",
+            github_repo="acme/site",
+            status=ContentFactoryRunStatus.RUNNING,
+            current_step="verify_directory_build",
+            result={"status": "running"},
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "article_system_setup_cancelled",
+                "job_id": "setup-callback-cancel",
+                "run_id": "setup-callback-cancel",
+                "workflow": "article_system_setup",
+                "domain": "cancel.example",
+                "github_repo": "acme/site",
+                "status": "cancelled",
+                "current_step": "cancelled",
+                "cleanup": {"setup_branch": {"status": "deleted"}},
+                "article_system_setup": {
+                    "status": "cancelled",
+                    "setup_run_id": "setup-callback-cancel",
+                },
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("callback processed", response.data["message"])
+        setup_run = ContentFactoryRun.objects.get(run_id="setup-callback-cancel")
+        self.assertEqual(setup_run.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(setup_run.current_step, "cancelled")
+        self.assertEqual(setup_run.approval_state, ContentFactoryApprovalState.NOT_REQUIRED)
+        config.refresh_from_db()
+        self.assertNotIn("pending_article_system_setup", config.article_system)
+        self.assertEqual(config.article_system_setup_cache, {})
+        self.assertEqual(config.publish_targets, [])
+        self.assertIsNone(config.default_publish_target_id)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
     def test_article_system_setup_progress_callback_replaces_stale_failure(self, mock_send_dm):
         ContentFactoryRun.objects.create(
             run_id="setup-run-retry-progress",
@@ -2520,6 +2804,172 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
         self.assertEqual(user.points_account.balance, 20)
         job = ContentFactoryJob.objects.get(job_id="publish-target-run-1")
         self.assertEqual(job.billing_status, "refunded")
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_research_shortfall_refunds_and_suppresses_resume(self, mock_send_dm):
+        from workflow_runs.models import ContentFactoryRun
+
+        user = User.objects.create_user(email="shortfall@example.com", password="password", slack_id="U123")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="research-shortfall-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U123",
+            status="researching",
+            client_request_id="research-shortfall-request-1",
+            billing_source_job_id="research-shortfall-run-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "research-shortfall-request-1",
+            },
+        )
+
+        payload = {
+            "event_type": "generation_failed",
+            "job_id": "research-shortfall-run-1",
+            "run_id": "research-shortfall-run-1",
+            "workflow": "confirmed_topic",
+            "domain": "golden-vite-router-baseline.com",
+            "slack_user_id": "U123",
+            "failed_step": "collect_research_bundle",
+            "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+            "error": (
+                "This topic looks too narrow to research well — we found only 3 of the 4 "
+                "quality source pages needed to write a well-grounded article. Try a broader topic."
+            ),
+            # content-factory owns refundability + the true resume decision.
+            "refundable": True,
+            "resume_available": False,
+            "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+        }
+
+        response = self.client.post(reverse('content_factory_callback'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Deterministic content shortfall produced no article → topic charge refunded.
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+        job = ContentFactoryJob.objects.get(job_id="research-shortfall-run-1")
+        self.assertEqual(job.billing_status, "refunded")
+        mock_send_dm.assert_called_once()
+        self.assertIn("refunded automatically", mock_send_dm.call_args[0][1])
+
+        # The failed run must NOT advertise a blind Resume.
+        run = ContentFactoryRun.objects.get(run_id="research-shortfall-run-1")
+        self.assertFalse(run.resume_available)
+
+        # Re-delivery of the same callback must not double-refund.
+        response = self.client.post(reverse('content_factory_callback'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 20)
+
+    @patch('integrations.services.slack.SlackService.send_dm')
+    def test_generation_failed_insufficient_sources_without_refundable_is_not_refunded(self, mock_send_dm):
+        # The ground_section evidence-starved path and transient scrape storms share the
+        # INSUFFICIENT_SOURCE_SUPPORT code but are resumable, value-producing failures:
+        # without the explicit refundable hint they must NOT be refunded.
+        from workflow_runs.models import ContentFactoryRun
+
+        user = User.objects.create_user(email="notrefund@example.com", password="password", slack_id="U555")
+        PointsAccount.objects.create(user=user, balance=14)
+        ContentFactoryJob.objects.create(
+            job_id="insufficient-not-refundable-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U555",
+            status="generating",
+            client_request_id="insufficient-not-refundable-req-1",
+            billing_source_job_id="insufficient-not-refundable-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "insufficient-not-refundable-req-1",
+            },
+        )
+
+        response = self.client.post(
+            reverse('content_factory_callback'),
+            {
+                "event_type": "generation_failed",
+                "job_id": "insufficient-not-refundable-1",
+                "run_id": "insufficient-not-refundable-1",
+                "workflow": "confirmed_topic",
+                "domain": "golden-vite-router-baseline.com",
+                "slack_user_id": "U555",
+                "failed_step": "ground_section:intro",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "error": "Section intro is evidence starved.",
+                # No refundable hint and no resume_available=False → resumable + charged.
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 14)
+        job = ContentFactoryJob.objects.get(job_id="insufficient-not-refundable-1")
+        self.assertEqual(job.billing_status, "charged")
+        run = ContentFactoryRun.objects.get(run_id="insufficient-not-refundable-1")
+        self.assertTrue(run.resume_available)
+
+    def test_maybe_auto_refund_honors_explicit_refundable_flag_outside_allowlist(self):
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+
+        user = User.objects.create_user(email="refundable@example.com", password="password", slack_id="U777")
+        PointsAccount.objects.create(user=user, balance=10)
+        job = ContentFactoryJob.objects.create(
+            job_id="explicit-refundable-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U777",
+            status="error",
+            client_request_id="explicit-refundable-request-1",
+            billing_source_job_id="explicit-refundable-run-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "explicit-refundable-request-1",
+            },
+        )
+
+        # A code NOT in AUTO_REFUND_ERROR_CODES still refunds when content-factory
+        # flags the failure refundable explicitly.
+        refunded, points = maybe_auto_refund_terminal_failure(
+            job,
+            error_code="SOME_FUTURE_NO_VALUE_CODE",
+            error_message="No value produced.",
+            refundable=True,
+        )
+        self.assertTrue(refunded)
+        self.assertEqual(points, 6)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 16)
+
+        # Without the flag and outside the allowlist, no refund.
+        other_job = ContentFactoryJob.objects.create(
+            job_id="not-refundable-run-1",
+            domain="golden-vite-router-baseline.com",
+            slack_user_id="U777",
+            status="error",
+            client_request_id="not-refundable-request-1",
+            billing_amount=6,
+            billing_status="charged",
+            request_meta={
+                "domain": "golden-vite-router-baseline.com",
+                "client_request_id": "not-refundable-request-1",
+            },
+        )
+        refunded, points = maybe_auto_refund_terminal_failure(
+            other_job,
+            error_code="SOME_FUTURE_NO_VALUE_CODE",
+            error_message="No value produced.",
+        )
+        self.assertFalse(refunded)
+        user.points_account.refresh_from_db()
+        self.assertEqual(user.points_account.balance, 16)
 
     @patch('integrations.services.slack.SlackService.send_message')
     @patch('integrations.services.slack.SlackService.send_dm')

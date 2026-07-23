@@ -49,6 +49,9 @@ SCHEDULE_LOOKAHEAD_LIMIT = 500
 # no retry. Fail anything in a machine-waiting state past this window. Excludes
 # TOPIC_SELECTION_SENT / DELIVERY_MODE_REQUIRED, which legitimately wait on a human.
 STUCK_RUN_TIMEOUT_SECONDS = 3 * 60 * 60
+# Manual "Run today now" runs live in a dedicated slot namespace so they can never
+# collide with the scheduled slots (enumerate(send_times) -> 0..n-1).
+MANUAL_SLOT_BASE = 100
 
 
 def _coerce_timezone(value: str) -> str:
@@ -357,6 +360,108 @@ def dispatch_due_automation_runs(*, now: Optional[datetime] = None, limit: int =
         .values_list("id", flat=True)[: max(1, limit)]
     )
     return [dispatch_automation_run(str(run_id)) for run_id in due_ids]
+
+
+def start_manual_automation_run(
+    organization,
+    *,
+    requested_by_user_id: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Start an on-demand ("Run today now") research run for an org's automation.
+
+    Creates a manual AutomationRun in the MANUAL_SLOT_BASE namespace (so it never
+    collides with the scheduled 0..n-1 slots or the already-consumed 8am slot) and
+    dispatches it through the exact same path as the daily send — same discovery,
+    billing, top-3 topics, fan-out to enabled channels, buttons, and watchdog.
+
+    Reuses an in-flight manual run (discovery still running, topics not yet sent) so
+    an impatient double-click doesn't spend a second content-factory discovery.
+    Returns the dispatch_automation_run result dict, or a sentinel status:
+    "no_automation" / "no_delivery_channels" / "reused".
+    """
+    current = now or timezone.now()
+    automation = (
+        ResearchAutomation.objects.filter(
+            organization=organization, status=ResearchAutomationStatus.ACTIVE
+        )
+        .order_by("created_at")
+        .first()
+    )
+    if automation is None:
+        return {"status": "no_automation"}
+
+    has_target = NotificationChannel.objects.filter(
+        organization=organization,
+        consent_state=NotificationConsentState.ACTIVE,
+        delivery_enabled=True,
+    ).exists()
+    if not has_target:
+        return {"status": "no_delivery_channels"}
+
+    timezone_name = _coerce_timezone(automation.timezone)
+    local_date = current.astimezone(ZoneInfo(timezone_name)).date()
+
+    in_flight = (
+        AutomationRun.objects.filter(
+            automation=automation,
+            local_date=local_date,
+            slot_index__gte=MANUAL_SLOT_BASE,
+            status__in=[AutomationRunStatus.SCHEDULED, AutomationRunStatus.QUEUED],
+        )
+        .order_by("-slot_index")
+        .first()
+    )
+    if in_flight is not None:
+        return {
+            "status": "reused",
+            "automation_run_id": str(in_flight.id),
+            "run_status": in_flight.status,
+        }
+
+    last_manual_slot = (
+        AutomationRun.objects.filter(
+            automation=automation,
+            local_date=local_date,
+            slot_index__gte=MANUAL_SLOT_BASE,
+        )
+        .order_by("-slot_index")
+        .values_list("slot_index", flat=True)
+        .first()
+    )
+    slot_index = (last_manual_slot + 1) if last_manual_slot is not None else MANUAL_SLOT_BASE
+    key = automation_run_idempotency_key(
+        automation_id=str(automation.id),
+        local_date=local_date,
+        slot_index=slot_index,
+    )
+    try:
+        run = AutomationRun.objects.create(
+            automation=automation,
+            local_date=local_date,
+            slot_index=slot_index,
+            scheduled_for_at=current,
+            status=AutomationRunStatus.SCHEDULED,
+            idempotency_key=key,
+            request_payload={
+                "trigger_source": "founder_tools_run_now",
+                "requested_by_user_id": requested_by_user_id,
+                "timezone": timezone_name,
+            },
+        )
+    except IntegrityError:
+        existing = AutomationRun.objects.filter(idempotency_key=key).first()
+        if existing is not None:
+            return {
+                "status": "reused",
+                "automation_run_id": str(existing.id),
+                "run_status": existing.status,
+            }
+        raise
+
+    result = dispatch_automation_run(str(run.id))
+    result.setdefault("automation_run_id", str(run.id))
+    return result
 
 
 def fail_stuck_automation_runs(

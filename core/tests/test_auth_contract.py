@@ -36,6 +36,43 @@ class AuthContractTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data['user_exists'])
 
+    def test_healthhack_admin_check_rejects_non_superuser(self):
+        User.objects.create_user(email='closed@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/check-user/',
+            {
+                'email': 'closed@example.com',
+                'app': 'hospital',
+                'healthhack_admin_only': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.data['detail'],
+            'HealthHack has closed. Administrator access only.',
+        )
+
+    def test_healthhack_admin_check_accepts_superuser(self):
+        user = User.objects.create_user(email='healthhack-admin@example.com')
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
+
+        response = self.client.post(
+            '/api/v1/auth/check-user/',
+            {
+                'email': user.email,
+                'app': 'hospital',
+                'healthhack_admin_only': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['user_exists'])
+
     def test_current_user_returns_401_for_anonymous_requests(self):
         response = self.client.get('/api/v1/auth/me/')
 
@@ -127,6 +164,26 @@ class AuthContractTests(TestCase):
         mock_send.assert_called_once()
 
     @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_healthhack_admin_login_does_not_create_participant(self, mock_generate, mock_send):
+        response = self.client.post(
+            '/api/v1/auth/create-user/',
+            {
+                'email': 'closed-new-user@example.com',
+                'firstName': 'Closed',
+                'lastName': 'User',
+                'app': 'hospital',
+                'healthhack_admin_only': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(User.objects.filter(email='closed-new-user@example.com').exists())
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch('core.views.send_magic_link_email')
     @patch('core.views.generate_magic_link', return_value='http://localhost:5173/verify?token=vibe')
     def test_create_user_normalizes_vibe_raising_to_founder_tools_contract(self, mock_generate, mock_send):
         response = self.client.post(
@@ -184,6 +241,26 @@ class AuthContractTests(TestCase):
 
         mock_generate.assert_called_once_with(user, base_url='http://localhost:3000')
         mock_send.assert_called_once()
+
+    @patch('core.views.send_magic_link_email')
+    @patch('core.views.generate_magic_link')
+    def test_healthhack_admin_login_does_not_email_non_superuser(self, mock_generate, mock_send):
+        User.objects.create_user(email='closed-link@example.com', role='participant')
+
+        response = self.client.post(
+            '/api/v1/auth/send-magic-link/',
+            {
+                'email': 'closed-link@example.com',
+                'app': 'hospital',
+                'next': '/hospital/app',
+                'healthhack_admin_only': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        mock_generate.assert_not_called()
+        mock_send.assert_not_called()
 
     @override_settings(VIBE_RAISING_URL='http://localhost:5173')
     @patch('core.views.send_magic_link_email')
@@ -303,15 +380,15 @@ class AuthContractTests(TestCase):
         mock_send.assert_called_once()
 
     @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'verify@example.com'})
-    def test_verify_magic_link_returns_redirect_and_user_id(self, mock_verify):
+    def test_verify_healthhack_admin_magic_link_returns_redirect_and_user_id(self, mock_verify):
         user = User.objects.create_user(
             email='verify@example.com',
             role='participant',
             first_name='Verify',
             last_name='User',
         )
-        user.is_active = False
-        user.save(update_fields=['is_active'])
+        user.is_superuser = True
+        user.save(update_fields=['is_superuser'])
 
         response = self.client.get(
             '/api/v1/auth/verify-magic-link/?token=test-token&app=hospital&next=/hospital/app'
@@ -329,8 +406,27 @@ class AuthContractTests(TestCase):
         self.assertIn('sessionid', response.cookies)
         self.assertEqual(str(user.id), self.client.session.get('_auth_user_id'))
 
-        user.refresh_from_db()
-        self.assertTrue(user.is_active)
+        mock_verify.assert_called_once_with('test-token')
+
+    @patch('core.views.verify_magic_link', return_value={'kind': 'user', 'email': 'closed-verify@example.com'})
+    def test_verify_healthhack_magic_link_rejects_non_superuser(self, mock_verify):
+        User.objects.create_user(
+            email='closed-verify@example.com',
+            role='participant',
+        )
+
+        response = self.client.get(
+            '/api/v1/auth/verify-magic-link/?token=test-token&app=hospital&next=/hospital/app'
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.data['detail'],
+            'HealthHack has closed. Administrator access only.',
+        )
+        self.assertNotIn('access_token', response.cookies)
+        self.assertNotIn('refresh_token', response.cookies)
+        self.assertNotIn('_auth_user_id', self.client.session)
         mock_verify.assert_called_once_with('test-token')
 
     @override_settings(ADMIN_FRONTEND_URL='https://admin.mlai.au')

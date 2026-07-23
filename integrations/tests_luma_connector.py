@@ -263,6 +263,7 @@ class SyncLumaConnectionTests(TestCase):
 
         self.assertEqual(result["status"], "synced")
         self.assertEqual(result["eventsSynced"], 1)
+        self.assertEqual(result["catalogEventsSynced"], 1)
         # Constructed with the founder's own key.
         mock_service_cls.assert_called_once_with(api_key="luma-secret")
         connection.refresh_from_db()
@@ -274,6 +275,10 @@ class SyncLumaConnectionTests(TestCase):
                 organization=self.org, source_provider="luma", metric_key="eventRegistrations"
             ).exists()
         )
+        event = LumaEventSelection.objects.get(connection=connection, event_id="m1")
+        self.assertEqual(event.event_name, "March")
+        self.assertEqual(event.start_at, datetime(2026, 3, 5, 3, 0, tzinfo=ZoneInfo("UTC")))
+        self.assertFalse(event.selected)
 
     def test_sync_requires_linked_organization(self):
         from integrations.services.luma import LumaConfigurationError

@@ -1,11 +1,14 @@
-from django.urls import path
+from django.urls import include, path
 
+from .admin_views import VibeMarketingAdminUsageView
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
     VibeMarketingNotificationChannelDetailView,
     VibeMarketingNotificationChannelResendView,
     VibeMarketingNotificationChannelVerifyView,
     VibeMarketingNotificationChannelsView,
+    VibeMarketingResearchAutomationRunNowView,
+    VibeMarketingResearchAutomationRunStatusView,
     VibeMarketingResearchAutomationView,
 )
 from .vibe_marketing_views import (
@@ -49,6 +52,8 @@ from .vibe_marketing_views import (
 
 
 urlpatterns = [
+    path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),
+    path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
     path("company/avatar", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar-no-slash"),
     path("company/avatar/", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar"),
@@ -154,6 +159,10 @@ urlpatterns = [
     path("notifications/channels/<uuid:channel_id>/resend/", VibeMarketingNotificationChannelResendView.as_view(), name="vibe-marketing-notification-channel-resend"),
     path("notifications/channels/<uuid:channel_id>", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail-no-slash"),
     path("notifications/channels/<uuid:channel_id>/", VibeMarketingNotificationChannelDetailView.as_view(), name="vibe-marketing-notification-channel-detail"),
+    path("notifications/automation/run-now", VibeMarketingResearchAutomationRunNowView.as_view(), name="vibe-marketing-notification-automation-run-now-no-slash"),
+    path("notifications/automation/run-now/", VibeMarketingResearchAutomationRunNowView.as_view(), name="vibe-marketing-notification-automation-run-now"),
+    path("notifications/automation/runs/<uuid:automation_run_id>", VibeMarketingResearchAutomationRunStatusView.as_view(), name="vibe-marketing-notification-automation-run-status-no-slash"),
+    path("notifications/automation/runs/<uuid:automation_run_id>/", VibeMarketingResearchAutomationRunStatusView.as_view(), name="vibe-marketing-notification-automation-run-status"),
     path("notifications/automation", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation-no-slash"),
     path("notifications/automation/", VibeMarketingResearchAutomationView.as_view(), name="vibe-marketing-notification-automation"),
 ]

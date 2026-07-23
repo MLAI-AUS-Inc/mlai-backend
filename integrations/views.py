@@ -595,9 +595,10 @@ def github_callback(request):
                 (repo_name for repo_name in repo_names if repo_name.casefold() == previous_repo.casefold()),
                 None,
             )
+        # Only bind a repository GitHub confirmed belongs to this installation.
+        # Preserving an unmatched preselection creates an invalid
+        # repo/installation tuple that later fails token minting with HTTP 422.
         repo_to_store = selected_repo
-        if not repo_to_store and len(repo_names) > 1 and previous_repo:
-            repo_to_store = previous_repo
 
         config.github_token_encrypted = access_token
         config.github_refresh_token_encrypted = refresh_token
@@ -623,13 +624,7 @@ def github_callback(request):
         # support by clobbering the user's existing credentials with a different domain's token.
         if slack_user_id:
             existing_integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-            if existing_integration:
-                # Only update identity metadata — preserve token, refresh, repo, and expiry.
-                # Each domain's token lives on its own OrganizationContentConfig.
-                existing_integration.github_user_name = github_login
-                existing_integration.github_installation_id = installation_id
-                existing_integration.save()
-            else:
+            if not existing_integration:
                 # No existing integration — create one with this repo+token as the default.
                 # This is the user's first GitHub connection, so it becomes their default.
                 UserIntegration.objects.create(
@@ -642,6 +637,10 @@ def github_callback(request):
                     github_installation_id=installation_id,
                     github_scopes=[],
                 )
+            # Existing legacy defaults are intentionally left untouched. The new
+            # installation is already stored in the founder-scoped registry above;
+            # mixing its id/user with an older token and repo would make that row
+            # unusable for both installations.
 
         # Notify via Slack and auto-trigger scan only when the installation is bound to one repo.
         if slack_user_id and selected_repo:

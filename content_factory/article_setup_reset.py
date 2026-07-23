@@ -90,6 +90,33 @@ def carry_reset_markers(source, target):
     return target
 
 
+def article_setup_reset_marker(article_system) -> str:
+    """The reset watermark, if the founder has explicitly reset this setup.
+
+    Reads the *stored* article_system: ``normalize_article_system`` drops these
+    non-template keys, so callers holding a resolved/normalized article_system must
+    pass ``config.article_system`` (the raw field) here, not the normalized copy.
+    """
+    if not isinstance(article_system, dict):
+        return ""
+    for key in ("article_setup_reset_at", "articleSetupResetAt"):
+        value = str(article_system.get(key) or "").strip()
+        if value:
+            return value
+    info = article_system.get("article_setup_reset")
+    if isinstance(info, dict):
+        return str(info.get("reset_at") or info.get("resetAt") or "").strip()
+    return ""
+
+
+def clear_article_setup_reset_markers(article_system):
+    if not isinstance(article_system, dict):
+        return article_system
+    for key in ARTICLE_SETUP_RESET_KEYS:
+        article_system.pop(key, None)
+    return article_system
+
+
 def article_setup_reset_ignores_run(config, run) -> bool:
     if not run or getattr(run, "workflow", "") != "article_system_setup":
         return False
@@ -131,6 +158,91 @@ def _existing_article_system_setup_run_ids(config) -> list[str]:
         if normalized and normalized not in seen:
             seen.append(normalized)
     return seen
+
+
+def _setup_owner_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(
+        payload.get("setup_run_id")
+        or payload.get("setupRunId")
+        or payload.get("source_setup_run_id")
+        or payload.get("sourceSetupRunId")
+        or ""
+    ).strip()
+
+
+def clear_cancelled_article_setup_config(config, *, setup_run_id: str) -> dict:
+    """Clear setup state owned by one cancelled build without resetting the repo.
+
+    An organization may already have a working blog/articles target while it
+    builds a second `/articles` scaffold. Cancellation must remove only the
+    pending/cache/targets created by the matching setup run, never the existing
+    publishing configuration.
+    """
+
+    owner_id = str(setup_run_id or "").strip()
+    if not owner_id:
+        return {"changed": False, "cleared_fields": [], "removed_target_ids": []}
+
+    update_fields: list[str] = []
+    cleared_fields: list[str] = []
+    removed_target_ids: list[str] = []
+
+    raw_article_system = config.article_system if isinstance(getattr(config, "article_system", None), dict) else {}
+    article_system = dict(raw_article_system)
+    pending = article_system.get("pending_article_system_setup")
+    pending_owned = _setup_owner_id(pending) == owner_id
+    if pending_owned:
+        article_system.pop("pending_article_system_setup", None)
+        config.article_system = article_system
+        update_fields.append("article_system")
+        cleared_fields.append("pending_article_system_setup")
+
+    setup_cache = (
+        config.article_system_setup_cache
+        if isinstance(getattr(config, "article_system_setup_cache", None), dict)
+        else {}
+    )
+    cache_owned = _setup_owner_id(setup_cache) == owner_id
+    if cache_owned:
+        config.article_system_setup_cache = {}
+        update_fields.append("article_system_setup_cache")
+        cleared_fields.append("article_system_setup_cache")
+
+    targets = config.publish_targets if isinstance(getattr(config, "publish_targets", None), list) else []
+    kept_targets = []
+    for target in targets:
+        if not isinstance(target, dict):
+            kept_targets.append(target)
+            continue
+        target_owned = _setup_owner_id(target) == owner_id
+        scaffold_cache_owned = cache_owned and str(target.get("source") or "").strip() == "scaffold_cache"
+        if target_owned or scaffold_cache_owned:
+            target_id = str(target.get("target_id") or target.get("targetId") or "").strip()
+            if target_id:
+                removed_target_ids.append(target_id)
+            continue
+        kept_targets.append(target)
+    if kept_targets != targets:
+        config.publish_targets = kept_targets
+        update_fields.append("publish_targets")
+        cleared_fields.append("publish_targets")
+        if str(getattr(config, "default_publish_target_id", "") or "").strip() in removed_target_ids:
+            config.default_publish_target_id = None
+            update_fields.append("default_publish_target_id")
+            cleared_fields.append("default_publish_target_id")
+
+    if update_fields:
+        update_fields.append("updated_at")
+        config.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    return {
+        "changed": bool(update_fields),
+        "cleared_fields": cleared_fields,
+        "removed_target_ids": removed_target_ids,
+        "setup_run_id": owner_id,
+    }
 
 
 def reset_article_setup_config(config, *, github_repo: str = "", deep: bool = False) -> dict:

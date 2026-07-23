@@ -156,6 +156,12 @@ def create_installation_access_token(
         timeout=(3, 20),
     )
     if response.status_code not in {200, 201}:
+        try:
+            error_payload = response.json()
+        except (TypeError, ValueError):
+            error_payload = {}
+        github_message = str(error_payload.get("message") or "").strip()
+        github_detail = f" GitHub message: {github_message}" if github_message else ""
         permission_hint = (
             " Ensure the MLAI Tools GitHub App is installed on this repository with "
             "Contents: Read/Write and Pull requests: Read/Write."
@@ -164,7 +170,7 @@ def create_installation_access_token(
         )
         raise GitHubAppTokenError(
             f"Could not mint GitHub App installation token for {normalized_repository}: "
-            f"GitHub returned {response.status_code}.{permission_hint}"
+            f"GitHub returned {response.status_code}.{github_detail}{permission_hint}"
         )
     payload = response.json()
     token = str(payload.get("token") or "").strip()
@@ -259,3 +265,109 @@ def list_installation_repositories_via_app(installation_id: str) -> list[dict]:
             break
         page += 1
     return repos
+
+
+# Liveness classifications for a GitHub App installation. ``DEAD`` is only ever
+# returned on a definitive GitHub not-found/gone response; every ambiguous
+# signal (suspension, 5xx, network trouble, unconfigured credentials) is
+# ``UNKNOWN`` so callers never prune on an inconclusive probe.
+INSTALLATION_LIVE = "live"
+INSTALLATION_DEAD = "dead"
+INSTALLATION_UNKNOWN = "unknown"
+
+
+def probe_installation_liveness(installation_id: str) -> str:
+    """Classify a GitHub App installation as live / dead / unknown.
+
+    Attempts to mint a metadata-read installation token — the minimal
+    capability the founder registry needs from an installation, and the same
+    call ``list_installation_repositories_via_app`` relies on. GitHub answers
+    ``404`` (uninstalled) or ``410`` (gone) for an installation that no longer
+    exists, which is the authoritative "this row is stale" signal.
+
+    Returns ``INSTALLATION_LIVE`` on ``200``/``201``, ``INSTALLATION_DEAD`` on
+    ``404``/``410`` (the founder uninstalled the App), and
+    ``INSTALLATION_UNKNOWN`` for anything else — a suspended installation
+    (``403``), a transient ``5xx``, a network failure, or missing App
+    credentials. Callers MUST treat ``UNKNOWN`` as "cannot prove stale" and
+    leave the row alone.
+    """
+    normalized_installation_id = str(installation_id or "").strip()
+    if not normalized_installation_id:
+        return INSTALLATION_UNKNOWN
+    if not github_app_credentials_configured():
+        return INSTALLATION_UNKNOWN
+    try:
+        jwt_token = _github_app_jwt()
+    except GitHubAppTokenError:
+        return INSTALLATION_UNKNOWN
+
+    try:
+        response = http_requests.post(
+            f"https://api.github.com/app/installations/{normalized_installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {jwt_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"permissions": {"metadata": "read"}},
+            timeout=(3, 20),
+        )
+    except Exception:  # noqa: BLE001 - any transport failure is inconclusive
+        return INSTALLATION_UNKNOWN
+
+    if response.status_code in (200, 201):
+        return INSTALLATION_LIVE
+    if response.status_code in (404, 410):
+        return INSTALLATION_DEAD
+    return INSTALLATION_UNKNOWN
+
+
+def list_app_installation_ids() -> Optional[set]:
+    """The set of installation ids the *configured* GitHub App currently owns.
+
+    Uses the App JWT to page ``GET /app/installations``. This is the anti-
+    footgun for the pruning sweep: a ``404`` on a single installation is
+    ambiguous between "the founder uninstalled" and "these credentials
+    authenticate as a *different* App than minted this row" (e.g. a staging
+    scheduler pointed at the prod DB, or an App migration). Cross-referencing the
+    rows we are about to prune against the ids this App actually owns tells the
+    two apart.
+
+    Returns a set of string ids on success (possibly empty), or ``None`` when the
+    App is unconfigured or the listing could not be retrieved — callers MUST
+    treat ``None`` as "cannot confirm ownership", never as "owns nothing".
+    """
+    if not github_app_credentials_configured():
+        return None
+    try:
+        jwt_token = _github_app_jwt()
+    except GitHubAppTokenError:
+        return None
+
+    ids: set = set()
+    page = 1
+    while page <= 20:  # hard cap 20*100 = 2000 installations
+        try:
+            response = http_requests.get(
+                f"https://api.github.com/app/installations?per_page=100&page={page}",
+                headers={
+                    "Authorization": f"Bearer {jwt_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=(3, 20),
+            )
+        except Exception:  # noqa: BLE001 - any transport failure is inconclusive
+            return None
+        if response.status_code != 200:
+            return None
+        data = response.json() if response.content else []
+        batch = data if isinstance(data, list) else []
+        for item in batch:
+            if isinstance(item, dict) and item.get("id") is not None:
+                ids.add(str(item.get("id")))
+        if len(batch) < 100:
+            break
+        page += 1
+    return ids

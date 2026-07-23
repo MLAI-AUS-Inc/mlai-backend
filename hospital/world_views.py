@@ -1,4 +1,4 @@
-"""Public world-state endpoint for the health-hack 3D visualisation.
+"""Admin-only world-state endpoint for the closed HealthHack visualisation.
 
 Serves a render-ready entity list (cubes = teams placed by rank, spheres =
 recent submissions) that the health-hack frontend polls every 5 seconds.
@@ -8,15 +8,20 @@ import hashlib
 from datetime import timedelta
 
 from django.core.cache import cache
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
-from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Submission, Team
+from core.permissions import IsHealthHackAdmin
+
+from .models import HospitalCompetitionRound, Submission, Team
 
 WORLD_CACHE_KEY = "hospital_world_state"
-WORLD_CACHE_SECONDS = 3
+# The build is now O(teams) not O(submissions), so freshness — not cost —
+# sets this. 10s keeps the leaderboard lively while capping world rebuilds
+# at worker_count/10s no matter how many players poll every ~5s.
+WORLD_CACHE_SECONDS = 10
 WORLD_RADIUS = 30
 RECENT_SUBMISSION_WINDOW = timedelta(minutes=15)
 RECENT_SUBMISSION_LIMIT = 20
@@ -38,8 +43,7 @@ def rank_to_lat_lon(rank):
 
 
 class WorldStateView(APIView):
-    permission_classes = [permissions.AllowAny]
-    authentication_classes = []
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         payload = cache.get(WORLD_CACHE_KEY)
@@ -49,62 +53,87 @@ class WorldStateView(APIView):
         return Response(payload)
 
     def _build(self):
-        best_by_team = {}
-        for sub in (
-            Submission.objects.select_related("team")
-            .filter(team__isnull=False)
+        # Best submission per team via a correlated subquery: ONE row per
+        # team (≤100 teams), never the whole submission table. Both the
+        # ranked cubes and the "not yet submitted" cubes come from this
+        # single Team query — a team with no submissions surfaces as
+        # best_score=None. `feedback` never leaves the database.
+        #
+        # Before 2026-07-13 this iterated every Submission as a full model
+        # instance, dragging each row's multi-KB feedback JSON (37k rows
+        # ≈ 600MB) into memory on every cache miss and melting the workers.
+        # This view is polled every ~5s per connected player.
+        best = (
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                team=OuterRef("pk"),
+            )
             .order_by("-score", "submitted_at")
-        ):
-            best_by_team.setdefault(sub.team_id, sub)
+        )
+        teams = list(
+            Team.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+            ).annotate(
+                best_score=Subquery(best.values("score")[:1]),
+                best_submitted=Subquery(best.values("submitted_at")[:1]),
+            )
+            .order_by("team_id")
+            .values("team_id", "team_name", "best_score", "best_submitted")
+        )
 
         ranked = sorted(
-            best_by_team.values(), key=lambda s: (-s.score, s.submitted_at)
+            (t for t in teams if t["best_score"] is not None),
+            key=lambda t: (-t["best_score"], t["best_submitted"]),
         )
-        scores = [s.score for s in ranked] or [0.0]
+        scores = [t["best_score"] for t in ranked] or [0.0]
         lo = min(scores)
         span = (max(scores) - lo) or 1.0
 
         entities = []
-        for rank, sub in enumerate(ranked, start=1):
+        for rank, team in enumerate(ranked, start=1):
             lat, lon = rank_to_lat_lon(rank)
             entities.append({
-                "id": "team-%s" % sub.team.team_id,
+                "id": "team-%s" % team["team_id"],
                 "kind": "cube",
-                "label": "#%d %s" % (rank, sub.team.team_name),
+                "label": "#%d %s" % (rank, team["team_name"]),
                 "lat": lat,
                 "lon": lon,
-                "size": round(1.0 + 2.0 * (sub.score - lo) / span, 2),
-                "color": PALETTE[(sub.team.team_id or 0) % len(PALETTE)],
-                "meta": {"score": round(sub.score, 4), "rank": rank},
+                "size": round(1.0 + 2.0 * (team["best_score"] - lo) / span, 2),
+                "color": PALETTE[(team["team_id"] or 0) % len(PALETTE)],
+                "meta": {"score": round(team["best_score"], 4), "rank": rank},
             })
 
-        # Teams that have not submitted yet still get a spot on the planet.
+        # Teams that have not submitted yet still get a spot on the planet,
+        # in team_id order after the ranked ones.
         rank = len(ranked)
-        for team in (
-            Team.objects.exclude(pk__in=best_by_team.keys()).order_by("team_id")
-        ):
+        for team in teams:
+            if team["best_score"] is not None:
+                continue
             rank += 1
             lat, lon = rank_to_lat_lon(rank)
             entities.append({
-                "id": "team-%s" % team.team_id,
+                "id": "team-%s" % team["team_id"],
                 "kind": "cube",
-                "label": team.team_name,
+                "label": team["team_name"],
                 "lat": lat,
                 "lon": lon,
                 "size": 1.0,
-                "color": PALETTE[(team.team_id or 0) % len(PALETTE)],
+                "color": PALETTE[(team["team_id"] or 0) % len(PALETTE)],
                 "meta": {"score": None, "rank": None},
             })
 
         cutoff = timezone.now() - RECENT_SUBMISSION_WINDOW
         for sub in (
-            Submission.objects.filter(submitted_at__gte=cutoff)
-            .select_related("team")
-            .order_by("-submitted_at")[:RECENT_SUBMISSION_LIMIT]
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                submitted_at__gte=cutoff,
+            )
+            .order_by("-submitted_at")
+            .values("id", "accuracy", "team__team_name")[:RECENT_SUBMISSION_LIMIT]
         ):
-            digest = int(hashlib.md5(str(sub.id).encode()).hexdigest()[:8], 16)
+            digest = int(hashlib.md5(str(sub["id"]).encode()).hexdigest()[:8], 16)
             entities.append({
-                "id": "sub-%s" % sub.id,
+                "id": "sub-%s" % sub["id"],
                 "kind": "sphere",
                 "lat": float(digest % 120) - 60.0,
                 "lon": float((digest // 120) % 360) - 180.0,
@@ -113,8 +142,8 @@ class WorldStateView(APIView):
                 "spin": True,
                 "color": "#ffffff",
                 "meta": {
-                    "team": sub.team.team_name if sub.team else None,
-                    "accuracy": round(sub.accuracy, 4),
+                    "team": sub["team__team_name"],
+                    "accuracy": round(sub["accuracy"], 4),
                 },
             })
 

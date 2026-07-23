@@ -205,6 +205,52 @@ class ContentJobConfirmTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.data["error_code"], "CONTENT_FACTORY_UNAVAILABLE")
         self.assertEqual(response.data["status"], "backend_unavailable")
+        # A failed confirm must not leave a phantom 'confirmed' job with no run behind it.
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, "awaiting_confirmation")
+
+    @patch("integrations.services.article_generation.confirm_topic")
+    def test_confirm_failure_does_not_mark_job_confirmed(self, mock_confirm_topic):
+        from integrations.services.article_generation import ArticleGenerationError
+
+        mock_confirm_topic.side_effect = ArticleGenerationError("Content Factory timed out")
+
+        response = self.client.post(
+            self.url,
+            {
+                "slack_user_id": "U999",
+                "domain": "example.com",
+                "option_index": 0,
+                "request_source": "roo_slackbot",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, "awaiting_confirmation")
+        # The user's selection is still recorded so a retry can reuse it.
+        self.assertEqual(self.job.selected_keyword, "existing keyword")
+        self.assertEqual(self.job.slack_user_id, "U999")
+
+    @patch("integrations.services.article_generation.confirm_topic")
+    def test_confirm_unexpected_error_does_not_mark_job_confirmed(self, mock_confirm_topic):
+        mock_confirm_topic.side_effect = RuntimeError("connection dropped mid-request")
+
+        response = self.client.post(
+            self.url,
+            {
+                "slack_user_id": "U123",
+                "domain": "example.com",
+                "option_index": 0,
+                "request_source": "roo_slackbot",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.status, "awaiting_confirmation")
 
     def test_cancel_marks_job_and_dispatch_cancelled(self):
         dispatch = ScheduledDiscoveryDispatch.objects.create(

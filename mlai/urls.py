@@ -33,6 +33,7 @@ urlpatterns = [
     path('api/v1/vibe-raising/', include('vibe_raising.urls')),
     path('api/v1/vibe-marketing/', include('content_factory.urls_vibe_marketing')),
     path('api/v1/mlai-studio/', include('mlai_studio.urls')),
+    path('api/v1/victor-ai/', include('victor_ai.urls')),
     path('api/v1/data/', include('data_access.urls')),
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/jobs/', include('jobs.urls')),

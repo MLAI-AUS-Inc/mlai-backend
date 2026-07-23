@@ -195,12 +195,14 @@ class ExternalFinancialRecord(models.Model):
     RECORD_BANK_TRANSACTION = "bank_transaction"
     RECORD_XERO_REPEATING_INVOICE = "xero_repeating_invoice"
     RECORD_XERO_INVOICE = "xero_invoice"
+    RECORD_XERO_BILL = "xero_bill"
     RECORD_XERO_PAYMENT = "xero_payment"
 
     RECORD_TYPE_CHOICES = [
         (RECORD_BANK_TRANSACTION, "Bank Transaction"),
         (RECORD_XERO_REPEATING_INVOICE, "Xero Repeating Invoice"),
         (RECORD_XERO_INVOICE, "Xero Invoice"),
+        (RECORD_XERO_BILL, "Xero Bill"),
         (RECORD_XERO_PAYMENT, "Xero Payment"),
     ]
 
@@ -324,6 +326,11 @@ class GitHubInstallation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+    # When the reconciliation sweep last verified this installation is still
+    # live against GitHub. Throttles re-probing (see
+    # integrations.services.github_installations.run_github_installation_reconciliation_sweep);
+    # null means never probed.
+    liveness_checked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -549,3 +556,458 @@ class CommunityBridgeDelivery(models.Model):
             f"{self.delivery_type}:{self.source_platform}:{self.source_message_id}"
             f" -> {self.target_platform} ({self.status})"
         )
+
+
+class ReconciliationProfile(models.Model):
+    """Per-organisation accounting policy for Stripe payout reconciliation.
+
+    Account codes and tax types are deliberately configuration, never inferred
+    from Stripe or Luma.  That keeps the integration from making tax decisions
+    on behalf of the organisation's accountant.
+    """
+
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_profile",
+    )
+    xero_connection = models.ForeignKey(
+        ExternalServiceConnection,
+        on_delete=models.SET_NULL,
+        related_name="reconciliation_profiles",
+        null=True,
+        blank=True,
+    )
+    stripe_account_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bank_account_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bank_account_name = models.CharField(max_length=255, blank=True, default="")
+    xero_contact_id = models.CharField(max_length=255, blank=True, default="")
+    xero_contact_name = models.CharField(max_length=255, default="Stripe Payments")
+    revenue_account_code = models.CharField(max_length=64, blank=True, default="")
+    fee_account_code = models.CharField(max_length=64, blank=True, default="")
+    refund_account_code = models.CharField(max_length=64, blank=True, default="")
+    revenue_tax_type = models.CharField(max_length=64, blank=True, default="")
+    fee_tax_type = models.CharField(max_length=64, blank=True, default="")
+    refund_tax_type = models.CharField(max_length=64, blank=True, default="")
+    line_amount_types = models.CharField(max_length=16, default="Inclusive")
+    event_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_category_name = models.CharField(max_length=255, default="Event Name")
+    project_tracking_category_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_category_name = models.CharField(max_length=255, default="Project Name")
+    standalone_fee_project_option_id = models.CharField(max_length=255, blank=True, default="")
+    standalone_fee_project_option_name = models.CharField(max_length=255, blank=True, default="")
+    enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_profile"
+
+
+class ReconciliationMapping(models.Model):
+    """Maps an immutable Stripe/Luma source ID to approved Xero dimensions."""
+
+    SOURCE_LUMA_EVENT = "luma_event"
+    SOURCE_STRIPE_PRODUCT = "stripe_product"
+    SOURCE_STRIPE_INVOICE = "stripe_invoice"
+    SOURCE_STRIPE_METADATA = "stripe_metadata"
+    SOURCE_UNATTRIBUTED = "unattributed"
+    SOURCE_CHOICES = [
+        (SOURCE_LUMA_EVENT, "Luma event"),
+        (SOURCE_STRIPE_PRODUCT, "Stripe product"),
+        (SOURCE_STRIPE_INVOICE, "Stripe invoice"),
+        (SOURCE_STRIPE_METADATA, "Stripe metadata"),
+        (SOURCE_UNATTRIBUTED, "Unattributed Stripe transaction"),
+    ]
+    TREATMENT_REVENUE = "revenue"
+    TREATMENT_CLEARING = "clearing"
+    TREATMENT_CHOICES = [
+        (TREATMENT_REVENUE, "Recognise revenue"),
+        (TREATMENT_CLEARING, "Clear revenue recorded elsewhere"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_mappings",
+    )
+    source_type = models.CharField(max_length=32, choices=SOURCE_CHOICES)
+    source_id = models.CharField(max_length=255)
+    source_label = models.CharField(max_length=500, blank=True, default="")
+    accounting_treatment = models.CharField(
+        max_length=16,
+        choices=TREATMENT_CHOICES,
+        blank=True,
+        default="",
+    )
+    event_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    reconciliation_note = models.TextField(blank=True, default="")
+    account_code = models.CharField(max_length=64, blank=True, default="")
+    tax_type = models.CharField(max_length=64, blank=True, default="")
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_mapping"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "source_type", "source_id"],
+                name="recon_mapping_org_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "active"], name="recon_mapping_org_active_idx"),
+        ]
+
+
+class StripePayoutReconciliation(models.Model):
+    """Durable, idempotent ledger and posting state for one Stripe payout."""
+
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_READY = "ready"
+    STATUS_POSTING = "posting"
+    STATUS_POSTED = "posted"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_NEEDS_REVIEW, "Needs review"),
+        (STATUS_READY, "Ready"),
+        (STATUS_POSTING, "Posting"),
+        (STATUS_POSTED, "Posted"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="stripe_payout_reconciliations",
+    )
+    stripe_account_id = models.CharField(max_length=255, blank=True, default="")
+    payout_id = models.CharField(max_length=255)
+    arrival_date = models.DateField(null=True, blank=True)
+    currency = models.CharField(max_length=12, blank=True, default="")
+    amount_cents = models.BigIntegerField(default=0)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    report_payload = models.JSONField(default=dict, blank=True)
+    preview_payload = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_NEEDS_REVIEW, db_index=True)
+    approved_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    xero_bank_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_payout_reconciliation"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "stripe_account_id", "payout_id"],
+                name="recon_payout_org_account_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "arrival_date"], name="recon_payout_org_arrival_idx"),
+        ]
+
+
+class ReconciliationSuggestion(models.Model):
+    """Evidence-backed Event/Project proposal produced by the monthly-update agent.
+
+    Suggestions are deliberately separate from approved mappings.  Valley can
+    propose dimensions and a review note, but only the reconciliation approval
+    endpoint may copy those values onto :class:`ReconciliationMapping`.
+    """
+
+    STATUS_PROPOSED = "proposed"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_SUPERSEDED, "Superseded"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="reconciliation_suggestions",
+    )
+    payout = models.ForeignKey(
+        StripePayoutReconciliation,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    run_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    source_type = models.CharField(max_length=32)
+    source_id = models.CharField(max_length=255)
+    source_label = models.CharField(max_length=500, blank=True, default="")
+    event_source_type = models.CharField(max_length=32, blank=True, default="")
+    event_source_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_type = models.CharField(max_length=32, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    confidence = models.FloatField(default=0.0)
+    rationale = models.TextField(blank=True, default="")
+    review_note = models.TextField(blank=True, default="")
+    evidence = models.JSONField(default=list, blank=True)
+    source_hash = models.CharField(max_length=64, blank=True, default="")
+    model_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    reviewed_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "stripe_xero_reconciliation_suggestion"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "payout", "run_id", "source_type", "source_id"],
+                name="recon_suggest_org_payout_run_source_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="recon_suggest_org_status_idx"),
+            models.Index(fields=["organization", "source_type", "source_id"], name="recon_suggest_org_source_idx"),
+        ]
+
+
+class XeroStatementLineSnapshot(models.Model):
+    """A browser-observed unreconciled Xero statement line.
+
+    Xero's Accounting API does not expose the bank-reconciliation statement
+    queue, so explicit founder-run browser backfills import immutable line
+    identifiers and the visible draft fields.  No browser import posts or
+    reconciles anything.
+    """
+
+    DIRECTION_DEBIT = "debit"
+    DIRECTION_CREDIT = "credit"
+    DIRECTION_CHOICES = [
+        (DIRECTION_DEBIT, "Debit"),
+        (DIRECTION_CREDIT, "Credit"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_line_snapshots",
+    )
+    bank_account_id = models.CharField(max_length=255)
+    statement_line_id = models.CharField(max_length=255)
+    transaction_date = models.DateField()
+    narration = models.TextField(blank=True, default="")
+    reference = models.CharField(max_length=500, blank=True, default="")
+    direction = models.CharField(max_length=16, choices=DIRECTION_CHOICES)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=12, blank=True, default="AUD")
+    current_contact = models.CharField(max_length=255, blank=True, default="")
+    current_account = models.CharField(max_length=255, blank=True, default="")
+    current_description = models.TextField(blank=True, default="")
+    current_event_name = models.CharField(max_length=255, blank=True, default="")
+    current_project_name = models.CharField(max_length=255, blank=True, default="")
+    current_tax_type = models.CharField(max_length=255, blank=True, default="")
+    ready_in_xero = models.BooleanField(default=False, db_index=True)
+    active = models.BooleanField(default=True, db_index=True)
+    source_hash = models.CharField(max_length=64)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_line_snapshot"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "bank_account_id", "statement_line_id"],
+                name="xero_stmt_org_account_line_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "active", "ready_in_xero"], name="xero_stmt_org_queue_idx"),
+            models.Index(fields=["organization", "transaction_date"], name="xero_stmt_org_date_idx"),
+        ]
+
+
+class XeroStatementSuggestion(models.Model):
+    """Guarded proposal for prefilling one Xero bank-reconciliation row."""
+
+    ACTION_CREATE_BANK_TRANSACTION = "create_bank_transaction"
+    ACTION_PAY_EXISTING_BILL = "pay_existing_bill"
+    # Legacy values remain readable while older Valley runs and browser
+    # backfills drain from the queue. New runs use the explicit API actions.
+    ACTION_PREFILL_CREATE = "prefill_create"
+    ACTION_MATCH_BILL = "match_existing_bill"
+    ACTION_NEEDS_REVIEW = "needs_review"
+    ACTION_CHOICES = [
+        (ACTION_CREATE_BANK_TRANSACTION, "Create Bank Transaction"),
+        (ACTION_PAY_EXISTING_BILL, "Pay Existing Bill"),
+        (ACTION_PREFILL_CREATE, "Prefill Create"),
+        (ACTION_MATCH_BILL, "Match Existing Bill"),
+        (ACTION_NEEDS_REVIEW, "Needs Review"),
+    ]
+    STATUS_PROPOSED = "proposed"
+    STATUS_APPLIED = "applied"
+    STATUS_REJECTED = "rejected"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CHOICES = [
+        (STATUS_PROPOSED, "Proposed"),
+        (STATUS_APPLIED, "Applied to Xero form"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_SUPERSEDED, "Superseded"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_suggestions",
+    )
+    statement_line = models.ForeignKey(
+        XeroStatementLineSnapshot,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    run_id = models.CharField(max_length=255, db_index=True)
+    proposed_action = models.CharField(max_length=32, choices=ACTION_CHOICES, default=ACTION_NEEDS_REVIEW)
+    contact_name = models.CharField(max_length=255, blank=True, default="")
+    account_code = models.CharField(max_length=64, blank=True, default="")
+    account_name = models.CharField(max_length=255, blank=True, default="")
+    tax_type = models.CharField(max_length=255, blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    event_source_id = models.CharField(max_length=255, blank=True, default="")
+    event_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    project_source_id = models.CharField(max_length=255, blank=True, default="")
+    project_tracking_option_name = models.CharField(max_length=255, blank=True, default="")
+    matched_xero_bill_id = models.CharField(max_length=255, blank=True, default="")
+    confidence = models.FloatField(default=0.0)
+    rationale = models.TextField(blank=True, default="")
+    review_note = models.TextField(blank=True, default="")
+    evidence = models.JSONField(default=list, blank=True)
+    source_hash = models.CharField(max_length=64)
+    model_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PROPOSED, db_index=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_suggestion"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "statement_line", "run_id"],
+                name="xero_stmt_suggest_org_line_run_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="xero_stmt_suggest_status_idx"),
+        ]
+
+
+class XeroStatementPosting(models.Model):
+    """Idempotent Xero write for one observed bank-statement line.
+
+    The public Xero API can create the matching accounting object but cannot
+    reconcile a bank-statement line. ``match_ready`` therefore means the API
+    write succeeded and the row is ready for the founder's final Xero "OK".
+    """
+
+    OPERATION_BANK_TRANSACTION = "bank_transaction"
+    OPERATION_BILL_PAYMENT = "bill_payment"
+    OPERATION_CHOICES = [
+        (OPERATION_BANK_TRANSACTION, "Bank Transaction"),
+        (OPERATION_BILL_PAYMENT, "Bill Payment"),
+    ]
+    STATUS_PREVIEWED = "previewed"
+    STATUS_READY = "ready"
+    STATUS_POSTING = "posting"
+    STATUS_MATCH_READY = "match_ready"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PREVIEWED, "Previewed"),
+        (STATUS_READY, "Ready"),
+        (STATUS_POSTING, "Posting"),
+        (STATUS_MATCH_READY, "Ready to Match"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="xero_statement_postings",
+    )
+    statement_line = models.ForeignKey(
+        XeroStatementLineSnapshot,
+        on_delete=models.PROTECT,
+        related_name="postings",
+    )
+    suggestion = models.ForeignKey(
+        XeroStatementSuggestion,
+        on_delete=models.PROTECT,
+        related_name="postings",
+    )
+    operation = models.CharField(max_length=32, choices=OPERATION_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PREVIEWED, db_index=True)
+    source_hash = models.CharField(max_length=64)
+    payload_hash = models.CharField(max_length=64)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    preview_payload = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    requested_by_slack_id = models.CharField(max_length=100, blank=True, default="")
+    automatic = models.BooleanField(default=False)
+    xero_bank_transaction_id = models.CharField(max_length=255, blank=True, default="")
+    xero_payment_id = models.CharField(max_length=255, blank=True, default="")
+    xero_bill_id = models.CharField(max_length=255, blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "xero_statement_posting"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "statement_line", "source_hash"],
+                name="xero_stmt_post_org_line_hash_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["organization", "status"], name="xero_stmt_post_status_idx"),
+        ]
+
+
+class LinearIssueCreationReceipt(models.Model):
+    """Durable idempotency receipt for Roo-created Linear issues."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    idempotency_key = models.CharField(max_length=64, unique=True, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    request_payload = models.JSONField(default=dict, blank=True)
+    linear_issue_payload = models.JSONField(default=dict, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "linear_issue_creation_receipt"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.idempotency_key}:{self.status}"

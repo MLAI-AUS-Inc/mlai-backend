@@ -1,8 +1,8 @@
 """Admin (organiser) dashboard endpoints for Vibe Raising.
 
-These power the founder-tools admin dashboard in mlai-au: an overview with
-headline stats + charts, a filterable list of every startup's monthly updates,
-and a per-update detail view. Access is gated to MLAI organisers via
+These power the standalone admin dashboard at admin.mlai.au: an overview with
+headline stats + charts, monthly-update adoption metrics, a filterable list of
+every startup's monthly updates, and a per-update detail view. Access is gated to MLAI organisers via
 ``roo.permissions.is_points_admin_user`` (Django superusers always count).
 
 Data source is ``startup_updates.MonthlyUpdateDraft`` (one row per org per
@@ -23,6 +23,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from roo.permissions import is_points_admin_user
+from startup_updates.admin_metrics import build_monthly_update_usage_payload
 from startup_updates.models import MonthlyUpdateDraft, MonthlyUpdateDraftStatus
 
 from .views import _month_start, _previous_month_start, _serialize_monthly_update
@@ -219,7 +220,6 @@ class VibeRaisingAdminOverviewView(APIView):
             ),
             "organization__startup_profile__stage",
         )
-
         recent_updates = [
             _summary_for_draft(draft)
             for draft in _admin_drafts_queryset().order_by("-updated_at")[:RECENT_UPDATES_LIMIT]
@@ -241,6 +241,15 @@ class VibeRaisingAdminOverviewView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class VibeRaisingAdminMonthlyUpdateUsageView(APIView):
+    """Current connector adoption and completed AI-assisted update usage."""
+
+    permission_classes = [IsVibeRaisingAdmin]
+
+    def get(self, request):
+        return Response(build_monthly_update_usage_payload(), status=status.HTTP_200_OK)
 
 
 class VibeRaisingAdminUpdatesView(APIView):

@@ -413,6 +413,22 @@ def publish_disconnected_at(article_system: Optional[Dict[str, Any]]) -> str:
     return str(article_system.get(PUBLISH_DISCONNECTED_KEY) or "").strip()
 
 
+def is_bundle_only_fallback_target(target: Optional[Dict[str, Any]]) -> bool:
+    """Whether a target is the manual-delivery fallback, not a real publish route.
+
+    The generic scan emits a ``bundle_only_article_directory`` target
+    (``publish_capability == "bundle_only"``, ``unsupported_reason`` set) when it
+    detects an article-shaped directory but cannot confirm a safe automated publish
+    route — the content bundle must be applied by hand. Such a target must never
+    count as a live publishing surface on its own.
+    """
+    if not isinstance(target, dict):
+        return False
+    kind = str(target.get("kind") or "").strip()
+    capability = str(target.get("publish_capability") or "").strip()
+    return kind == "bundle_only_article_directory" or capability == "bundle_only"
+
+
 def is_directly_publishable_target(target: Optional[Dict[str, Any]]) -> bool:
     """Whether a target represents a real, safe publish route (not a manual bundle fallback).
 
@@ -423,10 +439,9 @@ def is_directly_publishable_target(target: Optional[Dict[str, Any]]) -> bool:
     """
     if not isinstance(target, dict):
         return False
-    kind = str(target.get("kind") or "").strip()
-    capability = str(target.get("publish_capability") or "").strip()
-    if kind == "bundle_only_article_directory" or capability == "bundle_only":
+    if is_bundle_only_fallback_target(target):
         return False
+    capability = str(target.get("publish_capability") or "").strip()
     if capability == "direct":
         return True
     if is_registry_driven_publish_target(target) and registry_target_publish_ready(target):

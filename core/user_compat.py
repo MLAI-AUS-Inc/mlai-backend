@@ -16,7 +16,13 @@ def user_has_team(user):
 
     for relation_name in USER_TEAM_RELATION_NAMES:
         relation_manager = getattr(user, relation_name, None)
-        if relation_manager is not None and relation_manager.exists():
+        if relation_manager is None:
+            continue
+        if relation_name == "hospital_teams":
+            has_team = relation_manager.filter(round__status="active").exists()
+        else:
+            has_team = relation_manager.exists()
+        if has_team:
             return True
 
     return False

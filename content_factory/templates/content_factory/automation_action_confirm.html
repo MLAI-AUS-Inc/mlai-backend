@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Confirm your MLAI action</title>
+    <style>
+      :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; }
+      body { margin: 0; background: #f7f8fa; color: #18181b; }
+      main { width: min(560px, calc(100% - 40px)); margin: 64px auto; }
+      .card { background: #fff; border: 1px solid #e4e4e7; border-radius: 16px; padding: 32px; box-shadow: 0 12px 35px rgba(24, 24, 27, .08); }
+      .eyebrow { margin: 0 0 10px; color: #6366f1; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+      .topic { margin: 20px 0; padding: 18px; background: #f8fafc; border-radius: 12px; }
+      .topic strong { display: block; font-size: 18px; line-height: 1.35; }
+      .topic span { display: block; margin-top: 7px; color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+      p { color: #52525b; line-height: 1.55; }
+      button { width: 100%; border: 0; border-radius: 10px; padding: 14px 20px; background: #4f46e5; color: #fff; cursor: pointer; font-size: 16px; font-weight: 700; }
+      .secondary { margin-top: 14px; color: #71717a; font-size: 13px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <p class="eyebrow">MLAI · Vibe Marketing</p>
+        {% if action == "approve_topic" %}
+          <h1>Start writing this article?</h1>
+          <div class="topic">
+            <strong>{{ topic_title }}</strong>
+            {% if keyword %}<span>{{ keyword }}</span>{% endif %}
+          </div>
+          <p>Confirm to start the article-generation flow for <strong>{{ domain }}</strong>.</p>
+          <form method="post">
+            <input type="hidden" name="token" value="{{ token }}">
+            <button type="submit">Start writing</button>
+          </form>
+        {% elif action == "unsubscribe" %}
+          <h1>Pause daily email reminders?</h1>
+          <p>This pauses the {{ channel_type|default:"email" }} channel for <strong>{{ domain }}</strong>. Your other enabled reminder channels stay active.</p>
+          <form method="post">
+            <input type="hidden" name="token" value="{{ token }}">
+            <button type="submit">Pause reminders</button>
+          </form>
+        {% else %}
+          <h1>Confirm this action</h1>
+          <p>Continue with this MLAI action for <strong>{{ domain }}</strong>.</p>
+          <form method="post">
+            <input type="hidden" name="token" value="{{ token }}">
+            <button type="submit">Continue</button>
+          </form>
+        {% endif %}
+        <p class="secondary">Nothing changes until you press the button above.</p>
+      </section>
+    </main>
+  </body>
+</html>

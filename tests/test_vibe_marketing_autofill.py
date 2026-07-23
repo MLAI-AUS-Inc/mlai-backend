@@ -1585,7 +1585,11 @@ class VibeMarketingAutofillTests(TestCase):
         self.company.save(update_fields=["organization", "updated_at"])
         OrganizationContentConfig.objects.get_or_create(organization=organization)
 
-        with patch.object(http_client, "post", side_effect=http_client.RequestException("connection refused")):
+        with patch.object(
+            http_client, "post", side_effect=http_client.RequestException("connection refused")
+        ), patch.object(
+            http_client, "get", side_effect=http_client.RequestException("connection refused")
+        ):
             response = self.client.post(
                 "/api/v1/vibe-marketing/discovery/",
                 {
@@ -1610,8 +1614,17 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(run.workflow, "auto_discovery")
         self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(run.run_request["content_island_slug"], "ai-growth")
+        # The dispatch outcome is ambiguous (the POST may have landed on the
+        # content-factory side despite the transport error) and the key lookup
+        # could not prove it absent, so the charge is WITHHELD, not refunded —
+        # refunding here while the real run starts is the refund-then-ghost bug
+        # (Phase 4.1). The poll path refunds once the key confirms absent.
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 20)
+        self.assertEqual(self.user.points_account.balance, 19)
+        self.assertEqual(
+            run.run_request["pending_billing_refund"]["charged_user_id"], self.user.pk
+        )
+        self.assertTrue(run.run_request["dispatch_pending_resolution"])
 
     def test_bootstrap_returns_first_article_mode_without_domain(self):
         self.company.domain = ""
@@ -3360,6 +3373,100 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(config.connected_slack_user_id, f"mlai_user:{self.user.id}")
         self.assertNotIn("github_token", response.data)
 
+    def test_github_mutation_requires_explicit_scope_for_multi_company_founder(self):
+        second_org = Organization.objects.create(domain="second.example", name="Second")
+        VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=second_org,
+            name="Second Company",
+            domain="second.example",
+            registered=True,
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"], "company_context_required")
+        repos_response = self.client.get("/api/v1/vibe-marketing/github/repos/")
+        self.assertEqual(repos_response.status_code, 409)
+        self.assertEqual(repos_response.data["error"], "company_context_required")
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization__domain="acme.com").exists())
+
+    def test_github_mutations_reject_repo_connected_to_sibling_company(self):
+        current_org = Organization.objects.create(domain="acme.com", name="Acme")
+        self.company.organization = current_org
+        self.company.save(update_fields=["organization", "updated_at"])
+        current_config = OrganizationContentConfig.objects.create(organization=current_org)
+
+        sibling_org = Organization.objects.create(domain="sheldon.example", name="Sheldon")
+        sibling = VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=sibling_org,
+            name="Sheldon Health",
+            domain="sheldon.example",
+            registered=True,
+        )
+        OrganizationContentConfig.objects.create(
+            organization=sibling_org,
+            github_repo="sheldonhealth/site",
+        )
+
+        requests = (
+            ("/api/v1/vibe-marketing/github/connect/", {}),
+            ("/api/v1/vibe-marketing/scan/", {"scanPurpose": "inventory"}),
+            (
+                "/api/v1/vibe-marketing/article-system-setup/",
+                {
+                    "articleSurfaceMode": "none",
+                    "articleSurfaceUrl": "https://acme.com/articles",
+                },
+            ),
+        )
+        for endpoint, extra in requests:
+            with self.subTest(endpoint=endpoint):
+                response = self.client.post(
+                    endpoint,
+                    {
+                        "companyId": str(self.company.id),
+                        "githubRepo": "sheldonhealth/site",
+                        **extra,
+                    },
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.data["error"], "repository_company_conflict")
+                self.assertEqual(response.data["connectedCompany"]["id"], str(sibling.id))
+                self.assertIn("Sheldon Health", response.data["detail"])
+
+        current_config.refresh_from_db()
+        self.assertFalse(current_config.github_repo)
+        self.assertFalse(ContentFactoryRun.objects.filter(organization=current_org).exists())
+
+    def test_explicit_company_scope_allows_unbound_repo_for_multi_company_founder(self):
+        second_org = Organization.objects.create(domain="second.example", name="Second")
+        VibeRaisingCompany.objects.create(
+            profile=self.profile,
+            organization=second_org,
+            name="Second Company",
+            domain="second.example",
+            registered=True,
+        )
+
+        response = self.client.post(
+            "/api/v1/vibe-marketing/github/connect/",
+            {"companyId": str(self.company.id), "githubRepo": "acme/site"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "auth_required")
+        config = OrganizationContentConfig.objects.get(organization__domain="acme.com")
+        self.assertEqual(config.github_repo, "acme/site")
+
     def test_github_connect_reuses_valid_org_credentials(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
@@ -3592,6 +3699,93 @@ class VibeMarketingAutofillTests(TestCase):
         self.assertEqual(pending["mode"], "existing")
         self.assertEqual(pending["routePath"], "/articles")
         self.assertEqual(pending["sourceScanRunId"], "scan-hint-1")
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_modeless_setup_scan_recovers_create_new_selection(self):
+        # talathrive: a setup re-dispatch that omits articleSurfaceMode (resolves to
+        # "not_sure") must recover the founder's create-new ("none") selection saved in
+        # step 3 — otherwise content-factory never fires its create-new escape and
+        # manual-blocks a from-scratch scaffold on a repo with a different article surface.
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        self.company.organization = organization
+        self.company.save(update_fields=["organization", "updated_at"])
+        config, _ = OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "article_system": {
+                    "pending_article_system_setup": {
+                        "mode": "none",
+                        "route_path": "/articles",
+                        "routePath": "/articles",
+                    }
+                },
+            },
+        )
+
+        class FakeResponse:
+            status_code = 202
+            content = b"{}"
+
+            def json(self):
+                return {"run_id": "scan-recover-1", "status": "queued", "workflow": "repo_scan"}
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["mode"] = json["article_surface_mode"]
+            return FakeResponse()
+
+        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/v1/vibe-marketing/scan/",
+                {
+                    "githubRepo": "acme/site",
+                    # NOTE: no articleSurfaceMode → resolves to "not_sure"
+                    "articleSurfaceUrl": "https://www.acme.com/articles",
+                    "autoSetupPreview": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        # The stored create-new selection is recovered and forwarded to content-factory.
+        self.assertEqual(captured["mode"], "none")
+        run = ContentFactoryRun.objects.get(run_id="scan-recover-1")
+        self.assertEqual(run.run_request["article_surface_mode"], "none")
+        # And the pending selection is preserved (not downgraded to not_sure).
+        config.refresh_from_db()
+        self.assertEqual(config.article_system["pending_article_system_setup"]["mode"], "none")
+
+    def test_store_pending_setup_does_not_downgrade_explicit_selection(self):
+        from content_factory.vibe_marketing_views import _store_pending_article_system_setup
+
+        organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
+        config, _ = OrganizationContentConfig.objects.update_or_create(
+            organization=organization,
+            defaults={
+                "github_repo": "acme/site",
+                "article_system": {
+                    "pending_article_system_setup": {
+                        "mode": "none",
+                        "route_path": "/articles",
+                        "routePath": "/articles",
+                    }
+                },
+            },
+        )
+
+        # A modeless re-dispatch for the SAME route must keep the explicit "none".
+        pending = _store_pending_article_system_setup(config, mode="not_sure", route_path="/articles")
+        self.assertEqual(pending["mode"], "none")
+
+        # A modeless dispatch for a DIFFERENT route legitimately defaults to not_sure.
+        pending_other = _store_pending_article_system_setup(config, mode="not_sure", route_path="/blog")
+        self.assertEqual(pending_other["mode"], "not_sure")
+
+        # An explicit incoming mode always wins.
+        pending_explicit = _store_pending_article_system_setup(config, mode="existing", route_path="/articles")
+        self.assertEqual(pending_explicit["mode"], "existing")
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_inventory_scan_does_not_require_article_surface_url(self):

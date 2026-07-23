@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from datetime import timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from typing import Any, Optional
 
 from django.conf import settings
@@ -48,6 +48,7 @@ NOTIFICATION_CONTEXT_KEYS = {
 }
 AUTOMATION_ACTION_SALT = "content-factory-research-automation-action"
 DEFAULT_ACTION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_EMAIL_ACTION_MAX_AGE_SECONDS = 48 * 60 * 60
 
 
 def normalize_notification_context(value: Optional[dict[str, Any]]) -> dict[str, str]:
@@ -95,6 +96,37 @@ def resolve_automation_run(context: Optional[dict[str, Any]]) -> Optional[Automa
     )
 
 
+def resolve_automation_run_for_callback(data: dict[str, Any]) -> Optional[AutomationRun]:
+    """Resolve the automation run for a terminal article callback.
+
+    Prefer the routing context, but fall back to the article job id. The
+    deferred hosted-preview path in content-factory can emit article_review_ready
+    without notification_context (it fires after finalize, from the platform
+    callback, and only the runner's finalize-time payload carries the context);
+    without this fallback the review link never reaches the founder's channel and
+    the automation run is later swept to failed with content_factory_timeout.
+    """
+    run = resolve_automation_run(data.get("notification_context"))
+    if run is not None:
+        return run
+    job_id = _callback_job_id(data)
+    if not job_id:
+        return None
+    return (
+        AutomationRun.objects.select_related(
+            "automation",
+            "automation__organization",
+            "automation__user",
+            "automation__notification_channel",
+            "automation__notification_channel__user",
+            "automation__notification_channel__provider_connection",
+        )
+        .filter(article_content_factory_run_id=job_id)
+        .order_by("-updated_at")
+        .first()
+    )
+
+
 def _callback_job_id(data: dict[str, Any]) -> str:
     return str(data.get("job_id") or data.get("run_id") or "").strip()
 
@@ -124,9 +156,20 @@ def _action_token(run: AutomationRun, action: str, **kwargs: Any) -> str:
     return signing.dumps(payload, salt=AUTOMATION_ACTION_SALT)
 
 
-def build_action_url(run: AutomationRun, action: str, **kwargs: Any) -> str:
+def build_action_url(
+    run: AutomationRun,
+    action: str,
+    *,
+    confirmation_required: bool = False,
+    **kwargs: Any,
+) -> str:
     base_url = str(getattr(settings, "DEFAULT_BACKEND_URL", "") or "").rstrip("/")
     path = reverse("content_factory_automation_action")
+    if confirmation_required:
+        # Email security scanners commonly prefetch links. Stamp the safety
+        # requirement inside the signed payload so a GET can only render the
+        # confirmation page; the explicit POST performs the mutation.
+        kwargs["confirmation_required"] = True
     token = _action_token(run, action, **kwargs)
     return f"{base_url}{path}?{urlencode({'token': token})}"
 
@@ -220,7 +263,13 @@ def record_delivery_status(
     return delivery
 
 
-def _plain_topic_message(run: AutomationRun, data: dict[str, Any], channel: Optional[NotificationChannel] = None) -> str:
+def _plain_topic_message(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+    *,
+    confirmation_required: bool = False,
+) -> str:
     domain = data.get("domain") or run.automation.organization.domain
     lines = [f"Research topics are ready for {domain}:"]
     for index, option in enumerate(_topic_options(data), start=1):
@@ -229,14 +278,30 @@ def _plain_topic_message(run: AutomationRun, data: dict[str, Any], channel: Opti
         score = option.get("opportunity_index")
         score_suffix = f" (score {score})" if score not in (None, "") else ""
         lines.append(f"{index}. {title} - {keyword}{score_suffix}")
-        lines.append(f"Approve: {build_action_url(run, 'approve_topic', option_index=index - 1)}")
+        trend_summary = str(option.get("trend_summary") or "").strip()
+        if trend_summary:
+            lines.append(f"Trend: {trend_summary}")
+        lines.append(
+            "Approve: "
+            + build_action_url(
+                run,
+                "approve_topic",
+                option_index=index - 1,
+                confirmation_required=confirmation_required,
+            )
+        )
     lines.append(f"Pause these notifications: {_unsubscribe_url(run, channel)}")
     return "\n".join(lines)
 
 
 def _unsubscribe_url(run: AutomationRun, channel: Optional[NotificationChannel] = None) -> str:
     if channel is not None:
-        return build_action_url(run, "unsubscribe", channel_id=str(channel.id))
+        return build_action_url(
+            run,
+            "unsubscribe",
+            channel_id=str(channel.id),
+            confirmation_required=channel.channel_type == NotificationChannelType.EMAIL,
+        )
     return build_action_url(run, "unsubscribe")
 
 
@@ -245,14 +310,35 @@ def _topic_email_html(run: AutomationRun, data: dict[str, Any], channel: Optiona
     rows = []
     for index, option in enumerate(_topic_options(data), start=1):
         keyword = html.escape(_option_keyword(option))
-        title = html.escape(_option_title(option))
+        raw_title = _option_title(option)
+        title = html.escape(raw_title)
         explanation = html.escape(str(option.get("explanation") or ""))
-        approve_url = html.escape(build_action_url(run, "approve_topic", option_index=index - 1))
+        trend_summary = html.escape(str(option.get("trend_summary") or "").strip())
+        chart_url = html.escape(_https_image_url(option.get("chart_url")))
+        chart_alt = html.escape(str(option.get("chart_alt") or f"Demand trend for {raw_title}"))
+        explanation_html = f"<p>{explanation}</p>" if explanation else ""
+        trend_html = f"<p>{trend_summary}</p>" if trend_summary else ""
+        chart_html = (
+            f'<p><img src="{chart_url}" alt="{chart_alt}" width="480" '
+            'style="display:block;width:100%;max-width:480px;height:auto"></p>'
+            if chart_url
+            else ""
+        )
+        approve_url = html.escape(
+            build_action_url(
+                run,
+                "approve_topic",
+                option_index=index - 1,
+                confirmation_required=True,
+            )
+        )
         rows.append(
             "<li>"
             f"<strong>{title}</strong><br>"
             f"<code>{keyword}</code>"
-            f"{'<p>' + explanation + '</p>' if explanation else ''}"
+            f"{explanation_html}"
+            f"{trend_html}"
+            f"{chart_html}"
             f'<p><a href="{approve_url}">Approve this topic</a></p>'
             "</li>"
         )
@@ -271,6 +357,17 @@ def _recipient_first_name(run: AutomationRun) -> str:
     return str(getattr(user, "first_name", "") or "").strip()
 
 
+def _https_image_url(value: Any) -> str:
+    """Allow only absolute HTTPS image URLs into outbound email markup."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return raw
+
+
 def _topic_email_message_data(
     run: AutomationRun,
     data: dict[str, Any],
@@ -279,8 +376,9 @@ def _topic_email_message_data(
     """message_data for the Customer.io daily-topics transactional template.
 
     Field names match docs/customerio-daily-topics-email.html. Each topic's
-    confirm_url is the signed one-click approve action (same endpoint Slack and
-    the plain-HTML email use), so the template needs no signing logic.
+    confirm_url is a signed confirmation landing page. Its GET is read-only so
+    email link scanners cannot start an article; an explicit POST approves the
+    topic through the same endpoint used by the other channels.
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
     topics: list[dict[str, Any]] = []
@@ -297,7 +395,18 @@ def _topic_email_message_data(
                 "ai_volume_display": str(option.get("ai_volume_display") or ""),
                 "why_recommended": str(option.get("why_recommended") or option.get("explanation") or ""),
                 "recommended": bool(option.get("recommended")),
-                "confirm_url": build_action_url(run, "approve_topic", option_index=index),
+                "trend_source_label": str(option.get("trend_source_label") or ""),
+                "trend_period_label": str(option.get("trend_period_label") or ""),
+                "trend_summary": str(option.get("trend_summary") or ""),
+                "trend_percent": option.get("trend_percent"),
+                "chart_url": _https_image_url(option.get("chart_url")),
+                "chart_alt": str(option.get("chart_alt") or ""),
+                "confirm_url": build_action_url(
+                    run,
+                    "approve_topic",
+                    option_index=index,
+                    confirmation_required=True,
+                ),
             }
         )
     return {
@@ -378,14 +487,17 @@ def _delivery_mode_text(run: AutomationRun, data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _founder_tools_run_url(run_id: str) -> str:
+def _founder_tools_run_url(run_id: str, *, expanded_review: bool = False) -> str:
     """Review page for a content-factory run: founder-tools resolves :runId
     to the same id the callbacks carry as job_id/run_id."""
     run_id = str(run_id or "").strip()
     base_url = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
     if not run_id or not base_url:
         return ""
-    return f"{base_url}/founder-tools/marketing/runs/{run_id}"
+    url = f"{base_url}/founder-tools/marketing/runs/{run_id}"
+    if expanded_review:
+        return f"{url}?{urlencode({'articleStep': 'review', 'reviewMode': 'expanded'})}"
+    return url
 
 
 def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
@@ -404,6 +516,111 @@ def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
     if pr_url.startswith("http"):
         lines.append(f"Pull request: {pr_url}")
     return "\n".join(lines)
+
+
+def _review_ready_url(run: AutomationRun, data: dict[str, Any]) -> str:
+    return _founder_tools_run_url(
+        run.article_content_factory_run_id or _callback_job_id(data),
+        expanded_review=True,
+    )
+
+
+def _review_ready_text(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> str:
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    title = str(data.get("title") or data.get("topic") or "Article")
+    review_url = _review_ready_url(run, data)
+    lines = [f"{title} is ready for {domain}."]
+    if review_url:
+        lines.extend(["", f"Review and approve: {review_url}"])
+    if channel and channel.channel_type in {NotificationChannelType.EMAIL, NotificationChannelType.SLACK}:
+        lines.extend(["", f"Manage notifications: {_unsubscribe_url(run, channel)}"])
+    return "\n".join(lines)
+
+
+def _review_ready_email_html(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> str:
+    domain = html.escape(str(data.get("domain") or run.automation.organization.domain or "your site"))
+    title = html.escape(str(data.get("title") or data.get("topic") or "Article"))
+    review_url = html.escape(_review_ready_url(run, data))
+    unsubscribe_url = html.escape(_unsubscribe_url(run, channel))
+    action = (
+        f'<p><a href="{review_url}" style="display:inline-block;padding:12px 18px;'
+        'border-radius:10px;background:#111827;color:#ffffff;text-decoration:none;font-weight:700">'
+        "Review article</a></p>"
+        f'<p style="font-size:13px;color:#6b7280">Or open this link: <a href="{review_url}">{review_url}</a></p>'
+        if review_url
+        else ""
+    )
+    return (
+        f"<p><strong>{title}</strong> is ready for <strong>{domain}</strong>.</p>"
+        f"{action}"
+        f'<p style="font-size:13px"><a href="{unsubscribe_url}">Manage notifications</a></p>'
+    )
+
+
+def _review_ready_slack_blocks(
+    run: AutomationRun,
+    data: dict[str, Any],
+    channel: Optional[NotificationChannel] = None,
+) -> list[dict[str, Any]]:
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    title = str(data.get("title") or data.get("topic") or "Article")
+    review_url = _review_ready_url(run, data)
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{title}* is ready for *{domain}*.",
+            },
+        }
+    ]
+    if review_url:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Review article", "emoji": True},
+                        "url": review_url,
+                        "action_id": "review_ready_open_article",
+                    }
+                ],
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"<{_unsubscribe_url(run, channel)}|Manage notifications>",
+                }
+            ],
+        }
+    )
+    return blocks
+
+
+def _whatsapp_review_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
+    """Variables for the review-ready utility template.
+
+    Template contract: {{1}} title, {{2}} domain, {{3}} expanded review URL.
+    The approved template must include the fixed `Reply STOP to opt out.` footer.
+    """
+    return {
+        "1": str(data.get("title") or data.get("topic") or "Article"),
+        "2": str(data.get("domain") or run.automation.organization.domain or "your site"),
+        "3": _review_ready_url(run, data),
+    }
 
 
 def _error_text(run: AutomationRun, data: dict[str, Any]) -> str:
@@ -658,6 +875,13 @@ def _send_channel_delivery(
                         "WhatsApp topic Content template is not configured; attempting plain text for run %s",
                         run.id,
                     )
+            elif not content_sid and event_type == "review_ready":
+                content_sid = str(getattr(settings, "TWILIO_WHATSAPP_REVIEW_CONTENT_SID", "") or "").strip()
+                if not content_sid:
+                    logger.warning(
+                        "WhatsApp review-ready Content template is not configured; attempting plain text for run %s",
+                        run.id,
+                    )
             success, provider_id, response_payload = _send_whatsapp(
                 channel,
                 text=text,
@@ -741,7 +965,12 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
         event_type="topic_selection",
         request_payload={"event_type": "topic_selection", "job_id": job_id, "options": _topic_options(data)},
         build_kwargs=lambda channel: {
-            "text": _plain_topic_message(run, data, channel),
+            "text": _plain_topic_message(
+                run,
+                data,
+                channel,
+                confirmation_required=channel.channel_type == NotificationChannelType.EMAIL,
+            ),
             "subject": f"Article topics for {run.automation.organization.domain}",
             "blocks": _topic_slack_blocks(run, data, channel),
             # Raw-HTML fallback used when no Customer.io template id is configured
@@ -765,7 +994,9 @@ def send_delivery_mode_required(data: dict[str, Any]) -> list[NotificationDelive
         # this prompt raced the selection and is stale — don't message anyone.
         return []
     job_id = _callback_job_id(data)
-    if job_id:
+    # Only stamp when empty — a later revision/child callback resolving this
+    # same run must not overwrite the article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.DELIVERY_MODE_REQUIRED
@@ -789,11 +1020,15 @@ def send_content_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     if not run:
         return []
     job_id = _callback_job_id(data)
-    if job_id:
+    # Only stamp when empty — a later revision/child callback resolving this
+    # same run must not overwrite the article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.COMPLETED
-    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
+    # Recovering a swept run to COMPLETED must not leave a stale timeout error.
+    run.last_error = ""
+    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "last_error", "updated_at"])
 
     text = _content_ready_text(run, data)
     return _fan_out_event(
@@ -815,25 +1050,41 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     reviewable outcomes of review_draft/publish_code deliveries, which
     otherwise notify nobody (content_ready only covers content_only runs).
     """
-    run = resolve_automation_run(data.get("notification_context"))
-    if not run:
-        return []
     job_id = _callback_job_id(data)
-    if job_id:
+    run = resolve_automation_run_for_callback(data)
+    if not run:
+        # Not every review-ready callback belongs to an automation (web/Slack
+        # runs have no channel to fan out to). Log so a genuinely dropped
+        # notification — the failure mode this fallback exists to catch — is
+        # diagnosable instead of silent.
+        logger.info(
+            "No automation run resolved for review-ready callback (job=%s); skipping channel fan-out.",
+            job_id or "?",
+        )
+        return []
+    # Only stamp the article run id when the run doesn't already have one: a
+    # later revision/child callback can resolve this same run via its inherited
+    # context, and must not overwrite the original article the automation owns.
+    if job_id and not run.article_content_factory_run_id:
         run.article_content_factory_run_id = job_id
     run.callback_payload = data
     run.status = AutomationRunStatus.COMPLETED
-    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
+    # Clear any stale timeout error: the job-id fallback can resolve a run the
+    # sweep already flipped to FAILED, and recovering it to COMPLETED must not
+    # leave content_factory_timeout on a run that actually finished.
+    run.last_error = ""
+    run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "last_error", "updated_at"])
 
-    text = _content_ready_text(run, data)
     return _fan_out_event(
         run=run,
         event_type="review_ready",
         request_payload={"event_type": "review_ready", "job_id": job_id},
         build_kwargs=lambda channel: {
-            "text": text,
-            "subject": f"Article ready to review for {run.automation.organization.domain}",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "text": _review_ready_text(run, data, channel),
+            "subject": "Your article is ready to review",
+            "blocks": _review_ready_slack_blocks(run, data, channel),
+            "html_body": _review_ready_email_html(run, data, channel),
+            "whatsapp_variables": _whatsapp_review_variables(run, data),
         },
     )
 
@@ -1006,9 +1257,20 @@ def unsubscribe_channel_for_run(run: AutomationRun, *, channel_id: Optional[str]
     }
 
 
-def handle_automation_action_token(token: str) -> dict[str, Any]:
+def _resolve_automation_action_token(token: str) -> tuple[dict[str, Any], AutomationRun]:
     max_age = int(getattr(settings, "CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS", DEFAULT_ACTION_MAX_AGE_SECONDS))
     payload = signing.loads(token, salt=AUTOMATION_ACTION_SALT, max_age=max_age)
+    if payload.get("confirmation_required"):
+        email_max_age = int(
+            getattr(
+                settings,
+                "CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS",
+                DEFAULT_EMAIL_ACTION_MAX_AGE_SECONDS,
+            )
+        )
+        # Re-validate the same timestamped signature with the shorter lifetime
+        # used by daily email CTAs. Other channel actions keep the legacy TTL.
+        payload = signing.loads(token, salt=AUTOMATION_ACTION_SALT, max_age=email_max_age)
     run = (
         AutomationRun.objects.select_related(
             "automation",
@@ -1017,6 +1279,52 @@ def handle_automation_action_token(token: str) -> dict[str, Any]:
         )
         .get(id=payload["automation_run_id"])
     )
+    return payload, run
+
+
+def preview_automation_action_token(token: str) -> dict[str, Any]:
+    """Read-only details for the email confirmation landing page."""
+
+    payload, run = _resolve_automation_action_token(token)
+    action = str(payload.get("action") or "").strip()
+    preview: dict[str, Any] = {
+        "action": action,
+        "confirmation_required": bool(payload.get("confirmation_required")),
+        "automation_run_id": str(run.id),
+        "domain": run.automation.organization.domain,
+        "already_started": bool(run.article_content_factory_run_id),
+        "article_run_id": str(run.article_content_factory_run_id or ""),
+    }
+    if action == "approve_topic":
+        options = _topic_options(dict(run.callback_payload or {}))
+        option_index = int(payload.get("option_index") or 0)
+        if option_index < 0 or option_index >= len(options):
+            raise ValueError("Invalid topic option index.")
+        option = options[option_index]
+        preview.update(
+            {
+                "option_index": option_index,
+                "topic_title": _option_title(option),
+                "keyword": _option_keyword(option),
+            }
+        )
+    elif action == "unsubscribe":
+        channel_id = str(payload.get("channel_id") or "").strip()
+        channel = None
+        if channel_id:
+            channel = NotificationChannel.objects.filter(
+                id=channel_id,
+                organization_id=run.automation.organization_id,
+            ).first()
+        preview["channel_type"] = str(
+            getattr(channel, "channel_type", "")
+            or run.automation.notification_channel.channel_type
+        )
+    return preview
+
+
+def handle_automation_action_token(token: str) -> dict[str, Any]:
+    payload, run = _resolve_automation_action_token(token)
     action = str(payload.get("action") or "").strip()
     if action == "approve_topic":
         return approve_topic_for_run(
