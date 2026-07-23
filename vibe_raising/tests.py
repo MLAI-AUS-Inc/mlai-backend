@@ -435,6 +435,8 @@ class VibeRaisingApiTests(TestCase):
             [{"metricKey": "customerInterviews", "label": "Customer Interviews", "reason": "Track discovery."}],
         )
         self.assertNotIn("ignored", response.data["update"]["metrics"])
+        self.assertEqual(response.data["update"]["id"], draft.id)
+        self.assertIsInstance(response.data["update"]["id"], int)
 
     def test_monthly_update_defaults_to_company_visibility_for_new_updates_only(self):
         self.client.force_authenticate(user=self.user)
@@ -530,9 +532,10 @@ class VibeRaisingApiTests(TestCase):
                 self.assertEqual(response.status_code, 400)
         self.assertFalse(MonthlyUpdateDraft.objects.filter(organization__domain="acme.com").exists())
 
-    def test_draft_publish_preserves_audience_visibility(self):
+    @patch("roo.services.StartupUpdateRewardService.award_monthly_update_completion")
+    def test_draft_publish_preserves_audience_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
 
         response = self.client.post(
             "/api/v1/vibe-raising/updates/",
@@ -571,6 +574,12 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNotNone(draft.published_at)
         self.assertEqual(draft.audience_visibility, ["community", "investors"])
         self.assertEqual(self.client.get("/api/v1/vibe-raising/drafts/").data["drafts"], [])
+        mock_award.assert_called_once_with(
+            user=self.user,
+            company=company,
+            month_bucket=date(2026, 6, 1),
+            draft=draft,
+        )
 
     def test_publish_requires_founder_owner(self):
         self.client.force_authenticate(user=self.user)
@@ -613,7 +622,8 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNone(draft.published_at)
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
 
-    def test_publish_is_idempotent_and_preserves_existing_visibility(self):
+    @patch("roo.services.StartupUpdateRewardService.award_monthly_update_completion")
+    def test_publish_is_idempotent_and_preserves_existing_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
         organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
@@ -639,6 +649,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(draft.published_at, first_published_at)
         self.assertEqual(draft.audience_visibility, ["investors"])
         self.assertEqual(second_response.data["update"]["audienceVisibility"], ["investors"])
+        mock_award.assert_called_once()
 
     def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
         self.client.force_authenticate(user=self.user)

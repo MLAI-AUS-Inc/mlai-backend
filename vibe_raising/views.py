@@ -914,7 +914,7 @@ def _serialize_monthly_update(draft, structured_memo=None):
     video_metadata = _structured_memo_video_metadata(structured_memo)
     published_at = getattr(draft, "published_at", None)
     return {
-        "id": str(draft.id),
+        "id": draft.id,
         "isoMonth": draft.month.isoformat(),
         "month": f"{calendar.month_name[draft.month.month]} {draft.month.year}",
         "monthName": calendar.month_name[draft.month.month],
@@ -2567,12 +2567,23 @@ class VibeRaisingMonthlyUpdatePublishView(APIView):
             pk=update_id,
             organization=organization,
         )
+        was_unpublished = draft.published_at is None
         update_fields = ["status", "updated_at"]
         draft.status = MonthlyUpdateDraftStatus.READY
-        if draft.published_at is None:
+        if was_unpublished:
             draft.published_at = timezone.now()
             update_fields.append("published_at")
         draft.save(update_fields=update_fields)
+
+        if was_unpublished:
+            from roo.services import StartupUpdateRewardService
+
+            StartupUpdateRewardService.award_monthly_update_completion(
+                user=request.user,
+                company=context["company"],
+                month_bucket=draft.month,
+                draft=draft,
+            )
         return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
 
 
