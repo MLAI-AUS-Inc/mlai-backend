@@ -874,6 +874,8 @@ def build_event_cashflow_validation(
     bank_transactions: list[dict[str, Any]],
     payout_previews: list[dict[str, Any]],
     profile: ReconciliationProfile,
+    period_start: date | None = None,
+    period_end: date | None = None,
 ) -> dict[str, Any]:
     """Estimate event/project cashflow without double-counting Stripe payouts.
 
@@ -897,6 +899,15 @@ def build_event_cashflow_validation(
             continue
         transaction_type = str(transaction.get("Type") or "").strip().upper()
         if transaction_type not in {"RECEIVE", "SPEND"}:
+            continue
+        transaction_date = parse_date(_xero_transaction_date(transaction))
+        if period_start and (
+            transaction_date is None or transaction_date < period_start
+        ):
+            continue
+        if period_end and (
+            transaction_date is None or transaction_date > period_end
+        ):
             continue
         for index, line in enumerate(transaction.get("LineItems") or []):
             if not isinstance(line, dict):
@@ -1105,6 +1116,8 @@ def build_event_cashflow_validation(
             "Stripe gross revenue, refunds, and fees plus non-Stripe Xero "
             "Receive/Spend Money lines carrying Event Name or Project Name tracking."
         ),
+        "period_start": period_start.isoformat() if period_start else None,
+        "period_end": period_end.isoformat() if period_end else None,
         "limitations": [
             "This is a cashflow validation, not an accrual P&L.",
             "Bills and journals that do not appear as Xero bank transactions are not included.",
@@ -1131,6 +1144,9 @@ def build_event_cashflow_validation(
 
 def build_xero_correction_batch(
     records: list[StripePayoutReconciliation],
+    *,
+    cashflow_period_start: date | None = None,
+    cashflow_period_end: date | None = None,
 ) -> dict[str, Any]:
     if not records:
         return {
@@ -1139,6 +1155,16 @@ def build_xero_correction_batch(
             "payouts": [],
             "event_revenue": [],
             "event_cashflow_validation": {
+                "period_start": (
+                    cashflow_period_start.isoformat()
+                    if cashflow_period_start
+                    else None
+                ),
+                "period_end": (
+                    cashflow_period_end.isoformat()
+                    if cashflow_period_end
+                    else None
+                ),
                 "event_count": 0,
                 "status_counts": {},
                 "negative_count": 0,
@@ -1178,6 +1204,8 @@ def build_xero_correction_batch(
             bank_transactions=bank_transactions,
             payout_previews=previews,
             profile=profile,
+            period_start=cashflow_period_start,
+            period_end=cashflow_period_end,
         ),
     }
 

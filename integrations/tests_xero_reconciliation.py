@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 from unittest.mock import Mock, patch
 
@@ -358,6 +358,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "BankTransactionID": "stripe-payout",
                     "Type": "RECEIVE",
                     "Status": "AUTHORISED",
+                    "DateString": "2026-05-01",
                     "LineItems": [{
                         "UnitAmount": 92.00,
                         "Quantity": 1,
@@ -372,6 +373,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "BankTransactionID": "sponsor-income",
                     "Type": "RECEIVE",
                     "Status": "AUTHORISED",
+                    "DateString": "2026-05-02",
                     "LineItems": [{
                         "UnitAmount": 100.00,
                         "Quantity": 1,
@@ -386,6 +388,7 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "BankTransactionID": "event-cost",
                     "Type": "SPEND",
                     "Status": "AUTHORISED",
+                    "DateString": "2026-05-03",
                     "LineItems": [{
                         "UnitAmount": 250.00,
                         "Quantity": 1,
@@ -400,12 +403,27 @@ class XeroReconciliationWorkflowTests(TestCase):
                     "BankTransactionID": "unmatched-cost",
                     "Type": "SPEND",
                     "Status": "AUTHORISED",
+                    "DateString": "2026-05-04",
                     "LineItems": [{
                         "UnitAmount": 30.00,
                         "Quantity": 1,
                         "Tracking": [{
                             "Name": "Event Name",
                             "Option": "Costs Only Event",
+                        }],
+                    }],
+                },
+                {
+                    "BankTransactionID": "prior-period-cost",
+                    "Type": "SPEND",
+                    "Status": "AUTHORISED",
+                    "DateString": "2025-12-31",
+                    "LineItems": [{
+                        "UnitAmount": 999.00,
+                        "Quantity": 1,
+                        "Tracking": [{
+                            "Name": "Event Name",
+                            "Option": "Luma Night",
                         }],
                     }],
                 },
@@ -416,6 +434,8 @@ class XeroReconciliationWorkflowTests(TestCase):
                 }],
             }],
             profile=self.profile,
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 6, 30),
         )
         row = validation["rows"][0]
         self.assertEqual(row["xero_other_income_cents"], 10000)
@@ -428,6 +448,8 @@ class XeroReconciliationWorkflowTests(TestCase):
         self.assertEqual(row["profitability_status"], "negative")
         self.assertIn("negative_cashflow", row["validation_flags"])
         self.assertEqual(validation["negative_count"], 1)
+        self.assertEqual(validation["period_start"], "2026-01-01")
+        self.assertEqual(validation["period_end"], "2026-06-30")
         self.assertEqual(
             validation["unmatched_xero_tracking"][0]["event_name"],
             "Costs Only Event",
@@ -1381,6 +1403,14 @@ class ReconciliationWorkflowApiTests(APITestCase):
         self.assertFalse(response.data["xero_writes"])
         records = build_batch.call_args.args[0]
         self.assertEqual([record.payout_id for record in records], ["po_correction"])
+        self.assertEqual(
+            build_batch.call_args.kwargs["cashflow_period_start"],
+            date(2026, 1, 1),
+        )
+        self.assertEqual(
+            build_batch.call_args.kwargs["cashflow_period_end"],
+            date(2026, 6, 30),
+        )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_statement_preview_and_safe_batch_are_admin_guarded(self, _permission):

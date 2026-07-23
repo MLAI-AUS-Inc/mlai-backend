@@ -666,6 +666,7 @@ class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
         queryset = StripePayoutReconciliation.objects.filter(
             organization=organization,
         ).order_by("arrival_date", "id")
+        cashflow_period = {"since": None, "until": None}
         for field_name, lookup in (("since", "arrival_date__gte"), ("until", "arrival_date__lte")):
             raw_value = str(request.data.get(field_name) or "").strip()
             if not raw_value:
@@ -677,11 +678,16 @@ class ReconciliationPayoutCorrectionPreviewView(ReconciliationAdminView):
                     {"error": f"{field_name} must use YYYY-MM-DD"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            cashflow_period[field_name] = parsed_value
             queryset = queryset.filter(**{lookup: parsed_value})
 
         records = list(queryset[:max_count])
         try:
-            preview = build_xero_correction_batch(records)
+            preview = build_xero_correction_batch(
+                records,
+                cashflow_period_start=cashflow_period["since"],
+                cashflow_period_end=cashflow_period["until"],
+            )
         except ReconciliationProfile.DoesNotExist:
             return Response(
                 {"error": "Reconciliation profile is not configured."},
