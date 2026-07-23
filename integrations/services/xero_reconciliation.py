@@ -1353,7 +1353,14 @@ def post_xero_bank_transaction(record: StripePayoutReconciliation, *, approved_b
         )
         existing_response.raise_for_status()
         existing = existing_response.json().get("BankTransactions", [])
-        bank_transaction = existing[0] if existing else None
+        bank_transaction = next(
+            (
+                item
+                for item in existing
+                if str(item.get("Status") or "").strip().upper() != "DELETED"
+            ),
+            None,
+        )
         if bank_transaction is not None:
             differences = _line_item_differences(
                 bank_transaction,
