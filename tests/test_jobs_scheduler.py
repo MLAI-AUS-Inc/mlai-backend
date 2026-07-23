@@ -675,6 +675,28 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
 
     @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_not_required_to_live_in_australia_is_eligible(self):
+        result = classify_location_eligibility(
+            {
+                "title": "Remote AI Engineer",
+                "description": "This role is remote; you do not need to live in Australia.",
+            }
+        )
+
+        self.assertEqual(result.status, "australia_eligible")
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_explicit_inability_to_hire_in_australia_is_restricted(self):
+        result = classify_location_eligibility(
+            {
+                "title": "Remote AI Engineer",
+                "description": "We can't hire candidates in Australia at this time.",
+            }
+        )
+
+        self.assertEqual(result.status, "restricted_remote")
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
     def test_europe_restriction_wins_when_job_mentions_apac_customers(self):
         run = JobRun.objects.create(
             run_date="2026-05-29",

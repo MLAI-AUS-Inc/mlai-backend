@@ -107,7 +107,9 @@ AUSTRALIA_ELIGIBLE_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
 AUSTRALIA_EXCLUSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"\b(?:not|cannot|can'?t|unable to|won'?t|doesn'?t|don'?t)\b(?:(?!\boutside\b)[^.]){0,60}\baustralia\b",
+            r"\b(?:cannot|can'?t|unable to|won'?t|do not|don'?t)\s+"
+            r"(?:hire|employ|accept|consider|support)\b[^.]{0,50}\b"
+            r"(?:candidates?\s+)?(?:in|from)\s+australia\b",
             re.I,
         ),
         "Description explicitly excludes Australia",
