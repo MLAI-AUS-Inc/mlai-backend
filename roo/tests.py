@@ -590,6 +590,30 @@ class CoworkingServiceTests(TestCase):
         account = PointsAccount.objects.get(user=self.user)
         self.assertEqual(account.balance, 2)  # charged once at the standard 8
 
+    @patch('roo.services.connection')
+    def test_booking_date_lock_uses_postgres_transaction_advisory_lock(self, mock_connection):
+        mock_connection.vendor = 'postgresql'
+        cursor = mock_connection.cursor.return_value.__enter__.return_value
+        booking_date = date(2026, 7, 24)
+
+        CoworkingService._lock_booking_date(booking_date)
+
+        cursor.execute.assert_called_once_with(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            [
+                CoworkingService.BOOKING_DATE_LOCK_NAMESPACE,
+                booking_date.toordinal(),
+            ],
+        )
+
+    @patch('roo.services.connection')
+    def test_booking_date_lock_is_skipped_off_postgres(self, mock_connection):
+        mock_connection.vendor = 'sqlite'
+
+        CoworkingService._lock_booking_date(date(2026, 7, 24))
+
+        mock_connection.cursor.assert_not_called()
+
 
 class CoworkingMonthlyUpdateDiscountTests(TestCase):
     """The coworking cost drops to 4 when the user's startup is an ABR-verified

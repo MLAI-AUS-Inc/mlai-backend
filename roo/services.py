@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 import requests
 from django.conf import settings
-from django.db import transaction, IntegrityError, models
+from django.db import connection, transaction, IntegrityError, models
 from django.db.models import Count
 from django.utils import timezone
 
@@ -28,6 +28,14 @@ from .permissions import (
 from core.models import User
 
 logger = logging.getLogger(__name__)
+
+
+class CoworkingBatchBookingError(ValueError):
+    """Raised when an admin coworking batch fails preflight."""
+
+    def __init__(self, message: str, errors: Optional[list[dict]] = None):
+        super().__init__(message)
+        self.errors = errors or []
 
 
 class PointsPurchaseService:
@@ -666,6 +674,7 @@ class CoworkingService:
     # A 'ready' monthly update grants the coworking discount for this many days
     # from the moment it first became ready.
     MONTHLY_UPDATE_DISCOUNT_WINDOW_DAYS = 28
+    BOOKING_DATE_LOCK_NAMESPACE = 1380929347
 
     @staticmethod
     def _has_ready_monthly_update(user: User, booking_date: date) -> bool:
@@ -747,6 +756,22 @@ class CoworkingService:
             if CoworkingService._has_ready_monthly_update(user, booking_date):
                 return getattr(settings, 'COWORKING_DAY_DISCOUNT_COST_POINTS', 4)
         return standard
+
+    @staticmethod
+    def _lock_booking_date(booking_date: date) -> None:
+        """Serialize capacity checks for one date on PostgreSQL.
+
+        Capacity normally comes from settings, so there may be no row available
+        for ``select_for_update``. A transaction-scoped advisory lock protects
+        both single and batch booking paths without creating fake overrides.
+        """
+        if connection.vendor != 'postgresql':
+            return
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                [CoworkingService.BOOKING_DATE_LOCK_NAMESPACE, booking_date.toordinal()],
+            )
     
     @staticmethod
     def get_capacity(booking_date: date) -> int:
@@ -933,6 +958,8 @@ class CoworkingService:
         
         if booking_date > today + timedelta(days=max_advance_days):
             raise ValueError(f"Cannot book more than {max_advance_days} days in advance")
+
+        CoworkingService._lock_booking_date(booking_date)
         
         # Check if user already has a booking for this date
         existing = CoworkingBooking.objects.filter(
@@ -978,6 +1005,119 @@ class CoworkingService:
         )
         
         return booking, True
+
+    @staticmethod
+    @transaction.atomic
+    def book_many(
+        *,
+        target_users: list[User],
+        booking_date: date,
+        created_by_slack_id: str,
+        slack_channel_id: Optional[str] = None,
+    ) -> list[Tuple[CoworkingBooking, bool]]:
+        """Book multiple target users atomically for an admin-initiated check-in."""
+        unique_users: list[User] = []
+        seen_user_ids = set()
+        for user in target_users:
+            if user.id in seen_user_ids:
+                continue
+            unique_users.append(user)
+            seen_user_ids.add(user.id)
+
+        if not unique_users:
+            raise CoworkingBatchBookingError("At least one target user is required")
+
+        today = timezone.now().date()
+        max_advance_days = getattr(settings, 'COWORKING_BOOKING_ADVANCE_DAYS', 30)
+
+        if booking_date < today:
+            raise CoworkingBatchBookingError("Cannot book dates in the past")
+
+        if booking_date > today + timedelta(days=max_advance_days):
+            raise CoworkingBatchBookingError(
+                f"Cannot book more than {max_advance_days} days in advance"
+            )
+
+        CoworkingService._lock_booking_date(booking_date)
+
+        existing_bookings = {
+            booking.user_id: booking
+            for booking in CoworkingBooking.objects.select_for_update().filter(
+                user__in=unique_users,
+                date=booking_date,
+                status='booked',
+            )
+        }
+        users_to_book = [
+            user for user in unique_users if user.id not in existing_bookings
+        ]
+
+        available, capacity = CoworkingService.check_availability(booking_date)
+        if available < len(users_to_book):
+            raise CoworkingBatchBookingError(
+                f"Not enough availability for {booking_date}",
+                errors=[
+                    {
+                        'slack_user_id': user.slack_id,
+                        'error': (
+                            f"No availability for {booking_date}: "
+                            f"{available} slots available, {len(users_to_book)} requested"
+                        ),
+                        'available_slots': available,
+                        'requested_new_bookings': len(users_to_book),
+                        'capacity': capacity,
+                    }
+                    for user in users_to_book
+                ],
+            )
+
+        costs_by_user_id = {
+            user.id: CoworkingService.get_coworking_cost(
+                user=user,
+                booking_date=booking_date,
+            )
+            for user in users_to_book
+        }
+        accounts_by_user_id = {
+            account.user_id: account
+            for account in PointsAccount.objects.select_for_update().filter(
+                user__in=users_to_book
+            )
+        }
+        balance_errors = []
+        for user in users_to_book:
+            account = accounts_by_user_id.get(user.id)
+            balance = account.balance if account else 0
+            cost = costs_by_user_id[user.id]
+            if balance < cost:
+                balance_errors.append({
+                    'slack_user_id': user.slack_id,
+                    'error': f"Insufficient balance: {balance} < {cost} required",
+                    'balance': balance,
+                    'required_points': cost,
+                })
+        if balance_errors:
+            raise CoworkingBatchBookingError(
+                "One or more users have insufficient Roo Points",
+                errors=balance_errors,
+            )
+
+        results: list[Tuple[CoworkingBooking, bool]] = []
+        for user in unique_users:
+            existing = existing_bookings.get(user.id)
+            if existing:
+                results.append((existing, False))
+                continue
+            results.append(
+                CoworkingService.book(
+                    user=user,
+                    booking_date=booking_date,
+                    created_by_slack_id=created_by_slack_id,
+                    slack_channel_id=slack_channel_id,
+                )
+            )
+
+        return results
     
     @staticmethod
     @transaction.atomic
