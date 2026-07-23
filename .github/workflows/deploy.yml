@@ -109,6 +109,7 @@ jobs:
       env:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
+        VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
       run: |
         if [ -z "$REDIS_URL" ]; then
           echo "::error::Required repository secret REDIS_URL is not configured"
@@ -116,6 +117,14 @@ jobs:
         fi
         if [ -z "$ROO_SIM_PATIENT_KEY" ]; then
           echo "::error::Required repository secret ROO_SIM_PATIENT_KEY is not configured"
+          exit 1
+        fi
+        if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
+          echo "::error::Required repository secret VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters"
+          exit 1
+        fi
+        if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
+          echo "::error::Victor AI and simulated-patient credentials must be distinct"
           exit 1
         fi
         ./deploy.sh
