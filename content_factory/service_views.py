@@ -4,6 +4,7 @@ import os
 import time
 from datetime import date as calendar_date, datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -11,6 +12,7 @@ from django.core import signing
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseRedirect
+from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -1755,18 +1757,54 @@ class ResearchAutomationActionView(APIView):
     permission_classes = []
 
     def get(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
+
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if preview.get("confirmation_required"):
+            return render(
+                request,
+                "content_factory/automation_action_confirm.html",
+                {"token": token, **preview},
+            )
+        return self._handle(request, token=token)
 
     def post(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
 
-    def _handle(self, request):
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._handle(
+            request,
+            token=token,
+            render_browser_result=bool(preview.get("confirmation_required")),
+        )
+
+    @staticmethod
+    def _token(request) -> str:
+        return str(request.query_params.get("token") or request.data.get("token") or "").strip()
+
+    def _handle(self, request, *, token: str, render_browser_result: bool = False):
         from django.core import signing as django_signing
         from integrations.services.notification_adapters import handle_automation_action_token
 
-        token = str(request.query_params.get("token") or request.data.get("token") or "").strip()
-        if not token:
-            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             result = handle_automation_action_token(token)
         except django_signing.BadSignature:
@@ -1774,6 +1812,19 @@ class ResearchAutomationActionView(APIView):
         except Exception as exc:
             logger.warning("Research automation action failed: %s", exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if render_browser_result:
+            job_id = str(result.get("job_id") or result.get("run_id") or "").strip()
+            frontend_base = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
+            if job_id and frontend_base:
+                query = urlencode({"automationAction": "started"})
+                return HttpResponseRedirect(
+                    f"{frontend_base}/founder-tools/marketing/runs/{job_id}?{query}"
+                )
+            return render(
+                request,
+                "content_factory/automation_action_complete.html",
+                {"result": result},
+            )
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -7406,6 +7457,10 @@ class SEOKeywordBulkUpsertView(APIView):
                         velocity_score=velocity.get('velocity_score', 0.0),
                         trend_status=velocity.get('trend_status', 'stable'),
                         daily_volumes=velocity.get('daily_volumes', []),
+                        source=velocity.get('source', 'unknown'),
+                        basis=velocity.get('basis', 'unknown'),
+                        period_label=velocity.get('period_label', ''),
+                        is_estimated=velocity.get('is_estimated', True),
                     )
 
                 # Create AI saturation snapshot if provided
@@ -7867,14 +7922,24 @@ class SEOWrittenArticleCreateView(APIView):
             'primary_keyword': primary_keyword,
             'article_url': serializer.validated_data.get('article_url'),
             'pr_url': serializer.validated_data.get('pr_url'),
+            'canonical_url': serializer.validated_data.get('canonical_url', ''),
+            'canonical_path': serializer.validated_data.get('canonical_path', ''),
             'job': job,
             'published_at': timezone.now(),
         }
-        article, created = WrittenArticle.objects.update_or_create(
-            organization=org,
-            slug=serializer.validated_data['slug'],
-            defaults=defaults,
-        )
+        incoming_analytics_id = serializer.validated_data.get('analytics_id')
+        # analytics_id is create-only. Replayed callbacks may refresh article
+        # metadata, but a later run must never replace the stable identity that
+        # already owns historical aggregates.
+        with transaction.atomic():
+            article, created = WrittenArticle.objects.update_or_create(
+                organization=org,
+                slug=serializer.validated_data['slug'],
+                defaults=defaults,
+            )
+            if created and incoming_analytics_id and article.analytics_id != incoming_analytics_id:
+                article.analytics_id = incoming_analytics_id
+                article.save(update_fields=['analytics_id'])
 
         # A PR URL only proves a PR exists; merge/live state is confirmed later
         # by the publish-status refresh. Never downgrade an existing status.

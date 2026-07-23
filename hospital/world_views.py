@@ -1,4 +1,4 @@
-"""Public world-state endpoint for the health-hack 3D visualisation.
+"""Admin-only world-state endpoint for the closed HealthHack visualisation.
 
 Serves a render-ready entity list (cubes = teams placed by rank, spheres =
 recent submissions) that the health-hack frontend polls every 5 seconds.
@@ -10,11 +10,12 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.db.models import OuterRef, Subquery
 from django.utils import timezone
-from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Submission, Team
+from core.permissions import IsHealthHackAdmin
+
+from .models import HospitalCompetitionRound, Submission, Team
 
 WORLD_CACHE_KEY = "hospital_world_state"
 # The build is now O(teams) not O(submissions), so freshness — not cost —
@@ -42,8 +43,7 @@ def rank_to_lat_lon(rank):
 
 
 class WorldStateView(APIView):
-    permission_classes = [permissions.AllowAny]
-    authentication_classes = []
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         payload = cache.get(WORLD_CACHE_KEY)
@@ -64,11 +64,16 @@ class WorldStateView(APIView):
         # ≈ 600MB) into memory on every cache miss and melting the workers.
         # This view is polled every ~5s per connected player.
         best = (
-            Submission.objects.filter(team=OuterRef("pk"))
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                team=OuterRef("pk"),
+            )
             .order_by("-score", "submitted_at")
         )
         teams = list(
-            Team.objects.annotate(
+            Team.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+            ).annotate(
                 best_score=Subquery(best.values("score")[:1]),
                 best_submitted=Subquery(best.values("submitted_at")[:1]),
             )
@@ -119,7 +124,10 @@ class WorldStateView(APIView):
 
         cutoff = timezone.now() - RECENT_SUBMISSION_WINDOW
         for sub in (
-            Submission.objects.filter(submitted_at__gte=cutoff)
+            Submission.objects.filter(
+                round__status=HospitalCompetitionRound.STATUS_ACTIVE,
+                submitted_at__gte=cutoff,
+            )
             .order_by("-submitted_at")
             .values("id", "accuracy", "team__team_name")[:RECENT_SUBMISSION_LIMIT]
         ):

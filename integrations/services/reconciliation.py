@@ -35,11 +35,14 @@ from django.conf import settings
 
 
 STRIPE_API_BASE_URL = "https://api.stripe.com"
+DEFAULT_STRIPE_API_VERSION = "2026-02-25.clover"
+_STRIPE_API_VERSION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\.[A-Za-z0-9_-]+)?$")
 
 # Stripe balance-transaction types that represent processing fees (folded into
 # the Stripe Fees line rather than listed as refunds/adjustments).
 STRIPE_FEE_TYPES = {"stripe_fee", "application_fee", "tax_fee"}
 REFUND_TYPES = {"refund", "payment_refund"}
+REVENUE_TYPES = {"charge", "payment"}
 
 # openpyxl rejects most C0 control chars (it allows tab \x09, LF \x0a, CR \x0d).
 _ILLEGAL_XLSX_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -63,6 +66,13 @@ class StripeAPIError(RuntimeError):
     def __init__(self, message: str, *, status_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class ReconciliationMappingSource:
+    LUMA_EVENT = "luma_event"
+    STRIPE_INVOICE = "stripe_invoice"
+    STRIPE_METADATA = "stripe_metadata"
+    UNATTRIBUTED = "unattributed"
 
 
 def _dollars(cents: int) -> float:
@@ -96,6 +106,17 @@ def _md_cell(value: Any) -> str:
     return s
 
 
+def resolve_stripe_api_version(value: Any) -> str:
+    """Return a valid Stripe-Version header, safely repairing malformed env values.
+
+    A production env file once contained a literal Python settings expression.
+    Sending that text as a header makes every Stripe request fail with a 400, so
+    malformed values use the pinned application default instead.
+    """
+    candidate = str(value or "").strip()
+    return candidate if _STRIPE_API_VERSION_RE.fullmatch(candidate) else DEFAULT_STRIPE_API_VERSION
+
+
 class ReconciliationReportService:
     """Pull Stripe payouts + charges and build the reconciliation report."""
 
@@ -114,9 +135,12 @@ class ReconciliationReportService:
             else getattr(settings, "STRIPE_SECRET_KEY", None)
         )
         self.stripe_api_key = str(raw_key or "").strip()
-        self.stripe_api_version = str(
-            stripe_api_version or getattr(settings, "STRIPE_API_VERSION", "2026-02-25.clover")
+        configured_version = (
+            stripe_api_version
+            if stripe_api_version is not None
+            else getattr(settings, "STRIPE_API_VERSION", DEFAULT_STRIPE_API_VERSION)
         )
+        self.stripe_api_version = resolve_stripe_api_version(configured_version)
         self.base_url = str(base_url or STRIPE_API_BASE_URL).rstrip("/")
         self.session = session or requests.Session()
         self.timeout = timeout
@@ -151,7 +175,7 @@ class ReconciliationReportService:
             payout_reports.append(report)
             sales_rows.extend(rows)
             for row in rows:
-                if not row["event_api_id"]:
+                if row.get("source_type") == ReconciliationMappingSource.UNATTRIBUTED:
                     unmatched.append(row)
 
             ccy = report["currency"]
@@ -204,13 +228,32 @@ class ReconciliationReportService:
 
         return result
 
+    def build_payout(self, payout_id: str) -> Dict[str, Any]:
+        """Build one payout ledger for a webhook-triggered incremental sync."""
+        if not self.stripe_api_key:
+            raise StripeConfigurationError("STRIPE_SECRET_KEY is not configured on mlai-backend.")
+        normalized_id = str(payout_id or "").strip()
+        if not normalized_id.startswith("po_"):
+            raise StripeAPIError("Invalid Stripe payout id.")
+        payout = self._get(f"/v1/payouts/{normalized_id}", {})
+        if str(payout.get("status") or "") != "paid":
+            raise StripeAPIError("Stripe payout is not paid yet.")
+        report, rows = self._build_payout_report(payout)
+        return {
+            "payout_count": 1,
+            "charge_count": len(rows),
+            "unmatched_charge_count": sum(
+                1 for row in rows if row.get("source_type") == ReconciliationMappingSource.UNATTRIBUTED
+            ),
+            "payouts": [report],
+        }
+
     # ---- payout assembly -------------------------------------------------
 
     def _build_payout_report(self, payout: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        payout_id = payout.get("id", "")
+        payout_id = str(payout.get("id") or "")
         currency = str(payout.get("currency") or "").upper()
         arrival = _unix_to_date(payout.get("arrival_date"))
-
         txns = self._list(
             "/v1/balance_transactions",
             {"payout": payout_id, "expand[]": "data.source"},
@@ -218,46 +261,31 @@ class ReconciliationReportService:
 
         sales_rows: List[Dict[str, Any]] = []
         refunds: List[Dict[str, Any]] = []
-        gross_cents = 0
-        fee_cents = 0
-        net_cents = 0
-        non_payout_net = 0
-        events: Dict[str, Dict[str, Any]] = {}
+        groups: Dict[str, Dict[str, Any]] = {}
+        gross_cents = fee_cents = standalone_fee_cents = charge_net_cents = non_payout_net = 0
 
         for txn in txns:
-            ttype = txn.get("type")
+            ttype = str(txn.get("type") or "")
             if ttype == "payout":
-                # The payout line itself (negative); skip but note for tie-out.
                 continue
-
             non_payout_net += int(txn.get("net") or 0)
 
-            if ttype == "charge":
+            if ttype in REVENUE_TYPES:
                 source = txn.get("source") if isinstance(txn.get("source"), dict) else {}
-                metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
-                event_api_id = str(metadata.get("event_api_id") or "").strip()
-                event_name = (
-                    str(source.get("description") or txn.get("description") or "").strip()
-                    or "(no event name)"
-                )
-                buyer_email = str(
-                    metadata.get("email")
-                    or (source.get("billing_details") or {}).get("email")
-                    or ""
-                ).strip()
-
+                attribution = self._revenue_attribution(txn, source)
+                metadata = attribution.pop("metadata")
                 row_gross = int(txn.get("amount") or 0)
                 row_fee = int(txn.get("fee") or 0)
                 row_net = int(txn.get("net") or 0)
                 gross_cents += row_gross
                 fee_cents += row_fee
-                net_cents += row_net
-
+                charge_net_cents += row_net
                 row = {
                     "charge_id": str(source.get("id") or txn.get("id") or ""),
-                    "event_api_id": event_api_id,
-                    "event_name": event_name,
-                    "buyer_email": buyer_email,
+                    "event_api_id": attribution["event_api_id"],
+                    "event_name": attribution["source_label"],
+                    **attribution,
+                    "buyer_email": str(metadata.get("email") or (source.get("billing_details") or {}).get("email") or "").strip(),
                     "gross_cents": row_gross,
                     "stripe_fee_cents": row_fee,
                     "net_cents": row_net,
@@ -267,45 +295,42 @@ class ReconciliationReportService:
                     "payout_arrival": arrival,
                 }
                 sales_rows.append(row)
-
-                # Group by Luma event. Unmatched charges (no event_api_id) must
-                # NOT collapse into one bucket — key them per charge so each gets
-                # its own split line the human can assign.
-                key = event_api_id or ("charge:" + row["charge_id"])
-                bucket = events.setdefault(
+                key = f"{row['source_type']}:{row['source_id']}"
+                bucket = groups.setdefault(
                     key,
                     {
-                        "event_api_id": event_api_id,
-                        "event_name": event_name,
+                        "event_api_id": row["event_api_id"],
+                        "event_name": row["source_label"],
+                        "source_type": row["source_type"],
+                        "source_id": row["source_id"],
+                        "source_label": row["source_label"],
+                        "project_name": row.get("project_name", ""),
                         "ticket_count": 0,
                         "gross_cents": 0,
+                        "stripe_fee_cents": 0,
                     },
                 )
-                # Upgrade a placeholder name if a later charge carries the real one.
-                if bucket["event_name"] in ("", "(no event name)") and event_name not in ("", "(no event name)"):
-                    bucket["event_name"] = event_name
                 bucket["ticket_count"] += 1
                 bucket["gross_cents"] += row_gross
-
+                bucket["stripe_fee_cents"] += row_fee
             elif ttype in STRIPE_FEE_TYPES or txn.get("reporting_category") == "fee":
-                # Standalone Stripe fee (not tied to a charge) — fold into the
-                # Stripe Fees total so gross/fee/deposit stay consistent. net is
-                # negative (a cost); add its magnitude to fee_cents.
-                fee_cents += -int(txn.get("net") or 0)
-
+                standalone_fee = -int(txn.get("net") or 0)
+                fee_cents += standalone_fee
+                standalone_fee_cents += standalone_fee
             elif ttype in REFUND_TYPES:
                 source = txn.get("source") if isinstance(txn.get("source"), dict) else {}
                 refunds.append(
                     {
                         "id": str(txn.get("id") or ""),
+                        "type": ttype,
                         "amount_cents": int(txn.get("amount") or 0),
                         "net_cents": int(txn.get("net") or 0),
                         "currency": str(txn.get("currency") or currency).upper(),
                         "description": str(txn.get("description") or source.get("description") or ""),
+                        **self._refund_attribution(source),
                     }
                 )
             else:
-                # adjustments, disputes, stripe_fee lines, etc. — surface them.
                 refunds.append(
                     {
                         "id": str(txn.get("id") or ""),
@@ -314,42 +339,95 @@ class ReconciliationReportService:
                         "net_cents": int(txn.get("net") or 0),
                         "currency": str(txn.get("currency") or currency).upper(),
                         "description": str(txn.get("description") or ""),
+                        "source_type": ReconciliationMappingSource.UNATTRIBUTED,
+                        "source_id": str(txn.get("id") or ""),
+                        "source_label": str(txn.get("description") or ttype),
+                        "event_api_id": "",
                     }
                 )
 
         refund_net_cents = sum(int(r.get("net_cents") or 0) for r in refunds)
         payout_amount = int(payout.get("amount") or 0)
-
         warnings: List[str] = []
         if non_payout_net != payout_amount:
             warnings.append(
                 "Tie-out mismatch: sum of transaction nets "
                 f"({_dollars(non_payout_net)}) != payout amount ({_dollars(payout_amount)})."
             )
-        if any(not r["event_api_id"] for r in sales_rows):
-            warnings.append("Some charges have no Luma event_api_id — event must be assigned manually.")
+        if any(r["source_type"] == ReconciliationMappingSource.UNATTRIBUTED for r in sales_rows):
+            warnings.append(
+                "Some payments have no Luma event_api_id and could not be attributed — "
+                "a source mapping is required."
+            )
         if refunds:
             warnings.append(f"{len(refunds)} non-charge transaction(s) (refunds/adjustments) in this payout.")
-
+        ordered_groups = sorted(groups.values(), key=lambda item: item["event_name"])
         report = {
             "payout_id": payout_id,
             "arrival_date": arrival,
             "currency": currency,
-            # deposit_cents is the ACTUAL bank line (payout amount). It equals
-            # charge_net_cents + refund_net_cents when the payout ties out.
             "payout_amount_cents": payout_amount,
             "deposit_cents": payout_amount,
             "gross_cents": gross_cents,
             "stripe_fee_cents": fee_cents,
-            "charge_net_cents": net_cents,       # gross - Stripe fees, before refunds
+            "standalone_fee_cents": standalone_fee_cents,
+            "charge_net_cents": charge_net_cents,
             "refund_net_cents": refund_net_cents,
             "charge_count": len(sales_rows),
-            "events": sorted(events.values(), key=lambda e: e["event_name"]),
+            "events": ordered_groups,
+            "revenue_groups": ordered_groups,
             "charges": sales_rows,
             "refunds": refunds,
             "warnings": warnings,
         }
         return report, sales_rows
+
+    def _revenue_attribution(self, txn: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        event_api_id = str(metadata.get("event_api_id") or "").strip()
+        source_object_id = str(source.get("id") or txn.get("id") or "").strip()
+        description = str(source.get("description") or txn.get("description") or "").strip()
+        if event_api_id:
+            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_api_id, "source_label": description or event_api_id, "event_api_id": event_api_id, "project_name": "", "metadata": metadata}
+        if metadata.get("points_purchase_id") or metadata.get("pack_id") or metadata.get("points"):
+            return {"source_type": ReconciliationMappingSource.STRIPE_METADATA, "source_id": "roo_points", "source_label": description or "Roo Points", "event_api_id": "", "project_name": "Roo Points", "metadata": metadata}
+        invoice = self._invoice_for_payment(source)
+        if invoice:
+            invoice_id = str(invoice.get("id") or source_object_id)
+            lines = invoice.get("lines") if isinstance(invoice.get("lines"), dict) else {}
+            descriptions = [str(line.get("description") or "").strip() for line in lines.get("data", []) if isinstance(line, dict) and str(line.get("description") or "").strip()]
+            label = descriptions[0] if descriptions else description or invoice_id
+            return {"source_type": ReconciliationMappingSource.STRIPE_INVOICE, "source_id": invoice_id, "source_label": label, "event_api_id": "", "project_name": label, "stripe_invoice_id": invoice_id, "metadata": metadata}
+        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": source_object_id, "source_label": description or "(unattributed Stripe payment)", "event_api_id": "", "project_name": "", "metadata": metadata}
+
+    def _invoice_for_payment(self, source: Dict[str, Any]) -> Dict[str, Any]:
+        raw_invoice = source.get("invoice")
+        if isinstance(raw_invoice, dict):
+            return raw_invoice
+        invoice_id = str(raw_invoice or "").strip()
+        raw_intent = source.get("payment_intent")
+        intent_id = str(raw_intent.get("id") if isinstance(raw_intent, dict) else raw_intent or "").strip()
+        if not intent_id and str(source.get("id") or "").startswith("pi_"):
+            intent_id = str(source["id"])
+        if not invoice_id and intent_id:
+            payments = self._list("/v1/invoice_payments", {"payment[type]": "payment_intent", "payment[payment_intent]": intent_id})
+            if payments:
+                raw_invoice = payments[0].get("invoice")
+                invoice_id = str(raw_invoice.get("id") if isinstance(raw_invoice, dict) else raw_invoice or "").strip()
+        return self._get(f"/v1/invoices/{invoice_id}", {}) if invoice_id else {}
+
+    def _refund_attribution(self, source: Dict[str, Any]) -> Dict[str, Any]:
+        raw_intent = source.get("payment_intent")
+        if isinstance(raw_intent, dict):
+            intent = raw_intent
+        else:
+            intent_id = str(raw_intent or "").strip()
+            intent = self._get(f"/v1/payment_intents/{intent_id}", {}) if intent_id else {}
+        metadata = intent.get("metadata") if isinstance(intent.get("metadata"), dict) else {}
+        event_id = str(metadata.get("event_api_id") or "").strip()
+        if event_id:
+            return {"source_type": ReconciliationMappingSource.LUMA_EVENT, "source_id": event_id, "source_label": str(intent.get("description") or event_id), "event_api_id": event_id}
+        return {"source_type": ReconciliationMappingSource.UNATTRIBUTED, "source_id": str(intent.get("id") or source.get("id") or ""), "source_label": str(intent.get("description") or source.get("description") or ""), "event_api_id": ""}
 
     # ---- Stripe HTTP -----------------------------------------------------
 
@@ -411,12 +489,12 @@ class ReconciliationReportService:
         L: List[str] = []
         L.append("# Stripe payout reconciliation brief")
         L.append("")
-        L.append("**For Claude Cowork.** Reconcile each Stripe deposit below in the Xero")
+        L.append("**For review.** Reconcile each Stripe deposit below in Xero")
         L.append("bank feed. **Only these Stripe/Luma deposits — leave every other bank")
         L.append("line (transfers, PayID, etc.) untouched.**")
         L.append("")
         L.append("For each: open the bank line -> **Create** -> fill Who / Why, then")
-        L.append("**Add details** to split by event. Each split line sets **What** (account),")
+        L.append("**Add details** to split by source. Each split line sets **What** (account),")
         L.append("**Event Name**, **Project Name**, **Amount**, **Tax Rate**. The split total")
         L.append("must equal the bank line to the cent. **A human clicks OK to confirm.**")
         L.append("")
@@ -425,7 +503,7 @@ class ReconciliationReportService:
 
         L.append("## Deposits to reconcile")
         L.append("")
-        L.append("| Payout | Arrived | Bank deposit | Events | Charges |")
+        L.append("| Payout | Arrived | Bank deposit | Sources | Payments |")
         L.append("|---|---|---|---|---|")
         for p in payouts:
             evs = ", ".join(_md_cell(e["event_name"]) for e in p["events"]) or "—"
@@ -436,8 +514,8 @@ class ReconciliationReportService:
         if summary.get("unmatched_charge_count"):
             L.append("")
             L.append(
-                f"> ⚠ {summary['unmatched_charge_count']} charge(s) have no Luma "
-                "event_api_id — assign the event manually (marked below)."
+                f"> ⚠ {summary['unmatched_charge_count']} payment(s) could not be attributed "
+                "from Stripe/Luma metadata — map them manually (marked below)."
             )
         L.append("")
         L.append("---")
@@ -454,7 +532,7 @@ class ReconciliationReportService:
             L.append("")
             L.append("- **Who:** Stripe Payments")
             events_list = ", ".join(_md_cell(e["event_name"]) for e in p["events"]) or "—"
-            L.append(f"- **Why:** Luma tickets — {events_list} — {p['charge_count']} charge(s) — payout {p['payout_id']}")
+            L.append(f"- **Why:** Stripe sales — {events_list} — {p['charge_count']} payment(s) — payout {p['payout_id']}")
             L.append("")
             L.append("**Create → Add details (split lines):**")
             L.append("")
@@ -462,9 +540,13 @@ class ReconciliationReportService:
             L.append("|---|---|---|---|---|")
             for e in p["events"]:
                 name = _md_cell(e["event_name"])
-                label = name if e["event_api_id"] else f"⚠ pick — {name}"
+                unmatched = e.get("source_type") == ReconciliationMappingSource.UNATTRIBUTED
+                event_label = name if e.get("source_type") == ReconciliationMappingSource.LUMA_EVENT else "—"
+                project_label = _md_cell(e.get("project_name") or "—")
+                if unmatched:
+                    project_label = f"⚠ map — {name}"
                 L.append(
-                    f"| {TICKET_INCOME_ACCOUNT} | {label} | (set if used) | "
+                    f"| Approved revenue/clearing account | {event_label} | {project_label} | "
                     f"{_dollars(e['gross_cents']):,.2f} | {TAX_RATE_LABEL} |"
                 )
             if p["stripe_fee_cents"]:

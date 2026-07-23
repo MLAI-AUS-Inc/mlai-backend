@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
+from django.core import signing
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -27,8 +28,10 @@ from content_factory.models import (
 )
 from core.models import User
 from integrations.services.notification_adapters import (
+    AUTOMATION_ACTION_SALT,
     build_action_url,
     notification_context_for_run,
+    preview_automation_action_token,
     send_review_ready,
     send_topic_selection,
 )
@@ -708,6 +711,7 @@ class FanOutDeliveryTests(TestCase):
                 "options": [
                     {"keyword": "topic one", "suggested_title": "Topic One"},
                     {"keyword": "topic two", "suggested_title": "Topic Two"},
+                    {"keyword": "topic three", "suggested_title": "Topic Three"},
                 ]
             },
         }
@@ -746,7 +750,7 @@ class FanOutDeliveryTests(TestCase):
         variables = json.loads(payload["ContentVariables"])
         self.assertEqual(
             variables,
-            {"1": "fanout.example.com", "2": "Topic One", "3": "Topic Two", "4": "-"},
+            {"1": "fanout.example.com", "2": "Topic One", "3": "Topic Two", "4": "Topic Three"},
         )
 
         # Re-delivering the same callback sends nothing new.
@@ -910,7 +914,7 @@ class FanOutDeliveryTests(TestCase):
             ),
         )
 
-    @override_settings(CUSTOMERIO_API_KEY="cio-key")
+    @override_settings(CUSTOMERIO_API_KEY="cio-key", CUSTOMERIO_TOPIC_TEMPLATE_ID="")
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters._customerio_client")
     @patch("integrations.services.notification_adapters.http_client.post")
@@ -949,6 +953,17 @@ class FanOutDeliveryTests(TestCase):
         mock_cio.return_value = client
         self.email.user = self.user
         self.email.save(update_fields=["user"])
+        self.callback_data["selection"]["options"][0].update(
+            {
+                "trend_source_label": "Google Trends interest",
+                "trend_period_label": "past 30 days",
+                "trend_summary": "Google Trends interest over the past 30 days is rising.",
+                "trend_percent": 24,
+                "chart_url": "https://storage.example.test/topic-one.png",
+                "chart_alt": "Demand trend for Topic One, up 24%.",
+            }
+        )
+        self.callback_data["selection"]["options"][1]["chart_url"] = "javascript:alert(1)"
 
         deliveries = send_topic_selection(self.callback_data)
 
@@ -967,12 +982,101 @@ class FanOutDeliveryTests(TestCase):
         message_data = request_body["message_data"]
         self.assertEqual(message_data["domain"], "fanout.example.com")
         topics = message_data["topics"]
-        self.assertEqual(len(topics), 2)
+        self.assertEqual(len(topics), 3)
         self.assertEqual(topics[0]["display_title"], "Topic One")
         self.assertEqual(topics[0]["rank"], 1)
-        # Each topic carries its own signed one-click approve URL.
+        self.assertEqual(topics[0]["chart_url"], "https://storage.example.test/topic-one.png")
+        self.assertEqual(topics[0]["chart_alt"], "Demand trend for Topic One, up 24%.")
+        self.assertEqual(topics[0]["trend_period_label"], "past 30 days")
+        self.assertEqual(topics[0]["trend_percent"], 24)
+        self.assertEqual(topics[1]["chart_url"], "")
+        # Each topic carries its own signed, scanner-safe confirmation URL.
         self.assertIn("token=", topics[0]["confirm_url"])
         self.assertNotEqual(topics[0]["confirm_url"], topics[1]["confirm_url"])
+        first_token = parse_qs(urlparse(topics[0]["confirm_url"]).query)["token"][0]
+        payload = signing.loads(first_token, salt=AUTOMATION_ACTION_SALT)
+        self.assertTrue(payload["confirmation_required"])
+        unsubscribe_token = parse_qs(urlparse(message_data["unsubscribe_url"]).query)["token"][0]
+        unsubscribe_payload = signing.loads(unsubscribe_token, salt=AUTOMATION_ACTION_SALT)
+        self.assertTrue(unsubscribe_payload["confirmation_required"])
+
+    @patch("integrations.services.notification_adapters.confirm_topic")
+    def test_email_topic_get_is_read_only_and_post_starts_generation(self, mock_confirm):
+        self.run.callback_payload = self.callback_data
+        self.run.content_factory_run_id = "discovery-run-5"
+        self.run.save(update_fields=["callback_payload", "content_factory_run_id"])
+        action_url = build_action_url(
+            self.run,
+            "approve_topic",
+            option_index=1,
+            confirmation_required=True,
+        )
+        token = parse_qs(urlparse(action_url).query)["token"][0]
+        preview = preview_automation_action_token(token)
+        self.assertEqual(preview["topic_title"], "Topic Two")
+        self.assertTrue(preview["confirmation_required"])
+
+        client = APIClient()
+        get_response = client.get(reverse("content_factory_automation_action"), {"token": token})
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertContains(get_response, "Start writing this article?")
+        self.assertContains(get_response, "Topic Two")
+        mock_confirm.assert_not_called()
+
+        mock_confirm.return_value = {"job_id": "article-run-22", "status": "queued"}
+        post_response = client.post(
+            reverse("content_factory_automation_action"),
+            {"token": token},
+        )
+
+        self.assertEqual(post_response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(
+            post_response["Location"],
+            "https://app.test/founder-tools/marketing/runs/article-run-22?automationAction=started",
+        )
+        mock_confirm.assert_called_once()
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.article_content_factory_run_id, "article-run-22")
+        self.assertEqual(self.run.status, AutomationRunStatus.GENERATING)
+
+    @patch("integrations.services.notification_adapters.confirm_topic")
+    def test_legacy_direct_action_get_still_executes_for_slack(self, mock_confirm):
+        self.run.callback_payload = self.callback_data
+        self.run.content_factory_run_id = "discovery-run-5"
+        self.run.save(update_fields=["callback_payload", "content_factory_run_id"])
+        action_url = build_action_url(self.run, "approve_topic", option_index=0)
+        token = parse_qs(urlparse(action_url).query)["token"][0]
+        mock_confirm.return_value = {"job_id": "slack-article-run", "status": "queued"}
+
+        response = APIClient().get(
+            reverse("content_factory_automation_action"),
+            {"token": token},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["job_id"], "slack-article-run")
+        mock_confirm.assert_called_once()
+
+    @override_settings(CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS=-1)
+    def test_email_action_uses_shorter_expiry_window(self):
+        self.run.callback_payload = self.callback_data
+        self.run.save(update_fields=["callback_payload"])
+        action_url = build_action_url(
+            self.run,
+            "approve_topic",
+            option_index=0,
+            confirmation_required=True,
+        )
+        token = parse_qs(urlparse(action_url).query)["token"][0]
+
+        response = APIClient().get(
+            reverse("content_factory_automation_action"),
+            {"token": token},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Invalid or expired action token")
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")

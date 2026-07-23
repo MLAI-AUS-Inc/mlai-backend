@@ -60,6 +60,10 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed
 from content_factory.google_baseline import collect_verified_google_metrics, google_baseline_connection_status
 from content_factory.run_state import ARTICLE_WORKFLOWS, active_retry_signal, clear_obsolete_active_run_blockers
+from content_analytics.services.config import (
+    analytics_article_manifest,
+    analytics_config_for_content_factory,
+)
 from content_factory.article_publish_status import (
     advance_publish_status,
     article_bucket,
@@ -94,6 +98,10 @@ from content_factory.topic_feedback import (
     serialize_topic_feedback,
 )
 from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
+from content_factory.vibe_marketing_workflows import (
+    DISCOVERY_WORKFLOWS,
+    VIBE_MARKETING_WORKFLOWS,
+)
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
@@ -169,24 +177,7 @@ class _AnyContentRenderer(BaseRenderer):
         return json.dumps(data or {}).encode("utf-8")
 
 
-VIBE_MARKETING_WORKFLOWS = {
-    "repo_scan",
-    "content_factory_scan",
-    "article_system_setup",
-    "auto_discovery",
-    "content_factory_discovery",
-    "article_generation",
-    "content_factory_article",
-    "direct_generate",
-    "confirmed_topic",
-    "article_revision",
-    "daily_discovery",
-    "startup_autofill",
-    "website_baseline",
-    "vibe_marketing_daily_replay",
-}
 SCAN_WORKFLOWS = {"repo_scan", "content_factory_scan"}
-DISCOVERY_WORKFLOWS = {"auto_discovery", "content_factory_discovery", "daily_discovery"}
 ARTICLE_SYSTEM_SETUP_WORKFLOWS = {"article_system_setup"}
 RESTARTABLE_ARTICLE_WORKFLOWS = {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"}
 BASELINE_WORKFLOWS = {"website_baseline"}
@@ -1545,6 +1536,11 @@ def _extract_topic_candidates_from_result(result):
                 "trendPercent": raw.get("trend_percent") or raw.get("trendPercent"),
                 "trendDescription": raw.get("trend_description") or raw.get("trendDescription") or raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "trendLabel": raw.get("trending_label") or raw.get("trendLabel"),
+                "trendSource": raw.get("trend_source") or raw.get("trendSource"),
+                "trendSourceLabel": raw.get("trend_source_label") or raw.get("trendSourceLabel"),
+                "trendBasis": raw.get("trend_basis") or raw.get("trendBasis"),
+                "trendPeriodLabel": raw.get("trend_period_label") or raw.get("trendPeriodLabel"),
+                "trendIsEstimated": raw.get("trend_is_estimated") if "trend_is_estimated" in raw else raw.get("trendIsEstimated"),
                 "statsMeaning": raw.get("stats_meaning") or raw.get("statsMeaning"),
                 "whyRecommended": raw.get("why_recommended") or raw.get("whyRecommended"),
                 "recommendationReason": raw.get("recommendation_reason") or raw.get("recommendationReason"),
@@ -1610,6 +1606,10 @@ def _latest_keyword_velocity(keyword):
         "trendStatus": snapshot.trend_status,
         "absoluteVolume": snapshot.absolute_volume,
         "dailyVolumes": snapshot.daily_volumes or [],
+        "source": snapshot.source,
+        "basis": snapshot.basis,
+        "periodLabel": snapshot.period_label,
+        "isEstimated": snapshot.is_estimated,
     }
 
 
@@ -1741,6 +1741,10 @@ def _topic_candidate_from_keyword(keyword):
         "trendStatus": trend_status,
         "trendPercent": trend_percent,
         "trendDescription": _trend_description(trend_status),
+        "trendSource": (velocity or {}).get("source"),
+        "trendBasis": (velocity or {}).get("basis"),
+        "trendPeriodLabel": (velocity or {}).get("periodLabel"),
+        "trendIsEstimated": (velocity or {}).get("isEstimated"),
         "aiSaturation": _latest_keyword_saturation(keyword),
         "relatedKeywords": _keyword_related_keywords(keyword),
         "paaQuestions": _keyword_paa_questions(keyword),
@@ -3193,6 +3197,7 @@ def _persist_article_memory_from_run(*, organization, run):
         return None
 
     result = run.result or {}
+    run_request = _run_mapping(run.run_request)
     title = str(content_package.get("title") or result.get("title") or "").strip()
     primary_keyword = str(
         content_package.get("targetKeyword")
@@ -3214,6 +3219,37 @@ def _persist_article_memory_from_run(*, organization, run):
     pr_number = coerce_pr_number(evidence.get("prNumber"))
     content_path = _pick_content_path(evidence, slug)
     derived_status = derive_publish_status_from_evidence(evidence)
+    analytics_id = None
+    raw_analytics_id = str(
+        run_request.get("analytics_article_id")
+        or run_request.get("analyticsArticleId")
+        or result.get("analytics_article_id")
+        or result.get("analyticsArticleId")
+        or ""
+    ).strip()
+    if raw_analytics_id:
+        try:
+            analytics_id = uuid.UUID(raw_analytics_id)
+        except (TypeError, ValueError, AttributeError):
+            logger.warning("invalid_article_analytics_id run_id=%s value=%s", run.run_id, raw_analytics_id)
+    canonical_url = str(
+        content_package.get("canonicalUrl")
+        or content_package.get("canonical_url")
+        or result.get("canonical_url")
+        or result.get("canonicalUrl")
+        or evidence.get("liveUrl")
+        or ""
+    ).strip()
+    canonical_path = str(
+        content_package.get("canonicalPath")
+        or content_package.get("canonical_path")
+        or result.get("canonical_path")
+        or result.get("canonicalPath")
+        or (urlsplit(canonical_url).path if canonical_url else "")
+        or ""
+    ).strip()
+    if canonical_path and not canonical_path.startswith("/"):
+        canonical_path = f"/{canonical_path}"
     article, created = WrittenArticle.objects.get_or_create(
         organization=organization,
         slug=slug,
@@ -3230,6 +3266,9 @@ def _persist_article_memory_from_run(*, organization, run):
             "published_at": timezone.now(),
             "publish_status": derived_status,
             "source_run_id": "" if _is_publish_child_run(run) else run.run_id,
+            **({"analytics_id": analytics_id} if analytics_id else {}),
+            "canonical_url": canonical_url,
+            "canonical_path": canonical_path,
         },
     )
     if not created:
@@ -3242,12 +3281,27 @@ def _persist_article_memory_from_run(*, organization, run):
             ("pr_url", pr_url),
             ("content_path", content_path),
             ("primary_keyword", primary_keyword),
+            ("canonical_url", canonical_url),
+            ("canonical_path", canonical_path),
         ):
             # Only overwrite with real values so a later evidence-less run
             # (e.g. a revision) can't wipe URLs we already captured.
             if value and getattr(article, field) != value:
                 setattr(article, field, value)
                 update_fields.add(field)
+        if analytics_id and article.analytics_id != analytics_id:
+            # The first persisted identity owns every historical aggregate for
+            # this article. A later retry/revision with the same slug must not
+            # silently re-key it; scaffold reconciliation can restore the
+            # existing id into the generated registry if an upstream run ever
+            # supplies a different value.
+            logger.warning(
+                "article_analytics_id_mismatch_preserved run_id=%s article_id=%s incoming=%s existing=%s",
+                run.run_id,
+                article.pk,
+                analytics_id,
+                article.analytics_id,
+            )
         if not article.published_at:
             article.published_at = timezone.now()
             update_fields.add("published_at")
@@ -6708,7 +6762,17 @@ def _restart_article_payload_from_run(*, run, context, config, actor_id):
         "custom_title": run_request.get("custom_title") or run_request.get("customTitle") or title or None,
         "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
         "restart_source_run_id": run.run_id,
+        "analytics_article_id": str(
+            run_request.get("analytics_article_id")
+            or run_request.get("analyticsArticleId")
+            or uuid.uuid4()
+        ),
     }
+    payload["analytics_config"] = analytics_config_for_content_factory(
+        context.organization,
+        analytics_article_id=payload["analytics_article_id"],
+        provision_if_missing=True,
+    )
     if delivery_mode_explicit and delivery_mode:
         payload["delivery_mode"] = delivery_mode
     return payload
@@ -7179,7 +7243,20 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 def _merge_django_owned_article_result(local_result, remote_result):
     local = _run_mapping(local_result)
     merged = dict(_run_mapping(remote_result))
+    remote_quality = _run_mapping(merged.get("article_preview_quality"))
+    remote_quality_status = str(remote_quality.get("status") or "").strip().lower()
     for key, value in local.items():
+        if key == "approval_blocker":
+            # A rejection is written locally before the next status poll. Keep
+            # it while Content Factory still reports the same blocking quality
+            # state, but let a queued/passed recheck clear the stale message.
+            if (
+                remote_quality_status == "blocking_findings"
+                and merged.get(key) in (None, "", {}, [])
+                and value not in (None, "", {}, [])
+            ):
+                merged[key] = value
+            continue
         django_owned = key in DJANGO_OWNED_ARTICLE_RESULT_KEYS or key.startswith(
             DJANGO_OWNED_ARTICLE_RESULT_PREFIXES
         )
@@ -12654,12 +12731,19 @@ def _call_content_factory_run_action(
         response_payload = response.json()
     except Exception:
         response_payload = {}
-    detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    raw_detail = response_payload.get("detail") or response_payload.get("error") or response.text
+    approval_blocker = raw_detail if isinstance(raw_detail, dict) else None
+    detail = (
+        raw_detail.get("message") or raw_detail.get("detail") or raw_detail.get("error")
+        if isinstance(raw_detail, dict)
+        else raw_detail
+    )
     return {
         "error": str(detail or f"Content Factory returned {response.status_code}."),
         "errors": [str(detail or f"Content Factory returned {response.status_code}.")],
         "content_factory_status_code": response.status_code,
         "content_factory_response": response_payload,
+        **({"approval_blocker": approval_blocker} if approval_blocker else {}),
         "retryable": response.status_code >= 500,
     }
 
@@ -14541,6 +14625,11 @@ class VibeMarketingArticleSystemSetupView(APIView):
             "scan_run_id": pending.get("source_scan_run_id") or "",
             "article_surface_mode": article_surface_mode,
             "article_surface_hint": article_surface_hint,
+            "analytics_config": analytics_config_for_content_factory(
+                context.organization,
+                provision_if_missing=True,
+            ),
+            "analytics_article_manifest": analytics_article_manifest(context.organization),
         }
         _mark_roo_points_gate_authorized(
             payload,
@@ -15274,7 +15363,13 @@ class VibeMarketingArticleView(APIView):
                 "conflicts": selection_conflicts,
             },
             "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+            "analytics_article_id": str(uuid.uuid4()),
         }
+        payload["analytics_config"] = analytics_config_for_content_factory(
+            context.organization,
+            analytics_article_id=payload["analytics_article_id"],
+            provision_if_missing=True,
+        )
         if delivery_mode_explicit and delivery_mode:
             payload["delivery_mode"] = delivery_mode
         # Byline: resolve the per-article author pick (else the org default) and carry the resolved
@@ -16593,7 +16688,13 @@ class VibeMarketingRunControlView(APIView):
             ).strip()
             result = dict(run.result or {})
             result["latest_control_response"] = remote_data
+            remote_blocker = remote_data.get("approval_blocker")
             result["approval_blocker"] = {
+                **(
+                    remote_blocker
+                    if isinstance(remote_blocker, dict)
+                    else {"detail": detail, "message": detail}
+                ),
                 "detail": detail,
                 "content_factory_status_code": remote_status_code,
                 "recorded_at": timezone.now().isoformat(),
@@ -16609,6 +16710,40 @@ class VibeMarketingRunControlView(APIView):
                     "contentFactoryStatusCode": remote_status_code,
                 },
                 status=remote_status_code,
+            )
+
+        if action == "retry-preview-quality":
+            if run.workflow not in ARTICLE_WORKFLOWS:
+                return Response(
+                    {"detail": "Preview quality can only be retried for an article run."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if remote_data.get("error"):
+                response_status = (
+                    status.HTTP_409_CONFLICT
+                    if remote_status_code in {400, 404, 409, 422}
+                    else status.HTTP_502_BAD_GATEWAY
+                )
+                return Response(
+                    {
+                        "detail": str(remote_data.get("error")),
+                        "retryable": bool(remote_data.get("retryable")),
+                    },
+                    status=response_status,
+                )
+            result = dict(run.result or {})
+            remote_quality = remote_data.get("article_preview_quality")
+            if isinstance(remote_quality, dict):
+                result["article_preview_quality"] = remote_quality
+            result["latest_control_response"] = remote_data
+            result.pop("approval_blocker", None)
+            result.pop("preview_quality_warning", None)
+            result.pop("previewQualityWarning", None)
+            run.result = result
+            run.save(update_fields=["result", "updated_at"])
+            return Response(
+                _serialize_run(run, context=context),
+                status=status.HTTP_202_ACCEPTED,
             )
 
         if action == "revise":

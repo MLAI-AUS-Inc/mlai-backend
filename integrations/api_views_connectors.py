@@ -32,6 +32,7 @@ from integrations.services.external_connectors import (
 from integrations.services.linear_meeting_actions import (
     LinearMeetingConfigurationError,
     LinearMeetingGraphQLError,
+    LinearMeetingIdempotencyConflictError,
     LinearMeetingRateLimitError,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
@@ -48,6 +49,14 @@ logger = logging.getLogger(__name__)
 
 
 def _linear_meeting_error_response(exc):
+    if isinstance(exc, LinearMeetingIdempotencyConflictError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_issue_creation_in_progress",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
     if isinstance(exc, LinearMeetingConfigurationError):
         return Response(
             {
@@ -662,6 +671,7 @@ class LinearMeetingContextView(APIView):
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)

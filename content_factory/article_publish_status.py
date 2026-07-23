@@ -122,6 +122,13 @@ def advance_publish_status(article, new_status, *, pr_number=None, pr_merged_at=
         if live_url and article.live_url != live_url:
             article.live_url = live_url
             changed.append("live_url")
+        if live_url and article.canonical_url != live_url:
+            article.canonical_url = live_url
+            changed.append("canonical_url")
+        live_path = urlsplit(str(live_url or "")).path if live_url else ""
+        if live_path and article.canonical_path != live_path:
+            article.canonical_path = live_path
+            changed.append("canonical_path")
     return changed
 
 

@@ -55,7 +55,8 @@ class KeywordVelocitySerializer(serializers.ModelSerializer):
         model = KeywordVelocity
         fields = [
             'absolute_volume', 'velocity_score', 'trend_status',
-            'daily_volumes', 'captured_at'
+            'daily_volumes', 'source', 'basis', 'period_label',
+            'is_estimated', 'captured_at'
         ]
 
 
@@ -112,7 +113,11 @@ class ResearchedKeywordListSerializer(serializers.ModelSerializer):
         if snapshot:
             return {
                 'velocity_score': snapshot.velocity_score,
-                'trend_status': snapshot.trend_status
+                'trend_status': snapshot.trend_status,
+                'source': snapshot.source,
+                'basis': snapshot.basis,
+                'period_label': snapshot.period_label,
+                'is_estimated': snapshot.is_estimated,
             }
         return None
 
@@ -221,7 +226,8 @@ class WrittenArticleSerializer(serializers.ModelSerializer):
     class Meta:
         model = WrittenArticle
         fields = [
-            'id', 'title', 'slug', 'category', 'article_url', 'pr_url',
+            'id', 'analytics_id', 'title', 'slug', 'category', 'article_url', 'pr_url',
+            'canonical_url', 'canonical_path',
             'publish_status', 'pr_number', 'pr_merged_at', 'live_url', 'live_verified_at',
             'primary_keyword', 'published_at', 'created_at'
         ]
@@ -237,6 +243,9 @@ class WrittenArticleCreateSerializer(serializers.Serializer):
     primary_keyword = serializers.CharField()
     article_url = serializers.URLField(required=False, allow_null=True)
     pr_url = serializers.URLField(required=False, allow_null=True)
+    analytics_id = serializers.UUIDField(required=False)
+    canonical_url = serializers.URLField(required=False, allow_blank=True)
+    canonical_path = serializers.CharField(required=False, allow_blank=True, max_length=1024)
     job_id = serializers.CharField(required=False, allow_null=True)
 
 

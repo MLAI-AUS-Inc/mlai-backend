@@ -1,0 +1,203 @@
+name: mlai-content-analytics
+
+services:
+  database:
+    # Images are required and must be immutable references. See .env.example.
+    image: ${ANALYTICS_POSTGRES_IMAGE:?Set ANALYTICS_POSTGRES_IMAGE to a tested tag@sha256 digest}
+    environment:
+      POSTGRES_DB: ${ANALYTICS_POSTGRES_DB:-umami}
+      POSTGRES_USER: ${ANALYTICS_POSTGRES_USER:-umami}
+      POSTGRES_PASSWORD: ${ANALYTICS_POSTGRES_PASSWORD:?Set ANALYTICS_POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: UTC
+    volumes:
+      - analytics-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${ANALYTICS_POSTGRES_USER:-umami} -d ${ANALYTICS_POSTGRES_DB:-umami}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - analytics-internal
+
+  umami:
+    image: ${UMAMI_IMAGE:?Set UMAMI_IMAGE to a tested Umami v3 tag@sha256 digest}
+    environment:
+      # This URL is internal and server-side only. The password must be URL-safe
+      # (the documented openssl hex command produces a safe value).
+      DATABASE_URL: postgresql://${ANALYTICS_POSTGRES_USER:-umami}:${ANALYTICS_POSTGRES_PASSWORD:?Set ANALYTICS_POSTGRES_PASSWORD}@database:5432/${ANALYTICS_POSTGRES_DB:-umami}
+      APP_SECRET: ${UMAMI_APP_SECRET:?Set UMAMI_APP_SECRET}
+      DISABLE_TELEMETRY: "1"
+      DISABLE_UPDATES: "1"
+      PRIVATE_MODE: "1"
+      # Daily rotation prevents Umami's anonymous session identifier from
+      # linking a browser across calendar days.
+      SALT_ROTATION: day
+      TRACKER_SCRIPT_NAME: ${UMAMI_TRACKER_SCRIPT_NAME:-content-signal.js}
+      COLLECT_API_ENDPOINT: ${UMAMI_COLLECT_API_ENDPOINT:-/api/content-signal}
+      CORS_MAX_AGE: ${UMAMI_CORS_MAX_AGE:-86400}
+      IGNORE_IP: ${UMAMI_IGNORE_IP:-}
+      # The ingress must overwrite this header; never trust a client-supplied
+      # value. The supplied nginx example sets X-Real-IP itself.
+      CLIENT_IP_HEADER: ${UMAMI_CLIENT_IP_HEADER:-X-Real-IP}
+      TZ: UTC
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      # Keep the full UI/API on loopback. A public ingress may expose only the
+      # two exact tracker/collector routes documented in README.md.
+      - "${UMAMI_BIND_HOST:-127.0.0.1}:${UMAMI_PORT:-3000}:3000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/heartbeat').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      analytics-internal:
+      mlai-shared:
+        aliases:
+          - content-analytics-umami
+
+  backup:
+    image: ${ANALYTICS_POSTGRES_IMAGE:?Set ANALYTICS_POSTGRES_IMAGE to a tested tag@sha256 digest}
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: ${ANALYTICS_POSTGRES_DB:-umami}
+      PGUSER: ${ANALYTICS_POSTGRES_USER:-umami}
+      PGPASSWORD: ${ANALYTICS_POSTGRES_PASSWORD:?Set ANALYTICS_POSTGRES_PASSWORD}
+      BACKUP_RETENTION_DAYS: ${ANALYTICS_BACKUP_RETENTION_DAYS:-30}
+      TZ: UTC
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        case "$${BACKUP_RETENTION_DAYS}" in
+          ''|*[!0-9]*) echo "BACKUP_RETENTION_DAYS must be an integer" >&2; exit 64 ;;
+        esac
+        if [ "$${BACKUP_RETENTION_DAYS}" -lt 7 ]; then
+          echo "BACKUP_RETENTION_DAYS must be at least 7" >&2
+          exit 64
+        fi
+        while true; do
+          stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
+          partial="/backups/.umami-$${stamp}.dump.partial"
+          final="/backups/umami-$${stamp}.dump"
+          trap 'rm -f "$${partial}"' EXIT INT TERM
+          pg_dump --format=custom --compress=9 --no-owner --no-acl --file="$${partial}"
+          mv "$${partial}" "$${final}"
+          touch /state/last-success
+          find /backups -type f -name 'umami-*.dump' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+          trap - EXIT INT TERM
+          sleep 86400
+        done
+    depends_on:
+      database:
+        condition: service_healthy
+    volumes:
+      - analytics-postgres-backups:/backups
+      - analytics-backup-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -n \"$$(find /state -name last-success -mtime -2 -print -quit)\"",
+        ]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    networks:
+      - analytics-internal
+
+  retention:
+    image: ${ANALYTICS_POSTGRES_IMAGE:?Set ANALYTICS_POSTGRES_IMAGE to a tested tag@sha256 digest}
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: ${ANALYTICS_POSTGRES_DB:-umami}
+      PGUSER: ${ANALYTICS_POSTGRES_USER:-umami}
+      PGPASSWORD: ${ANALYTICS_POSTGRES_PASSWORD:?Set ANALYTICS_POSTGRES_PASSWORD}
+      RAW_RETENTION_DAYS: ${ANALYTICS_RAW_RETENTION_DAYS:-120}
+      TZ: UTC
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        while true; do
+          recent_backup="$$(find /backups -type f -name 'umami-*.dump' -mtime -2 -print -quit)"
+          if [ -z "$${recent_backup}" ]; then
+            echo "Refusing raw-data prune: no successful Umami dump from the last 48 hours" >&2
+          elif psql --set=ON_ERROR_STOP=1 --set="retention_days=$${RAW_RETENTION_DAYS}" --single-transaction --file=/opt/mlai/prune-raw-data.sql; then
+            touch /state/last-success
+          fi
+          sleep 86400
+        done
+    depends_on:
+      database:
+        condition: service_healthy
+      backup:
+        condition: service_started
+    volumes:
+      - ./prune-raw-data.sql:/opt/mlai/prune-raw-data.sql:ro
+      - analytics-postgres-backups:/backups:ro
+      - analytics-retention-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -n \"$$(find /state -name last-success -mtime -2 -print -quit)\"",
+        ]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+    networks:
+      - analytics-internal
+
+networks:
+  analytics-internal:
+    internal: true
+  mlai-shared:
+    name: ${MLAI_SHARED_NETWORK:-mlai-shared}
+    external: true
+
+volumes:
+  analytics-postgres-data:
+  analytics-postgres-backups:
+  analytics-backup-state:
+  analytics-retention-state:

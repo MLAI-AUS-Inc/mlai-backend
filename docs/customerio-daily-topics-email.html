@@ -6,7 +6,7 @@
   1. In Customer.io, create (or open) the transactional message whose id you set
      as CUSTOMERIO_TOPIC_TEMPLATE_ID in the mlai-backend env.
   2. Edit the message body as "Code"/HTML and paste this entire file in.
-  3. Set a subject, e.g.  Your {{ topics.size }} topics for today ✍️
+  3. Set a subject, e.g.  Your 3 article recommendations for {{ trigger.domain }} ✍️
   4. Send a test with the sample payload at the bottom of this file.
 
   DATA CONTRACT
@@ -30,24 +30,30 @@
           "ai_volume_display": "320/mo",         // may be ""
           "why_recommended": "Low difficulty...",// may be ""
           "recommended": true,
-          "confirm_url": "https://api.mlai.au/..." // one-click signed approve
+          "trend_source_label": "Google Trends interest",
+          "trend_period_label": "past 30 days",
+          "trend_summary": "Google Trends interest over the past 30 days is rising.",
+          "trend_percent": 24,
+          "chart_url": "https://.../chart.png",  // may be ""
+          "chart_alt": "Demand trend for AI Code Review, up 24%.",
+          "confirm_url": "https://api.mlai.au/..." // signed confirmation page
         }
-        // ...up to 4 topics
+        // ...exactly 3 topics for a normal daily run
       ]
     }
 
-  Customer.io's transactional API exposes message_data keys at the TOP LEVEL
-  ({{ topics }}, {{ first_name }}). The aliases below also accept a nested
-  {{ message_data.topics }} shape so the template renders either way.
+  Customer.io's transactional API exposes message_data beneath the `trigger`
+  object ({{ trigger.topics }}, {{ trigger.first_name }}). The aliases below
+  retain the historical top-level/nested fallbacks for previews and old sends.
 
   LIQUID GOTCHA: in Liquid an empty string AND an empty array are TRUTHY, so
-  `{% if x %}` fires even when x is "". Optional fields are guarded with
+  a simple truthiness branch fires even when x is "". Optional fields are guarded with
   `!= blank` and the empty-state with `== blank`. Do not "simplify" these.
 -->
-{%- assign topic_list = topics | default: message_data.topics -%}
-{%- assign greeting_name = first_name | default: message_data.first_name -%}
-{%- assign site_domain = domain | default: message_data.domain -%}
-{%- assign optout_url = unsubscribe_url | default: message_data.unsubscribe_url -%}
+{%- assign topic_list = trigger.topics | default: topics | default: message_data.topics -%}
+{%- assign greeting_name = trigger.first_name | default: first_name | default: message_data.first_name -%}
+{%- assign site_domain = trigger.domain | default: domain | default: message_data.domain -%}
+{%- assign optout_url = trigger.unsubscribe_url | default: unsubscribe_url | default: message_data.unsubscribe_url -%}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
   <tr>
     <td align="center">
@@ -61,7 +67,7 @@
               {% if greeting_name != blank %}{{ greeting_name }}, your{% else %}Your{% endif %} topics for {{ site_domain }}
             </h1>
             <p style="margin:12px 0 0 0;font-size:15px;line-height:1.5;color:#4b5563;">
-              We researched today's best opportunities. Pick one and we'll write the article — one click, no login.
+              We researched today's best opportunities. Pick one, confirm your choice, and we'll start writing — no login required.
             </p>
           </td>
         </tr>
@@ -82,7 +88,7 @@
         {% for topic in topic_list %}
         <tr>
           <td style="padding:16px 32px 0 32px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;{% if topic.recommended %}border-color:#6366f1;box-shadow:0 0 0 1px #6366f1;{% endif %}">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;">
               <tr>
                 <td style="padding:20px 20px 16px 20px;">
                   {% if topic.recommended %}
@@ -106,6 +112,16 @@
                   {% endif %}
                   {% if topic.why_recommended != blank %}
                   <p style="margin:12px 0 0 0;font-size:14px;color:#4b5563;line-height:1.5;">{{ topic.why_recommended }}</p>
+                  {% endif %}
+
+                  {% if topic.trend_summary != blank %}
+                  <p style="margin:14px 0 0 0;font-size:13px;color:#374151;line-height:1.5;"><strong>Demand trend:</strong> {{ topic.trend_summary }}</p>
+                  {% endif %}
+                  {% if topic.chart_url != blank %}
+                  <p style="margin:6px 0 8px 0;font-size:11px;color:#9ca3af;">
+                    {{ topic.trend_source_label }}{% if topic.trend_period_label != blank %} · {{ topic.trend_period_label }}{% endif %}
+                  </p>
+                  <img src="{{ topic.chart_url | escape }}" alt="{{ topic.chart_alt | escape }}" width="480" style="display:block;width:100%;max-width:480px;height:auto;border:0;border-radius:8px;background:#ffffff;" />
                   {% endif %}
 
                   <!-- Bulletproof CTA button -->
@@ -155,8 +171,9 @@
     "domain": "example.com",
     "unsubscribe_url": "https://api.mlai.au/example-unsubscribe",
     "topics": [
-      {"rank": 1, "keyword": "ai code review", "display_title": "How AI Code Review Cuts PR Cycle Time", "volume_display": "1.2k/mo", "difficulty": 34, "opportunity_index": 82, "tier_label": "Quick win", "ai_volume_display": "320/mo", "why_recommended": "Low difficulty, high intent, and you already rank for adjacent terms.", "recommended": true, "confirm_url": "https://api.mlai.au/approve-1"},
-      {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "", "ai_volume_display": "", "why_recommended": "", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"}
+      {"rank": 1, "keyword": "ai code review", "display_title": "How AI Code Review Cuts PR Cycle Time", "volume_display": "1.2k/mo", "difficulty": 34, "opportunity_index": 82, "tier_label": "Quick win", "ai_volume_display": "320/mo", "why_recommended": "Low difficulty, high intent, and you already rank for adjacent terms.", "recommended": true, "trend_source_label": "Google Trends interest", "trend_period_label": "past 30 days", "trend_summary": "Google Trends interest over the past 30 days is rising.", "trend_percent": 24, "chart_url": "https://placehold.co/960x240/png?text=Demand+trend", "chart_alt": "Demand trend for AI Code Review, up 24%.", "confirm_url": "https://api.mlai.au/approve-1"},
+      {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "Authority Builder", "ai_volume_display": "", "why_recommended": "Strong audience fit and useful evergreen demand.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"},
+      {"rank": 3, "keyword": "ai workflow automation", "display_title": "AI Workflow Automation for Small Teams", "volume_display": "480/mo", "difficulty": 42, "opportunity_index": 57, "tier_label": "Long-tail Gem", "ai_volume_display": "90/mo", "why_recommended": "Focused intent with attainable competition.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-3"}
     ]
   }
 -->

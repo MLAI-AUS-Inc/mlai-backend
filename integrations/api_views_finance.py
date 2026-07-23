@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -30,8 +31,12 @@ from integrations.services.finance import (
 from integrations.services.valley_harness import notify_valley_run_created
 from integrations.utils import normalize_domain
 from startup_updates.models import StartupMetricObservation, UserStartupBinding
+from integrations.models import ReconciliationProfile
+from integrations.services.reconciliation import ReconciliationReportService
+from integrations.services.xero_reconciliation import persist_report
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class FinancialSyncCreateSerializer(serializers.Serializer):
@@ -222,6 +227,8 @@ class StripeFinancialWebhookView(APIView):
         "invoice.paid",
         "invoice.payment_failed",
         "checkout.session.completed",
+        "payout.paid",
+        "payout.reconciliation_completed",
     }
 
     def post(self, request):
@@ -241,6 +248,38 @@ class StripeFinancialWebhookView(APIView):
         event_type = str(event.get("type") or "")
         if event_type not in self.RELEVANT_EVENTS:
             return Response({"status": "ignored", "event_type": event_type}, status=status.HTTP_200_OK)
+
+        if event_type in {"payout.paid", "payout.reconciliation_completed"}:
+            payout = ((event.get("data") or {}).get("object") or {})
+            payout_id = str(payout.get("id") or "").strip()
+            domain = str(getattr(settings, "RECONCILIATION_DEFAULT_DOMAIN", "mlai.au") or "").strip()
+            organization = Organization.objects.filter(domain__iexact=domain).first()
+            if organization is None or not payout_id:
+                return Response(
+                    {"status": "ignored", "reason": "missing_reconciliation_target"},
+                    status=status.HTTP_200_OK,
+                )
+            try:
+                report = ReconciliationReportService().build_payout(payout_id)
+                profile = ReconciliationProfile.objects.filter(organization=organization).first()
+                records = persist_report(
+                    organization=organization,
+                    report=report,
+                    stripe_account_id=profile.stripe_account_id if profile else "",
+                )
+            except Exception:
+                # Avoid a webhook retry storm for a transient enrichment error;
+                # the self-throttled daily backfill is the repair path and no
+                # Xero posting ever occurs from a webhook.
+                logger.exception("stripe payout reconciliation webhook sync failed", extra={"payout_id": payout_id})
+                return Response(
+                    {"status": "accepted", "payout_id": payout_id, "sync_status": "failed"},
+                    status=status.HTTP_202_ACCEPTED,
+                )
+            return Response(
+                {"status": "accepted", "payout_id": payout_id, "ledger_records": len(records)},
+                status=status.HTTP_202_ACCEPTED,
+            )
 
         stripe_account_id = str(event.get("account") or "").strip()
         if not stripe_account_id:

@@ -152,6 +152,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
     "google_analytics_relevance_classification": "Filtering Google Analytics signal",
     "google_analytics_event_extraction": "Extracting Google Analytics metrics",
     "timeline_merge": "Building timeline",
+    "reconciliation_enrichment": "Preparing transaction reconciliation context",
     "candidate_curation": "Choosing update-worthy candidates",
     "founder_review": "Preparing founder review",
     "draft_generation": "Drafting monthly updates",

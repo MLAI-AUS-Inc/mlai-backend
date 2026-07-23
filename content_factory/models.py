@@ -783,13 +783,27 @@ class AutomationRun(models.Model):
 
 
 class NotificationDelivery(models.Model):
-    """Provider delivery attempt for an automation event."""
+    """Provider delivery attempt for an automation or analytics-report event.
+
+    Exactly one of ``automation_run`` / ``performance_report`` references the
+    subject (DB check constraint enforces at least one). ``idempotency_key``
+    stays the global once-per-subject-per-channel-per-event guard for both.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     automation_run = models.ForeignKey(
         AutomationRun,
         on_delete=models.CASCADE,
         related_name="deliveries",
+        null=True,
+        blank=True,
+    )
+    performance_report = models.ForeignKey(
+        "content_analytics.ArticlePerformanceReport",
+        on_delete=models.SET_NULL,
+        related_name="notification_deliveries",
+        null=True,
+        blank=True,
     )
     channel = models.ForeignKey(
         NotificationChannel,
@@ -818,6 +832,13 @@ class NotificationDelivery(models.Model):
         indexes = [
             models.Index(fields=["event_type", "status"], name="cf_notify_delivery_event_idx"),
             models.Index(fields=["channel", "status"], name="cf_notify_delivery_channel_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(automation_run__isnull=False)
+                | models.Q(performance_report__isnull=False),
+                name="cf_notify_delivery_has_subject",
+            ),
         ]
 
     def __str__(self):
@@ -1048,6 +1069,9 @@ class WrittenArticle(models.Model):
     Tracks the output of the content-factory pipeline.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Stable, public-safe identity embedded into generated article pages. Unlike
+    # the slug or source run, this survives URL changes and article revisions.
+    analytics_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
@@ -1062,6 +1086,8 @@ class WrittenArticle(models.Model):
     # URLs
     article_url = models.URLField(blank=True, null=True)
     pr_url = models.URLField(blank=True, null=True)
+    canonical_url = models.URLField(max_length=2048, blank=True, default="")
+    canonical_path = models.CharField(max_length=1024, blank=True, default="", db_index=True)
 
     # Publish lifecycle (see ArticlePublishStatus): written -> pr_open -> merged -> live.
     publish_status = models.CharField(
@@ -1310,6 +1336,10 @@ class KeywordVelocity(models.Model):
         blank=True,
         help_text="Raw daily volume data from Glimpse/pytrends"
     )
+    source = models.CharField(max_length=32, default="unknown")
+    basis = models.CharField(max_length=32, default="unknown")
+    period_label = models.CharField(max_length=64, blank=True, default="")
+    is_estimated = models.BooleanField(default=True)
 
     # Snapshot timestamp
     captured_at = models.DateTimeField(default=timezone.now)

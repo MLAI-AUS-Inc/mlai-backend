@@ -27,9 +27,13 @@ class IsOwnerOrTeammateOrSuperuser(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             # Check hospital teams
             if hasattr(request.user, 'hospital_teams') and hasattr(obj, 'hospital_teams'):
-                user_teams = request.user.hospital_teams.all()
-                obj_teams = obj.hospital_teams.all()
-                if any(team in user_teams for team in obj_teams):
+                user_team_ids = request.user.hospital_teams.filter(
+                    round__status='active',
+                ).values_list('pk', flat=True)
+                if obj.hospital_teams.filter(
+                    round__status='active',
+                    pk__in=user_team_ids,
+                ).exists():
                     return True
             
             # Check esafety teams
@@ -52,6 +56,20 @@ class IsLeaderboardAdmin(permissions.BasePermission):
             request.user
             and request.user.is_authenticated
             and request.user.email == 'hi@mlai.au'
+        )
+
+
+class IsHealthHackAdmin(permissions.BasePermission):
+    """Allow the closed HealthHack application to Django superusers only."""
+
+    message = "HealthHack has closed. Administrator access only."
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.is_active
+            and request.user.is_superuser
         )
 
 
@@ -172,9 +190,8 @@ class HasStrictRooApiKey(permissions.BasePermission):
             logger.error("HasStrictRooApiKey: No ROO_API_KEY configured on backend.")
             return False
 
-        if api_key in allowed_keys:
+        if any(secrets.compare_digest(api_key, allowed_key) for allowed_key in allowed_keys):
             return True
 
-        masked_key = api_key[:4] + "***" if len(api_key) > 4 else "***"
-        logger.warning("HasStrictRooApiKey: Invalid Roo API key received: %s", masked_key)
+        logger.warning("HasStrictRooApiKey: Invalid Roo API key received.")
         return False

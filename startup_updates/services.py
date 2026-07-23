@@ -245,6 +245,7 @@ RUN_STEP_ORDER = [
     "google_analytics_relevance_classification",
     "google_analytics_event_extraction",
     "timeline_merge",
+    "reconciliation_enrichment",
     "candidate_curation",
     "founder_review",
     "draft_generation",
@@ -252,6 +253,7 @@ RUN_STEP_ORDER = [
 ]
 SOURCE_REPROCESS_STEPS = {
     "timeline_merge",
+    "reconciliation_enrichment",
     "candidate_curation",
     "founder_review",
     "draft_generation",
@@ -469,7 +471,14 @@ def build_startup_update_step_order(input_sources: Optional[list[str]]) -> list[
             "google_analytics_relevance_classification",
             "google_analytics_event_extraction",
         ])
-    steps.extend(["timeline_merge", "candidate_curation", "founder_review", "draft_generation", "groundedness_review"])
+    steps.extend([
+        "timeline_merge",
+        "reconciliation_enrichment",
+        "candidate_curation",
+        "founder_review",
+        "draft_generation",
+        "groundedness_review",
+    ])
     return steps
 
 

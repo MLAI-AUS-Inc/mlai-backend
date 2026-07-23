@@ -22,6 +22,9 @@ class WorldStateViewTests(TestCase):
             first_name="World",
             last_name="Tester",
         )
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        self.client.force_authenticate(user=self.user)
         self.team_a = Team.objects.create(team_id=1, team_name="Alpha")
         self.team_b = Team.objects.create(team_id=2, team_name="Beta")
         self.team_a.members.add(self.user)
@@ -49,13 +52,22 @@ class WorldStateViewTests(TestCase):
             sub.refresh_from_db()
         return sub
 
-    def test_anonymous_get_returns_world_state(self):
+    def test_admin_get_returns_world_state(self):
         self._submit(self.team_a, 0.5)
         response = self.client.get(WORLD_URL)
         self.assertEqual(response.status_code, 200)
         self.assertIn("updated_at", response.data)
         self.assertEqual(response.data["world"], {"radius": 30})
         self.assertTrue(response.data["entities"])
+
+    def test_non_admin_get_is_forbidden(self):
+        participant = User.objects.create_user(email="world-participant@example.com")
+        participant_client = APIClient()
+        participant_client.force_authenticate(user=participant)
+
+        response = participant_client.get(WORLD_URL)
+
+        self.assertEqual(response.status_code, 403)
 
     def test_teams_ranked_by_best_score(self):
         self._submit(self.team_a, 0.4)

@@ -28,6 +28,8 @@ class VictorApplication(models.Model):
     last_name = models.CharField(max_length=255)
     # Not unique: people can register twice; client_ref is the upsert key.
     email = models.EmailField(db_index=True)
+    # Applicant's own LinkedIn (optional); captured in step 1 alongside contact.
+    linkedin = models.CharField(max_length=500, blank=True)
 
     team_name = models.CharField(max_length=255, blank=True)
     # Choice labels from the form ("Founder", "Idea stage"), not enums, so
@@ -36,6 +38,14 @@ class VictorApplication(models.Model):
     startup_stage = models.CharField(max_length=64, blank=True)
     industry_sector = models.CharField(max_length=64, blank=True)
     location = models.CharField(max_length=255, blank=True)
+
+    # Team composition: total headcount including the applicant, plus
+    # first/last/email for each *other* member (list of dicts).
+    team_size = models.PositiveIntegerField(null=True, blank=True)
+    team_members = models.JSONField(default=list, blank=True)
+    # Monthly revenue (AUD) for the last three months, keyed 'YYYY-MM'.
+    # Only collected when startup_stage indicates paying users or funding.
+    revenue_last_3_months = models.JSONField(default=dict, blank=True)
 
     idea = models.TextField(blank=True)
     support = models.TextField(blank=True)
