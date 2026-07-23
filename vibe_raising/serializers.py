@@ -8,6 +8,7 @@ from startup_updates.metric_catalog import (
     startup_update_metric_key,
     startup_update_metric_label,
 )
+from vibe_raising.serializer_fields import AudienceVisibilityField
 
 
 VIBE_RAISING_UPDATE_METRIC_KEYS = STARTUP_UPDATE_METRIC_KEY_SET
@@ -82,6 +83,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
     organizationDomain = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    audienceVisibility = AudienceVisibilityField(source="default_audience_visibility", read_only=True)
 
     class Meta:
         model = VibeRaisingCompany
@@ -92,6 +94,7 @@ class VibeRaisingCompanySerializer(serializers.ModelSerializer):
             "abn",
             "acn",
             "registered",
+            "audienceVisibility",
             "entityTypeName",
             "abrVerifiedAt",
             "organizationId",
@@ -168,6 +171,13 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
         "companyId": ("company_id",),
         "createNew": ("create_new",),
         "confirmDomainChange": ("confirm_domain_change",),
+        "audienceVisibility": (
+            "audience_visibility",
+            "defaultAudienceVisibility",
+            "default_audience_visibility",
+            "visibilityPreference",
+            "visibility_preference",
+        ),
     }
 
     companyId = serializers.UUIDField(required=False, allow_null=True)
@@ -185,6 +195,7 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
     # ABN/ABR rather than trusting it directly.
     acn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     registered = serializers.BooleanField(required=False)
+    audienceVisibility = AudienceVisibilityField(required=False)
 
     def validate(self, attrs):
         attrs["name"] = attrs["name"].strip()
@@ -197,6 +208,8 @@ class VibeRaisingCompanyUpsertSerializer(AliasInputSerializer):
             attrs["abn"] = _blank_to_none(attrs.get("abn"))
         if "acn" in attrs:
             attrs["acn"] = _blank_to_none(attrs.get("acn"))
+        if "audienceVisibility" in attrs:
+            attrs["default_audience_visibility"] = attrs.pop("audienceVisibility")
         return attrs
 
 
@@ -210,6 +223,12 @@ class VibeRaisingActiveCompanySerializer(AliasInputSerializer):
 
 class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     input_aliases = {
+        "audienceVisibility": (
+            "audience_visibility",
+            "visibilityPreference",
+            "visibility_preference",
+        ),
+        "saveMode": ("save_mode",),
         "sourceUrl": ("source_url",),
         "videoUrl": ("video_url",),
         "videoStoragePath": ("video_storage_path",),
@@ -225,6 +244,12 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
 
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
+    audienceVisibility = AudienceVisibilityField(required=False)
+    saveMode = serializers.ChoiceField(
+        choices=("draft", "ready"),
+        required=False,
+        default="ready",
+    )
     summary = serializers.CharField(allow_blank=True, allow_null=True, required=False, default="")
     sourceUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)
     videoUrl = serializers.URLField(allow_blank=True, allow_null=True, required=False)

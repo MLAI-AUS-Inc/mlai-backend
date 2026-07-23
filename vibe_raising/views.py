@@ -102,6 +102,10 @@ from vibe_raising.registration import (
     attempt_company_verification,
     set_unverified_company_abn,
 )
+from vibe_raising.audience_visibility import (
+    normalize_audience_visibility,
+    monthly_update_visibility,
+)
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .metric_history import build_metric_history
@@ -908,6 +912,7 @@ def _serialize_monthly_update(draft, structured_memo=None):
     if structured_memo is None:
         structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
+    published_at = getattr(draft, "published_at", None)
     return {
         "id": draft.id,
         "isoMonth": draft.month.isoformat(),
@@ -916,6 +921,9 @@ def _serialize_monthly_update(draft, structured_memo=None):
         "year": draft.month.year,
         "date": draft.updated_at.isoformat(),
         "status": draft.status,
+        "visibility": "published" if published_at else "private",
+        "audienceVisibility": monthly_update_visibility(draft),
+        "publishedAt": published_at.isoformat() if published_at else None,
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -2022,6 +2030,8 @@ class VibeRaisingCompanyView(APIView):
                     set_unverified_company_abn(company, data["abn"])
                 if "registered" in data:
                     company.registered = bool(data.get("registered"))
+                if "default_audience_visibility" in data:
+                    company.default_audience_visibility = data["default_audience_visibility"]
                 company.save()
 
                 # Best-effort: stamp the company verified if its ABN/ACN check out. An
@@ -2381,9 +2391,20 @@ class VibeRaisingMonthlyUpdateView(APIView):
         if organization is None:
             return Response({"updates": [], "metricHistory": {}}, status=status.HTTP_200_OK)
 
+        draft_queryset = organization.monthly_update_drafts.all()
+        audience = str(request.query_params.get("audience") or "").strip().lower().replace("-", "_")
+        if audience and audience != "founder":
+            try:
+                draft_queryset = draft_queryset.visible_to_audience(audience)
+            except ValueError:
+                return Response(
+                    {"detail": "audience must be founder, community, or investor."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         draft_memo_pairs = [
             (draft, _structured_memo_with_xero_metrics(draft))
-            for draft in organization.monthly_update_drafts.order_by("-month", "-updated_at")
+            for draft in draft_queryset.order_by("-month", "-updated_at")
         ]
         updates = [
             _serialize_monthly_update(draft, structured_memo=memo)
@@ -2432,19 +2453,34 @@ class VibeRaisingMonthlyUpdateView(APIView):
             1,
         )
 
+        existing_draft = MonthlyUpdateDraft.objects.filter(
+            organization=organization,
+            month=month_bucket,
+        ).first()
         display_config = serializer.validated_data.get("displayConfig")
         if display_config is None:
             # Saves that omit displayConfig (older clients, the frontend's
             # minimal-body retry) must not wipe a previously stored config,
             # since the manual memo fully replaces the existing one.
-            existing_draft = MonthlyUpdateDraft.objects.filter(
-                organization=organization,
-                month=month_bucket,
-            ).first()
             if existing_draft:
                 display_config = normalize_vibe_raising_display_config(
                     (existing_draft.structured_memo or {}).get("display_config")
                 )
+        if "audienceVisibility" in serializer.validated_data:
+            audience_visibility = serializer.validated_data["audienceVisibility"]
+        elif existing_draft is not None:
+            audience_visibility = monthly_update_visibility(existing_draft)
+        else:
+            audience_visibility = normalize_audience_visibility(
+                getattr(company, "default_audience_visibility", None)
+            )
+        is_existing_published = bool(existing_draft and existing_draft.published_at)
+        save_mode = serializer.validated_data.get("saveMode") or "ready"
+        draft_status = (
+            MonthlyUpdateDraftStatus.DRAFT
+            if save_mode == "draft" and not is_existing_published
+            else MonthlyUpdateDraftStatus.READY
+        )
 
         structured_payload = {
             **serializer.validated_data,
@@ -2458,10 +2494,12 @@ class VibeRaisingMonthlyUpdateView(APIView):
             organization=organization,
             month=month_bucket,
             defaults={
-                "status": MonthlyUpdateDraftStatus.READY,
+                "status": draft_status,
                 "title": f"{company.name} {serializer.validated_data['month']} {serializer.validated_data['year']} Update",
                 "model_name": "vibe-raising-manual",
                 "structured_memo": _build_manual_structured_memo(structured_payload),
+                "audience_visibility": audience_visibility,
+                "published_at": existing_draft.published_at if existing_draft else None,
             },
         )
 
@@ -2469,14 +2507,84 @@ class VibeRaisingMonthlyUpdateView(APIView):
         # company per month; best-effort, never blocks the save).
         from roo.services import StartupUpdateRewardService
 
-        StartupUpdateRewardService.award_monthly_update_completion(
-            user=request.user, company=company, month_bucket=month_bucket, draft=draft,
-        )
+        if draft_status == MonthlyUpdateDraftStatus.READY:
+            StartupUpdateRewardService.award_monthly_update_completion(
+                user=request.user, company=company, month_bucket=month_bucket, draft=draft,
+            )
 
         return Response(
             {"update": _serialize_monthly_update(draft)},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class VibeRaisingDraftView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        context, error_response = _get_founder_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        domain = context["domain"]
+        if not domain:
+            return Response({"drafts": []}, status=status.HTTP_200_OK)
+
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
+        if organization is None:
+            return Response({"drafts": []}, status=status.HTTP_200_OK)
+
+        drafts = [
+            _serialize_monthly_update(draft)
+            for draft in organization.monthly_update_drafts.filter(
+                published_at__isnull=True,
+            ).order_by("-month", "-updated_at")
+        ]
+        return Response({"drafts": drafts}, status=status.HTTP_200_OK)
+
+
+class VibeRaisingMonthlyUpdatePublishView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, update_id):
+        context, error_response = _get_founder_company_context_or_response(request)
+        if error_response:
+            return error_response
+
+        domain = context["domain"]
+        if not domain:
+            return Response(
+                {"detail": "Add a company domain before publishing updates."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        organization = _resolve_owned_organization(user=request.user, domain=domain)
+        if organization is None:
+            return Response({"detail": "Update not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        draft = get_object_or_404(
+            MonthlyUpdateDraft,
+            pk=update_id,
+            organization=organization,
+        )
+        was_unpublished = draft.published_at is None
+        update_fields = ["status", "updated_at"]
+        draft.status = MonthlyUpdateDraftStatus.READY
+        if was_unpublished:
+            draft.published_at = timezone.now()
+            update_fields.append("published_at")
+        draft.save(update_fields=update_fields)
+
+        if was_unpublished:
+            from roo.services import StartupUpdateRewardService
+
+            StartupUpdateRewardService.award_monthly_update_completion(
+                user=request.user,
+                company=context["company"],
+                month_bucket=draft.month,
+                draft=draft,
+            )
+        return Response({"update": _serialize_monthly_update(draft)}, status=status.HTTP_200_OK)
 
 
 class VibeRaisingStartupUpdateBootstrapView(APIView):
