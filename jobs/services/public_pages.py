@@ -526,7 +526,7 @@ def job_dict(
         "source_type": source_type,
         "source_quality_score": source_quality_score,
         "keyword": source_name.lower().replace(" ", "_"),
-        "title": clean_text(title),
+        "title": clean_scraped_title(title, company),
         "company_name": company,
         "company_logo_url": logo_url_for_company(company),
         "location": location,
@@ -630,3 +630,22 @@ def extract_after(text: str, pattern: str) -> str | None:
 
 def clean_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+JOB_TITLE_TRAILING_BOILERPLATE = re.compile(
+    r"\s+(?:Full[- ]?Time|Part[- ]?Time|Contract|Casual|Internship|Freelance)?\s*Job\s+"
+    r"(?:Remote\s+in\s+[A-Za-z]+|in\s+[A-Za-z ,]+)$",
+    re.I,
+)
+
+
+def clean_scraped_title(title: str, company: str | None) -> str:
+    # Some boards (e.g. Company Brew) render an anchor's whole text as
+    # "{company} {title} Full Time Job Remote in {region}" - strip the company
+    # prefix and the trailing employment-type/region boilerplate so the stored
+    # title is just the role name, not the source page's own layout text.
+    text = clean_text(title)
+    normalized_company = clean_text(company)
+    if normalized_company and text.lower().startswith(normalized_company.lower() + " "):
+        text = text[len(normalized_company):].strip()
+    return JOB_TITLE_TRAILING_BOILERPLATE.sub("", text).strip()

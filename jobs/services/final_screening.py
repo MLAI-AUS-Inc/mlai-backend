@@ -6,7 +6,7 @@ from typing import Any
 
 from jobs.conf import settings
 from jobs.services.job_scoring import is_target_role_title, rerank_for_relevance, score_job
-from jobs.services.location_eligibility import classify_with_rules, searchable_text
+from jobs.services.location_eligibility import classify_with_rules, scan_disqualifying_signals, searchable_text
 from jobs.services.summaries import build_job_summary
 
 
@@ -72,10 +72,14 @@ def _job_payload(job: Any) -> dict[str, Any]:
         "posted_text",
         "remote_eligibility",
         "remote_eligibility_score",
-        "ranking_penalty",
     )
     payload = {field: getattr(job, field, None) for field in fields}
     payload["source_quality_score"] = getattr(job, "source_score", 0.0)
+    # Soft-penalty signals (company stage, seniority, placeholder employer names, ...)
+    # aren't stored as their own column, so recompute them here rather than reading a
+    # stale/nonexistent value - otherwise every re-screening pass silently drops them.
+    signals = scan_disqualifying_signals(payload)
+    payload["ranking_penalty"] = min(0.35, sum(signal.penalty for signal in signals)) if signals else 0.0
     return payload
 
 
@@ -92,8 +96,20 @@ def _is_stale(date_posted: Any, posted_text: str | None) -> bool:
                 date_posted = date_posted.replace(tzinfo=dt_timezone.utc)
             return date_posted.astimezone(dt_timezone.utc) < cutoff
 
-    age_match = re.search(r"\b(\d+)\s*(h|hr|hrs|hour|hours|d|day|days)\b", str(posted_text or ""), re.I)
+    age_match = re.search(
+        r"\b(\d+)\s*(h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mos|month|months)\b",
+        str(posted_text or ""),
+        re.I,
+    )
     if not age_match:
         return False
-    multiplier = 24 if age_match.group(2).lower().startswith("d") else 1
-    return int(age_match.group(1)) * multiplier > settings.jobs_freshness_hours
+    unit = age_match.group(2).lower()
+    if unit.startswith("mo"):
+        hours_per_unit = 24 * 30
+    elif unit.startswith("w"):
+        hours_per_unit = 24 * 7
+    elif unit.startswith("d"):
+        hours_per_unit = 24
+    else:
+        hours_per_unit = 1
+    return int(age_match.group(1)) * hours_per_unit > settings.jobs_freshness_hours

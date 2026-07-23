@@ -241,7 +241,7 @@ class JobsSchedulerTests(TestCase):
         self.assertIn("1. AI Engineer", payload["text"])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
-    def test_previous_top_pick_is_not_repeated_but_updated_url_is_eligible(self, _mock_judge):
+    def test_previous_top_pick_is_not_repeated_even_when_url_changes(self, _mock_judge):
         previous_run = JobRun.objects.create(run_date="2026-05-30", run_id="2026-05-30-history")
         current_run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-history")
         common = {
@@ -271,7 +271,10 @@ class JobsSchedulerTests(TestCase):
             dedupe_key="ai-engineer|example-ai|old-url",
             **common,
         )
-        updated = JobListing.objects.create(
+        # Same underlying role (same title + company) reposted with a different URL,
+        # and therefore a different dedupe_key. It's still the same job, so it must
+        # stay excluded rather than resurface just because the URL changed.
+        JobListing.objects.create(
             run=current_run,
             job_url="https://example.com/jobs/ai-engineer-v2",
             dedupe_key="ai-engineer|example-ai|new-url",
@@ -280,7 +283,7 @@ class JobsSchedulerTests(TestCase):
 
         selected = job_pipeline.select_top_jobs(current_run)
 
-        self.assertEqual(selected, [updated])
+        self.assertEqual(selected, [])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
     def test_top_jobs_fills_seven_slots_from_screened_candidates_when_source_mix_is_limited(self, _mock_judge):
@@ -485,7 +488,7 @@ class JobsSchedulerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("AI Engineer", response.content.decode())
-        self.assertIn("JSON feed", response.content.decode())
+        self.assertNotIn("JSON feed", response.content.decode())
 
     def test_jobs_history_html_page_renders_browser_friendly_links(self):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-history-html")
@@ -670,6 +673,28 @@ class JobsSchedulerTests(TestCase):
 
         self.assertEqual(inserted, [])
         self.assertEqual(JobListing.objects.filter(run=run).count(), 0)
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_not_required_to_live_in_australia_is_eligible(self):
+        result = classify_location_eligibility(
+            {
+                "title": "Remote AI Engineer",
+                "description": "This role is remote; you do not need to live in Australia.",
+            }
+        )
+
+        self.assertEqual(result.status, "australia_eligible")
+
+    @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
+    def test_explicit_inability_to_hire_in_australia_is_restricted(self):
+        result = classify_location_eligibility(
+            {
+                "title": "Remote AI Engineer",
+                "description": "We can't hire candidates in Australia at this time.",
+            }
+        )
+
+        self.assertEqual(result.status, "restricted_remote")
 
     @override_settings(JOBS_LLM_LOCATION_CHECK_ENABLED=False)
     def test_europe_restriction_wins_when_job_mentions_apac_customers(self):

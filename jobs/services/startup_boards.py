@@ -10,6 +10,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from jobs.services.himalayas import parse_datetime
 from jobs.services.logos import logo_url_for_company
 from jobs.services.public_pages import clean_text
 from jobs.services.public_pages import collect_simple_jobs
@@ -192,6 +193,7 @@ def map_yc_job(item: dict[str, Any]) -> dict[str, Any] | None:
         "company_stage": item.get("companyBatchName"),
         "location": clean_text(item.get("location")) or None,
         "posted_text": item.get("createdAt"),
+        "date_posted": parse_datetime(item.get("createdAt")),
         "description": clean_text(description),
         "job_url": urljoin(YC_JOBS_URL, job_url),
         "apply_url": item.get("applyUrl") or item.get("ctaUrl") or urljoin(YC_JOBS_URL, job_url),
