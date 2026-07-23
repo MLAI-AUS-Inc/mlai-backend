@@ -38,7 +38,7 @@ from .permissions import (
     PermissionDeniedError,
 )
 from core.models import User
-from core.permissions import HasAPIKey, HasRooApiKey
+from core.permissions import HasAPIKey, HasRooApiKey, HasStrictRooApiKey
 from integrations.services import SlackService
 
 # Additional imports for Activity & Quests
@@ -1193,6 +1193,14 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
 class CoworkingViewSet(viewsets.ViewSet):
     """Coworking booking management."""
     permission_classes = [HasAPIKey | HasRooApiKey]
+
+    def get_permissions(self):
+        # This action is also wired through an explicit URL, so enforce its
+        # narrower service credential here rather than relying on router-only
+        # @action metadata.
+        if self.action == 'book_many':
+            return [HasStrictRooApiKey()]
+        return super().get_permissions()
 
     @action(detail=False, methods=['get'])
     def availability(self, request):

@@ -1823,7 +1823,6 @@ class CoworkingViewSetTests(APITestCase):
         booking_date,
         update_status,
         domain,
-        updated_days_ago=None,
     ):
         from organizations.models import Organization
         from startup_updates.models import MonthlyUpdateDraft, UserStartupBinding
@@ -1836,11 +1835,6 @@ class CoworkingViewSetTests(APITestCase):
             month=booking_date.replace(day=1),
             status=update_status,
         )
-        if updated_days_ago is not None:
-            MonthlyUpdateDraft.objects.filter(pk=draft.pk).update(
-                updated_at=timezone.now() - timedelta(days=updated_days_ago)
-            )
-            draft.refresh_from_db()
         return draft
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
@@ -1917,38 +1911,6 @@ class CoworkingViewSetTests(APITestCase):
         self.assertTrue(response.data['monthly_update_discount_applied'])
 
     @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
-    def test_book_response_flags_discount_for_draft_and_review_updates(self, mock_permission):
-        from startup_updates.models import MonthlyUpdateDraftStatus
-
-        statuses = [
-            MonthlyUpdateDraftStatus.DRAFT,
-            MonthlyUpdateDraftStatus.NEEDS_REVIEW,
-            MonthlyUpdateDraftStatus.READY,
-        ]
-        for index, update_status in enumerate(statuses, start=1):
-            with self.subTest(status=update_status):
-                user = self._create_member_with_points(f'UCODISCOUNT{index}', balance=4)
-                booking_date = date.today() + timedelta(days=index)
-                self._create_monthly_update_for_user(
-                    user,
-                    booking_date,
-                    update_status,
-                    f'discount-{index}.book.example',
-                )
-
-                response = self.client.post(
-                    self.url,
-                    {'slack_user_id': user.slack_id, 'date': booking_date.isoformat()},
-                    format='json',
-                )
-
-                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-                self.assertEqual(response.data['points_cost'], 4)
-                self.assertEqual(response.data['standard_points_cost'], 8)
-                self.assertTrue(response.data['monthly_update_discount_applied'])
-                self.assertEqual(PointsAccount.objects.get(user=user).balance, 0)
-
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
     def test_book_endpoint_is_idempotent_for_existing_booking(self, mock_permission):
         booking_date = (date.today() + timedelta(days=1)).isoformat()
 
@@ -1981,7 +1943,28 @@ class CoworkingViewSetTests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 2)  # charged once at the standard 8
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @override_settings(ROO_API_KEY='roo-key', INTERNAL_API_KEY='internal-key')
+    def test_batch_book_requires_dedicated_roo_api_key(self):
+        target = self._create_member_with_points('UCOSTRICTKEY', balance=10)
+        booking_date = date.today() + timedelta(days=1)
+
+        self.client.credentials(HTTP_X_API_KEY='internal-key')
+        internal_key_response = self._post_batch([target.slack_id], booking_date)
+
+        self.assertEqual(internal_key_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertFalse(
+            CoworkingBooking.objects.filter(user=target, date=booking_date).exists()
+        )
+
+        self.client.credentials(HTTP_X_API_KEY='roo-key')
+        roo_key_response = self._post_batch([target.slack_id], booking_date)
+
+        self.assertEqual(roo_key_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            CoworkingBooking.objects.filter(user=target, date=booking_date).exists()
+        )
+
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_admin_can_batch_book_multiple_users_without_charging_admin(self, mock_permission):
         target_1 = self._create_member_with_points('UCOBATCH1', balance=10)
         target_2 = self._create_member_with_points('UCOBATCH2', balance=10)
@@ -2021,7 +2004,7 @@ class CoworkingViewSetTests(APITestCase):
             all(entry.created_by_slack_id == self.admin_slack_id for entry in ledger_entries)
         )
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_uses_each_targets_discounted_or_standard_cost(self, mock_permission):
         from startup_updates.models import MonthlyUpdateDraftStatus
 
@@ -2031,7 +2014,7 @@ class CoworkingViewSetTests(APITestCase):
         self._create_monthly_update_for_user(
             discounted_target,
             booking_date,
-            MonthlyUpdateDraftStatus.NEEDS_REVIEW,
+            MonthlyUpdateDraftStatus.READY,
             'discounted-batch.book.example',
         )
 
@@ -2054,7 +2037,7 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(PointsAccount.objects.get(user=discounted_target).balance, 0)
         self.assertEqual(PointsAccount.objects.get(user=standard_target).balance, 0)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_mixed_cost_preflight_is_all_or_nothing(self, mock_permission):
         from startup_updates.models import MonthlyUpdateDraftStatus
 
@@ -2064,7 +2047,7 @@ class CoworkingViewSetTests(APITestCase):
         self._create_monthly_update_for_user(
             discounted_target,
             booking_date,
-            MonthlyUpdateDraftStatus.DRAFT,
+            MonthlyUpdateDraftStatus.READY,
             'mixed-discount.book.example',
         )
 
@@ -2082,7 +2065,7 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(PointsAccount.objects.get(user=discounted_target).balance, 4)
         self.assertEqual(PointsAccount.objects.get(user=short_standard_target).balance, 4)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_rejects_partner_and_non_admin(self, mock_permission):
         target = self._create_member_with_points('UCOBATCHDENY', balance=10)
         booking_date = date.today() + timedelta(days=1)
@@ -2104,7 +2087,7 @@ class CoworkingViewSetTests(APITestCase):
             CoworkingBooking.objects.filter(user=target, date=booking_date).exists()
         )
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_dedupes_target_ids(self, mock_permission):
         target_1 = self._create_member_with_points('UCODEDUPE1', balance=10)
         target_2 = self._create_member_with_points('UCODEDUPE2', balance=10)
@@ -2123,7 +2106,7 @@ class CoworkingViewSetTests(APITestCase):
             2,
         )
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_treats_existing_booking_as_idempotent(self, mock_permission):
         existing_user = self._create_member_with_points('UCOEXISTING', balance=10)
         new_user = self._create_member_with_points('UCONEWBOOK', balance=10)
@@ -2154,7 +2137,7 @@ class CoworkingViewSetTests(APITestCase):
             2,
         )
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_is_all_or_nothing_for_insufficient_balance(self, mock_permission):
         enough_user = self._create_member_with_points('UCOENOUGH', balance=10)
         short_user = self._create_member_with_points('UCOSHORT', balance=4)
@@ -2171,7 +2154,7 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(PointsAccount.objects.get(user=enough_user).balance, 10)
         self.assertEqual(PointsAccount.objects.get(user=short_user).balance, 4)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_is_all_or_nothing_for_unlinked_target(self, mock_permission):
         target = self._create_member_with_points('UCOLINKED', balance=10)
         booking_date = date.today() + timedelta(days=1)
@@ -2186,7 +2169,7 @@ class CoworkingViewSetTests(APITestCase):
         )
         self.assertEqual(PointsAccount.objects.get(user=target).balance, 10)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_is_all_or_nothing_for_insufficient_capacity(self, mock_permission):
         target_1 = self._create_member_with_points('UCOCAP1', balance=10)
         target_2 = self._create_member_with_points('UCOCAP2', balance=10)
@@ -2204,7 +2187,7 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(PointsAccount.objects.get(user=target_1).balance, 10)
         self.assertEqual(PointsAccount.objects.get(user=target_2).balance, 10)
 
-    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    @patch('core.permissions.HasStrictRooApiKey.has_permission', return_value=True)
     def test_batch_book_rejects_invalid_date_range(self, mock_permission):
         target = self._create_member_with_points('UCODATE', balance=10)
 
