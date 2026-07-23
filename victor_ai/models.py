@@ -59,3 +59,34 @@ class VictorApplication(models.Model):
 
     def __str__(self):
         return f'{self.first_name} {self.last_name} <{self.email}> ({self.stage})'
+
+
+class VictorRooRequestReceipt(models.Model):
+    """One-time nonce receipt for signed Roo application-data requests."""
+
+    nonce = models.CharField(max_length=128, unique=True)
+    request_id = models.CharField(max_length=128, db_index=True)
+    event_id = models.CharField(max_length=128, blank=True, default='')
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class VictorApplicationAccessAudit(models.Model):
+    """PII-free audit metadata for every authorised Victor read/export."""
+
+    action = models.CharField(max_length=32, db_index=True)
+    slack_team_id = models.CharField(max_length=32, db_index=True)
+    slack_channel_id = models.CharField(max_length=32, db_index=True)
+    acting_slack_user_id = models.CharField(max_length=32, db_index=True)
+    request_id = models.CharField(max_length=128, db_index=True)
+    target_application_id = models.PositiveBigIntegerField(null=True, blank=True)
+    filters = models.JSONField(default=dict, blank=True)
+    row_count = models.PositiveIntegerField(default=0)
+    outcome = models.CharField(max_length=32, default='success')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']

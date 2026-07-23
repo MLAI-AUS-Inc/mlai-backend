@@ -1075,6 +1075,38 @@ COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_D
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
+
+# Dedicated, fail-closed access for read-only Victor application reports in Roo.
+# This secret is used only to sign short-lived Slack actor assertions; the
+# generic Roo/internal API keys are deliberately not accepted by these views.
+VICTOR_AI_ROO_ENABLED = _env_is_true('VICTOR_AI_ROO_ENABLED', False)
+VICTOR_AI_ROO_SIGNING_SECRET = os.environ.get('VICTOR_AI_ROO_SIGNING_SECRET', '').strip()
+VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS = int(
+    os.environ.get('VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS', '60') or 60
+)
+VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS = int(
+    os.environ.get('VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS', '5') or 5
+)
+VICTOR_AI_ROO_EXPORT_MAX_ROWS = int(
+    os.environ.get('VICTOR_AI_ROO_EXPORT_MAX_ROWS', '5000') or 5000
+)
+if VICTOR_AI_ROO_ENABLED:
+    if len(VICTOR_AI_ROO_SIGNING_SECRET) < 32:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_SIGNING_SECRET must contain at least 32 characters when enabled.'
+        )
+    if not 10 <= VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS <= 300:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_ASSERTION_MAX_AGE_SECONDS must be between 10 and 300.'
+        )
+    if not 0 <= VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS <= 30:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_ASSERTION_CLOCK_SKEW_SECONDS must be between 0 and 30.'
+        )
+    if not 1 <= VICTOR_AI_ROO_EXPORT_MAX_ROWS <= 10000:
+        raise ImproperlyConfigured(
+            'VICTOR_AI_ROO_EXPORT_MAX_ROWS must be between 1 and 10000.'
+        )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
 
