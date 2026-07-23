@@ -1,12 +1,12 @@
 <!--
-  Daily research-topics email — Customer.io transactional template body.
+  Daily research-topics email -- Customer.io transactional template body.
 
   HOW TO USE
   ----------
   1. In Customer.io, create (or open) the transactional message whose id you set
      as CUSTOMERIO_TOPIC_TEMPLATE_ID in the mlai-backend env.
   2. Edit the message body as "Code"/HTML and paste this entire file in.
-  3. Set a subject, e.g.  Your 3 article recommendations for {{ trigger.domain }} ✍️
+  3. Set a subject, e.g.  Your 3 article recommendations for {{ trigger.domain }} 
   4. Send a test with the sample payload at the bottom of this file.
 
   DATA CONTRACT
@@ -19,7 +19,7 @@
       "domain": "example.com",
       "unsubscribe_url": "https://api.mlai.au/...",
       "analytics": {                             // article-performance digest; leads the email
-        "available": true,                       // false → whole section hidden
+        "available": true,                       // false -> whole section hidden
         "report_date": "2026-07-23",
         "window_days": 7,
         "human_visits": 11,
@@ -27,12 +27,12 @@
         "engaged_rate_display": "45%",
         "cta_clickers": 2,
         "conversion_display": "18.2%",
-        "summary_line": "11 visits (+4 vs prior) · 45% engaged · 2 CTA clickers",
+        "summary_line": "11 visits (+4 vs prior) - 45% engaged - 2 CTA clickers",
         "top_pages": [                           // up to 3, visits-desc; may be []
-          {"rank": 1, "title": "…", "url": "https://…", "summary": "5 visits · 60% engaged · 2 CTA clicks · Top performer"}
+          {"rank": 1, "title": "...", "url": "https://...", "summary": "5 visits - 60% engaged - 2 CTA clicks - Top performer"}
         ],
         "attention_pages": [                     // up to 3 needing an update; may be []
-          {"title": "…", "url": "https://…", "summary": "Visitors arrive but leave without engaging…"}
+          {"title": "...", "url": "https://...", "summary": "Visitors arrive but leave without engaging..."}
         ],
         "extra_attention_count": 0,
         "brief_url": "https://mlai.au/founder-tools/marketing#analytics"
@@ -65,6 +65,12 @@
   object ({{ trigger.topics }}, {{ trigger.first_name }}). The aliases below
   retain the historical top-level/nested fallbacks for previews and old sends.
 
+  ENCODING RULE: this file must stay pure 7-bit ASCII. Customer.io's template
+  storage mangled literal UTF-8 (Mac-Roman mojibake in received emails), so
+  use HTML entities in markup (&middot; &mdash; &#9733; ...) and \uXXXX
+  escapes inside the sample JSON. tests/test_customerio_template_docs.py
+  enforces this.
+
   LIQUID GOTCHA: in Liquid an empty string AND an empty array are TRUTHY, so
   a simple truthiness branch fires even when x is "". Optional fields are guarded with
   `!= blank` and the empty-state with `== blank`. Do not "simplify" these.
@@ -82,12 +88,12 @@
         <!-- Header -->
         <tr>
           <td style="padding:32px 32px 8px 32px;">
-            <p style="margin:0;font-size:14px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Roo · Daily research</p>
+            <p style="margin:0;font-size:14px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Roo &middot; Daily research</p>
             <h1 style="margin:8px 0 0 0;font-size:24px;line-height:1.25;color:#111827;font-weight:700;">
               {% if greeting_name != blank %}{{ greeting_name }}, your{% else %}Your{% endif %} topics for {{ site_domain }}
             </h1>
             <p style="margin:12px 0 0 0;font-size:15px;line-height:1.5;color:#4b5563;">
-              We researched today's best opportunities. Pick one, confirm your choice, and we'll start writing — no login required.
+              We researched today's best opportunities. Pick one, confirm your choice, and we'll start writing &mdash; no login required.
             </p>
           </td>
         </tr>
@@ -99,14 +105,14 @@
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;">
               <tr>
                 <td style="padding:20px;">
-                  <p style="margin:0;font-size:12px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Article performance · last {{ perf.window_days }} days</p>
+                  <p style="margin:0;font-size:12px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">Article performance &middot; last {{ perf.window_days }} days</p>
                   <p style="margin:8px 0 0 0;font-size:15px;line-height:1.5;color:#111827;font-weight:600;">{{ perf.summary_line }}</p>
 
                   {% if perf.top_pages != blank %}
                   <p style="margin:14px 0 4px 0;font-size:13px;color:#374151;font-weight:700;">Top pages</p>
                   {% for page in perf.top_pages %}
                   <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;">
-                    {{ page.rank }}. {% if page.url != blank %}<a href="{{ page.url }}" style="color:#4f46e5;text-decoration:none;font-weight:600;">{{ page.title }}</a>{% else %}<strong>{{ page.title }}</strong>{% endif %} — {{ page.summary }}
+                    {{ page.rank }}. {% if page.url != blank %}<a href="{{ page.url }}" style="color:#4f46e5;text-decoration:none;font-weight:600;">{{ page.title }}</a>{% else %}<strong>{{ page.title }}</strong>{% endif %} &mdash; {{ page.summary }}
                   </p>
                   {% endfor %}
                   {% endif %}
@@ -114,10 +120,10 @@
                   {% if perf.attention_pages != blank %}
                   <p style="margin:14px 0 4px 0;font-size:13px;color:#b45309;font-weight:700;">Needs attention</p>
                   {% for page in perf.attention_pages %}
-                  <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;"><strong>{{ page.title }}</strong> — {{ page.summary }}</p>
+                  <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;"><strong>{{ page.title }}</strong> &mdash; {{ page.summary }}</p>
                   {% endfor %}
                   {% if perf.extra_attention_count > 0 %}
-                  <p style="margin:6px 0 0 0;font-size:12px;color:#9ca3af;">…and {{ perf.extra_attention_count }} more in the full brief.</p>
+                  <p style="margin:6px 0 0 0;font-size:12px;color:#9ca3af;">&hellip;and {{ perf.extra_attention_count }} more in the full brief.</p>
                   {% endif %}
                   {% endif %}
 
@@ -137,7 +143,7 @@
           <td style="padding:24px 32px 32px 32px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;">
               <tr><td style="padding:24px;font-size:15px;color:#4b5563;line-height:1.5;">
-                No topics were ready this morning. We'll try again at the next scheduled run — nothing you need to do.
+                No topics were ready this morning. We'll try again at the next scheduled run &mdash; nothing you need to do.
               </td></tr>
             </table>
           </td>
@@ -151,7 +157,7 @@
               <tr>
                 <td style="padding:20px 20px 16px 20px;">
                   {% if topic.recommended %}
-                  <span style="display:inline-block;background:#6366f1;color:#ffffff;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:4px 10px;border-radius:999px;margin-bottom:10px;">★ Recommended</span>
+                  <span style="display:inline-block;background:#6366f1;color:#ffffff;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:4px 10px;border-radius:999px;margin-bottom:10px;">&#9733; Recommended</span>
                   {% elsif topic.tier_label != blank %}
                   <span style="display:inline-block;background:#eef2ff;color:#4338ca;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:4px 10px;border-radius:999px;margin-bottom:10px;">{{ topic.tier_label }}</span>
                   {% endif %}
@@ -162,12 +168,12 @@
 
                   <!-- Stats row -->
                   <p style="margin:12px 0 0 0;font-size:13px;color:#374151;line-height:1.6;">
-                    {% if topic.volume_display != blank %}🔍 <strong>{{ topic.volume_display }}</strong> searches&nbsp;&nbsp;{% endif %}
-                    {% if topic.difficulty != blank %}📊 difficulty <strong>{{ topic.difficulty }}</strong>&nbsp;&nbsp;{% endif %}
-                    {% if topic.opportunity_index != blank %}🎯 opportunity <strong>{{ topic.opportunity_index }}</strong>{% endif %}
+                    {% if topic.volume_display != blank %}&#128269; <strong>{{ topic.volume_display }}</strong> searches&nbsp;&nbsp;{% endif %}
+                    {% if topic.difficulty != blank %}&#128202; difficulty <strong>{{ topic.difficulty }}</strong>&nbsp;&nbsp;{% endif %}
+                    {% if topic.opportunity_index != blank %}&#127919; opportunity <strong>{{ topic.opportunity_index }}</strong>{% endif %}
                   </p>
                   {% if topic.ai_volume_display != blank %}
-                  <p style="margin:4px 0 0 0;font-size:13px;color:#374151;">🤖 <strong>{{ topic.ai_volume_display }}</strong> AI-assistant searches</p>
+                  <p style="margin:4px 0 0 0;font-size:13px;color:#374151;">&#129302; <strong>{{ topic.ai_volume_display }}</strong> AI-assistant searches</p>
                   {% endif %}
                   {% if topic.why_recommended != blank %}
                   <p style="margin:12px 0 0 0;font-size:14px;color:#4b5563;line-height:1.5;">{{ topic.why_recommended }}</p>
@@ -178,7 +184,7 @@
                   {% endif %}
                   {% if topic.chart_url != blank %}
                   <p style="margin:6px 0 8px 0;font-size:11px;color:#9ca3af;">
-                    {{ topic.trend_source_label }}{% if topic.trend_period_label != blank %} · {{ topic.trend_period_label }}{% endif %}
+                    {{ topic.trend_source_label }}{% if topic.trend_period_label != blank %} &middot; {{ topic.trend_period_label }}{% endif %}
                   </p>
                   <img src="{{ topic.chart_url | escape }}" alt="{{ topic.chart_alt | escape }}" width="480" style="display:block;width:100%;max-width:480px;height:auto;border:0;border-radius:8px;background:#ffffff;" />
                   {% endif %}
@@ -189,11 +195,11 @@
                       <td align="center" bgcolor="#4f46e5" style="border-radius:8px;">
                         <!--[if mso]>
                         <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ topic.confirm_url }}" style="height:44px;v-text-anchor:middle;width:220px;" arcsize="18%" strokecolor="#4f46e5" fillcolor="#4f46e5">
-                        <w:anchorlock/><center style="color:#ffffff;font-family:sans-serif;font-size:15px;font-weight:bold;">✍️ Write this article</center>
+                        <w:anchorlock/><center style="color:#ffffff;font-family:sans-serif;font-size:15px;font-weight:bold;">&#9997;&#65039; Write this article</center>
                         </v:roundrect>
                         <![endif]-->
                         <!--[if !mso]><!-->
-                        <a href="{{ topic.confirm_url }}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;background:#4f46e5;">✍️ Write this article</a>
+                        <a href="{{ topic.confirm_url }}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;background:#4f46e5;">&#9997;&#65039; Write this article</a>
                         <!--<![endif]-->
                       </td>
                     </tr>
@@ -229,7 +235,7 @@
     "first_name": "Sam",
     "domain": "example.com",
     "unsubscribe_url": "https://api.mlai.au/example-unsubscribe",
-    "analytics": {"available": true, "report_date": "2026-07-23", "window_days": 7, "human_visits": 11, "visits_delta_display": "+4", "engaged_rate_display": "45%", "cta_clickers": 2, "conversion_display": "18.2%", "summary_line": "11 visits (+4 vs prior) · 45% engaged · 2 CTA clickers", "top_pages": [{"rank": 1, "title": "How AI Code Review Cuts PR Cycle Time", "url": "https://example.com/articles/ai-code-review", "summary": "5 visits · 60% engaged · 2 CTA clicks · Top performer"}, {"rank": 2, "title": "A Practical Guide to LLM Evals", "url": "https://example.com/articles/llm-evals", "summary": "3 visits · 67% engaged"}, {"rank": 3, "title": "AI Workflow Automation for Small Teams", "url": "", "summary": "2 visits"}], "attention_pages": [{"title": "Old Launch Announcement", "url": "https://example.com/articles/launch", "summary": "Visitors arrive but leave without engaging (5% reach 30 active seconds, 0.0% CTA conversion)."}], "extra_attention_count": 0, "brief_url": "https://mlai.au/founder-tools/marketing#analytics"},
+    "analytics": {"available": true, "report_date": "2026-07-23", "window_days": 7, "human_visits": 11, "visits_delta_display": "+4", "engaged_rate_display": "45%", "cta_clickers": 2, "conversion_display": "18.2%", "summary_line": "11 visits (+4 vs prior) \u00b7 45% engaged \u00b7 2 CTA clickers", "top_pages": [{"rank": 1, "title": "How AI Code Review Cuts PR Cycle Time", "url": "https://example.com/articles/ai-code-review", "summary": "5 visits \u00b7 60% engaged \u00b7 2 CTA clicks \u00b7 Top performer"}, {"rank": 2, "title": "A Practical Guide to LLM Evals", "url": "https://example.com/articles/llm-evals", "summary": "3 visits \u00b7 67% engaged"}, {"rank": 3, "title": "AI Workflow Automation for Small Teams", "url": "", "summary": "2 visits"}], "attention_pages": [{"title": "Old Launch Announcement", "url": "https://example.com/articles/launch", "summary": "Visitors arrive but leave without engaging (5% reach 30 active seconds, 0.0% CTA conversion)."}], "extra_attention_count": 0, "brief_url": "https://mlai.au/founder-tools/marketing#analytics"},
     "topics": [
       {"rank": 1, "keyword": "ai code review", "display_title": "How AI Code Review Cuts PR Cycle Time", "volume_display": "1.2k/mo", "difficulty": 34, "opportunity_index": 82, "tier_label": "Quick win", "ai_volume_display": "320/mo", "why_recommended": "Low difficulty, high intent, and you already rank for adjacent terms.", "recommended": true, "trend_source_label": "Google Trends interest", "trend_period_label": "past 30 days", "trend_summary": "Google Trends interest over the past 30 days is rising.", "trend_percent": 24, "chart_url": "https://placehold.co/960x240/png?text=Demand+trend", "chart_alt": "Demand trend for AI Code Review, up 24%.", "confirm_url": "https://api.mlai.au/approve-1"},
       {"rank": 2, "keyword": "llm evals", "display_title": "A Practical Guide to LLM Evals", "volume_display": "640/mo", "difficulty": 51, "opportunity_index": 60, "tier_label": "Authority Builder", "ai_volume_display": "", "why_recommended": "Strong audience fit and useful evergreen demand.", "recommended": false, "confirm_url": "https://api.mlai.au/approve-2"},
