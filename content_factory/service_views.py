@@ -2,8 +2,9 @@ import json
 import logging
 import os
 import time
-from datetime import date as calendar_date, datetime, timezone as datetime_timezone
+from datetime import date as calendar_date, datetime, timedelta, timezone as datetime_timezone
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -11,6 +12,7 @@ from django.core import signing
 from django.db import OperationalError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseRedirect
+from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -29,7 +31,11 @@ from content_factory.article_system import (
     registry_target_publish_ready,
     resolve_article_system,
 )
-from content_factory.article_setup_reset import carry_reset_markers
+from content_factory.article_setup_reset import (
+    carry_reset_markers,
+    clear_article_setup_reset_markers,
+    clear_cancelled_article_setup_config,
+)
 from content_factory.authors import normalize_authors, org_config_author_payload
 from content_factory.auth import content_factory_github_connection_state
 from content_factory.delivery import (
@@ -44,11 +50,14 @@ from content_factory.delivery import (
     validate_content_factory_preview_signature,
 )
 from content_factory.article_publish_status import advance_publish_status
+from content_factory.dispatch_binding import bind_dispatch_token_run
 from content_factory.github_webhook import process_github_event, verify_github_signature
 from content_factory.models import (
     ArticlePublishStatus,
     ComponentMapping,
     ContentFactoryHealingRecord,
+    ContentFactoryLearningEntry,
+    ContentFactoryLearningScope,
     GeneratedComponent,
     OrganizationContentConfig,
     WebsiteBaselineSnapshot,
@@ -59,8 +68,15 @@ from content_factory.progress import (
     maybe_send_still_working_ping,
     upsert_live_progress_card,
 )
+from content_factory.run_state import (
+    ACTIVE_RUN_STATUSES as DURABLE_ACTIVE_RUN_STATUSES,
+    ARTICLE_WORKFLOWS,
+    active_retry_signal,
+    clear_obsolete_active_run_blockers,
+)
 from content_factory.serializers import (
     ContentFactoryHealingRecordSerializer,
+    ContentFactoryLearningEntrySerializer,
     GeneratedComponentListSerializer,
     GeneratedComponentSerializer,
 )
@@ -299,29 +315,67 @@ class ContentFactoryOrgConfigView(APIView):
             except Exception as e:
                 logger.warning(f"Error looking up owned domains for slack_user_id {slack_user_id}: {e}")
 
-        # 1. Try lookup by github_repo if provided
-        if github_repo and not org:
+        # 1. Resolve by domain FIRST — it is the authoritative tenant key.
+        #    (github_repo used to be tried first, so a stale scan hint or a repo
+        #    shared across two of a founder's companies could silently bind a run
+        #    to a DIFFERENT company's org, including its GitHub token + publish
+        #    target.)
+        domain_org = None
+        if domain and not org:
+            normalized_domain = self._normalize_domain(domain)
+            domain_org = Organization.objects.filter(domain=normalized_domain).first()
+
+        # 2. Collect the org(s) this github_repo is configured for. A repo can be
+        #    shared by several of a founder's companies (a monorepo), so this is a
+        #    set, not a single org.
+        repo_org_ids = set()
+        repo_org = None
+        if github_repo:
             try:
-                # Find the config that matches this repo
-                config_qs = OrganizationContentConfig.objects.filter(github_repo=github_repo)
+                repo_qs = OrganizationContentConfig.objects.filter(github_repo=github_repo)
                 if slack_user_id:
-                    config_qs = config_qs.filter(
+                    scoped = repo_qs.filter(
                         Q(connected_slack_user_id=slack_user_id)
                         | Q(connected_slack_user_id__isnull=True)
                     )
-                config = config_qs.first()
-                if config:
-                    org = config.organization
+                    repo_qs = scoped if scoped.exists() else repo_qs
+                repo_org_ids = set(repo_qs.values_list("organization_id", flat=True))
+                # Deterministic pick for the repo-only case (no domain given).
+                repo_config = (
+                    repo_qs.select_related("organization")
+                    .order_by("organization__domain", "organization_id")
+                    .first()
+                )
+                repo_org = repo_config.organization if repo_config else None
             except Exception as e:
                 logger.warning(f"Error looking up org by repo {github_repo}: {e}")
 
-        # 2. Try lookup by domain if no org found yet
-        if not org and domain:
-            normalized_domain = self._normalize_domain(domain)
-            try:
-                org = Organization.objects.get(domain=normalized_domain)
-            except Organization.DoesNotExist:
-                pass
+        # 3. Reconcile. Domain wins. A github_repo that is registered ONLY to other
+        #    companies (its org set excludes the domain's org) is a setup conflict
+        #    — a stale scan hint or a mistaken repo link — surfaced as a structured
+        #    409 instead of silently switching tenants. When the domain's org is
+        #    among the repo's orgs (including a legitimately shared monorepo), the
+        #    domain wins with no conflict. Repo-only still resolves for scan/preflight.
+        if org is None:
+            if domain_org is not None:
+                if repo_org_ids and domain_org.id not in repo_org_ids:
+                    return Response(
+                        {
+                            'error': (
+                                "This GitHub repository is registered to a different "
+                                "company. Reconnect the repository for this website, or "
+                                "switch to the company that owns it."
+                            ),
+                            'code': 'repo_domain_org_conflict',
+                            'domain': domain_org.domain,
+                            'github_repo': github_repo,
+                            'repo_org_domain': repo_org.domain if repo_org else None,
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                org = domain_org
+            elif repo_org is not None:
+                org = repo_org
 
         if not org:
             return Response(
@@ -395,6 +449,7 @@ class ContentFactoryOrgConfigView(APIView):
             ),
             'scan_request_fingerprint': (config.scan_request_fingerprint if config else ''),
             'article_system_setup_cache': (config.article_system_setup_cache if config else {}),
+            'scan_artifact_cache': (config.scan_artifact_cache if config else {}),
             'framework_component_specs': (config.framework_component_specs if config else {}),
             # Opt-in gate read by content-factory (_component_library_enabled) to import + compose the
             # real component library for articles instead of inlining generic helpers.
@@ -416,6 +471,33 @@ class ContentFactoryOrgConfigView(APIView):
         # authors + default_author_name/default_author_profile: content-factory re-fetches this
         # per run and the renderer seeds its inline author byline from the default profile.
         response_data.update(org_config_author_payload(config))
+
+        # Opt-in heavy payload for the scan hydration path ONLY: the full stored component
+        # rows (including source code), so a re-scan at an unchanged repo SHA can replay the
+        # prior generation instead of regenerating ~29 components. Kept off the default
+        # response — article runs fetch this config too and must stay lean — and kept off
+        # `generated_components`, whose dormant render-pipeline consumers must not activate
+        # (see the article_component_library note above).
+        include_component_reuse = str(
+            request.query_params.get('include_component_reuse') or ''
+        ).strip().lower() in {'1', 'true', 'yes'}
+        if include_component_reuse and config is not None:
+            response_data['component_reuse_inventory'] = [
+                {
+                    'name': comp.name,
+                    'content': comp.content,
+                    'source': comp.source,
+                    'original_path': comp.original_path,
+                    'similarity_score': comp.similarity_score,
+                    'matched_component': comp.matched_component,
+                    'adaptation_notes': comp.adaptation_notes,
+                    'import_statement': comp.import_statement or '',
+                    'metadata': comp.metadata if isinstance(comp.metadata, dict) else {},
+                }
+                for comp in GeneratedComponent.objects.filter(
+                    organization_id=config.organization_id
+                ).order_by('name')
+            ]
 
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -557,6 +639,7 @@ class ContentFactoryOrgConfigView(APIView):
             # regenerating all ~29 on every scan.
             'scan_request_fingerprint',
             'article_system_setup_cache',
+            'scan_artifact_cache',
             'framework_component_specs',
             # Opt-in gate for component-library article assembly (default off, enable per org).
             'use_component_library',
@@ -822,6 +905,7 @@ class ContentFactoryHealingRecordView(APIView):
         github_repo = str(request.query_params.get("github_repo") or "").strip()
         failure_kind = str(request.query_params.get("failure_kind") or "").strip()
         failure_family_key = str(request.query_params.get("failure_family_key") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
         promotion_state = str(request.query_params.get("promotion_state") or "").strip()
         limit_raw = str(request.query_params.get("limit") or "").strip()
 
@@ -833,6 +917,8 @@ class ContentFactoryHealingRecordView(APIView):
             records = records.filter(failure_kind=failure_kind)
         if failure_family_key:
             records = records.filter(failure_family_key=failure_family_key)
+        if framework:
+            records = records.filter(framework=framework)
         if promotion_state:
             records = records.filter(promotion_state=promotion_state)
 
@@ -882,6 +968,7 @@ class ContentFactoryHealingRecordView(APIView):
             github_repo=github_repo,
             failure_kind=failure_kind,
             failure_family_key=failure_family_key,
+            framework=data.get("framework") or "",
             defaults=defaults,
         )
         response_payload = ContentFactoryHealingRecordSerializer(record).data
@@ -889,6 +976,100 @@ class ContentFactoryHealingRecordView(APIView):
         return Response(
             response_payload,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ContentFactoryLearningEntryView(APIView):
+    """
+    GET/POST entries for Content Factory's durable learning stores
+    (error_fix_pairs, build_failures). Entries are opaque payloads keyed by
+    (store, scope, repo_name, framework, entry_key); all merge semantics live
+    in Content Factory, this endpoint only persists.
+    """
+
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    MAX_BATCH = 200
+
+    def get(self, request):
+        store = str(request.query_params.get("store") or "").strip()
+        if not store:
+            return Response(
+                {"error": "store query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        entries = ContentFactoryLearningEntry.objects.filter(store=store)
+
+        scope = str(request.query_params.get("scope") or "").strip()
+        repo_name = str(request.query_params.get("repo_name") or "").strip()
+        framework = str(request.query_params.get("framework") or "").strip()
+        entry_key = str(request.query_params.get("entry_key") or "").strip()
+        limit_raw = str(request.query_params.get("limit") or "").strip()
+
+        if scope:
+            entries = entries.filter(scope=scope)
+        if repo_name:
+            entries = entries.filter(repo_name=repo_name)
+        if framework:
+            entries = entries.filter(framework=framework)
+        if entry_key:
+            entries = entries.filter(entry_key=entry_key)
+
+        limit = 200
+        if limit_raw:
+            try:
+                limit = max(1, min(int(limit_raw), 1000))
+            except ValueError:
+                limit = 200
+
+        serializer = ContentFactoryLearningEntrySerializer(entries.order_by("-updated_at")[:limit], many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        raw_entries = body.get("entries")
+        if raw_entries is None:
+            raw_entries = [body]
+        if not isinstance(raw_entries, list) or not raw_entries:
+            return Response(
+                {"error": "expected an entry object or {\"entries\": [...]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(raw_entries) > self.MAX_BATCH:
+            return Response(
+                {"error": f"batch too large (max {self.MAX_BATCH} entries)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ContentFactoryLearningEntrySerializer(data=raw_entries, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        results = []
+        created_count = 0
+        for data in serializer.validated_data:
+            payload = data.get("payload") or {}
+            try:
+                occurrences = int(payload.get("occurrences") or data.get("occurrences") or 1)
+            except (TypeError, ValueError):
+                occurrences = 1
+            record, created = ContentFactoryLearningEntry.objects.update_or_create(
+                store=data["store"],
+                scope=data.get("scope") or ContentFactoryLearningScope.REPO,
+                repo_name=data.get("repo_name") or "",
+                framework=data.get("framework") or "",
+                entry_key=data["entry_key"],
+                defaults={"payload": payload, "occurrences": occurrences},
+            )
+            if created:
+                created_count += 1
+            item = ContentFactoryLearningEntrySerializer(record).data
+            item["sync_status"] = "created" if created else "updated"
+            results.append(item)
+
+        return Response(
+            {"results": results, "created": created_count, "updated": len(results) - created_count},
+            status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
         )
 
 
@@ -1085,6 +1266,11 @@ class ContentFactoryTokenView(APIView):
             create_installation_access_token,
             github_app_credentials_configured,
         )
+        from integrations.services.github_installations import (
+            installation_for_repo,
+            resolve_user_for_actor_id,
+            user_has_registered_installation,
+        )
         from integrations.models import UserIntegration
 
         domain = request.query_params.get('domain')
@@ -1104,9 +1290,68 @@ class ContentFactoryTokenView(APIView):
                 # Fetch config for additional context
                 org = Organization.objects.get(domain=normalized_domain)
                 config = org.content_config
-                github_repo = requested_repo or str(config.github_repo or '').strip()
+                configured_repo = str(config.github_repo or '').strip()
+                github_repo = requested_repo or configured_repo
+                installation_id = str(config.github_installation_id or '').strip()
 
-                if config.github_installation_id and github_repo:
+                # Resolve repository access from the founder's installation
+                # registry before trusting the legacy per-company id. A founder
+                # can authorize multiple GitHub accounts, so the stored config id
+                # may refer to another account after switching companies.
+                actor_id = str(config.connected_slack_user_id or slack_user_id or '').strip()
+                registry_user = resolve_user_for_actor_id(actor_id)
+                # A registry of only stale (uninstalled) installations lists no
+                # repos and must not be treated as authoritative — otherwise a
+                # dead row forces a hard "installation mismatch" 401 instead of
+                # falling back to the legacy per-org id. Excludes GitHub-confirmed
+                # dead rows; the reconciliation sweep durably removes them.
+                registry_is_authoritative = (
+                    registry_user is not None
+                    and user_has_registered_installation(registry_user)
+                )
+                if registry_is_authoritative and github_repo:
+                    registry_installation = installation_for_repo(registry_user, github_repo)
+                    if registry_installation is None:
+                        message = (
+                            f"The MLAI Tools GitHub App is not installed for {github_repo} under any "
+                            "GitHub account connected by this founder. Reconnect GitHub for this repository, "
+                            "then retry."
+                        )
+                        logger.warning(
+                            "GitHub installation registry could not resolve repo domain=%s repo=%s actor_id=%s",
+                            normalized_domain,
+                            github_repo,
+                            actor_id,
+                        )
+                        return Response(
+                            {
+                                'error': 'GitHub repository installation mismatch',
+                                'message': message,
+                                'action_required': 'auth_required',
+                                'reason_code': 'repository_not_accessible_by_registered_installations',
+                                'github_repo': github_repo,
+                            },
+                            status=status.HTTP_401_UNAUTHORIZED,
+                        )
+
+                    installation_id = str(registry_installation.installation_id or '').strip()
+                    if (
+                        installation_id
+                        and installation_id != str(config.github_installation_id or '').strip()
+                        and github_repo.casefold() == configured_repo.casefold()
+                    ):
+                        previous_installation_id = str(config.github_installation_id or '').strip()
+                        config.github_installation_id = installation_id
+                        config.save(update_fields=['github_installation_id', 'updated_at'])
+                        logger.info(
+                            "Self-healed GitHub installation binding domain=%s repo=%s old_installation_id=%s installation_id=%s",
+                            normalized_domain,
+                            github_repo,
+                            previous_installation_id,
+                            installation_id,
+                        )
+
+                if installation_id and github_repo:
                     if not github_app_credentials_configured():
                         logger.warning("GitHub App credentials are not configured for installation token lookup.")
                         return Response(
@@ -1115,13 +1360,13 @@ class ContentFactoryTokenView(APIView):
                                 'message': 'MLAI Tools GitHub App server credentials are missing. Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, then retry.',
                                 'action_required': 'server_configuration_required',
                                 'github_repo': github_repo,
-                                'github_installation_id': config.github_installation_id,
+                                'github_installation_id': installation_id,
                             },
                             status=status.HTTP_401_UNAUTHORIZED,
                         )
                     try:
                         installation_token = create_installation_access_token(
-                            installation_id=config.github_installation_id,
+                            installation_id=installation_id,
                             repository=github_repo,
                             permission_mode='write',
                         )
@@ -1130,7 +1375,7 @@ class ContentFactoryTokenView(APIView):
                             "GitHub App installation token lookup failed for domain=%s repo=%s installation_id=%s: %s",
                             normalized_domain,
                             github_repo,
-                            config.github_installation_id,
+                            installation_id,
                             exc,
                         )
                         return Response(
@@ -1138,8 +1383,9 @@ class ContentFactoryTokenView(APIView):
                                 'error': 'GitHub App installation access failed',
                                 'message': str(exc),
                                 'action_required': 'auth_required',
+                                'reason_code': 'github_installation_token_mint_failed',
                                 'github_repo': github_repo,
-                                'github_installation_id': config.github_installation_id,
+                                'github_installation_id': installation_id,
                             },
                             status=status.HTTP_401_UNAUTHORIZED,
                         )
@@ -1149,7 +1395,7 @@ class ContentFactoryTokenView(APIView):
                         "Provided GitHub App installation token for %s repo=%s installation_id=%s",
                         normalized_domain,
                         github_repo,
-                        config.github_installation_id,
+                        installation_id,
                     )
                     return Response(response_data, status=status.HTTP_200_OK)
 
@@ -1511,18 +1757,54 @@ class ResearchAutomationActionView(APIView):
     permission_classes = []
 
     def get(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
+
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if preview.get("confirmation_required"):
+            return render(
+                request,
+                "content_factory/automation_action_confirm.html",
+                {"token": token, **preview},
+            )
+        return self._handle(request, token=token)
 
     def post(self, request):
-        return self._handle(request)
+        token = self._token(request)
+        if not token:
+            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from integrations.services.notification_adapters import preview_automation_action_token
 
-    def _handle(self, request):
+            preview = preview_automation_action_token(token)
+        except signing.BadSignature:
+            return Response({"error": "Invalid or expired action token"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.warning("Research automation action preview failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._handle(
+            request,
+            token=token,
+            render_browser_result=bool(preview.get("confirmation_required")),
+        )
+
+    @staticmethod
+    def _token(request) -> str:
+        return str(request.query_params.get("token") or request.data.get("token") or "").strip()
+
+    def _handle(self, request, *, token: str, render_browser_result: bool = False):
         from django.core import signing as django_signing
         from integrations.services.notification_adapters import handle_automation_action_token
 
-        token = str(request.query_params.get("token") or request.data.get("token") or "").strip()
-        if not token:
-            return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             result = handle_automation_action_token(token)
         except django_signing.BadSignature:
@@ -1530,6 +1812,19 @@ class ResearchAutomationActionView(APIView):
         except Exception as exc:
             logger.warning("Research automation action failed: %s", exc)
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if render_browser_result:
+            job_id = str(result.get("job_id") or result.get("run_id") or "").strip()
+            frontend_base = str(getattr(settings, "FOUNDER_TOOLS_URL", "") or "").rstrip("/")
+            if job_id and frontend_base:
+                query = urlencode({"automationAction": "started"})
+                return HttpResponseRedirect(
+                    f"{frontend_base}/founder-tools/marketing/runs/{job_id}?{query}"
+                )
+            return render(
+                request,
+                "content_factory/automation_action_complete.html",
+                {"result": result},
+            )
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -1935,40 +2230,132 @@ def _callback_event_is_stale(*, existing_run: Optional[ContentFactoryRun], emitt
     return bool(last_synced and emitted_at < last_synced)
 
 
-def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitted_at: Optional[datetime]) -> bool:
+def _callback_claim_lease_ttl() -> timedelta:
+    """
+    How long a claimed-but-unprocessed callback claim stays exclusive.
+
+    Must comfortably exceed the longest synchronous handler run (bounded by
+    the web worker timeout) so a live handler is never raced by a retry, while
+    staying short enough that an event orphaned by a hard process death
+    (SIGKILL/OOM/deploy restart) is reprocessed on the sender's next retry
+    soon after.
+    """
+    try:
+        seconds = int(getattr(settings, "CONTENT_FACTORY_CALLBACK_CLAIM_TTL_SECONDS", 600) or 600)
+    except (TypeError, ValueError):
+        seconds = 600
+    return timedelta(seconds=seconds)
+
+
+# Dispositions returned by _claim_callback_event. "claimed" processes the
+# delivery; "duplicate" acks it 200 without reprocessing; "pending" answers
+# non-2xx so the sender's durable outbox keeps retrying — if the in-flight
+# worker finishes, a later retry dedupes to "duplicate", and if it died the
+# retry that lands after the lease TTL reclaims and reprocesses. Answering
+# 200 for a live claim would ack the outbox permanently and turn a hard
+# worker death into a silently dropped event.
+CALLBACK_CLAIM_CLAIMED = "claimed"
+CALLBACK_CLAIM_DUPLICATE = "duplicate"
+CALLBACK_CLAIM_PENDING = "pending"
+
+
+def _claim_callback_event(*, event_id: str, event_type: str, job_id: str, emitted_at: Optional[datetime]) -> str:
     """
     Atomically claim a callback delivery by its event_id.
 
-    Returns True when this delivery is the first acknowledgement of the event
-    (caller should process it) and False when the event_id is already
-    recorded. The unique constraint makes the claim race-safe across workers.
-    Fails open on storage errors: reprocessing an event is recoverable,
-    silently dropping one is not.
+    Returns CALLBACK_CLAIM_CLAIMED when this delivery should be processed:
+    either the event_id was never seen, or an earlier claim was orphaned by a
+    hard process death (claimed, never processed, lease TTL elapsed) and this
+    delivery reclaims it. Returns CALLBACK_CLAIM_DUPLICATE when the event was
+    already fully processed, and CALLBACK_CLAIM_PENDING while another worker
+    holds a live (unexpired) claim. The unique constraint makes the insert
+    race-safe across workers; the reclaim is a guarded UPDATE so concurrent
+    retries elect exactly one winner. Fails open on storage errors:
+    reprocessing an event is recoverable, silently dropping one is not.
     """
     from content_factory.models import ContentFactoryCallbackEvent
 
     max_attempts = 3 if connection.vendor == "sqlite" else 1
     for attempt in range(max_attempts):
         try:
+            now = timezone.now()
             _, created = ContentFactoryCallbackEvent.objects.get_or_create(
                 event_id=event_id[:100],
                 defaults={
                     "job_id": str(job_id or "")[:100],
                     "event_type": str(event_type or "")[:100],
                     "emitted_at": emitted_at,
+                    "claimed_at": now,
                 },
             )
-            return created
+            if created:
+                return CALLBACK_CLAIM_CLAIMED
+            # The row exists: processed (duplicate), claimed by a live worker
+            # (pending), or orphaned by a hard death (reclaimable once the
+            # lease TTL has elapsed). The claimed_at guard means a NULL
+            # claimed_at (pre-lease legacy row) never matches a reclaim.
+            cutoff = now - _callback_claim_lease_ttl()
+            reclaimed = ContentFactoryCallbackEvent.objects.filter(
+                event_id=event_id[:100],
+                processed_at__isnull=True,
+                claimed_at__lt=cutoff,
+            ).update(claimed_at=now)
+            if reclaimed:
+                logger.warning(
+                    "Reclaimed orphaned callback claim event_id=%s event=%s job_id=%s; "
+                    "a previous worker died before processing completed",
+                    event_id,
+                    event_type,
+                    job_id,
+                )
+                return CALLBACK_CLAIM_CLAIMED
+            row = (
+                ContentFactoryCallbackEvent.objects.filter(event_id=event_id[:100])
+                .values("claimed_at", "processed_at")
+                .first()
+            )
+            if row is None:
+                # Deleted between the lookup and here: the in-flight worker
+                # failed and released the claim. The sender's retry will
+                # reprocess; tell it to keep retrying.
+                return CALLBACK_CLAIM_PENDING
+            if row["processed_at"] is None and row["claimed_at"] is not None:
+                return CALLBACK_CLAIM_PENDING
+            # processed_at set, or a legacy row without lease stamps (only
+            # 2xx-acknowledged deliveries left rows behind pre-lease).
+            return CALLBACK_CLAIM_DUPLICATE
         except OperationalError as exc:
             if _is_retryable_sqlite_lock(exc) and attempt < max_attempts - 1:
                 time.sleep(0.15 * (attempt + 1))
                 continue
             logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return True
+            return CALLBACK_CLAIM_CLAIMED
         except Exception as exc:
             logger.warning("Failed to record callback event_id=%s; processing without dedupe: %s", event_id, exc)
-            return True
-    return True
+            return CALLBACK_CLAIM_CLAIMED
+    return CALLBACK_CLAIM_CLAIMED
+
+
+def _mark_callback_event_processed(event_id: str) -> None:
+    """
+    Stamp a claimed event as fully processed so replays dedupe permanently.
+
+    Without the stamp the claim would look orphaned once the lease TTL
+    elapses and a late replay would reprocess it. A failed stamp therefore
+    degrades to at-least-once (recoverable), never to dropped.
+    """
+    from content_factory.models import ContentFactoryCallbackEvent
+
+    try:
+        ContentFactoryCallbackEvent.objects.filter(event_id=event_id[:100]).update(
+            processed_at=timezone.now()
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to mark callback event_id=%s processed; a TTL-expired replay may reprocess it: %s",
+            event_id,
+            exc,
+        )
 
 
 def _release_callback_event(event_id: str) -> None:
@@ -1990,6 +2377,9 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    # First signal carrying the real run id: bind any provisional local run
+    # still keyed by this callback's dispatch token (lost-response dispatch).
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     step_key = str(
         data.get("failed_step")
@@ -2011,6 +2401,12 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             existing_run.last_event_emitted_at.isoformat(),
         )
         return existing_run
+    # content-factory sends the true resume decision for the failure. A deterministic
+    # content shortfall is NOT resumable (re-running the same keyword loops to the same
+    # failure), so the wizard must not advertise a blind Resume. Default to resumable
+    # only when the field is absent (older content-factory that predates this signal).
+    remote_resume_available = data.get("resume_available")
+    resume_available = True if remote_resume_available is None else bool(remote_resume_available)
     result = dict((existing_run.result if existing_run else None) or {})
     result.update(
         {
@@ -2022,6 +2418,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "step": step_key,
             "error": error_message,
             "error_code": error_code,
+            "resume_available": resume_available,
             "retry_after_seconds": data.get("retry_after_seconds"),
             "next_step": data.get("next_step"),
             "rerunnable_step": data.get("rerunnable_step"),
@@ -2052,7 +2449,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
             "run_request": (existing_run.run_request if existing_run else {}),
             "result": result,
             "error": error_message,
-            "resume_available": True,
+            "resume_available": resume_available,
             "last_event_emitted_at": emitted_at or (existing_run.last_event_emitted_at if existing_run else None),
         },
     )
@@ -2080,6 +2477,7 @@ def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Option
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
@@ -2378,6 +2776,8 @@ def _mark_article_system_setup_generation_ready_for_domain(domain: str, *, pr_ur
             article_system["source"] = article_system.get("source") or "setup_pr_merge"
             article_system["confidence"] = article_system.get("confidence") or "high"
 
+        # A merged setup is an explicit exit from any prior reset — drop the watermark.
+        clear_article_setup_reset_markers(article_system)
         update_fields = ["article_system"]
         config.article_system = sanitize_json_for_postgres(article_system)
         if not config.articles_scaffolded:
@@ -2429,6 +2829,17 @@ def _article_system_setup_common_callback_fields(*, data: dict, setup_payload: d
         "directoryVisualStyleReport",
         "directory_visual_repair",
         "directoryVisualRepair",
+        "directory_build_verification",
+        "baseline_build_blocked",
+        "baselineBuildBlocked",
+        "code_review_only",
+        "codeReviewOnly",
+        "code_review_reason",
+        "codeReviewReason",
+        "preview_runtime_unsupported",
+        "previewRuntimeUnsupported",
+        "preview_unsupported_reason",
+        "previewUnsupportedReason",
         "output_excerpt",
     ):
         value = data.get(key)
@@ -2447,6 +2858,7 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
     run_id = str(data.get("run_id") or data.get("job_id") or "").strip()
     if not run_id:
         return None
+    bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
 
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
@@ -2688,6 +3100,48 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         approval_state = ContentFactoryApprovalState.NOT_REQUIRED
         current_step = current_step_value
         error = ""
+    elif event_type == "article_system_setup_cancelled":
+        setup_payload = dict(setup_payload)
+        setup_payload.update(common_fields)
+        setup_payload.update(
+            {
+                "status": "cancelled",
+                "setup_run_id": run_id,
+                "source_setup_run_id": result.get("source_setup_run_id") or run_id,
+                "current_step": "cancelled",
+                "currentStep": "cancelled",
+                "cancelled": True,
+                "cancelled_at": data.get("cancelled_at") or timezone.now().isoformat(),
+                "approve_url": None,
+                "deny_url": None,
+                "requested_action": None,
+                "retry_available": False,
+                "retryable": False,
+                "cleanup": data.get("cleanup") if isinstance(data.get("cleanup"), dict) else {},
+            }
+        )
+        result.update(
+            {
+                "status": "cancelled",
+                "setup_status": "cancelled",
+                "setupStatus": "cancelled",
+                "cancelled": True,
+                "cancelled_at": setup_payload["cancelled_at"],
+                "current_step": "cancelled",
+                "currentStep": "cancelled",
+                "approve_url": None,
+                "deny_url": None,
+                "requested_action": None,
+                "retry_available": False,
+                "retryable": False,
+                "cleanup": setup_payload["cleanup"],
+                "article_system_setup": setup_payload,
+            }
+        )
+        run_status = ContentFactoryRunStatus.CANCELLED
+        approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+        current_step = "cancelled"
+        error = ""
     elif event_type == "article_system_setup_completed":
         setup_payload = dict(setup_payload)
         setup_payload.update(common_fields)
@@ -2851,7 +3305,29 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         setup_payload["source_setup_run_id"] = result.get("source_setup_run_id") or run_id
         setup_payload["live_preview_url"] = live_preview_url_value
         setup_payload["preview_url"] = ""
-        setup_payload["preview_runtime_unsupported"] = True
+        baseline_build_blocked = bool(
+            data.get("baseline_build_blocked")
+            or data.get("baselineBuildBlocked")
+            or setup_payload.get("baseline_build_blocked")
+            or result.get("baseline_build_blocked")
+        )
+        preview_runtime_unsupported = bool(
+            data.get("preview_runtime_unsupported")
+            or data.get("previewRuntimeUnsupported")
+            or setup_payload.get("preview_runtime_unsupported")
+            or result.get("preview_runtime_unsupported")
+        ) and not baseline_build_blocked
+        code_review_reason = str(
+            data.get("code_review_reason")
+            or data.get("codeReviewReason")
+            or setup_payload.get("code_review_reason")
+            or result.get("code_review_reason")
+            or ""
+        ).strip()
+        setup_payload["baseline_build_blocked"] = baseline_build_blocked
+        setup_payload["code_review_only"] = True
+        setup_payload["code_review_reason"] = code_review_reason
+        setup_payload["preview_runtime_unsupported"] = preview_runtime_unsupported
         setup_payload["preview_unsupported_reason"] = str(
             data.get("preview_unsupported_reason") or setup_payload.get("preview_unsupported_reason") or ""
         )
@@ -2864,7 +3340,10 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         result["preview_url"] = ""
         result["approve_url"] = setup_payload["approve_url"]
         result["deny_url"] = setup_payload["deny_url"]
-        result["preview_runtime_unsupported"] = True
+        result["baseline_build_blocked"] = baseline_build_blocked
+        result["code_review_only"] = True
+        result["code_review_reason"] = code_review_reason
+        result["preview_runtime_unsupported"] = preview_runtime_unsupported
         result["preview_unsupported_reason"] = setup_payload["preview_unsupported_reason"]
         result["article_system_setup"] = setup_payload
         result["livePreview"] = live_preview
@@ -3035,7 +3514,29 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                 }
             )
             parent.result = sanitize_json_for_postgres(parent_result)
-            if parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
+            if event_type == "article_system_setup_cancelled":
+                parent_result.update(
+                    {
+                        "status": "article_system_setup_cancelled",
+                        "scaffold_status": "cancelled",
+                        "requested_action": None,
+                        "approve_url": None,
+                        "deny_url": None,
+                    }
+                )
+                parent.result = sanitize_json_for_postgres(parent_result)
+                if parent.status in {
+                    ContentFactoryRunStatus.QUEUED,
+                    ContentFactoryRunStatus.RUNNING,
+                    ContentFactoryRunStatus.AWAITING_CONFIRMATION,
+                    ContentFactoryRunStatus.AWAITING_APPROVAL,
+                    ContentFactoryRunStatus.BLOCKED,
+                }:
+                    parent.status = ContentFactoryRunStatus.COMPLETED
+                parent.current_step = "finalize"
+                parent.approval_state = ContentFactoryApprovalState.NOT_REQUIRED
+                parent.error = ""
+            elif parent.status in {ContentFactoryRunStatus.QUEUED, ContentFactoryRunStatus.RUNNING}:
                 parent.status = ContentFactoryRunStatus.COMPLETED
                 parent.current_step = (
                     "article_system_setup_preview_failed"
@@ -3046,7 +3547,24 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
                     if event_type == "article_system_setup_pr_created"
                     else "article_system_setup_preview"
                 )
-            parent.save(update_fields=["status", "result", "current_step", "updated_at"])
+            parent.save(
+                update_fields=[
+                    "status",
+                    "result",
+                    "current_step",
+                    "approval_state",
+                    "error",
+                    "updated_at",
+                ]
+            )
+
+    if event_type == "article_system_setup_cancelled":
+        config = OrganizationContentConfig.objects.filter(
+            organization__domain__iexact=result["domain"]
+        ).first()
+        if config is not None:
+            clear_cancelled_article_setup_config(config, setup_run_id=run_id)
+        return run
 
     _update_pending_article_system_setup_for_domain(
         result["domain"],
@@ -3108,6 +3626,12 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         preview_runtime_unsupported=result.get("preview_runtime_unsupported"),
         previewUnsupportedReason=result.get("preview_unsupported_reason"),
         preview_unsupported_reason=result.get("preview_unsupported_reason"),
+        baselineBuildBlocked=result.get("baseline_build_blocked"),
+        baseline_build_blocked=result.get("baseline_build_blocked"),
+        codeReviewOnly=result.get("code_review_only"),
+        code_review_only=result.get("code_review_only"),
+        codeReviewReason=result.get("code_review_reason"),
+        code_review_reason=result.get("code_review_reason"),
     )
     if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
         _mark_article_system_setup_generation_ready_for_domain(
@@ -3291,31 +3815,56 @@ class ContentFactoryCallbackView(APIView):
 
         # content-factory stamps each delivery with a unique event_id and
         # retries non-2xx responses from a durable outbox. Claim the event_id
-        # before processing so a replay of an already-acknowledged event
-        # returns 200 without reprocessing. Payloads from older
-        # content-factory versions have no event_id and skip the guard.
+        # before processing so a replay of an already-processed event returns
+        # 200 without reprocessing, while a delivery racing a live claim gets
+        # a retryable 409 — if that claim's worker dies without processing
+        # (SIGKILL/OOM/deploy restart), the retry that lands after the lease
+        # TTL reclaims the event instead of being falsely acked as a
+        # duplicate. Payloads from older content-factory versions have no
+        # event_id and skip the guard.
         event_id = str(data.get('event_id') or '').strip()
-        if event_id and not _claim_callback_event(
-            event_id=event_id,
-            event_type=str(event_type),
-            job_id=str(job_id),
-            emitted_at=_callback_event_emitted_at(data),
-        ):
-            logger.info(
-                "Duplicate content-factory callback ignored: event=%s, job_id=%s, event_id=%s",
-                event_type,
-                job_id,
-                event_id,
+        if event_id:
+            claim = _claim_callback_event(
+                event_id=event_id,
+                event_type=str(event_type),
+                job_id=str(job_id),
+                emitted_at=_callback_event_emitted_at(data),
             )
-            return Response(
-                {
-                    'status': 'duplicate',
-                    'message': f'{event_type} callback already processed',
-                    'job_id': job_id,
-                    'event_id': event_id,
-                },
-                status=status.HTTP_200_OK,
-            )
+            if claim == CALLBACK_CLAIM_DUPLICATE:
+                logger.info(
+                    "Duplicate content-factory callback ignored: event=%s, job_id=%s, event_id=%s",
+                    event_type,
+                    job_id,
+                    event_id,
+                )
+                return Response(
+                    {
+                        'status': 'duplicate',
+                        'message': f'{event_type} callback already processed',
+                        'job_id': job_id,
+                        'event_id': event_id,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            if claim == CALLBACK_CLAIM_PENDING:
+                logger.info(
+                    "Content-factory callback claim held by an in-flight delivery; deferring retry: "
+                    "event=%s, job_id=%s, event_id=%s",
+                    event_type,
+                    job_id,
+                    event_id,
+                )
+                return Response(
+                    {
+                        'status': 'pending',
+                        'message': (
+                            f'{event_type} callback is being processed by another delivery; retry later'
+                        ),
+                        'job_id': job_id,
+                        'event_id': event_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         try:
             response = self._dispatch_callback_event(data, event_type=event_type, job_id=job_id)
@@ -3327,10 +3876,16 @@ class ContentFactoryCallbackView(APIView):
                 {'error': 'Internal server error processing callback'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        if event_id and not (200 <= response.status_code < 300):
-            # Non-2xx tells the sender to retry; release the claim so the
-            # retry is reprocessed instead of deduped.
-            _release_callback_event(event_id)
+        if event_id:
+            if 200 <= response.status_code < 300:
+                # Only now is the claim a durable ack: a claim without this
+                # stamp is treated as orphaned (worker died mid-processing)
+                # and becomes reclaimable after the lease TTL.
+                _mark_callback_event_processed(event_id)
+            else:
+                # Non-2xx tells the sender to retry; release the claim so the
+                # retry is reprocessed instead of deduped.
+                _release_callback_event(event_id)
         return response
 
     def _dispatch_callback_event(self, data, *, event_type, job_id):
@@ -3352,6 +3907,7 @@ class ContentFactoryCallbackView(APIView):
             'article_system_setup_revision_ready',
             'article_system_setup_progress',
             'article_system_setup_preview_failed',
+            'article_system_setup_cancelled',
             'article_system_setup_completed',
             'article_system_setup_pr_created',
             'article_system_setup_manual_merge_required',
@@ -4311,14 +4867,18 @@ class ContentFactoryCallbackView(APIView):
             )
 
         from integrations.services.notification_adapters import (
-            normalize_notification_context,
+            resolve_automation_run_for_callback,
             send_review_ready,
         )
 
         slack_sent = False
-        if normalize_notification_context(data.get('notification_context')):
-            # Automation-driven runs route through notification channels; the
-            # Slack job-thread message below is the legacy manual-run path.
+        # Automation-driven runs route through their notification channels; the
+        # Slack job-thread message below is the legacy manual-run path. Gate on
+        # whether an automation run resolves (by context, or — when the deferred
+        # preview callback omits the context — by article job id), not on
+        # whether a channel was reachable, so an automation whose channels are
+        # all opted out still doesn't fall back to the manual Slack message.
+        if resolve_automation_run_for_callback(data) is not None:
             send_review_ready(data)
         elif pr_url:
             blocks = build_draft_pr_created_blocks(
@@ -4751,10 +5311,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_article_review_ready(self, data):
-        from integrations.services.notification_adapters import (
-            normalize_notification_context,
-            send_review_ready,
-        )
+        from integrations.services.notification_adapters import send_review_ready
 
         # Keep the pre-enrichment payload for channel fan-out: this event only
         # fires after the hosted preview passed the exact-ready gate, but the
@@ -4788,10 +5345,11 @@ class ContentFactoryCallbackView(APIView):
             job.request_meta = request_meta
             job.save(update_fields=['request_meta', 'updated_at'])
 
-        if normalize_notification_context(raw_payload.get('notification_context')):
-            # Automation-driven runs notify their channels with the review
-            # link; without this, review-draft articles complete silently.
-            send_review_ready(raw_payload)
+        # Automation-driven runs notify their channels with the review link.
+        # send_review_ready resolves the run by context, or falls back to the
+        # article job id when content-factory's deferred preview callback omits
+        # the routing context, and no-ops (with a log) for non-automation runs.
+        send_review_ready(raw_payload)
 
         logger.info("Article review draft ready for job %s (%s)", job_id, domain)
         return Response(
@@ -5623,6 +6181,7 @@ class ContentFactoryCallbackView(APIView):
                 job,
                 error_code=error_code,
                 error_message=error_message,
+                refundable=bool(data.get('refundable')),
             )
 
         mark_scheduled_dispatch_failed(
@@ -6898,6 +7457,10 @@ class SEOKeywordBulkUpsertView(APIView):
                         velocity_score=velocity.get('velocity_score', 0.0),
                         trend_status=velocity.get('trend_status', 'stable'),
                         daily_volumes=velocity.get('daily_volumes', []),
+                        source=velocity.get('source', 'unknown'),
+                        basis=velocity.get('basis', 'unknown'),
+                        period_label=velocity.get('period_label', ''),
+                        is_estimated=velocity.get('is_estimated', True),
                     )
 
                 # Create AI saturation snapshot if provided
@@ -7359,14 +7922,24 @@ class SEOWrittenArticleCreateView(APIView):
             'primary_keyword': primary_keyword,
             'article_url': serializer.validated_data.get('article_url'),
             'pr_url': serializer.validated_data.get('pr_url'),
+            'canonical_url': serializer.validated_data.get('canonical_url', ''),
+            'canonical_path': serializer.validated_data.get('canonical_path', ''),
             'job': job,
             'published_at': timezone.now(),
         }
-        article, created = WrittenArticle.objects.update_or_create(
-            organization=org,
-            slug=serializer.validated_data['slug'],
-            defaults=defaults,
-        )
+        incoming_analytics_id = serializer.validated_data.get('analytics_id')
+        # analytics_id is create-only. Replayed callbacks may refresh article
+        # metadata, but a later run must never replace the stable identity that
+        # already owns historical aggregates.
+        with transaction.atomic():
+            article, created = WrittenArticle.objects.update_or_create(
+                organization=org,
+                slug=serializer.validated_data['slug'],
+                defaults=defaults,
+            )
+            if created and incoming_analytics_id and article.analytics_id != incoming_analytics_id:
+                article.analytics_id = incoming_analytics_id
+                article.save(update_fields=['analytics_id'])
 
         # A PR URL only proves a PR exists; merge/live state is confirmed later
         # by the publish-status refresh. Never downgrade an existing status.
@@ -7452,9 +8025,16 @@ class SEODashboardView(APIView):
 
 class ContentFactoryOrgDomainsView(APIView):
     """
-    Return all known organization domains for fuzzy matching.
+    Return known organization domains for fuzzy matching.
 
     GET /api/content-factory/orgs/domains
+    GET /api/content-factory/orgs/domains?slack_user_id=<id>
+
+    With ``slack_user_id``, returns ONLY the domains that user owns (via their
+    connected org configs). content-factory scopes its fuzzy domain matching to
+    this set so a typo/variant of one founder's domain can never resolve to a
+    DIFFERENT tenant's org (and its GitHub repo/token). Without the hint the
+    global list is returned for backwards compatibility.
     """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -7462,6 +8042,16 @@ class ContentFactoryOrgDomainsView(APIView):
     def get(self, request):
         from django.core.cache import cache
         from integrations.utils import normalize_domain
+
+        slack_user_id = str(request.query_params.get('slack_user_id') or '').strip()
+        if slack_user_id:
+            owned = get_owned_org_configs(slack_user_id)
+            domains = sorted({
+                normalize_domain(cfg.organization.domain)
+                for cfg in owned
+                if cfg.organization and cfg.organization.domain
+            })
+            return Response(domains, status=status.HTTP_200_OK)
 
         cache_key = "content_factory_org_domains"
         domains = cache.get(cache_key)
@@ -7560,6 +8150,51 @@ def _is_retryable_sqlite_lock(exc: Exception) -> bool:
     return connection.vendor == "sqlite" and "database is locked" in str(exc).lower()
 
 
+_DJANGO_OWNED_RUN_RESULT_KEYS = frozenset(
+    {
+        "article_system_review_comments",
+        "daily_automation_channel_warning",
+        "latest_article_system_revision_response",
+        "merge_blocked_reason",
+        "merge_response",
+        "merge_status",
+        "merged_at",
+        "pr_number",
+        "pr_url",
+        "promoted_publish_job_id",
+    }
+)
+_DJANGO_OWNED_RUN_RESULT_PREFIXES = (
+    "component_feedback_",
+    "publish_auto_merge",
+    "publish_child_",
+    "publish_handoff_",
+)
+
+
+def _merge_django_owned_run_result(existing_result, incoming_result):
+    """Keep local orchestration state that Content Factory cannot reproduce.
+
+    Content Factory sends authoritative snapshots for its own result fields. Django
+    augments those snapshots with review lineage, publish-child, and merge state.
+    Replacing the whole JSON object on every PUT silently severed revision chains;
+    preserve only the known Django-owned keys when the incoming snapshot omits them.
+    Explicit incoming values remain authoritative.
+    """
+
+    existing = existing_result if isinstance(existing_result, dict) else {}
+    merged = dict(incoming_result) if isinstance(incoming_result, dict) else {}
+    for key, value in existing.items():
+        django_owned = key in _DJANGO_OWNED_RUN_RESULT_KEYS or key.startswith(
+            _DJANGO_OWNED_RUN_RESULT_PREFIXES
+        )
+        if not django_owned:
+            continue
+        if merged.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+            merged[key] = value
+    return merged
+
+
 def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dict, step_states: dict) -> bool:
     core_fields = {
         "workflow": data["workflow"],
@@ -7646,6 +8281,22 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             .filter(run_id=run_id)
             .first()
         )
+        active_snapshot = str(data.get("status") or "").strip().lower() in DURABLE_ACTIVE_RUN_STATUSES
+        if active_snapshot:
+            data["error"] = ""
+        if existing_run is not None:
+            data["result"] = _merge_django_owned_run_result(
+                existing_run.result,
+                data.get("result"),
+            )
+        if active_snapshot:
+            # Clean after the Django-owned merge as a final invariant: no local
+            # augmentation may reintroduce a blocker into an active snapshot.
+            data["result"] = clear_obsolete_active_run_blockers(
+                data.get("result"),
+                active_status=data["status"],
+                current_step=data.get("current_step") or "",
+            )
         if existing_run is not None and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
@@ -7743,6 +8394,18 @@ class ContentFactoryRunView(APIView):
         data = serializer.validated_data
         step_states = data.get("step_states", {}) or {}
         incoming_status = str(data.get("status") or "").strip()
+        active_retry_snapshot = bool(
+            existing_run is not None
+            and existing_run.status
+            in {
+                ContentFactoryRunStatus.BLOCKED,
+                ContentFactoryRunStatus.DENIED,
+                ContentFactoryRunStatus.FAILED,
+            }
+            and existing_run.workflow in ARTICLE_WORKFLOWS
+            and incoming_status in DURABLE_ACTIVE_RUN_STATUSES
+            and active_retry_signal(payload, data.get("result"))
+        )
 
         if (
             existing_run is not None
@@ -7774,6 +8437,7 @@ class ContentFactoryRunView(APIView):
                 data=data,
                 raw_payload=payload if isinstance(payload, dict) else {},
             )
+            and not active_retry_snapshot
         ):
             response_payload = _serialize_content_factory_run(existing_run)
             response_payload["sync_status"] = "ignored_terminal_state"

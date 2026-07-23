@@ -35,6 +35,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
     avatarUrl = serializers.SerializerMethodField()
     entityTypeName = serializers.SerializerMethodField()
     abrVerifiedAt = serializers.DateTimeField(source="abr_verified_at", read_only=True)
+    monthlyUpdatesEnabled = serializers.SerializerMethodField()
 
     class Meta:
         model = VibeRaisingCompany
@@ -53,6 +54,7 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             "organizationId",
             "organizationDomain",
             "companyLinkedInUrl",
+            "monthlyUpdatesEnabled",
         ]
 
     def get_entityTypeName(self, obj):
@@ -71,6 +73,20 @@ class FounderCompanySerializer(serializers.ModelSerializer):
 
     def get_avatarUrl(self, obj):
         return obj.avatar_url or ""
+
+    def get_monthlyUpdatesEnabled(self, obj):
+        # Opt-in lives on the founder's (user, organization) binding. Absent a
+        # binding (domainless draft, or setup not completed), monthly updates
+        # are simply off.
+        if not obj.organization_id:
+            return False
+        from startup_updates.models import UserStartupBinding
+
+        return UserStartupBinding.objects.filter(
+            user_id=obj.profile.user_id,
+            organization_id=obj.organization_id,
+            monthly_updates_enabled=True,
+        ).exists()
 
 
 class FounderProfileSerializer(serializers.ModelSerializer):

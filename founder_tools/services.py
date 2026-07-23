@@ -223,6 +223,120 @@ def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user
     return "repoint"
 
 
+def _purge_org_marketing_data(organization) -> None:
+    """Delete the org-level marketing/raising artifacts an offboarded company
+    leaves behind (the startup-update purge only covers ingestion artifacts)."""
+    from content_factory.models import OrganizationContentConfig
+    from startup_updates.models import MonthlyUpdateDraft
+    from workflow_runs.models import ContentFactoryRun
+
+    MonthlyUpdateDraft.objects.filter(organization=organization).delete()
+    # Cascades ContentFactoryRunStep; ContentFactoryJob is domain-keyed, not FK.
+    ContentFactoryRun.objects.filter(organization=organization).delete()
+    OrganizationContentConfig.objects.filter(organization=organization).delete()
+
+
+def offboard_company(company: VibeRaisingCompany, *, reason: str = "company_offboarding") -> dict:
+    """Disconnect a company's integrations, purge its data, and delete the row.
+
+    Composes the existing per-provider disconnect/purge machinery:
+
+    - **Always** revokes and removes *this user's* Gmail and third-party
+      connections for the company's organization. Those rows are keyed by
+      ``(user, organization)``, so a co-founder who shares the org (first-claim
+      tenancy) is never touched. This is the security-critical step: it stops a
+      shut-down startup from keeping live OAuth tokens.
+    - **Org-level** data (monthly updates, article runs, content config, and the
+      startup-update ingestion artifacts) is purged only when this company is the
+      org's sole owner — never a co-owner's shared data.
+    - The **Organization row is retained** (it is the tenant boundary; a later
+      re-registration of the domain reuses the now-empty shell).
+    - Re-points the profile's active company to a sibling (or clears it), then
+      deletes the company row — which frees the domain for re-registration.
+
+    Best-effort and idempotent-ish: a provider hiccup is collected as a warning
+    rather than aborting the offboard, since a half-connected startup is worse
+    than an over-cleaned one. Returns a summary of what was removed.
+    """
+    from integrations.models import ExternalServiceConnection
+    from startup_updates.data_deletion import (
+        delete_startup_data_for_organization,
+        disconnect_gmail_for_user,
+    )
+
+    profile = company.profile
+    user = profile.user
+    organization = company.organization if company.organization_id else None
+    company_id = company.id
+
+    summary = {
+        "companyId": str(company_id),
+        "gmailDisconnected": False,
+        "connectionsRemoved": 0,
+        "orgShared": False,
+        "orgDataPurged": False,
+        "warnings": [],
+    }
+
+    if organization is not None:
+        org_shared = (
+            VibeRaisingCompany.objects.filter(organization=organization)
+            .exclude(pk=company.pk)
+            .exists()
+        )
+        summary["orgShared"] = org_shared
+
+        # 1) Gmail: revoke the Google refresh token, delete the connection row
+        #    and its cached mail. disconnect_gmail_for_user is (user, org)-scoped.
+        try:
+            gmail_result = disconnect_gmail_for_user(
+                user, delete_derived_data=True, organization=organization, reason=reason
+            )
+            summary["gmailDisconnected"] = bool(gmail_result.get("googleAccount"))
+        except Exception as exc:  # pragma: no cover - never block offboarding
+            logger.exception("offboard_gmail_failed company=%s", company_id)
+            summary["warnings"].append(f"Gmail disconnect failed: {exc}")
+
+        # 2) Third-party connections (Stripe/Notion/Linear/Slack/GA/Xero/Luma/
+        #    bank): delete this user's rows for the org, removing the encrypted
+        #    tokens and cascading their financial accounts/records.
+        connections = ExternalServiceConnection.objects.filter(user=user, organization=organization)
+        summary["connectionsRemoved"] = connections.count()
+        connections.delete()
+
+        # 3) Org-level data — only when this company is the org's sole owner.
+        if not org_shared:
+            try:
+                delete_startup_data_for_organization(
+                    organization, requested_by_user_id=user.id, reason=reason
+                )
+            except Exception as exc:  # pragma: no cover - collected, not fatal
+                logger.exception("offboard_startup_purge_failed company=%s", company_id)
+                summary["warnings"].append(f"Startup data purge failed: {exc}")
+            _purge_org_marketing_data(organization)
+            summary["orgDataPurged"] = True
+
+    # 4) Re-point (or clear) the active company before removing this one.
+    if profile.active_company_id == company.id:
+        replacement = (
+            profile.companies.exclude(pk=company.pk).order_by("created_at", "name").first()
+        )
+        profile.active_company = replacement
+        profile.save(update_fields=["active_company", "updated_at"])
+        summary["newActiveCompanyId"] = str(replacement.id) if replacement else None
+
+    # 5) Delete the company row — frees the (profile, domain) slot for re-use.
+    company.delete()
+    logger.info(
+        "company_offboarded company=%s user=%s org_shared=%s connections=%s",
+        company_id,
+        user.id,
+        summary["orgShared"],
+        summary["connectionsRemoved"],
+    )
+    return summary
+
+
 def normalize_company_linkedin_url(value: str | None) -> str:
     raw = str(value or "").strip()
     if not raw:

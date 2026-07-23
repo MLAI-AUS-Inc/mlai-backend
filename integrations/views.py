@@ -539,6 +539,38 @@ def github_callback(request):
     repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
     selected_repo = repo_names[0] if len(repo_names) == 1 else None
 
+    # Record this installation in the founder-scoped registry so every company of
+    # the same founder can list + publish to it (GitHub access is per-founder, not
+    # per-startup). Best-effort — never block the OAuth callback on registry writes.
+    try:
+        from integrations.services.github_installations import (
+            resolve_user_for_actor_id,
+            upsert_github_installation,
+        )
+
+        registry_user = resolve_user_for_actor_id(slack_user_id)
+        registry_account_login = ""
+        registry_account_type = ""
+        if repos:
+            first_owner = repos[0].get("owner") if isinstance(repos[0].get("owner"), dict) else {}
+            registry_account_login = str(first_owner.get("login") or "").strip()
+            registry_account_type = str(first_owner.get("type") or "").strip()
+        upsert_github_installation(
+            user=registry_user,
+            installation_id=installation_id,
+            account_login=registry_account_login or github_login or "",
+            account_type=registry_account_type,
+            github_user_name=github_login or "",
+            user_token=access_token,
+            refresh_token=refresh_token,
+            token_expires_at=token_expires_at,
+            scopes=[],
+        )
+    except Exception:
+        logger.exception(
+            "github_installation_registry_upsert_failed installation_id=%s", installation_id
+        )
+
     retried = False
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
@@ -563,9 +595,10 @@ def github_callback(request):
                 (repo_name for repo_name in repo_names if repo_name.casefold() == previous_repo.casefold()),
                 None,
             )
+        # Only bind a repository GitHub confirmed belongs to this installation.
+        # Preserving an unmatched preselection creates an invalid
+        # repo/installation tuple that later fails token minting with HTTP 422.
         repo_to_store = selected_repo
-        if not repo_to_store and len(repo_names) > 1 and previous_repo:
-            repo_to_store = previous_repo
 
         config.github_token_encrypted = access_token
         config.github_refresh_token_encrypted = refresh_token
@@ -591,13 +624,7 @@ def github_callback(request):
         # support by clobbering the user's existing credentials with a different domain's token.
         if slack_user_id:
             existing_integration = UserIntegration.objects.filter(slack_user_id=slack_user_id).first()
-            if existing_integration:
-                # Only update identity metadata — preserve token, refresh, repo, and expiry.
-                # Each domain's token lives on its own OrganizationContentConfig.
-                existing_integration.github_user_name = github_login
-                existing_integration.github_installation_id = installation_id
-                existing_integration.save()
-            else:
+            if not existing_integration:
                 # No existing integration — create one with this repo+token as the default.
                 # This is the user's first GitHub connection, so it becomes their default.
                 UserIntegration.objects.create(
@@ -610,6 +637,10 @@ def github_callback(request):
                     github_installation_id=installation_id,
                     github_scopes=[],
                 )
+            # Existing legacy defaults are intentionally left untouched. The new
+            # installation is already stored in the founder-scoped registry above;
+            # mixing its id/user with an older token and repo would make that row
+            # unusable for both installations.
 
         # Notify via Slack and auto-trigger scan only when the installation is bound to one repo.
         if slack_user_id and selected_repo:

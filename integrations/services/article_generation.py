@@ -56,6 +56,12 @@ AUTO_REFUND_ERROR_CODES = {
     "NO_OPPORTUNITIES",
     "PUBLISH_TARGET_ACTION_REQUIRED",
 }
+# A deterministic research shortfall (topic too narrow to source) is refunded via the
+# explicit `refundable` hint content-factory sends, NOT via this error-code allowlist:
+# the INSUFFICIENT_SOURCE_SUPPORT code is also emitted by resumable, value-producing
+# failures (ground_section evidence-starved, transient scrape storms) that must NOT be
+# refunded. content-factory owns the refundability decision; keying off the shared code
+# here would over-refund those.
 AUTH_REQUIRED_ERROR_CODE = "AUTH_REQUIRED"
 AUTH_REQUIRED_MISSING_STEP = "github_auth"
 AUTH_REQUIRED_NEXT_ACTION = "reconnect_github"
@@ -493,6 +499,26 @@ def _get_client_request_id(article_request: dict) -> str:
     return client_request_id
 
 
+# roo.Ledger.reference_id is CharField(max_length=100). A content-island topic
+# request's client_request_id embeds the (long) island slug, so it can exceed 100 and
+# blow the INSERT with StringDataRightTruncation (arb-gen.com POST /discovery 500,
+# 2026-07-09). reference_id is trace/display only — nothing queries Ledger by it
+# (idempotency uses idempotency_key, max_length=255) — so a long id is compacted to a
+# readable prefix + stable sha1 tail. Deterministic: the same id always maps to the
+# same reference, so a charge and its later refund stay linked.
+_LEDGER_REFERENCE_ID_MAX = 100
+
+
+def _ledger_reference_id(client_request_id: str) -> str:
+    cid = str(client_request_id or "")
+    if len(cid) <= _LEDGER_REFERENCE_ID_MAX:
+        return cid
+    import hashlib
+
+    digest = hashlib.sha1(cid.encode("utf-8")).hexdigest()[:40]
+    return f"{cid[: _LEDGER_REFERENCE_ID_MAX - 41]}:{digest}"
+
+
 def _resolve_requested_by_slack_user_id(
     slack_user_id: Optional[str],
     article_request: Optional[dict],
@@ -687,7 +713,7 @@ def _charge_content_factory_user(
             created_by_slack_id=created_by_slack_id,
             idempotency_key=f"content_factory:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
-            reference_id=client_request_id,
+            reference_id=_ledger_reference_id(client_request_id),
         )
     except InsufficientBalanceError:
         raise InsufficientRooPointsError(
@@ -758,7 +784,7 @@ def charge_content_factory_topic_generation_for_user(
             created_by_slack_id=actor_id,
             idempotency_key=f"content_factory:topic_generation:charge:{client_request_id}",
             reference_type="CONTENT_FACTORY",
-            reference_id=client_request_id,
+            reference_id=_ledger_reference_id(client_request_id),
         )
     except InsufficientBalanceError:
         raise InsufficientRooPointsError(
@@ -799,7 +825,7 @@ def _refund_content_factory_request(
         created_by_slack_id=requested_by_slack_user_id,
         idempotency_key=f"content_factory:refund:{client_request_id}",
         reference_type="CONTENT_FACTORY",
-        reference_id=client_request_id,
+        reference_id=_ledger_reference_id(client_request_id),
     )
     ContentFactoryJob.objects.filter(client_request_id=client_request_id).update(
         billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
@@ -849,7 +875,7 @@ def refund_content_factory_topic_generation_for_user(
         created_by_slack_id=actor_id,
         idempotency_key=f"content_factory:topic_generation:refund:{client_request_id}",
         reference_type="CONTENT_FACTORY",
-        reference_id=client_request_id,
+        reference_id=_ledger_reference_id(client_request_id),
     )
     return ledger
 
@@ -1077,12 +1103,21 @@ def _serialize_existing_confirm_child_job(job, *, source_run_id: Optional[str]) 
     return payload
 
 
-def maybe_auto_refund_terminal_failure(job, *, error_code: Optional[str], error_message: Optional[str]) -> tuple[bool, int]:
+def maybe_auto_refund_terminal_failure(
+    job,
+    *,
+    error_code: Optional[str],
+    error_message: Optional[str],
+    refundable: Optional[bool] = None,
+) -> tuple[bool, int]:
     if not job:
         return False, 0
 
+    # content-factory owns the refundability decision and may flag a no-value
+    # terminal failure `refundable` explicitly; the error-code allowlist is the
+    # fallback for that signal. Either path requires an actually-charged job below.
     resolved_error_code = str(error_code or "").strip().upper()
-    if resolved_error_code not in AUTO_REFUND_ERROR_CODES:
+    if not bool(refundable) and resolved_error_code not in AUTO_REFUND_ERROR_CODES:
         return False, 0
 
     client_request_id = str(getattr(job, "client_request_id", "") or "").strip()
@@ -1731,6 +1766,54 @@ def get_github_credentials_for_domain(domain: str, slack_user_id: str = None) ->
             pass
         except TokenRefreshError as e:
             raise ArticleGenerationError(f"GitHub token refresh failed: {e}. Please re-authenticate.")
+
+    # 3. Founder-scoped registry: mint a GitHub App installation token for the
+    # domain's selected repo from any installation the founder authorized (shared
+    # across all their companies). Covers a company that picked a repo from the
+    # shared pool but has no per-org OAuth token of its own.
+    if normalized_domain:
+        try:
+            from integrations.services.github_app import GitHubAppTokenError
+            from integrations.services.github_installations import (
+                mint_user_repo_token,
+                resolve_user_for_actor_id,
+            )
+
+            org = Organization.objects.filter(domain=normalized_domain).first()
+            config = getattr(org, "content_config", None) if org else None
+            repo = str(getattr(config, "github_repo", "") or "").strip()
+            owner_user = resolve_user_for_actor_id(slack_user_id) if slack_user_id else None
+            if owner_user is None and config is not None:
+                owner_user = resolve_user_for_actor_id(
+                    getattr(config, "connected_slack_user_id", "")
+                )
+            if repo and owner_user is not None:
+                try:
+                    minted = mint_user_repo_token(owner_user, repo, permission_mode="write")
+                except GitHubAppTokenError as e:
+                    minted = None
+                    logger.warning(
+                        "Founder-registry token mint failed for %s (repo=%s): %s",
+                        normalized_domain,
+                        repo,
+                        e,
+                    )
+                if minted is not None:
+                    logger.info(
+                        "Using founder-registry GitHub App token for %s (repo=%s)",
+                        normalized_domain,
+                        repo,
+                    )
+                    return {
+                        "token": minted.token,
+                        "repo": repo,
+                        "source": "app_installation",
+                        "config": config,
+                    }
+        except Exception:
+            logger.exception(
+                "Founder-registry credential resolution failed for %s", normalized_domain
+            )
 
     oauth_url = build_github_oauth_url(domain, slack_user_id or '')
     raise ArticleGenerationError(

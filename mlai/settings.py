@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 import os
 import subprocess
 from datetime import timedelta
@@ -81,6 +82,47 @@ def _env_first(*names: str, default: str = "") -> str:
         if value:
             return value
     return default
+
+
+def _validate_health_hack_service_secrets(
+    *,
+    health_hack_key: str,
+    roo_sim_patient_key: str,
+    roo_api_key: str,
+    is_production: bool,
+) -> None:
+    """Require strong, purpose-specific cross-service credentials in production."""
+
+    if not is_production:
+        return
+    if len(health_hack_key) < 32:
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_API_KEY must contain at least 32 characters in production.'
+        )
+    if len(roo_sim_patient_key) < 32:
+        raise ImproperlyConfigured(
+            'ROO_SIM_PATIENT_KEY must contain at least 32 characters in production.'
+        )
+    if len(roo_api_key) < 32:
+        raise ImproperlyConfigured(
+            'ROO_API_KEY must contain at least 32 characters in production.'
+        )
+    if len({health_hack_key, roo_sim_patient_key, roo_api_key}) != 3:
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_API_KEY, ROO_SIM_PATIENT_KEY, and ROO_API_KEY must be '
+            'distinct credentials.'
+        )
+
+
+def _validate_health_hack_ai_modes(*, rate_mode: str, budget_mode: str, is_production: bool):
+    if rate_mode not in {'observe', 'enforce'}:
+        raise ImproperlyConfigured('HEALTH_HACK_AI_RATE_LIMIT_MODE must be observe or enforce')
+    if budget_mode not in {'observe', 'enforce'}:
+        raise ImproperlyConfigured('HEALTH_HACK_AI_BUDGET_MODE must be observe or enforce')
+    if is_production and budget_mode != 'enforce':
+        raise ImproperlyConfigured(
+            'HEALTH_HACK_AI_BUDGET_MODE must be enforce in production.'
+        )
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -162,6 +204,7 @@ INSTALLED_APPS = [
     'workflow_runs',
     'startup_updates',
     'content_factory',
+    'content_analytics',
     'founder_tools',
     'data_access',
     'core',
@@ -169,6 +212,7 @@ INSTALLED_APPS = [
     'generic_hackathons',
     'vibe_raising',
     'mlai_studio',
+    'victor_ai',
     'jobs',
     "rest_framework",
     "roo",
@@ -270,21 +314,36 @@ if _REDIS_URL:
 else:
     _REDIS_CACHE_AVAILABLE = False
 
-if _REDIS_CACHE_AVAILABLE:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': _REDIS_URL,
-            'KEY_PREFIX': 'mlai',
-        },
-        'watt_session': {
-            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-            'LOCATION': _REDIS_URL,
-            'KEY_PREFIX': 'watt_session',
-        },
-    }
-else:
-    CACHES = {
+
+def _build_cache_settings(*, redis_url: str, redis_available: bool, is_production: bool):
+    """Build cache settings, refusing process-local security state in production."""
+
+    if is_production and not redis_url:
+        raise ImproperlyConfigured(
+            'REDIS_URL must be configured in production. Health Hack quotas, '
+            'in-flight locks, and spending caps require a shared Redis/Valkey cache.'
+        )
+    if is_production and not redis_available:
+        raise ImproperlyConfigured(
+            'The redis package is required in production when REDIS_URL is configured.'
+        )
+    if redis_url and not redis_url.lower().startswith(('redis://', 'rediss://')):
+        raise ImproperlyConfigured('REDIS_URL must use the redis:// or rediss:// scheme.')
+
+    if redis_available:
+        return {
+            'default': {
+                'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+                'LOCATION': redis_url,
+                'KEY_PREFIX': 'mlai',
+            },
+            'watt_session': {
+                'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+                'LOCATION': redis_url,
+                'KEY_PREFIX': 'watt_session',
+            },
+        }
+    return {
         'default': {
             'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
         },
@@ -293,6 +352,13 @@ else:
             'LOCATION': 'watt_unity_session_cache',
         },
     }
+
+
+CACHES = _build_cache_settings(
+    redis_url=_REDIS_URL,
+    redis_available=_REDIS_CACHE_AVAILABLE,
+    is_production=IS_PRODUCTION_ENV,
+)
 
 
 def _configure_sqlite_connection(sender, connection, **kwargs):
@@ -331,6 +397,105 @@ REST_FRAMEWORK = {
         'watt_unity_ticket_redeem': os.getenv('WATT_UNITY_TICKET_REDEEM_RATE', '60/minute'),
     }
 }
+
+HEALTH_HACK_ACTIVE_CASE_ID = int(os.getenv('HEALTH_HACK_ACTIVE_CASE_ID', '1'))
+HEALTH_HACK_AI_BODY_MAX_BYTES = int(os.getenv('HEALTH_HACK_AI_BODY_MAX_BYTES', str(16 * 1024)))
+HEALTH_HACK_AI_UPSTREAM_MAX_BYTES = int(
+    os.getenv('HEALTH_HACK_AI_UPSTREAM_MAX_BYTES', str(32 * 1024))
+)
+HEALTH_HACK_AI_REPLY_MAX_CHARS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_CHARS', '1500'))
+HEALTH_HACK_AI_REPLY_MAX_WORDS = int(os.getenv('HEALTH_HACK_AI_REPLY_MAX_WORDS', '160'))
+HEALTH_HACK_AI_MAX_PROMPT_TOKENS = int(
+    os.getenv('HEALTH_HACK_AI_MAX_PROMPT_TOKENS', '12000')
+)
+HEALTH_HACK_AI_MAX_COMPLETION_TOKENS = int(
+    os.getenv('HEALTH_HACK_AI_MAX_COMPLETION_TOKENS', '2000')
+)
+HEALTH_HACK_DIAGNOSIS_UPSTREAM_MAX_BYTES = int(
+    os.getenv('HEALTH_HACK_DIAGNOSIS_UPSTREAM_MAX_BYTES', str(8 * 1024))
+)
+
+# Participant/network thresholds start in observation mode so event traffic can
+# tune them without gameplay friction. The generous global spend ceiling is a
+# hard circuit breaker by default and must never silently become advisory.
+HEALTH_HACK_AI_RATE_LIMIT_MODE = os.getenv(
+    'HEALTH_HACK_AI_RATE_LIMIT_MODE', 'observe'
+).strip().lower()
+HEALTH_HACK_AI_BUDGET_MODE = os.getenv(
+    'HEALTH_HACK_AI_BUDGET_MODE', 'enforce'
+).strip().lower()
+_validate_health_hack_ai_modes(
+    rate_mode=HEALTH_HACK_AI_RATE_LIMIT_MODE,
+    budget_mode=HEALTH_HACK_AI_BUDGET_MODE,
+    is_production=IS_PRODUCTION_ENV,
+)
+
+HEALTH_HACK_AI_KILL_SWITCH = _env_is_true('HEALTH_HACK_AI_KILL_SWITCH', False)
+HEALTH_HACK_AI_PARTICIPANT_BURST_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_BURST_LIMIT', '3')
+)
+HEALTH_HACK_AI_PARTICIPANT_10M_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_10M_LIMIT', '40')
+)
+HEALTH_HACK_AI_PARTICIPANT_HOURLY_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_PARTICIPANT_HOURLY_LIMIT', '100')
+)
+HEALTH_HACK_AI_NETWORK_BURST_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_BURST_LIMIT', '60')
+)
+HEALTH_HACK_AI_NETWORK_10M_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_10M_LIMIT', '400')
+)
+HEALTH_HACK_AI_NETWORK_HOURLY_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_NETWORK_HOURLY_LIMIT', '1000')
+)
+HEALTH_HACK_AI_INFLIGHT_TTL_SECONDS = int(
+    os.getenv('HEALTH_HACK_AI_INFLIGHT_TTL_SECONDS', '35')
+)
+HEALTH_HACK_AI_PENDING_TTL_SECONDS = int(
+    os.getenv('HEALTH_HACK_AI_PENDING_TTL_SECONDS', '35')
+)
+HEALTH_HACK_AI_DAILY_CALL_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_DAILY_CALL_LIMIT', '5000')
+)
+HEALTH_HACK_AI_DAILY_TOKEN_LIMIT = int(
+    os.getenv('HEALTH_HACK_AI_DAILY_TOKEN_LIMIT', '5000000')
+)
+HEALTH_HACK_CHAT_RETENTION_DAYS = int(
+    os.getenv('HEALTH_HACK_CHAT_RETENTION_DAYS', '30')
+)
+HEALTH_HACK_FREE_TICKET_URL = os.getenv(
+    'HEALTH_HACK_FREE_TICKET_URL',
+    'https://luma.com/mlai-8obe?coupon=RQY4N0',
+)
+HEALTH_HACK_DISCOUNT_URL = os.getenv(
+    'HEALTH_HACK_DISCOUNT_URL',
+    'https://luma.com/mlai-8obe?coupon=ALMOSTGOTIT',
+)
+# The two-patient ward runs concurrent one-guess books. Guess/claim/status
+# accept exactly these case ids; each case's first solver gets its own ticket
+# coupon (falling back to HEALTH_HACK_FREE_TICKET_URL for unmapped cases),
+# while the runner-up discount stays global.
+HEALTH_HACK_OPEN_CASE_IDS = [
+    int(token)
+    for token in os.getenv('HEALTH_HACK_OPEN_CASE_IDS', '1,2').split(',')
+    if token.strip()
+]
+_HEALTH_HACK_DEFAULT_FREE_TICKET_URLS = {
+    1: 'https://luma.com/mlai-8obe?coupon=RQY4N0',
+    2: 'https://luma.com/mlai-8obe?coupon=7FS6FZ',
+}
+try:
+    HEALTH_HACK_FREE_TICKET_URLS = {
+        int(case_key): str(url)
+        for case_key, url in json.loads(
+            os.getenv('HEALTH_HACK_FREE_TICKET_URLS', '') or '{}'
+        ).items()
+    } or _HEALTH_HACK_DEFAULT_FREE_TICKET_URLS
+except (ValueError, TypeError):
+    raise ImproperlyConfigured(
+        'HEALTH_HACK_FREE_TICKET_URLS must be a JSON object of case_id -> URL'
+    )
 
 WATT_HACKATHON_CLASS_ID = os.getenv('WATT_HACKATHON_CLASS_ID', 'WATT')
 WATT_HACKATHON_API_BASE_URL = os.getenv('WATT_HACKATHON_API_BASE_URL', '')
@@ -471,6 +636,20 @@ ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL') or (
 CONTENT_FACTORY_URL = os.getenv('CONTENT_FACTORY_URL') or (
     'http://localhost:8001' if IS_LOCAL_ENV else ''
 )
+
+# Health Hack simulated-patient gateway. The browser-facing Cloudflare Worker
+# calls this Django service over HTTPS; Django reaches Roo over the private
+# DigitalOcean VPC so Roo itself does not need a public hostname.
+ROO_SERVICE_URL = os.getenv('ROO_SERVICE_URL', '').rstrip('/')
+ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
+HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
+ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+_validate_health_hack_service_secrets(
+    health_hack_key=HEALTH_HACK_API_KEY,
+    roo_sim_patient_key=ROO_SIM_PATIENT_KEY,
+    roo_api_key=ROO_API_KEY,
+    is_production=IS_PRODUCTION_ENV,
+)
 CONTENT_FACTORY_PREVIEW_BASE_URL = os.getenv('CONTENT_FACTORY_PREVIEW_BASE_URL', '')
 CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
     os.getenv('CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS', str(7 * 24 * 60 * 60))
@@ -486,16 +665,25 @@ CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
 CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS = int(
     os.getenv('CONTENT_AUTOMATION_ACTION_MAX_AGE_SECONDS', str(14 * 24 * 60 * 60))
 )
+# Daily email links are short-lived capability URLs. They render a read-only
+# confirmation page on GET and only execute after an explicit POST.
+CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
+    os.getenv('CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS', str(48 * 60 * 60))
+)
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
 CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
+# Transactional message id of the Victor:AI completed-registration receipt.
+CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
+    'CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID', '4'
+)
 # Transactional message id of the "Vibe Marketing Daily Reminder" template in
 # Customer.io. When set, the daily topic_selection email renders through that
 # template (Liquid loop over message_data.topics) instead of a raw HTML body.
-CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '')
+CUSTOMERIO_TOPIC_TEMPLATE_ID = os.getenv('CUSTOMERIO_TOPIC_TEMPLATE_ID', '3')
 # Twilio credentials drive WhatsApp sends (Messages API) and inbound webhook
 # validation (X-Twilio-Signature is HMAC-SHA1 keyed by the auth token).
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID', '')
@@ -509,6 +697,10 @@ TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '
 # {{1}} domain, {{2}}-{{4}} topic titles). Without it, topic sends fall back to
 # plain text and only deliver inside an open 24h service window.
 TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
+# Approved utility Content template for article review notifications (variables:
+# {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
+# template copy must include "Reply STOP to opt out.".
+TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
@@ -541,6 +733,12 @@ JOBS_NOTION_API_VERSION = os.getenv('JOBS_NOTION_API_VERSION', '2022-06-28')
 JOBS_SLACK_CHANNEL = os.getenv('JOBS_SLACK_CHANNEL', '#jobs')
 JOBS_SLACK_WEBHOOK_URL = os.getenv('JOBS_SLACK_WEBHOOK_URL', '')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN', '')
+HOSPITAL_SLACK_CHANNEL_NAME = os.getenv('HOSPITAL_SLACK_CHANNEL_NAME', 'healthhack')
+HEALTHHACK_ANNOUNCEMENT_ADMIN_IDS = [
+    value.strip()
+    for value in os.getenv('HEALTHHACK_ANNOUNCEMENT_ADMIN_IDS', '').split(',')
+    if value.strip()
+]
 JOBS_SLACK_BOT_TOKEN = os.getenv('JOBS_SLACK_BOT_TOKEN', '')
 JOBS_LLM_JUDGE_ENABLED = _env_is_true('JOBS_LLM_JUDGE_ENABLED', False)
 JOBS_LLM_JUDGE_API_KEY = os.getenv('JOBS_LLM_JUDGE_API_KEY', '')
@@ -579,6 +777,87 @@ GOOGLE_OAUTH_IDENTITY_SCOPES = [
 GOOGLE_WEBSITE_BASELINE_SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
 ]
+
+# Content Factory page analytics. Umami remains the raw event store; this
+# service retains only daily, article-scoped aggregates.
+UMAMI_BASE_URL = os.environ.get("UMAMI_BASE_URL", "").strip().rstrip("/")
+UMAMI_API_TOKEN = os.environ.get("UMAMI_API_TOKEN", "").strip()
+UMAMI_USERNAME = os.environ.get("UMAMI_USERNAME", "").strip()
+UMAMI_PASSWORD = os.environ.get("UMAMI_PASSWORD", "").strip()
+UMAMI_TEAM_ID = os.environ.get("UMAMI_TEAM_ID", "").strip()
+CONTENT_ANALYTICS_TRACKER_SCRIPT_URL = os.environ.get("CONTENT_ANALYTICS_TRACKER_SCRIPT_URL", "").strip()
+# Public Umami host used as the tracker's data-host-url. This is not an event
+# endpoint; Umami's served tracker owns the configured collection path.
+CONTENT_ANALYTICS_HOST_URL = os.environ.get("CONTENT_ANALYTICS_HOST_URL", "").strip().rstrip("/")
+CONTENT_ANALYTICS_FIRST_PARTY_PROXY_ENABLED = _env_is_true(
+    "CONTENT_ANALYTICS_FIRST_PARTY_PROXY_ENABLED",
+    False,
+)
+CONTENT_ANALYTICS_SYNC_ENABLED = _env_is_true("CONTENT_ANALYTICS_SYNC_ENABLED", True)
+CONTENT_ANALYTICS_SYNC_LOOKBACK_DAYS = int(os.environ.get("CONTENT_ANALYTICS_SYNC_LOOKBACK_DAYS", "3") or 3)
+CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS = int(os.environ.get("CONTENT_ANALYTICS_SYNC_INTERVAL_SECONDS", "86400") or 86400)
+CONTENT_ANALYTICS_SYNC_MAX_BACKFILL_DAYS_PER_RUN = int(
+    os.environ.get("CONTENT_ANALYTICS_SYNC_MAX_BACKFILL_DAYS_PER_RUN", "30") or 30
+)
+CONTENT_ANALYTICS_UMAMI_SOURCE_ATTRIBUTION_LIMIT = int(
+    os.environ.get("CONTENT_ANALYTICS_UMAMI_SOURCE_ATTRIBUTION_LIMIT", "3") or 3
+)
+CONTENT_ANALYTICS_GSC_FINALIZATION_LAG_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_GSC_FINALIZATION_LAG_DAYS", "3") or 3
+)
+CONTENT_ANALYTICS_GSC_INITIAL_BACKFILL_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_GSC_INITIAL_BACKFILL_DAYS", "480") or 480
+)
+CONTENT_ANALYTICS_GSC_QUERY_LIMIT = int(os.environ.get("CONTENT_ANALYTICS_GSC_QUERY_LIMIT", "100") or 100)
+CONTENT_ANALYTICS_ARTICLE_MANIFEST_LIMIT = int(
+    os.environ.get("CONTENT_ANALYTICS_ARTICLE_MANIFEST_LIMIT", "500") or 500
+)
+CONTENT_ANALYTICS_UMAMI_RETENTION_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_UMAMI_RETENTION_DAYS", "120") or 120
+)
+# Daily article performance brief (immutable report snapshots). Rates are
+# fractions of visits (0.03 = 3%).
+CONTENT_ANALYTICS_REPORT_WINDOW_DAYS = int(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_WINDOW_DAYS", "7") or 7
+)
+CONTENT_ANALYTICS_REPORT_MIN_VISITS = int(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_MIN_VISITS", "20") or 20
+)
+CONTENT_ANALYTICS_REPORT_TOP_CONVERSION_RATE = float(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_TOP_CONVERSION_RATE", "0.03") or 0.03
+)
+CONTENT_ANALYTICS_REPORT_HIGH_ENGAGED_RATE = float(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_HIGH_ENGAGED_RATE", "0.40") or 0.40
+)
+CONTENT_ANALYTICS_REPORT_LOW_CTA_REACH_RATE = float(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_LOW_CTA_REACH_RATE", "0.50") or 0.50
+)
+# Scheduler for the daily brief: generates each enabled org's report once per
+# org-local date, after the configured local hour. Off until the pilot passes.
+CONTENT_ANALYTICS_REPORTS_ENABLED = _env_is_true("CONTENT_ANALYTICS_REPORTS_ENABLED", False)
+CONTENT_ANALYTICS_REPORT_LOCAL_HOUR = int(
+    os.environ.get("CONTENT_ANALYTICS_REPORT_LOCAL_HOUR", "7") or 7
+)
+CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE = (
+    os.environ.get("CONTENT_ANALYTICS_REPORT_DEFAULT_TIMEZONE", "").strip()
+    or "Australia/Melbourne"
+)
+# Report-ready delivery through the consented notification channels. Separate
+# switch so briefs can accumulate silently before delivery is turned on.
+CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED = _env_is_true(
+    "CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED", False
+)
+# Customer.io transactional template for the report email; inline HTML is the
+# fallback when unset (and Resend below that).
+CUSTOMERIO_REPORT_TEMPLATE_ID = os.environ.get("CUSTOMERIO_REPORT_TEMPLATE_ID", "").strip()
+GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON = os.environ.get(
+    "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_JSON",
+    "",
+).strip()
+GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE = os.environ.get(
+    "GOOGLE_SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE",
+    "",
+).strip()
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 # Google PageSpeed Insights key for website-baseline Lighthouse/Core Web Vitals.
 # Managed here and handed to the content-factory producer via
@@ -619,6 +898,10 @@ STRIPE_OAUTH_REDIRECT_URI = os.environ.get(
 )
 STRIPE_OAUTH_SCOPES = _env_list("STRIPE_OAUTH_SCOPES", ["read_only"])
 STRIPE_API_VERSION = os.environ.get("STRIPE_API_VERSION", "2026-02-25.clover")
+RECONCILIATION_DEFAULT_DOMAIN = os.environ.get("RECONCILIATION_DEFAULT_DOMAIN", "mlai.au")
+RECONCILIATION_SCHEDULER_ENABLED = os.environ.get(
+    "RECONCILIATION_SCHEDULER_ENABLED", "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 XERO_CLIENT_ID = os.environ.get("XERO_CLIENT_ID", "")
 XERO_CLIENT_SECRET = os.environ.get("XERO_CLIENT_SECRET", "")
@@ -632,9 +915,31 @@ XERO_OAUTH_SCOPES = _env_list(
         "offline_access",
         "accounting.invoices.read",
         "accounting.payments.read",
+        # Applying a bank payment to an existing ACCPAY bill is a write and
+        # deliberately uses the narrow payments scope, not invoices.write.
+        "accounting.payments",
         "accounting.settings.read",
+        # Creating missing Event Name / Project Name tracking options is part
+        # of the explicitly approved reconciliation posting operation.
+        "accounting.settings",
         "accounting.contacts.read",
+        # Required by the explicit Stripe-payout approval workflow. Existing
+        # connections must reconnect once to grant this additional scope.
+        "accounting.banktransactions",
     ],
+)
+
+# Automatic API writes are opt-in. Admin/Roo calls can still explicitly
+# confirm one preview while the final statement-line reconciliation stays in
+# Xero for a human to approve.
+XERO_STATEMENT_AUTO_POST_ENABLED = os.environ.get(
+    "XERO_STATEMENT_AUTO_POST_ENABLED", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE = float(
+    os.environ.get("XERO_STATEMENT_BANK_TRANSACTION_MIN_CONFIDENCE", "0.92")
+)
+XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE = float(
+    os.environ.get("XERO_STATEMENT_BILL_PAYMENT_MIN_CONFIDENCE", "0.98")
 )
 
 NOTION_CLIENT_ID = os.environ.get("NOTION_CLIENT_ID", "")
@@ -748,7 +1053,6 @@ COWORKING_REFUND_CUTOFF_HOURS = int(os.getenv('COWORKING_REFUND_CUTOFF_HOURS', '
 COWORKING_BOOKING_ADVANCE_DAYS = int(os.environ.get('COWORKING_BOOKING_ADVANCE_DAYS', 30))
 
 # Internal API Key for service-to-service auth (e.g. from Roo agent)
-ROO_API_KEY = os.environ.get('ROO_API_KEY')
 MLAI_API_KEY = os.environ.get('MLAI_API_KEY')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY') or ROO_API_KEY or MLAI_API_KEY
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')

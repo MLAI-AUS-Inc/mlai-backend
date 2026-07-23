@@ -70,6 +70,218 @@ class ContentFactoryRunSyncTests(TestCase):
         self.assertEqual(run.workflow, "repo_scan")
         self.assertEqual(run.run_request.get("domain"), "mlai.au")
 
+    def test_run_sync_preserves_django_owned_revision_and_publish_state(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="run-sync-revision-lineage-1",
+            workflow="article_revision",
+            domain="mlai.au",
+            status=ContentFactoryRunStatus.APPROVAL_REQUIRED,
+            current_step="await_review",
+            result={
+                "status": "preview_ready",
+                "component_feedback_latest_batch": {
+                    "id": "batch-2",
+                    "revisionRunId": "revision-2",
+                    "status": "accepted",
+                },
+                "component_feedback_revision_run_id": "revision-2",
+                "publish_child_run_id": "publish-revision-2",
+                "publish_handoff_status": "blocked",
+            },
+        )
+        payload = {
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "domain": run.domain,
+            "status": run.status,
+            "current_step": run.current_step,
+            "result": {
+                "status": "preview_ready",
+                "preview_url": "https://preview.example/revision-1",
+            },
+            "step_states": {},
+        }
+
+        first = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            payload,
+            format="json",
+        )
+        run.refresh_from_db()
+        first_updated_at = run.updated_at
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(run.result["preview_url"], "https://preview.example/revision-1")
+        self.assertEqual(run.result["component_feedback_revision_run_id"], "revision-2")
+        self.assertEqual(run.result["component_feedback_latest_batch"]["revisionRunId"], "revision-2")
+        self.assertEqual(run.result["publish_child_run_id"], "publish-revision-2")
+        self.assertEqual(run.result["publish_handoff_status"], "blocked")
+
+        second = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            payload,
+            format="json",
+        )
+        run.refresh_from_db()
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["sync_status"], "unchanged")
+        self.assertEqual(run.updated_at, first_updated_at)
+
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+
+        _sync_local_run_from_remote(
+            run,
+            {
+                "workflow": run.workflow,
+                "status": run.status,
+                "current_step": run.current_step,
+                "result": {
+                    "status": "preview_ready",
+                    "preview_url": "https://preview.example/status-poll",
+                },
+            },
+        )
+        run.refresh_from_db()
+
+        self.assertEqual(run.result["preview_url"], "https://preview.example/status-poll")
+        self.assertEqual(run.result["component_feedback_revision_run_id"], "revision-2")
+        self.assertEqual(run.result["component_feedback_latest_batch"]["revisionRunId"], "revision-2")
+        self.assertEqual(run.result["publish_child_run_id"], "publish-revision-2")
+
+    def test_run_sync_accepts_active_article_retry_and_clears_resolved_blocker_fields(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="article-retry-sync-1",
+            workflow="confirmed_topic",
+            domain="coworkadelaide.com.au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="precondition_failed",
+            error="Article system setup is required.",
+            result={
+                "status": "precondition_failed",
+                "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                "blocking_reason": "The cached setup contract is stale.",
+                "repair_status": "required",
+                "requires_user_action": True,
+                "next_action": "resume",
+            },
+        )
+
+        response = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            {
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "domain": run.domain,
+                "status": "running",
+                "current_step": "research_topic",
+                "error": "Article system setup is required.",
+                "result": {
+                    "status": "running",
+                    "precondition_recovered": True,
+                    "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED",
+                    "blocking_reason": "The cached setup contract is stale.",
+                    "repair_status": "required",
+                    "requires_user_action": True,
+                    "next_action": "resume",
+                    "article_system_readiness": {
+                        "status": "precondition_failed",
+                        "blocking_reason": "The cached setup contract is stale.",
+                    },
+                },
+                "step_states": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sync_status"], "updated")
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+        self.assertEqual(run.current_step, "research_topic")
+        self.assertEqual(run.error, "")
+        for key in (
+            "error_code",
+            "blocking_reason",
+            "repair_status",
+            "requires_user_action",
+            "next_action",
+            "article_system_readiness",
+        ):
+            self.assertNotIn(key, run.result)
+
+    def test_run_sync_does_not_resurrect_unrelated_workflow_with_article_recovery_signal(self):
+        run = ContentFactoryRun.objects.create(
+            run_id="scan-stale-recovery-sync-1",
+            workflow="repo_scan",
+            domain="coworkadelaide.com.au",
+            status=ContentFactoryRunStatus.BLOCKED,
+            current_step="scan_repository",
+            error="Repository scan failed.",
+            result={"status": "blocked", "error_code": "REPO_SCAN_FAILED"},
+        )
+
+        response = self.client.put(
+            f"/api/content-factory/runs/{run.run_id}/",
+            {
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "domain": run.domain,
+                "status": "running",
+                "current_step": "scan_repository",
+                "result": {"status": "running", "precondition_recovered": True},
+                "step_states": {},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sync_status"], "ignored_terminal_state")
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.error, "Repository scan failed.")
+        self.assertEqual(run.result["error_code"], "REPO_SCAN_FAILED")
+
+    def test_run_sync_does_not_resurrect_article_from_legacy_retry_markers(self):
+        legacy_payloads = (
+            {"is_current_attempt": True},
+            {"repaired": True},
+            {"repair_requested": True},
+            {"attempt_number": 2},
+            {"resume_generation": 2},
+            {"previous_status": "precondition_failed"},
+        )
+        for index, legacy_marker in enumerate(legacy_payloads):
+            with self.subTest(legacy_marker=legacy_marker):
+                run = ContentFactoryRun.objects.create(
+                    run_id=f"article-stale-retry-sync-{index}",
+                    workflow="confirmed_topic",
+                    domain="coworkadelaide.com.au",
+                    status=ContentFactoryRunStatus.BLOCKED,
+                    current_step="precondition_failed",
+                    error="Article system setup is required.",
+                    result={"status": "precondition_failed", "error_code": "ARTICLE_SYSTEM_SETUP_REQUIRED"},
+                )
+                response = self.client.put(
+                    f"/api/content-factory/runs/{run.run_id}/",
+                    {
+                        "run_id": run.run_id,
+                        "workflow": run.workflow,
+                        "domain": run.domain,
+                        "status": "running",
+                        "current_step": "research_topic",
+                        "result": {"status": "running", **legacy_marker},
+                        "step_states": {},
+                    },
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["sync_status"], "ignored_terminal_state")
+                run.refresh_from_db()
+                self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+                self.assertEqual(run.result["error_code"], "ARTICLE_SYSTEM_SETUP_REQUIRED")
+
     def test_repo_scan_status_serialization_includes_scan_progress(self):
         from content_factory.vibe_marketing_views import _serialize_run
 
@@ -120,6 +332,65 @@ class ContentFactoryRunSyncTests(TestCase):
 
         self.assertIsNone(payload["scanProgress"])
         self.assertIsNone(payload["scan_progress"])
+
+    def test_research_shortfall_serialization_is_honest_and_not_resumable(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        run = ContentFactoryRun.objects.create(
+            run_id="research-shortfall-serialize-1",
+            workflow="confirmed_topic",
+            domain="golden-vite-router-baseline.com",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="collect_research_bundle",
+            resume_available=False,
+            # A stale poll may have overwritten run.error with the raw internal phrasing.
+            error="Collected only 3 usable research sources for 'react router'; need at least 4.",
+            result={
+                "status": "failed",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+            },
+        )
+
+        for mode in ("status", "full"):
+            payload = _serialize_run(run, mode=mode)
+            message = payload["errors"][0]
+            # Honest, actionable copy regardless of the raw run.error text.
+            self.assertIn("too narrow", message)
+            self.assertIn("3 of the 4", message)
+            self.assertIn("broader", message.lower())
+            self.assertNotIn("Collected only", message)
+            # No blind Resume/Retry affordance for a deterministic content shortfall.
+            self.assertFalse(payload["resumeAvailable"])
+            self.assertFalse(payload["retryAvailable"])
+            self.assertEqual(payload["errorCode"], "INSUFFICIENT_SOURCE_SUPPORT")
+
+    def test_resumable_insufficient_sources_shows_raw_message_not_too_narrow(self):
+        from content_factory.vibe_marketing_views import _serialize_run
+
+        # Same error_code, but resumable (transient scrape storm / ground_section):
+        # "too narrow — try a broader topic" would be wrong, so the raw text passes through.
+        run = ContentFactoryRun.objects.create(
+            run_id="research-transient-serialize-1",
+            workflow="confirmed_topic",
+            domain="golden-vite-router-baseline.com",
+            status=ContentFactoryRunStatus.FAILED,
+            current_step="collect_research_bundle",
+            resume_available=True,
+            error="Collected only 3 usable research sources because several were rate limited; need at least 4.",
+            result={
+                "status": "failed",
+                "error_code": "INSUFFICIENT_SOURCE_SUPPORT",
+                "diagnostics": {"usable_source_count": 3, "minimum_usable_sources": 4},
+            },
+        )
+
+        for mode in ("status", "full"):
+            payload = _serialize_run(run, mode=mode)
+            message = payload["errors"][0]
+            self.assertNotIn("too narrow", message)
+            self.assertIn("rate limited", message)
+            self.assertTrue(payload["resumeAvailable"])
 
     def test_run_sync_sanitizes_nul_payload_before_persisting(self):
         response = self.client.put(

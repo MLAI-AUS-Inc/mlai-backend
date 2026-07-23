@@ -12,6 +12,7 @@ and a real removal.
 from django.test import SimpleTestCase
 
 from content_factory.article_system import (
+    is_bundle_only_fallback_target,
     is_directly_publishable_target,
     preserve_registered_publish_targets,
 )
@@ -159,3 +160,12 @@ class PreserveRegisteredPublishTargetsTests(SimpleTestCase):
         self.assertFalse(is_directly_publishable_target(BUNDLE_ONLY[0]))
         # A target with no capability marker is not assumed directly publishable.
         self.assertFalse(is_directly_publishable_target({"target_id": "x"}))
+
+    def test_is_bundle_only_fallback_target_classification(self):
+        # The denylist the readiness gate uses: bundle-only fallbacks are rejected,
+        # but hook and capability-less legacy targets are NOT (they stay a publish path).
+        self.assertTrue(is_bundle_only_fallback_target(BUNDLE_ONLY[0]))
+        self.assertFalse(is_bundle_only_fallback_target(REGISTERED_DIRECT[0]))
+        self.assertFalse(is_bundle_only_fallback_target({"kind": "hook_publish_target", "publish_capability": "hook"}))
+        self.assertFalse(is_bundle_only_fallback_target({"target_id": "articles", "kind": "react_article_system"}))
+        self.assertFalse(is_bundle_only_fallback_target(None))

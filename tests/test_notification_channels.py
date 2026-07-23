@@ -11,9 +11,13 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from content_factory.models import (
+    AutomationRun,
+    AutomationRunStatus,
     NotificationChannel,
     NotificationChannelType,
     NotificationConsentState,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
     OrganizationContentConfig,
     ResearchAutomation,
     ResearchAutomationStatus,
@@ -223,23 +227,37 @@ class EmailVerificationTests(TestCase):
         self.org = Organization.objects.create(name="Email Co", domain="email.example.com")
         self.user = User.objects.create_user(email="founder@example.com")
 
+    def _legacy_pending_channel(self):
+        return NotificationChannel.objects.create(
+            organization=self.org,
+            user=self.user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id=self.user.email,
+            display_name=self.user.email,
+            consent_state=NotificationConsentState.PENDING,
+        )
+
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_initiate_sends_signed_link_via_resend(self, mock_post):
-        mock_post.return_value = _Response(200, {"id": "email-1"})
+    def test_initiate_activates_account_email_without_sending(self, mock_post):
         channel = initiate_email_channel(organization=self.org, user=self.user, route_id="Founder@Example.com")
         self.assertEqual(channel.route_id, "founder@example.com")
-        self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
+        self.assertEqual(channel.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(channel.delivery_enabled)
+        self.assertIsNotNone(channel.verified_at)
+        mock_post.assert_not_called()
 
-        from integrations.services.notification_channels import send_email_verification
-
-        send_email_verification(channel)
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["to"], ["founder@example.com"])
-        self.assertIn("/api/content-factory/notification-channels/verify-email", payload["text"])
-        self.assertIn("token=", payload["text"])
+    def test_initiate_rejects_an_address_other_than_the_account_email(self):
+        with self.assertRaises(ChannelActionError) as ctx:
+            initiate_email_channel(
+                organization=self.org,
+                user=self.user,
+                route_id="someone-else@example.com",
+            )
+        self.assertEqual(ctx.exception.code, "email_must_match_account")
+        self.assertFalse(NotificationChannel.objects.filter(organization=self.org).exists())
 
     def test_verify_link_activates_and_redirects(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         url = build_email_verification_url(channel)
         token = parse_qs(urlparse(url).query)["token"][0]
 
@@ -258,7 +276,7 @@ class EmailVerificationTests(TestCase):
 
     @override_settings(NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS=-1)
     def test_expired_link_redirects_expired(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
 
         response = self.client.get(
@@ -270,7 +288,7 @@ class EmailVerificationTests(TestCase):
         self.assertEqual(channel.consent_state, NotificationConsentState.PENDING)
 
     def test_route_mismatch_or_garbage_token_redirects_invalid(self):
-        channel = initiate_email_channel(organization=self.org, user=self.user)
+        channel = self._legacy_pending_channel()
         token = parse_qs(urlparse(build_email_verification_url(channel)).query)["token"][0]
         channel.route_id = "changed@example.com"
         channel.save(update_fields=["route_id"])
@@ -284,6 +302,49 @@ class EmailVerificationTests(TestCase):
             reverse("content_factory_notification_channel_verify"), {"token": "garbage"}
         )
         self.assertTrue(response["Location"].endswith("emailChannel=invalid"))
+
+
+class AccountEmailChannelMigrationTests(TestCase):
+    def test_backfill_activates_only_pending_channels_matching_the_account_email(self):
+        from django.apps import apps as django_apps
+        from importlib import import_module
+
+        org = Organization.objects.create(name="Migration Co", domain="migration.example.com")
+        matching_user = User.objects.create_user(email="matching@example.com")
+        alternate_user = User.objects.create_user(email="account@example.com")
+        matching = NotificationChannel.objects.create(
+            organization=org,
+            user=matching_user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="MATCHING@example.com",
+            consent_state=NotificationConsentState.PENDING,
+            delivery_enabled=False,
+            verification_code_hash="old-code",
+            verification_expires_at=timezone.now() + timedelta(hours=1),
+            verification_attempts=2,
+        )
+        alternate = NotificationChannel.objects.create(
+            organization=org,
+            user=alternate_user,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="alternate@example.com",
+            consent_state=NotificationConsentState.PENDING,
+        )
+
+        migration = import_module(
+            "content_factory.migrations.0033_activate_account_email_notification_channels"
+        )
+        migration.activate_account_email_channels(django_apps, None)
+
+        matching.refresh_from_db()
+        alternate.refresh_from_db()
+        self.assertEqual(matching.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(matching.delivery_enabled)
+        self.assertIsNotNone(matching.verified_at)
+        self.assertEqual(matching.verification_code_hash, "")
+        self.assertIsNone(matching.verification_expires_at)
+        self.assertEqual(matching.verification_attempts, 0)
+        self.assertEqual(alternate.consent_state, NotificationConsentState.PENDING)
 
 
 class SlackLinkTests(TestCase):
@@ -504,19 +565,19 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertIsNone(response.data["automation"])
 
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_create_email_channel_sends_verification(self, mock_post):
-        mock_post.return_value = _Response(200, {"id": "email-1"})
+    def test_create_email_channel_activates_account_email_without_sending(self, mock_post):
         response = self.client.post(
             reverse("vibe-marketing-notification-channels"),
             {"channelType": "email"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], "verification_sent")
+        self.assertEqual(response.data["status"], "active")
         channel = response.data["channel"]
         self.assertEqual(channel["routeId"], "founder@example.com")
-        self.assertEqual(channel["consentState"], "pending")
-        self.assertIsNotNone(channel["pendingVerification"])
+        self.assertEqual(channel["consentState"], "active")
+        self.assertIsNone(channel["pendingVerification"])
+        mock_post.assert_not_called()
 
     def test_create_whatsapp_channel_without_template_returns_503(self):
         response = self.client.post(
@@ -634,3 +695,321 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertFalse(disable.data["automation"]["enabled"])
         config.refresh_from_db()
         self.assertFalse(config.daily_discovery_enabled)
+
+    def _active_channel(self, channel_type=NotificationChannelType.EMAIL, route_id="founder@example.com"):
+        return NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=channel_type,
+            route_id=route_id,
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+
+    def _detail_url(self, channel):
+        return reverse("vibe-marketing-notification-channel-detail", kwargs={"channel_id": channel.id})
+
+    def test_channels_serialize_delivery_enabled_default_true(self):
+        self._active_channel()
+        response = self.client.get(reverse("vibe-marketing-notification-channels"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["channels"][0]["deliveryEnabled"])
+
+    def test_toggle_delivery_off_then_on_preserves_consent(self):
+        # Two active channels so the guard permits turning one off.
+        self._active_channel()
+        whatsapp = self._active_channel(NotificationChannelType.WHATSAPP, "+61400000000")
+        url = self._detail_url(whatsapp)
+
+        off = self.client.patch(url, {"deliveryEnabled": False}, format="json")
+        self.assertEqual(off.status_code, status.HTTP_200_OK)
+        wa = next(c for c in off.data["channels"] if c["id"] == str(whatsapp.id))
+        self.assertFalse(wa["deliveryEnabled"])
+        whatsapp.refresh_from_db()
+        self.assertFalse(whatsapp.delivery_enabled)
+        # Consent is untouched, so re-enabling needs no re-verification.
+        self.assertEqual(whatsapp.consent_state, NotificationConsentState.ACTIVE)
+
+        on = self.client.patch(url, {"deliveryEnabled": True}, format="json")
+        self.assertEqual(on.status_code, status.HTTP_200_OK)
+        wa = next(c for c in on.data["channels"] if c["id"] == str(whatsapp.id))
+        self.assertTrue(wa["deliveryEnabled"])
+
+    def test_toggle_pending_channel_rejected(self):
+        pending = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.PENDING,
+        )
+        response = self.client.patch(self._detail_url(pending), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "channel_not_active")
+
+    def test_toggle_last_delivery_channel_blocked(self):
+        email = self._active_channel()
+        response = self.client.patch(self._detail_url(email), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "last_delivery_channel")
+        email.refresh_from_db()
+        self.assertTrue(email.delivery_enabled)  # left unchanged
+
+    def test_toggle_missing_field_returns_400(self):
+        email = self._active_channel()
+        response = self.client.patch(self._detail_url(email), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "missing_delivery_enabled")
+
+    def test_toggle_scoped_to_org(self):
+        other_org = Organization.objects.create(name="Other", domain="other.example.com")
+        foreign = NotificationChannel.objects.create(
+            organization=other_org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="other@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        response = self.client.patch(self._detail_url(foreign), {"deliveryEnabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- type-based delivery endpoint (connect-on-enable) -------------------
+
+    def _delivery_url(self):
+        return reverse("vibe-marketing-notification-channel-delivery")
+
+    @patch("integrations.services.notification_channels.SlackService.send_dm", return_value=(True, "1.0"))
+    def test_delivery_enable_slack_connects_and_enables(self, _mock_dm):
+        self.user.slack_id = "U1"
+        self.user.save(update_fields=["slack_id"])
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "active")
+        slack = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.SLACK)
+        self.assertEqual(slack.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(slack.delivery_enabled)
+
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_delivery_enable_email_activates_without_sending(self, mock_post):
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "active")
+        email = NotificationChannel.objects.get(organization=self.org, channel_type=NotificationChannelType.EMAIL)
+        self.assertEqual(email.consent_state, NotificationConsentState.ACTIVE)
+        self.assertTrue(email.delivery_enabled)
+        mock_post.assert_not_called()
+
+    def test_delivery_enable_email_when_active_enables_delivery(self):
+        email = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="founder@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=False,
+        )
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "email", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "active")
+        email.refresh_from_db()
+        self.assertTrue(email.delivery_enabled)
+
+    def test_delivery_disable_keeps_connection_and_needs_another_channel(self):
+        slack = self._active_channel(NotificationChannelType.SLACK, "U1")
+        self._active_channel(NotificationChannelType.EMAIL, "founder@example.com")  # keeps guard satisfied
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "disabled")
+        slack.refresh_from_db()
+        self.assertFalse(slack.delivery_enabled)
+        # Connection preserved (consent untouched), so re-enabling needs no reconnect.
+        self.assertEqual(slack.consent_state, NotificationConsentState.ACTIVE)
+
+    def test_delivery_disable_last_channel_blocked(self):
+        slack = self._active_channel(NotificationChannelType.SLACK, "U1")
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "slack", "enabled": False}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "last_delivery_channel")
+        slack.refresh_from_db()
+        self.assertTrue(slack.delivery_enabled)
+
+    def test_delivery_enable_whatsapp_without_channel_requires_setup(self):
+        response = self.client.post(
+            self._delivery_url(), {"channelType": "whatsapp", "enabled": True}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "whatsapp_setup_required")
+
+    def test_delivery_invalid_type_and_missing_enabled(self):
+        bad_type = self.client.post(
+            self._delivery_url(), {"channelType": "carrier-pigeon", "enabled": True}, format="json"
+        )
+        self.assertEqual(bad_type.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bad_type.data["code"], "invalid_channel_type")
+        missing = self.client.post(self._delivery_url(), {"channelType": "slack"}, format="json")
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.data["code"], "missing_enabled")
+
+    # --- Run today now (manual run) -----------------------------------------
+
+    def _run_now_url(self):
+        return reverse("vibe-marketing-notification-automation-run-now")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_accepts_and_returns_run_id(self, mock_start):
+        mock_start.return_value = {"status": "queued", "automation_run_id": "run-1"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data["automationRunId"], "run-1")
+        self.assertFalse(response.data["reused"])
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_reused_flag(self, mock_start):
+        mock_start.return_value = {"status": "reused", "automation_run_id": "run-1", "run_status": "queued"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertTrue(response.data["reused"])
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_no_automation_400(self, mock_start):
+        mock_start.return_value = {"status": "no_automation"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "automation_not_enabled")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_no_channels_400(self, mock_start):
+        mock_start.return_value = {"status": "no_delivery_channels"}
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "no_delivery_channels")
+
+    @patch("content_factory.notification_channel_views.start_manual_automation_run")
+    def test_run_now_insufficient_points_402(self, mock_start):
+        mock_start.return_value = {
+            "status": "failed",
+            "error": "insufficient_roo_points",
+            "automation_run_id": "run-1",
+        }
+        response = self.client.post(self._run_now_url(), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        self.assertEqual(response.data["code"], "insufficient_roo_points")
+
+    def _manual_run(self, *, organization, run_status):
+        channel = NotificationChannel.objects.create(
+            organization=organization,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        automation = ResearchAutomation.objects.create(
+            organization=organization,
+            notification_channel=channel,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        run = AutomationRun.objects.create(
+            automation=automation,
+            local_date=timezone.now().date(),
+            slot_index=100,
+            scheduled_for_at=timezone.now(),
+            status=run_status,
+            idempotency_key=f"manual-{organization.id}",
+        )
+        return run, channel
+
+    def _run_status_url(self, run):
+        return reverse(
+            "vibe-marketing-notification-automation-run-status",
+            kwargs={"automation_run_id": run.id},
+        )
+
+    def test_run_status_sent_with_deliveries(self):
+        run, channel = self._manual_run(
+            organization=self.org, run_status=AutomationRunStatus.TOPIC_SELECTION_SENT
+        )
+        NotificationDelivery.objects.create(
+            automation_run=run,
+            channel=channel,
+            event_type="topic_selection",
+            status=NotificationDeliveryStatus.SENT,
+            idempotency_key=f"{run.id}:whatsapp:topic_selection",
+            delivered_at=timezone.now(),
+        )
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["phase"], "sent")
+        self.assertEqual(response.data["deliveries"][0]["channelType"], "whatsapp")
+        self.assertEqual(response.data["deliveries"][0]["status"], "sent")
+
+    def test_run_status_researching_when_queued(self):
+        run, _ = self._manual_run(organization=self.org, run_status=AutomationRunStatus.QUEUED)
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["phase"], "researching")
+
+    def test_run_status_org_scoped_404(self):
+        other = Organization.objects.create(name="Other", domain="other2.example.com")
+        run, _ = self._manual_run(organization=other, run_status=AutomationRunStatus.QUEUED)
+        response = self.client.get(self._run_status_url(run))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ActiveChannelsForRunTests(TestCase):
+    """Fan-out targeting honours delivery_enabled (the single delivery seam)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Fanout Co", domain="fanout.example.com")
+        self.primary = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="founder@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=self.primary,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+
+    def _run(self):
+        from content_factory.models import AutomationRun
+
+        return AutomationRun.objects.create(
+            automation=self.automation,
+            scheduled_for_at=timezone.now(),
+            local_date=timezone.now().date(),
+            idempotency_key="fanout-run",
+        )
+
+    def test_excludes_delivery_disabled_channel(self):
+        from integrations.services.notification_adapters import _active_channels_for_run
+
+        muted = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=False,
+        )
+        ids = {channel.id for channel in _active_channels_for_run(self._run())}
+        self.assertIn(self.primary.id, ids)
+        self.assertNotIn(muted.id, ids)
+
+    def test_includes_delivery_enabled_channel(self):
+        from integrations.services.notification_adapters import _active_channels_for_run
+
+        whatsapp = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000000",
+            consent_state=NotificationConsentState.ACTIVE,
+            delivery_enabled=True,
+        )
+        ids = {channel.id for channel in _active_channels_for_run(self._run())}
+        self.assertIn(self.primary.id, ids)
+        self.assertIn(whatsapp.id, ids)

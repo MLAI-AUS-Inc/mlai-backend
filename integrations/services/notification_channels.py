@@ -1,7 +1,7 @@
 """User-facing lifecycle for research notification channels.
 
 Owns connect/verify/disable flows for the three channel types:
-- email: signed magic-link sent via Resend
+- email: activated from the authenticated user's account email
 - whatsapp: 6-digit OTP sent via an approved Twilio authentication Content template
 - slack: auto-linked from the signed-in user (login already proves the email)
 
@@ -104,6 +104,7 @@ def serialize_channel(
         "routeId": channel.route_id,
         "displayName": channel.display_name,
         "consentState": channel.consent_state,
+        "deliveryEnabled": bool(channel.delivery_enabled),
         "verifiedAt": channel.verified_at.isoformat() if channel.verified_at else None,
         "isPrimary": primary_channel_id is not None and channel.id == primary_channel_id,
         "pendingVerification": pending,
@@ -141,6 +142,10 @@ def _active_org_channels(organization) -> list[NotificationChannel]:
 
 def _activate_channel(channel: NotificationChannel) -> NotificationChannel:
     channel.consent_state = NotificationConsentState.ACTIVE
+    # A freshly (re)connected channel opts back into delivery. This is the only
+    # transition into ACTIVE, so it also resets a channel that was unchecked and
+    # then removed/re-added — it comes back selected rather than silently muted.
+    channel.delivery_enabled = True
     channel.verified_at = timezone.now()
     channel.opted_out_at = None
     channel.verification_code_hash = ""
@@ -149,6 +154,7 @@ def _activate_channel(channel: NotificationChannel) -> NotificationChannel:
     channel.save(
         update_fields=[
             "consent_state",
+            "delivery_enabled",
             "verified_at",
             "opted_out_at",
             "verification_code_hash",
@@ -220,16 +226,25 @@ def _enforce_send_limits(channel: NotificationChannel, now) -> None:
 # ---------------------------------------------------------------------------
 
 def initiate_email_channel(*, organization, user, route_id: str = "") -> NotificationChannel:
-    email = str(route_id or "").strip().lower() or str(getattr(user, "email", "") or "").strip().lower()
-    if not email or "@" not in email:
-        raise ChannelActionError("invalid_email", "Enter a valid email address.")
-    return _prepare_pending_channel(
+    account_email = str(getattr(user, "email", "") or "").strip().lower()
+    requested_email = str(route_id or "").strip().lower() or account_email
+    if not account_email or "@" not in account_email:
+        raise ChannelActionError("invalid_email", "Your account needs a valid email address.")
+    if requested_email != account_email:
+        raise ChannelActionError(
+            "email_must_match_account",
+            "Daily reminder email must match your signed-in account email.",
+        )
+    channel = _prepare_pending_channel(
         organization=organization,
         user=user,
         channel_type=NotificationChannelType.EMAIL,
-        route_id=email,
-        display_name=email,
+        route_id=account_email,
+        display_name=account_email,
     )
+    if channel.consent_state != NotificationConsentState.ACTIVE:
+        _activate_channel(channel)
+    return channel
 
 
 def build_email_verification_url(channel: NotificationChannel) -> str:

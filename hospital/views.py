@@ -4,23 +4,30 @@ import logging
 import datetime
 import re
 import json
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from django.conf import settings
 from django.utils import timezone
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.shortcuts import get_object_or_404
-from .models import Submission, Team, Announcement
-from .serializers import TeamSerializer, SubmissionSerializer, AnnouncementSerializer
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from .models import HospitalCompetitionRound, Submission, Team
+from .rounds import (
+    active_hospital_submissions,
+    active_hospital_team_for,
+    active_hospital_teams,
+)
+from .serializers import TeamSerializer, SubmissionSerializer
 from rest_framework.decorators import api_view, permission_classes
 import logging
 from dotenv import load_dotenv
 from django.db import transaction, IntegrityError
 from django.contrib.auth import get_user_model
-from rest_framework import permissions, status, generics
-from core.permissions import IsLeaderboardAdmin
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from core.permissions import IsHealthHackAdmin
 from core.user_compat import get_compat_user_role
 
 load_dotenv()
@@ -45,11 +52,20 @@ def _extract_team_id_from_code(code):
         return None
 
 
+def _slack_timestamp_is_current(timestamp_value, opened_at):
+    try:
+        message_timestamp = Decimal(str(timestamp_value))
+        round_timestamp = Decimal(f'{opened_at.timestamp():.6f}')
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return message_timestamp >= round_timestamp
+
+
 class TeamListView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
-        teams = Team.objects.all().order_by('team_id')
+        teams = active_hospital_teams().order_by('team_id')
         member_id = request.query_params.get('member_id')
         if member_id and member_id not in ('undefined', 'null'):
             try:
@@ -96,7 +112,11 @@ class TeamListView(APIView):
         if not team_name:
             return Response({"error": "team_name is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_team = Team.objects.filter(team_name__iexact=team_name).first()
+        competition_round = HospitalCompetitionRound.get_active()
+        existing_team = Team.objects.filter(
+            round=competition_round,
+            team_name__iexact=team_name,
+        ).first()
         created = False
 
         if existing_team:
@@ -105,7 +125,10 @@ class TeamListView(APIView):
                 team.avatar_url = requested_avatar_url
                 team.save(update_fields=['avatar_url'])
         else:
-            create_kwargs = {'team_name': team_name}
+            create_kwargs = {
+                'round': competition_round,
+                'team_name': team_name,
+            }
             requested_team_id = _extract_team_id_from_code(requested_code)
             if requested_code and requested_team_id is None:
                 return Response(
@@ -128,7 +151,7 @@ class TeamListView(APIView):
 
         # Keep one-team-per-user semantics for this hackathon.
         user = request.user
-        for current_team in user.hospital_teams.all():
+        for current_team in user.hospital_teams.filter(round=competition_round):
             current_team.members.remove(user)
 
         if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
@@ -147,7 +170,7 @@ class TeamListView(APIView):
 
 
 class JoinTeamView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def post(self, request):
         team_id = request.data.get('team_id')
@@ -158,13 +181,14 @@ class JoinTeamView(APIView):
 
         lookup_team_id = team_id
         team = None
+        teams = active_hospital_teams()
         if lookup_team_id is None and code:
             lookup_team_id = _extract_team_id_from_code(code)
             if lookup_team_id is not None:
-                team = Team.objects.filter(team_id=lookup_team_id).first()
+                team = teams.filter(team_id=lookup_team_id).first()
             else:
                 # Backward-compatible support where code is actually a team name.
-                team = Team.objects.filter(team_name__iexact=str(code).strip()).first()
+                team = teams.filter(team_name__iexact=str(code).strip()).first()
 
             if team is None:
                 return Response(
@@ -172,7 +196,7 @@ class JoinTeamView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
         elif lookup_team_id is not None:
-            team = get_object_or_404(Team, team_id=lookup_team_id)
+            team = get_object_or_404(teams, team_id=lookup_team_id)
         user = request.user
 
         if not team.members.filter(id=user.id).exists() and team.members.count() >= MEDHACK_TEAM_MAX_MEMBERS:
@@ -185,7 +209,7 @@ class JoinTeamView(APIView):
             )
 
         # Keep one-team-per-user semantics for this hackathon.
-        for current_team in user.hospital_teams.all():
+        for current_team in user.hospital_teams.filter(round=team.round):
             current_team.members.remove(user)
 
         team.members.add(user)
@@ -205,12 +229,15 @@ class JoinTeamView(APIView):
 
 
 class SubmissionListCreateView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
         submissions = (
-            Submission.objects.filter(user=request.user)
+            active_hospital_submissions().filter(user=request.user)
             .select_related('team')
+            # The list serialises only light fields — leave the multi-KB
+            # feedback JSON in the database.
+            .defer('feedback')
             .order_by('-submitted_at')
         )
         data = [
@@ -262,20 +289,34 @@ class SubmissionListCreateView(APIView):
 
 
 class LeaderboardView(APIView):
-    permission_classes = [IsLeaderboardAdmin]
+    permission_classes = [IsHealthHackAdmin]
 
     def get(self, request):
-        submissions = (
-            Submission.objects.select_related('team')
-            .filter(team__isnull=False)
+        # Best submission per team, in two phases: a light id scan (two
+        # small columns), then full rows — feedback included — for just the
+        # one winner per team. Iterating whole model instances here loads
+        # every submission's multi-KB feedback blob (37k rows ≈ 600MB at the
+        # 2026-07-13 event) on each request.
+        best_ids = {}
+        for sub in (
+            active_hospital_submissions().filter(team__isnull=False)
             .order_by('-score', '-submitted_at')
-        )
+            .values('id', 'team_id')
+        ):
+            if sub['team_id'] not in best_ids:
+                best_ids[sub['team_id']] = sub['id']
 
-        # Best submission per team.
-        best_by_team = {}
-        for sub in submissions:
-            if sub.team_id not in best_by_team:
-                best_by_team[sub.team_id] = sub
+        winners = {
+            sub.id: sub
+            for sub in active_hospital_submissions().select_related('team').filter(
+                id__in=best_ids.values()
+            )
+        }
+        # Rebuild in phase-1 discovery order so tied teams keep the original
+        # newest-first ordering (the final sort below is stable).
+        best_by_team = {
+            team_id: winners[sub_id] for team_id, sub_id in best_ids.items()
+        }
 
         rows = []
         for team_id, sub in best_by_team.items():
@@ -296,12 +337,13 @@ class LeaderboardView(APIView):
         rows.sort(key=lambda row: row["score"], reverse=True)
         return Response(rows, status=status.HTTP_200_OK)
 
-# Map the original state_label (0-17) to your 4 classes (0-3)
+# Keep this mapping in sync with synthea/src/main/custom/build_competition.py.
 def map_state_label(state_label):
     mapping = {
         0: 0,
         9: 0,
         10: 0,
+        16: 0,
         1: 1,
         2: 1,
         3: 1,
@@ -315,10 +357,13 @@ def map_state_label(state_label):
         13: 2,
         14: 2,
         15: 2,
-        16: 3,
-        57: 3, # Handling potential edge case if needed, though not in original
+        17: 3,
     }
     return mapping.get(int(state_label), -1)
+
+SOLUTION_PATH = Path(__file__).with_name('solution.csv')
+SOLUTION_COLUMNS = ['ID', 'predicted_label', 'Usage']
+VALID_CLASSES = {0, 1, 2, 3}
 
 # Module-level cache so the 452K-row CSV is read once per worker, not per request.
 _ground_truth_cache = None
@@ -329,21 +374,44 @@ def load_ground_truth():
         return _ground_truth_cache
     gt_rows = []
     try:
-        with open('./hospital/solution.csv', 'r') as f:
+        with SOLUTION_PATH.open('r', encoding='utf-8-sig', newline='') as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            if reader.fieldnames != SOLUTION_COLUMNS:
+                raise ValueError(
+                    f'Ground truth header must be {SOLUTION_COLUMNS}, got {reader.fieldnames}'
+                )
+            for expected_id, row in enumerate(reader, start=1):
+                try:
+                    row_id = int(row['ID'])
+                    label = int(row['predicted_label'])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f'Invalid ground truth row {expected_id}: {exc}') from exc
+                if row_id != expected_id:
+                    raise ValueError(
+                        f'Ground truth ID {row_id} at row {expected_id}; expected {expected_id}'
+                    )
+                if label not in VALID_CLASSES:
+                    raise ValueError(
+                        f'Invalid ground truth label {label} at row {expected_id}'
+                    )
+                if row['Usage'].strip() not in {'Public', 'Private'}:
+                    raise ValueError(
+                        f'Invalid Usage {row["Usage"]!r} at row {expected_id}'
+                    )
                 gt_rows.append(row)
     except FileNotFoundError:
-        logger.error("Ground truth file not found at ./hospital/solution.csv")
+        logger.error("Ground truth file not found at %s", SOLUTION_PATH)
         return gt_rows
     _ground_truth_cache = gt_rows
     logger.info(f"Ground truth loaded and cached: {len(gt_rows)} rows")
     return _ground_truth_cache
 
 def custom_score(true_labels, pred_labels):
-    """Score predictions using mapped classes: 0=Normal, 1=Warning, 2=Crisis, 3=Other."""
+    """Apply the published matrix, treating Death (3) as Crisis (2) for points."""
     total_score = 0
     for t, p in zip(true_labels, pred_labels):
+        t = min(t, 2)
+        p = min(p, 2)
         if t == 0:    # Normal
             total_score += 0 if p == 0 else -2
         elif t == 1:  # Warning
@@ -370,11 +438,67 @@ def _error_payload(detail):
     }
 
 
+def parse_predictions_csv(csv_file):
+    """Parse the exact participant submission contract and preserve row alignment."""
+    try:
+        file_data = csv_file.read().decode('utf-8-sig').splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f'CSV must be UTF-8 encoded: {exc}') from exc
+
+    reader = csv.reader(file_data)
+    header = next(reader, None)
+    if header != ['ID', 'predicted_label']:
+        raise ValueError(
+            f'CSV header must be exactly ID,predicted_label; got {header}'
+        )
+
+    pred_labels = []
+    for expected_id, row in enumerate(reader, start=1):
+        if len(row) != 2:
+            raise ValueError(
+                f'Row {expected_id} must contain exactly ID,predicted_label'
+            )
+        try:
+            row_id = int(row[0].strip())
+            pred = int(row[1].strip())
+        except ValueError as exc:
+            raise ValueError(f'Error parsing row {expected_id}: {exc}') from exc
+        if row_id != expected_id:
+            raise ValueError(
+                f'Invalid ID {row_id} at row {expected_id}; expected {expected_id}'
+            )
+        if pred not in VALID_CLASSES:
+            raise ValueError(
+                f'Invalid predicted_label "{pred}" at row {expected_id}. '
+                'Must be 0 (Normal), 1 (Warning), 2 (Crisis), or 3 (Death).'
+            )
+        pred_labels.append(pred)
+    return pred_labels
+
+
+def find_label_episodes(labels, target_labels, rows_per_encounter=720):
+    """Find episodes without allowing adjacent rows from different patients to merge."""
+    episodes = []
+    episode_start = None
+    for index, label in enumerate(labels):
+        if index and index % rows_per_encounter == 0 and episode_start is not None:
+            episodes.append((episode_start, index))
+            episode_start = None
+        if label in target_labels and episode_start is None:
+            episode_start = index
+        elif label not in target_labels and episode_start is not None:
+            episodes.append((episode_start, index))
+            episode_start = None
+    if episode_start is not None:
+        episodes.append((episode_start, len(labels)))
+    return episodes
+
+
 def _announce_if_top_score(submission):
-    """Post a hype message to #medhack-frontiers if this submission is the new #1."""
+    """Post a HealthHack hype message when this submission is the new #1."""
     try:
         previous_best = (
-            Submission.objects
+            Submission.objects.filter(round=submission.round)
             .exclude(id=submission.id)
             .order_by('-score')
             .values_list('score', flat=True)
@@ -386,9 +510,10 @@ def _announce_if_top_score(submission):
 
         from integrations.services.slack import SlackService
 
-        channel_id = SlackService.get_channel_id_by_name("medhack-frontiers")
+        channel_name = settings.HOSPITAL_SLACK_CHANNEL_NAME
+        channel_id = SlackService.get_channel_id_by_name(channel_name)
         if not channel_id:
-            logger.warning("Could not find #medhack-frontiers channel for leaderboard announcement")
+            logger.warning("Could not find #%s channel for leaderboard announcement", channel_name)
             return
 
         team_name = submission.team.team_name if submission.team else "an unnamed team"
@@ -437,7 +562,7 @@ def _announce_if_top_score(submission):
         )
 
         SlackService.send_message(channel_id, message)
-        logger.info(f"Announced new top score {submission.score} by {team_name} in #medhack-frontiers")
+        logger.info("Announced new top score %s by %s in #%s", submission.score, team_name, channel_name)
 
     except Exception as e:
         # Never let a Slack failure break the submission flow
@@ -445,7 +570,7 @@ def _announce_if_top_score(submission):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def submit_predictions(request):
     if request.method == 'POST':
         if not request.user.is_authenticated:
@@ -458,11 +583,11 @@ def submit_predictions(request):
         # Instead of getting team_id from POST, retrieve it from the user.
         # This assumes each user belongs to at least one team. If they might not,
         # you can default to None.
-        team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') and user.hospital_teams.exists() else None
+        team = active_hospital_team_for(user)
         if not team:
             return JsonResponse(
                 {
-                    **_error_payload('You must join a MedHack team before submitting.'),
+                    **_error_payload('You must join a HealthHack team before submitting.'),
                     'min_members': MEDHACK_TEAM_MIN_MEMBERS,
                     'max_members': MEDHACK_TEAM_MAX_MEMBERS,
                 },
@@ -487,33 +612,16 @@ def submit_predictions(request):
         if not csv_file:
             return JsonResponse(_error_payload('No CSV file uploaded'), status=400)
         
-        # Parse predictions CSV. We assume the CSV has a header like: ID,predicted_label
-        pred_labels = []
-        file_data = csv_file.read().decode('utf-8').splitlines()
-        reader = csv.reader(file_data, delimiter=',')
-        header = next(reader, None)  # skip header
+        try:
+            pred_labels = parse_predictions_csv(csv_file)
+        except ValueError as exc:
+            return JsonResponse(_error_payload(str(exc)), status=400)
         
         try:
-            predicted_label_index = header.index('predicted_label')
-        except ValueError:
-            predicted_label_index = 1  # assume second column
-        
-        valid_classes = {0, 1, 2, 3}
-        for row_num, row in enumerate(reader, start=1):
-            if not row:
-                continue
-            try:
-                pred = int(row[predicted_label_index].strip())
-            except Exception as e:
-                return JsonResponse(_error_payload(f'Error parsing row {row_num}: {str(e)}'), status=400)
-            if pred not in valid_classes:
-                return JsonResponse(
-                    _error_payload(f'Invalid predicted_label "{pred}" at row {row_num}. Must be 0 (Normal), 1 (Warning), 2 (Crisis), or 3 (Other).'),
-                    status=400,
-                )
-            pred_labels.append(pred)
-        
-        gt_rows_all = load_ground_truth()
+            gt_rows_all = load_ground_truth()
+        except ValueError as exc:
+            logger.error('Ground truth validation failed: %s', exc)
+            return JsonResponse(_error_payload('Ground truth data is invalid'), status=500)
         if not gt_rows_all:
              return JsonResponse(_error_payload('Ground truth data not loaded properly'), status=500)
         
@@ -528,7 +636,7 @@ def submit_predictions(request):
         accuracy = correct_count / len(true_labels_all) if true_labels_all else 0
 
         # --- Build compact feedback JSON instead of 180K+ Prediction rows ---
-        CLASS_NAMES = {0: 'Normal', 1: 'Warning', 2: 'Crisis', 3: 'Other'}
+        CLASS_NAMES = {0: 'Normal', 1: 'Warning', 2: 'Crisis', 3: 'Death'}
 
         # Confusion matrix: confusion[actual][predicted] = count
         confusion = {a: {p: 0 for p in range(4)} for a in range(4)}
@@ -548,10 +656,12 @@ def submit_predictions(request):
                 'accuracy': round(correct / total, 4) if total else 0,
             }
 
-        # Missed crises (actual=2, predicted!=2) — first 50
+        critical_classes = {2, 3}
+
+        # Missed critical rows (Crisis/Death predicted as Normal/Warning) — first 50
         missed_crises = []
         for i, (t, p) in enumerate(zip(true_labels_all, pred_labels)):
-            if t == 2 and p != 2:
+            if t in critical_classes and p not in critical_classes:
                 missed_crises.append({
                     'row': i + 1,
                     'predicted': p,
@@ -576,26 +686,15 @@ def submit_predictions(request):
             })
 
         # --- Clinical metrics: episode-level patient outcomes ---
-        # Identify contiguous crisis episodes (blocks where true_label == 2)
-        crisis_episodes = []  # list of (start_idx, end_idx) tuples
-        in_crisis = False
-        ep_start = 0
-        for i, t in enumerate(true_labels_all):
-            if t == 2 and not in_crisis:
-                in_crisis = True
-                ep_start = i
-            elif t != 2 and in_crisis:
-                in_crisis = False
-                crisis_episodes.append((ep_start, i))
-        if in_crisis:
-            crisis_episodes.append((ep_start, len(true_labels_all)))
+        # Crisis and Death are one critical category for competition scoring.
+        crisis_episodes = find_label_episodes(true_labels_all, critical_classes)
 
         # For each episode, check if the model detected at least one crisis row
         patients_saved = 0
         patients_at_risk = 0
         episode_details = []
         for start, end in crisis_episodes:
-            detected = any(pred_labels[j] == 2 for j in range(start, end))
+            detected = any(pred_labels[j] in critical_classes for j in range(start, end))
             if detected:
                 patients_saved += 1
             else:
@@ -608,17 +707,7 @@ def submit_predictions(request):
             })
 
         # Identify contiguous warning episodes (blocks where true_label == 1)
-        warning_episodes = []
-        in_warning = False
-        for i, t in enumerate(true_labels_all):
-            if t == 1 and not in_warning:
-                in_warning = True
-                ep_start = i
-            elif t != 1 and in_warning:
-                in_warning = False
-                warning_episodes.append((ep_start, i))
-        if in_warning:
-            warning_episodes.append((ep_start, len(true_labels_all)))
+        warning_episodes = find_label_episodes(true_labels_all, {1})
 
         warnings_caught = sum(
             1 for s, e in warning_episodes
@@ -626,10 +715,11 @@ def submit_predictions(request):
         )
         warnings_missed = len(warning_episodes) - warnings_caught
 
-        # False alarms: predicted crisis (2) when actual was not crisis
+        # False alarms: predicted Crisis/Death when actual was Normal/Warning.
         false_alarm_rows = [(i, true_labels_all[i]) for i in range(len(true_labels_all))
-                           if pred_labels[i] == 2 and true_labels_all[i] != 2]
-        false_alarm_breakdown = {0: 0, 1: 0, 3: 0}
+                           if pred_labels[i] in critical_classes
+                           and true_labels_all[i] not in critical_classes]
+        false_alarm_breakdown = {0: 0, 1: 0}
         for _, actual in false_alarm_rows:
             if actual in false_alarm_breakdown:
                 false_alarm_breakdown[actual] += 1
@@ -647,7 +737,6 @@ def submit_predictions(request):
             'false_alarm_breakdown': {
                 'actual_normal': false_alarm_breakdown[0],
                 'actual_warning': false_alarm_breakdown[1],
-                'actual_other': false_alarm_breakdown[3],
             },
             # First 10 missed episodes for debugging
             'missed_episodes_sample': [
@@ -659,13 +748,17 @@ def submit_predictions(request):
             'confusion_matrix': confusion,
             'class_stats': class_stats,
             'missed_crises': missed_crises,
-            'missed_crises_total': sum(1 for t, p in zip(true_labels_all, pred_labels) if t == 2 and p != 2),
+            'missed_crises_total': sum(
+                1 for t, p in zip(true_labels_all, pred_labels)
+                if t in critical_classes and p not in critical_classes
+            ),
             'first_100_public': first_100,
             'clinical_metrics': clinical_metrics,
         }
 
         # Create Submission with feedback — no Prediction rows needed
         submission = Submission.objects.create(
+            round=team.round,
             user=user,
             team=team,
             participant_name=participant_name,
@@ -692,12 +785,14 @@ def submit_predictions(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_submission(request):
     if request.method == 'GET':
         if not request.user.is_authenticated:
             return JsonResponse({'error': 'Authentication required'}, status=401)
-        submission = Submission.objects.filter(user=request.user).order_by('-submitted_at').first()
+        submission = active_hospital_submissions().filter(
+            user=request.user,
+        ).order_by('-submitted_at').first()
         if not submission:
             return JsonResponse({'error': 'No submission found'}, status=404)
 
@@ -721,14 +816,17 @@ def get_submission(request):
     return JsonResponse({'error': 'Invalid request'}, status=405)
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_submission_by_id(request, submission_id):
     if not request.user.is_authenticated:
         return JsonResponse({'error': 'Authentication required'}, status=401)
     
     try:
         # Ensure the submission belongs to the current user
-        submission = Submission.objects.get(id=submission_id, user=request.user)
+        submission = active_hospital_submissions().get(
+            id=submission_id,
+            user=request.user,
+        )
     except Submission.DoesNotExist:
         return JsonResponse({'error': 'Submission not found'}, status=404)
 
@@ -753,15 +851,17 @@ def get_submission_by_id(request, submission_id):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsHealthHackAdmin])
 def get_recent_submissions(request):
     user = request.user
-    team = user.hospital_teams.first() if hasattr(user, 'hospital_teams') else None
+    team = active_hospital_team_for(user)
     if not team:
         return JsonResponse({'error': 'User is not part of any team'}, status=400)
     
     # Retrieve the 5 most recent submissions for this team
-    submissions = Submission.objects.filter(team=team).order_by('-submitted_at')[:5]
+    submissions = active_hospital_submissions().filter(
+        team=team,
+    ).order_by('-submitted_at')[:5]
     
     submission_list = []
     for sub in submissions:
@@ -779,35 +879,41 @@ def get_recent_submissions(request):
     return JsonResponse(submission_list, safe=False)
 
 
-class AnnouncementListView(generics.ListAPIView):
-    queryset = Announcement.objects.all()
-    serializer_class = AnnouncementSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-
 class ChannelMessagesView(APIView):
-    """Read-only feed of messages from the #medhack-frontiers Slack channel."""
-    permission_classes = [permissions.IsAuthenticated]
+    """Read-only feed of messages from the configured HealthHack Slack channel."""
+    permission_classes = [IsHealthHackAdmin]
 
-    CHANNEL_NAME = "medhack-frontiers"
+    CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 
     def get(self, request):
         from integrations.services.slack import SlackService
 
         cursor = request.query_params.get('cursor')
         limit = min(int(request.query_params.get('limit', 30)), 100)
+        competition_round = HospitalCompetitionRound.get_active()
+        oldest = f'{competition_round.opened_at.timestamp():.6f}'
 
         channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
         if not channel_id:
             return Response({"error": f"Channel #{self.CHANNEL_NAME} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        result = SlackService.get_channel_history(channel_id, limit=limit, cursor=cursor)
+        result = SlackService.get_channel_history(
+            channel_id,
+            limit=limit,
+            cursor=cursor,
+            oldest=oldest,
+        )
         if result is None:
             return Response({"error": "Failed to fetch messages from Slack"}, status=status.HTTP_502_BAD_GATEWAY)
 
         user_cache = {}
         messages = []
         for msg in result["messages"]:
+            if not _slack_timestamp_is_current(
+                msg.get("ts"),
+                competition_round.opened_at,
+            ):
+                continue
             user_id = msg.get("user")
             if user_id and user_id not in user_cache:
                 user_cache[user_id] = SlackService.get_user_profile(user_id)
@@ -829,13 +935,20 @@ class ChannelMessagesView(APIView):
 
 
 class ThreadRepliesView(APIView):
-    """Read-only replies for a single thread in #medhack-frontiers."""
-    permission_classes = [permissions.IsAuthenticated]
+    """Read-only replies for a single thread in the HealthHack Slack channel."""
+    permission_classes = [IsHealthHackAdmin]
 
-    CHANNEL_NAME = "medhack-frontiers"
+    CHANNEL_NAME = settings.HOSPITAL_SLACK_CHANNEL_NAME
 
     def get(self, request, thread_ts):
         from integrations.services.slack import SlackService
+
+        competition_round = HospitalCompetitionRound.get_active()
+        if not _slack_timestamp_is_current(thread_ts, competition_round.opened_at):
+            return Response(
+                {"error": "Thread not found in the active HealthHack round"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         channel_id = SlackService.get_channel_id_by_name(self.CHANNEL_NAME)
         if not channel_id:
@@ -848,6 +961,11 @@ class ThreadRepliesView(APIView):
         user_cache = {}
         enriched = []
         for msg in replies:
+            if not _slack_timestamp_is_current(
+                msg.get("ts"),
+                competition_round.opened_at,
+            ):
+                continue
             user_id = msg.get("user")
             if user_id and user_id not in user_cache:
                 user_cache[user_id] = SlackService.get_user_profile(user_id)
