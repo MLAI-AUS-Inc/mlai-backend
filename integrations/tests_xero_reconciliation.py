@@ -534,6 +534,44 @@ class XeroReconciliationWorkflowTests(TestCase):
                 post_xero_bank_transaction(record, approved_by_slack_id="UFIN")
         put_mock.assert_not_called()
 
+    def test_explicit_post_replaces_deleted_xero_transaction(self):
+        record = persist_report(
+            organization=self.organization,
+            report=self.report,
+            stripe_account_id="acct_main",
+        )[0]
+        deleted = Mock()
+        deleted.json.return_value = {
+            "BankTransactions": [{
+                "BankTransactionID": "deleted-legacy-1",
+                "Reference": "po_ledger",
+                "Status": "DELETED",
+            }]
+        }
+        deleted.raise_for_status.return_value = None
+        created = Mock()
+        created.json.return_value = {
+            "BankTransactions": [{
+                "BankTransactionID": "replacement-1",
+                "HasErrors": False,
+            }]
+        }
+        created.raise_for_status.return_value = None
+        with patch(
+            "integrations.services.xero_reconciliation.http_client.get",
+            return_value=deleted,
+        ), patch(
+            "integrations.services.xero_reconciliation.http_client.put",
+            return_value=created,
+        ) as put_mock:
+            posted = post_xero_bank_transaction(
+                record,
+                approved_by_slack_id="UFIN",
+            )
+        self.assertEqual(posted.xero_bank_transaction_id, "replacement-1")
+        self.assertEqual(posted.status, "posted")
+        self.assertEqual(put_mock.call_count, 1)
+
     def test_explicit_post_creates_missing_project_tracking_option(self):
         record = persist_report(organization=self.organization, report=self.report, stripe_account_id="acct_main")[0]
         self.mapping.project_source_type = "linear"
