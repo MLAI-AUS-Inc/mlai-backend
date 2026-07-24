@@ -717,6 +717,13 @@ TWILIO_WHATSAPP_OTP_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_OTP_CONTENT_SID', '
 # {{1}} domain, {{2}}-{{4}} topic titles). Without it, topic sends fall back to
 # plain text and only deliver inside an open 24h service window.
 TWILIO_WHATSAPP_TOPIC_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_CONTENT_SID', '')
+# Analytics-lead variant of the daily-topics template ({{1}} domain, {{2}}
+# article-performance summary, {{3}}-{{5}} topic titles). When set it wins over
+# TWILIO_WHATSAPP_TOPIC_CONTENT_SID and switches the ContentVariables shape.
+# Only set this once the template is APPROVED in Twilio — sends against an
+# unapproved SID fail outright. Incompatible with per-channel
+# provider_metadata topic_selection_content_sid overrides of the legacy shape.
+TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID', '')
 # Approved utility Content template for article review notifications (variables:
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".

@@ -607,11 +607,22 @@ def _topic_email_message_data(
 WHATSAPP_TOPIC_TITLE_SLOTS = 3
 
 
-def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[str, str]:
-    """ContentVariables for the approved daily-topics utility template.
+def _whatsapp_topic_analytics_content_sid() -> str:
+    return str(getattr(settings, "TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID", "") or "").strip()
 
-    Template contract: {{1}} domain, {{2}}-{{4}} topic titles (daily runs
-    request 3 topics). Twilio rejects sends with missing declared variables,
+
+def _whatsapp_topic_variables(
+    run: AutomationRun,
+    data: dict[str, Any],
+    digest: Optional[dict[str, Any]] = None,
+) -> dict[str, str]:
+    """ContentVariables for the approved daily-topics template.
+
+    Legacy template contract: {{1}} domain, {{2}}-{{4}} topic titles (daily
+    runs request 3 topics). When the analytics-lead template is configured the
+    contract becomes {{1}} domain, {{2}} article-performance summary,
+    {{3}}-{{5}} topic titles — the variable shape must follow the ContentSid
+    the send will use. Twilio rejects sends with missing declared variables,
     so absent options are padded with "-"; extras beyond the slots are cut.
     """
     domain = str(data.get("domain") or run.automation.organization.domain or "your site")
@@ -619,7 +630,12 @@ def _whatsapp_topic_variables(run: AutomationRun, data: dict[str, Any]) -> dict[
     while len(titles) < WHATSAPP_TOPIC_TITLE_SLOTS:
         titles.append("-")
     variables = {"1": domain}
-    for index, title in enumerate(titles[:WHATSAPP_TOPIC_TITLE_SLOTS], start=2):
+    first_topic_slot = 2
+    if _whatsapp_topic_analytics_content_sid():
+        summary = str((digest or {}).get("summary_line") or "").strip()
+        variables["2"] = summary or "No measured visits yet."
+        first_topic_slot = 3
+    for index, title in enumerate(titles[:WHATSAPP_TOPIC_TITLE_SLOTS], start=first_topic_slot):
         variables[str(index)] = title or "-"
     return variables
 
@@ -1060,7 +1076,12 @@ def _send_channel_delivery(
         elif channel.channel_type == NotificationChannelType.WHATSAPP:
             content_sid = str(channel.provider_metadata.get(f"{event_type}_content_sid") or "").strip()
             if not content_sid and event_type == "topic_selection":
-                content_sid = str(getattr(settings, "TWILIO_WHATSAPP_TOPIC_CONTENT_SID", "") or "").strip()
+                # The analytics-lead template wins when configured; the
+                # ContentVariables shape from _whatsapp_topic_variables keys
+                # off the same setting so sid and variables stay in step.
+                content_sid = _whatsapp_topic_analytics_content_sid() or str(
+                    getattr(settings, "TWILIO_WHATSAPP_TOPIC_CONTENT_SID", "") or ""
+                ).strip()
                 if not content_sid:
                     # Business-initiated sends outside a 24h service window need an
                     # approved template; plain text only delivers inside a window.
@@ -1173,7 +1194,7 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
             # Raw-HTML fallback used when no Customer.io template id is configured
             # (or when email goes via Resend).
             "html_body": _topic_email_html(run, data, channel, digest=digest),
-            "whatsapp_variables": _whatsapp_topic_variables(run, data),
+            "whatsapp_variables": _whatsapp_topic_variables(run, data, digest=digest),
             "email_message_data": _topic_email_message_data(run, data, channel, digest=digest),
             "email_transactional_message_id": str(
                 getattr(settings, "CUSTOMERIO_TOPIC_TEMPLATE_ID", "") or ""
