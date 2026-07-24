@@ -35,6 +35,7 @@ from integrations.services.notification_adapters import (
     _topic_email_html,
     _topic_email_message_data,
     _topic_slack_blocks,
+    _whatsapp_topic_variables,
     build_action_url,
     notification_context_for_run,
     preview_automation_action_token,
@@ -1644,3 +1645,146 @@ class ReminderPerformanceDigestTests(TestCase):
         self.assertTrue(
             text.startswith("Research topics are ready for digestlead.example.com:")
         )
+
+
+class WhatsAppAnalyticsTemplateTests(TestCase):
+    """ContentSid + variable shape for the analytics-lead WhatsApp template."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="WA Digest Co", domain="wadigest.example.com"
+        )
+        self.whatsapp = NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.WHATSAPP,
+            route_id="+61400000777",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        self.automation = ResearchAutomation.objects.create(
+            organization=self.org,
+            notification_channel=self.whatsapp,
+            status=ResearchAutomationStatus.ACTIVE,
+        )
+        self.run = AutomationRun.objects.create(
+            automation=self.automation,
+            scheduled_for_at=timezone.now(),
+            local_date=timezone.now().date(),
+            slot_index=0,
+            status=AutomationRunStatus.QUEUED,
+            idempotency_key="research-automation:wadigest:0",
+        )
+        self.callback_data = {
+            "event_type": "topic_selection",
+            "job_id": "discovery-run-11",
+            "domain": "wadigest.example.com",
+            "notification_context": notification_context_for_run(self.run),
+            "selection": {
+                "options": [
+                    {"keyword": "topic one", "suggested_title": "Topic One"},
+                    {"keyword": "topic two", "suggested_title": "Topic Two"},
+                    {"keyword": "topic three", "suggested_title": "Topic Three"},
+                ]
+            },
+        }
+
+    def _create_report(self):
+        report_date = timezone.localdate()
+        return ArticlePerformanceReport.objects.create(
+            organization=self.org,
+            report_date=report_date,
+            window_start=report_date - timedelta(days=7),
+            window_end=report_date - timedelta(days=1),
+            prior_window_start=report_date - timedelta(days=14),
+            prior_window_end=report_date - timedelta(days=8),
+            payload={
+                "window": {"days": 7},
+                "headline": {
+                    "humanVisits": 11,
+                    "engagedReaderRate": 0.4545,
+                    "ctaClickers": 2,
+                    "ctaConversionRate": 0.1818,
+                    "visitsDelta": 4,
+                },
+                "articles": [],
+            },
+        )
+
+    def test_legacy_variable_shape_without_analytics_sid(self):
+        variables = _whatsapp_topic_variables(self.run, self.callback_data)
+        self.assertEqual(
+            variables,
+            {
+                "1": "wadigest.example.com",
+                "2": "Topic One",
+                "3": "Topic Two",
+                "4": "Topic Three",
+            },
+        )
+
+    @override_settings(TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID="HXanalytics")
+    def test_analytics_variable_shape_with_digest(self):
+        self._create_report()
+        digest = _article_performance_digest(self.run)
+        variables = _whatsapp_topic_variables(self.run, self.callback_data, digest=digest)
+        self.assertEqual(variables["1"], "wadigest.example.com")
+        self.assertEqual(
+            variables["2"], "11 visits (+4 vs prior) · 45% engaged · 2 CTA clickers"
+        )
+        self.assertEqual(
+            [variables["3"], variables["4"], variables["5"]],
+            ["Topic One", "Topic Two", "Topic Three"],
+        )
+
+    @override_settings(TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID="HXanalytics")
+    def test_analytics_variable_shape_without_digest_uses_fallback(self):
+        variables = _whatsapp_topic_variables(self.run, self.callback_data)
+        self.assertEqual(variables["2"], "No measured visits yet.")
+        self.assertEqual(variables["5"], "Topic Three")
+
+    @override_settings(
+        TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID="HXanalytics",
+        TWILIO_WHATSAPP_TOPIC_CONTENT_SID="HXlegacy",
+        TWILIO_ACCOUNT_SID="AC-test",
+        TWILIO_AUTH_TOKEN="token-test",
+        TWILIO_WHATSAPP_FROM="+61400000001",
+    )
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_send_uses_analytics_template_and_matching_variables(self, mock_post):
+        mock_post.return_value = _Response(200, {"sid": "SM-wa-1"})
+        self._create_report()
+
+        deliveries = send_topic_selection(self.callback_data)
+
+        self.assertEqual(
+            [delivery.status for delivery in deliveries], [NotificationDeliveryStatus.SENT]
+        )
+        twilio_call = next(
+            call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
+        )
+        payload = twilio_call.kwargs["data"]
+        self.assertEqual(payload["ContentSid"], "HXanalytics")
+        variables = json.loads(payload["ContentVariables"])
+        self.assertIn("45% engaged", variables["2"])
+        self.assertEqual(variables["5"], "Topic Three")
+
+    @override_settings(
+        TWILIO_WHATSAPP_TOPIC_CONTENT_SID="HXlegacy",
+        TWILIO_ACCOUNT_SID="AC-test",
+        TWILIO_AUTH_TOKEN="token-test",
+        TWILIO_WHATSAPP_FROM="+61400000001",
+    )
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_send_keeps_legacy_template_when_analytics_sid_unset(self, mock_post):
+        mock_post.return_value = _Response(200, {"sid": "SM-wa-2"})
+        self._create_report()
+
+        send_topic_selection(self.callback_data)
+
+        twilio_call = next(
+            call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
+        )
+        payload = twilio_call.kwargs["data"]
+        self.assertEqual(payload["ContentSid"], "HXlegacy")
+        variables = json.loads(payload["ContentVariables"])
+        self.assertEqual(variables["2"], "Topic One")
+        self.assertNotIn("5", variables)
