@@ -515,9 +515,25 @@ WATT_CAMPAIGN_START = os.getenv('WATT_CAMPAIGN_START', '2026-06-04T22:00:00+10:0
 WATT_CAMPAIGN_LENGTH_DAYS = int(os.getenv('WATT_CAMPAIGN_LENGTH_DAYS', '46'))
 WATT_CAMPAIGN_DAY_SECONDS = float(os.getenv('WATT_CAMPAIGN_DAY_SECONDS', '700'))
 
+# --- Session length ----------------------------------------------------------------------
+# The access token is the short-lived credential every API call carries; the refresh token is
+# the long-lived one that silently mints new access tokens (see core.views.CookieTokenRefreshView
+# and the website worker's session-refresh middleware). A user stays logged in for as long as
+# they keep visiting inside REFRESH_TOKEN_LIFETIME — rotation restarts that clock on every
+# refresh, so an active user is never bounced to the magic-link screen.
+JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '1440'))  # 1 day
+JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '90'))
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=1440),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=JWT_REFRESH_TOKEN_DAYS),
+    # Hand back a new refresh token on every refresh so the 90-day window slides forward with
+    # use instead of expiring a fixed 90 days after the magic-link login.
+    'ROTATE_REFRESH_TOKENS': True,
+    # Deliberately off: blacklisting needs the token_blacklist app (extra table + migration) and
+    # would break the common case of two tabs/SSR requests refreshing concurrently — the loser
+    # of that race would be logged out. Superseded refresh tokens simply age out on their own.
+    'BLACKLIST_AFTER_ROTATION': False,
     'AUTH_COOKIE': 'access_token',  # Cookie name for access token
     'AUTH_COOKIE_REFRESH': 'refresh_token',  # Cookie name for refresh token
     'AUTH_COOKIE_SECURE': not DEBUG,  # Set to True in production with HTTPS
