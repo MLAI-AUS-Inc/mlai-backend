@@ -14,6 +14,12 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.views.decorators.csrf import csrf_exempt
 
 from .serializers import MyTokenObtainPairSerializer
+from .auth_cookies import (
+    REFRESH_COOKIE,
+    clear_auth_cookies,
+    cookie_kwargs,
+    set_auth_cookies,
+)
 from .email_utils import (
     MAGIC_LINK_KIND_USER,
     generate_magic_link,
@@ -413,38 +419,15 @@ class MagicLinkVerifyView(APIView):
 
                 response = Response(response_data, status=status.HTTP_200_OK)
 
-                # Set cookies
-                # Use settings for secure flag to support local dev (HTTP) vs prod (HTTPS)
-                from django.conf import settings
-                
-                # For local development, set domain to None (host only)
-                # In production, set domain to .mlai.au with Secure=True and SameSite=None
-                is_production = not settings.DEBUG
-                
-                cookie_domain = None if not is_production else '.mlai.au'
-                
-                cookie_kwargs = {
-                    'httponly': True,
-                    'path': '/',
-                    'domain': cookie_domain,
-                    'secure': is_production,
-                    'samesite': 'None' if is_production else 'Lax',
-                }
-                
-                response.set_cookie(
-                    key='access_token',
-                    value=access_token,
-                    max_age=86400,  # 1 day
-                    **cookie_kwargs
-                )
-                response.set_cookie(
-                    key='refresh_token',
-                    value=refresh_token,
-                    max_age=172800,  # 2 days
-                    **cookie_kwargs
+                # Cookie lifetimes track the SIMPLE_JWT token lifetimes (see core.auth_cookies),
+                # so the refresh cookie survives as long as the refresh token itself does.
+                set_auth_cookies(
+                    response,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
                 )
 
-                logger.info(f"Set cookies for {email}: kwargs={cookie_kwargs}")
+                logger.info(f"Set cookies for {email}: kwargs={cookie_kwargs()}")
                 return response
 
             except User.DoesNotExist:
@@ -459,57 +442,56 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
-        access_token = response.data.get('access')
-        refresh_token = response.data.get('refresh')
-
-        from django.conf import settings
-        is_production = not settings.DEBUG
-        cookie_domain = None if not is_production else '.mlai.au'
-        response.set_cookie(
-            key='access_token',
-            value=access_token,
-            httponly=True,
-            domain=cookie_domain,
-            secure=is_production,
-            samesite='None' if is_production else 'Lax',
-        )
-        response.set_cookie(
-            key='refresh_token',
-            value=refresh_token,
-            httponly=True,
-            domain=cookie_domain,
-            secure=is_production,
-            samesite='None' if is_production else 'Lax',
+        set_auth_cookies(
+            response,
+            access_token=response.data.get('access'),
+            refresh_token=response.data.get('refresh'),
         )
         # Remove tokens from response body
         response.data = {}
         return response
 
 class CookieTokenRefreshView(TokenRefreshView):
+    """Mint a fresh access token from the refresh cookie, with no user interaction.
+
+    This is what keeps a login alive across days: callers (the website worker's
+    session-refresh middleware, or the browser keepalive) POST here with the auth
+    cookies attached and get back a refreshed pair. With ROTATE_REFRESH_TOKENS on,
+    the serializer also returns a new refresh token, which slides the long window
+    forward — so an active user never has to request a new magic link.
+    """
+
     def post(self, request, *args, **kwargs):
-        refresh_token = request.COOKIES.get('refresh_token')
-        if refresh_token is None:
-            return Response({'error': 'Refresh token not found in cookies'}, status=400)
+        refresh_token = request.COOKIES.get(REFRESH_COOKIE)
+        if not refresh_token:
+            # 401 (not 400) so callers can treat "no session" and "dead session"
+            # identically: both mean "fall through to the login flow".
+            return Response(
+                {'error': 'Refresh token not found in cookies'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
         serializer = self.get_serializer(data={'refresh': refresh_token})
         try:
             serializer.is_valid(raise_exception=True)
-        except:
-            return Response({'error': 'Invalid token'}, status=401)
-        access_token = serializer.validated_data['access']
-        response = Response()
-        from django.conf import settings
-        is_production = not settings.DEBUG
-        cookie_domain = None if not is_production else '.mlai.au'
-        response.set_cookie(
-            key='access_token',
-            value=access_token,
-            httponly=True,
-            domain=cookie_domain,
-            secure=is_production,
-            samesite='None' if is_production else 'Lax',
-            path='/',
+        except Exception:
+            logger.info("Refresh rejected: expired or invalid refresh cookie")
+            # Clear both cookies so an expired session stops re-attempting the
+            # refresh on every single page load.
+            response = Response(
+                {'error': 'Invalid or expired refresh token'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            return clear_auth_cookies(response)
+
+        data = serializer.validated_data
+        response = Response({'refreshed': True}, status=status.HTTP_200_OK)
+        return set_auth_cookies(
+            response,
+            access_token=data.get('access'),
+            # Present only when ROTATE_REFRESH_TOKENS is enabled.
+            refresh_token=data.get('refresh'),
         )
-        return response
 
 class CurrentUserView(APIView):
     permission_classes = [AllowAny]
@@ -781,17 +763,10 @@ def logout_view(request):
     try:
         # Create response object
         response = Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
-        
-        from django.conf import settings
-        is_production = not settings.DEBUG
-        cookie_domain = None if not is_production else '.mlai.au'
-        samesite = 'None' if is_production else 'Lax'
 
-        # Delete authentication cookies
-        # We must provide the same domain and samesite as when they were set
-        response.delete_cookie('access_token', path='/', domain=cookie_domain, samesite=samesite)
-        response.delete_cookie('refresh_token', path='/', domain=cookie_domain, samesite=samesite)
-        
+        # Delete authentication cookies with the same attributes they were set with.
+        clear_auth_cookies(response)
+
         # Delete any session-related cookies
         response.delete_cookie('sessionid', path='/')
         response.delete_cookie('csrftoken', path='/')
