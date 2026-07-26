@@ -481,6 +481,55 @@ Total $115.00 ($3.00) ($2.00) $110.00
         self.assertEqual(payout.status, HumanitixPayout.STATUS_READY)
 
     @patch(
+        "integrations.services.humanitix_payouts.fetch_xero_bank_transactions"
+    )
+    @patch("integrations.services.humanitix_payouts.http_client.put")
+    @patch("integrations.services.humanitix_payouts.http_client.get")
+    def test_confirmed_post_reuses_supplied_bank_transaction_snapshot(
+        self,
+        mock_get,
+        mock_put,
+        mock_fetch,
+    ):
+        payout = self._import_tied_payout()
+
+        categories_response = MagicMock()
+        categories_response.raise_for_status.return_value = None
+        categories_response.json.return_value = {
+            "TrackingCategories": [
+                {
+                    "TrackingCategoryID": "event-category",
+                    "Options": [
+                        {
+                            "TrackingOptionID": "event-option-medhack",
+                            "Name": "Pitch Night: MedHack",
+                        }
+                    ],
+                }
+            ]
+        }
+        existing_response = MagicMock()
+        existing_response.raise_for_status.return_value = None
+        existing_response.json.return_value = {"BankTransactions": []}
+        mock_get.side_effect = [categories_response, existing_response]
+        create_response = MagicMock()
+        create_response.raise_for_status.return_value = None
+        create_response.json.return_value = {
+            "BankTransactions": [{"BankTransactionID": "xero-batch-1"}]
+        }
+        mock_put.return_value = create_response
+
+        posted = post_humanitix_xero_bank_transaction(
+            payout,
+            approved_by_slack_id="UADMIN",
+            bank_transactions=[],
+        )
+
+        self.assertEqual(posted.xero_bank_transaction_id, "xero-batch-1")
+        mock_fetch.assert_not_called()
+        self.assertEqual(mock_put.call_count, 1)
+
+    @patch(
         "integrations.services.humanitix_payouts.fetch_xero_bank_transactions",
         return_value=[],
     )
