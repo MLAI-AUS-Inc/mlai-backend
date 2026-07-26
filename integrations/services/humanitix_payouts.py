@@ -15,11 +15,13 @@ import re
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Iterable, TextIO
+from pathlib import Path
+from typing import Any, BinaryIO, Iterable, TextIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.utils import timezone
+from pypdf import PdfReader
 
 from integrations import http_client
 from integrations.models import (
@@ -44,6 +46,7 @@ from integrations.services.xero_reconciliation import (
 
 
 MONEY_QUANTUM = Decimal("0.01")
+RECEIPT_MONEY_PATTERN = r"\(?\$[\d,]+\.\d{2}\)?"
 
 
 class HumanitixPayoutImportError(RuntimeError):
@@ -555,6 +558,150 @@ def import_payout_csv(
         organization=organization,
         connection=connection,
         rows=reader,
+    )
+
+
+def _receipt_match(text: str, pattern: str, *, label: str) -> str:
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        raise HumanitixPayoutImportError(
+            f"Humanitix payout receipt is missing {label}."
+        )
+    return str(match.group(1) or "").strip()
+
+
+def parse_humanitix_payout_receipt_text(text: str) -> dict[str, Any]:
+    """Convert a Humanitix payout-receipt PDF text layer into one safe import row."""
+
+    normalized = str(text or "").replace("\xa0", " ")
+    normalized = re.sub(r"\bT\s+o\b", "To", normalized)
+    normalized = re.sub(r"\bT\s+otal\b", "Total", normalized)
+    normalized = re.sub(r"\bT\s+ax\b", "Tax", normalized)
+    reference = _receipt_match(
+        normalized,
+        r"Reference:\s*([A-Z0-9_-]+)",
+        label="its payout reference",
+    )
+    event_name = _receipt_match(
+        normalized,
+        r"Event name:\s*(.+?)\s*Event date:",
+        label="its event name",
+    )
+    payout_amount = _money(
+        _receipt_match(
+            normalized,
+            rf"Payout details\s*({RECEIPT_MONEY_PATTERN})",
+            label="its payout amount",
+        )
+    )
+    payout_date = _parse_date(
+        _receipt_match(
+            normalized,
+            r"Processed at:\s*([^\r\n]+)",
+            label="its processed date",
+        )
+    )
+
+    def receipt_money(label: str) -> Decimal:
+        return _money(
+            _receipt_match(
+                normalized,
+                rf"{label}\s*({RECEIPT_MONEY_PATTERN})",
+                label=label.lower(),
+            )
+        )
+
+    return {
+        "payout reference": reference,
+        "payout date": payout_date.isoformat() if payout_date else "",
+        "currency": "AUD",
+        "payout amount": str(payout_amount),
+        "event name": re.sub(r"\s+", " ", event_name).strip(),
+        "sales via humanitix payments": str(
+            receipt_money("Sales via Humanitix payments")
+        ),
+        "ticket sales": str(receipt_money("Ticket sales")),
+        "add-on sales": str(receipt_money("Add-on sales")),
+        "additional donations": str(receipt_money("Additional donations")),
+        "refunds": str(abs(receipt_money("Refunds"))),
+        "absorbed humanitix fees": str(
+            abs(receipt_money("Absorbed Humanitix fees"))
+        ),
+    }
+
+
+def import_humanitix_payout_receipt_text(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    text: str,
+) -> HumanitixPayout:
+    row = parse_humanitix_payout_receipt_text(text)
+    existing = (
+        HumanitixPayout.objects.filter(
+            organization=organization,
+            payout_reference=row["payout reference"],
+        )
+        .prefetch_related("lines__event")
+        .first()
+    )
+    if existing is not None and existing.status == HumanitixPayout.STATUS_POSTED:
+        raise HumanitixPayoutImportError(
+            f"Humanitix payout {existing.payout_reference} is already posted to Xero."
+        )
+    if existing is not None:
+        linked_events = {
+            line.event
+            for line in existing.lines.all()
+            if line.event_id is not None
+        }
+        if len(linked_events) == 1:
+            linked_event = linked_events.pop()
+            row["event id"] = linked_event.external_event_id
+            row["event name"] = linked_event.event_name
+    return import_payout_rows(
+        organization=organization,
+        connection=connection,
+        rows=[row],
+    )[0]
+
+
+def import_humanitix_payout_receipt_pdf(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: BinaryIO | bytes | str | Path,
+) -> HumanitixPayout:
+    """Enrich one net-only payout from Humanitix's receipt PDF without Xero writes."""
+
+    close_stream = False
+    if isinstance(source, bytes):
+        stream: BinaryIO = io.BytesIO(source)
+    elif isinstance(source, (str, Path)):
+        stream = Path(source).expanduser().open("rb")
+        close_stream = True
+    else:
+        stream = source
+    try:
+        reader = PdfReader(stream)
+        if not reader.pages or len(reader.pages) > 10:
+            raise HumanitixPayoutImportError(
+                "Humanitix payout receipt has an unexpected page count."
+            )
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except HumanitixPayoutImportError:
+        raise
+    except Exception as exc:
+        raise HumanitixPayoutImportError(
+            "Unable to read the Humanitix payout receipt PDF."
+        ) from exc
+    finally:
+        if close_stream:
+            stream.close()
+    return import_humanitix_payout_receipt_text(
+        organization=organization,
+        connection=connection,
+        text=text,
     )
 
 
