@@ -176,6 +176,7 @@ EMAIL_DRAFT_DISPLAY_STAGES = {
 VIBE_RAISING_INPUT_SOURCE_KEYS = {
     "gmail",
     "stripe",
+    "humanitix",
     "xero",
     "bank_feed",
     "notion",

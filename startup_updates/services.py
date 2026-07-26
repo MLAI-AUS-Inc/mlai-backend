@@ -359,6 +359,7 @@ def normalize_startup_update_input_sources(input_sources: Optional[list[str]]) -
         ExternalServiceProvider.XERO,
         ExternalServiceProvider.BANK_FEED,
         ExternalServiceProvider.STRIPE,
+        ExternalServiceProvider.HUMANITIX,
         ExternalServiceProvider.NOTION,
         ExternalServiceProvider.GOOGLE_DRIVE,
         ExternalServiceProvider.SLACK,

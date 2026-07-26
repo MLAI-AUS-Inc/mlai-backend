@@ -78,6 +78,7 @@ jobs:
           content_factory.tests_admin_metrics \
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
+          integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \

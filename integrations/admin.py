@@ -8,6 +8,10 @@ from .models import (
     ExternalServiceConnection,
     FinancialAccount,
     GoogleConnection,
+    HumanitixEvent,
+    HumanitixEventFinancialSummary,
+    HumanitixPayout,
+    HumanitixPayoutLine,
     UserIntegration,
 )
 
@@ -124,3 +128,73 @@ class ExternalFinancialRecordAdmin(admin.ModelAdmin):
     search_fields = ("external_record_id", "external_account_id", "description", "merchant_name", "organization__domain")
     list_filter = ("provider", "record_type", "status", "transaction_date")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(HumanitixEvent)
+class HumanitixEventAdmin(admin.ModelAdmin):
+    list_display = (
+        "event_name",
+        "organization",
+        "start_at",
+        "currency",
+        "published",
+        "archived",
+        "last_synced_at",
+    )
+    search_fields = ("event_name", "external_event_id", "organization__domain")
+    list_filter = ("currency", "published", "archived", "start_at")
+    readonly_fields = ("source_hash", "source_payload", "created_at", "updated_at", "last_synced_at")
+
+
+@admin.register(HumanitixEventFinancialSummary)
+class HumanitixEventFinancialSummaryAdmin(admin.ModelAdmin):
+    list_display = (
+        "event",
+        "order_count",
+        "ticket_count",
+        "gross_sales",
+        "net_sales",
+        "refunds",
+        "last_synced_at",
+    )
+    search_fields = ("event__event_name", "event__external_event_id")
+    readonly_fields = (
+        "gateway_breakdown",
+        "ticket_type_breakdown",
+        "source_hash",
+        "created_at",
+        "updated_at",
+        "last_synced_at",
+    )
+
+
+@admin.register(HumanitixPayout)
+class HumanitixPayoutAdmin(admin.ModelAdmin):
+    list_display = (
+        "payout_reference",
+        "organization",
+        "payout_date",
+        "payout_amount",
+        "currency",
+        "status",
+    )
+    search_fields = ("payout_reference", "organization__domain")
+    list_filter = ("status", "currency", "payout_date")
+    readonly_fields = (
+        "source_hash",
+        "source_payload",
+        "preview_payload",
+        "warnings",
+        "approved_at",
+        "created_at",
+        "updated_at",
+        "posted_at",
+    )
+
+
+@admin.register(HumanitixPayoutLine)
+class HumanitixPayoutLineAdmin(admin.ModelAdmin):
+    list_display = ("payout", "event_name", "component", "amount", "tax_amount")
+    search_fields = ("payout__payout_reference", "event_name", "external_event_id")
+    list_filter = ("component",)
+    readonly_fields = ("metadata", "created_at", "updated_at")
