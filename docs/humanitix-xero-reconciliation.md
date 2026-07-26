@@ -89,6 +89,25 @@ GET /api/v1/integrations/reconciliation/humanitix/payouts/{reference}/preview
   &domain=mlai.au
 ```
 
+Audit the full set against existing Xero bank transactions before posting:
+
+```http
+POST /api/v1/integrations/reconciliation/humanitix/payouts/correction-preview
+X-API-Key: …
+Content-Type: application/json
+
+{
+  "slack_user_id": "U…",
+  "domain": "mlai.au",
+  "max_count": 500
+}
+```
+
+This endpoint is read-only against Xero. It distinguishes missing transactions
+from already-correct entries, ambiguous matches, and legacy net-only entries.
+Reconciled legacy entries must be unreconciled and replaced before the posting
+endpoint will create anything, preventing duplicate Receive Money transactions.
+
 ## Explicit Xero posting
 
 Only after the preview reports `ready: true`:

@@ -37,6 +37,11 @@ urlpatterns = [
         name='reconciliation_humanitix_payouts',
     ),
     path(
+        'reconciliation/humanitix/payouts/correction-preview',
+        api_views_reconciliation.HumanitixPayoutCorrectionPreviewView.as_view(),
+        name='reconciliation_humanitix_payout_correction_preview',
+    ),
+    path(
         'reconciliation/humanitix/payouts/import',
         api_views_reconciliation.HumanitixPayoutImportView.as_view(),
         name='reconciliation_humanitix_payout_import',

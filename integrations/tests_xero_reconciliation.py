@@ -1451,6 +1451,40 @@ class ReconciliationWorkflowApiTests(APITestCase):
         )
 
     @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
+    @patch(
+        "integrations.api_views_reconciliation."
+        "build_humanitix_xero_correction_batch"
+    )
+    def test_humanitix_correction_preview_is_read_only(
+        self,
+        build_batch,
+        _permission,
+    ):
+        build_batch.return_value = {
+            "payouts": [],
+            "summary": {
+                "payout_count": 0,
+                "safe_action_count": 0,
+                "manual_unreconcile_count": 0,
+            },
+        }
+
+        response = self.client.post(
+            reverse("reconciliation_humanitix_payout_correction_preview"),
+            {
+                "slack_user_id": "UADMIN",
+                "domain": "mlai.au",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["dry_run"])
+        self.assertFalse(response.data["xero_writes"])
+        self.assertEqual(response.data["summary"]["payout_count"], 0)
+        build_batch.assert_called_once()
+
+    @patch("core.permissions.HasRooApiKey.has_permission", return_value=True)
     def test_statement_preview_and_safe_batch_are_admin_guarded(self, _permission):
         connection = ExternalServiceConnection.objects.create(
             provider=ExternalServiceProvider.XERO,

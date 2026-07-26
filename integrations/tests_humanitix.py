@@ -29,6 +29,7 @@ from integrations.services.humanitix import (
 )
 from integrations.services.humanitix_payouts import (
     HumanitixPayoutImportError,
+    build_humanitix_xero_correction_preview,
     build_humanitix_xero_preview,
     import_payout_csv,
     import_humanitix_payout_receipt_bundle,
@@ -37,6 +38,7 @@ from integrations.services.humanitix_payouts import (
     parse_humanitix_payout_receipt_text,
     post_humanitix_xero_bank_transaction,
 )
+from integrations.services.xero_reconciliation import ReconciliationValidationError
 from organizations.models import Organization
 
 
@@ -372,9 +374,124 @@ Total $115.00 ($3.00) ($2.00) $110.00
             },
         )
 
+    def test_correction_preview_allows_missing_xero_transaction(self):
+        payout = self._import_tied_payout()
+
+        preview = build_humanitix_xero_correction_preview(
+            payout,
+            bank_transactions=[],
+        )
+
+        self.assertEqual(preview["classification"], "missing_xero_transaction")
+        self.assertEqual(preview["recommended_action"], "create_receive_money")
+        self.assertTrue(preview["automatic_action_allowed"])
+
+    def test_correction_preview_blocks_reconciled_legacy_net_transaction(self):
+        payout = self._import_tied_payout()
+        existing = {
+            "BankTransactionID": "legacy-net-1",
+            "Reference": "",
+            "Date": "2025-03-04",
+            "Type": "RECEIVE",
+            "Status": "AUTHORISED",
+            "IsReconciled": True,
+            "Total": "2343.80",
+            "BankAccount": {"AccountID": "bank-1"},
+            "LineItems": [
+                {
+                    "Quantity": 1,
+                    "UnitAmount": "2343.80",
+                    "AccountCode": "202",
+                    "TaxType": "NONE",
+                    "Tracking": [],
+                }
+            ],
+        }
+
+        preview = build_humanitix_xero_correction_preview(
+            payout,
+            bank_transactions=[existing],
+        )
+
+        self.assertEqual(preview["classification"], "legacy_net_only")
+        self.assertEqual(preview["recommended_action"], "unreconcile_then_replace")
+        self.assertTrue(preview["requires_manual_unreconcile"])
+        self.assertFalse(preview["automatic_action_allowed"])
+
+    def test_correction_preview_recognizes_correct_existing_transaction(self):
+        payout = self._import_tied_payout()
+        proposed = build_humanitix_xero_preview(payout)["xero_payload"]
+        existing = {
+            **proposed,
+            "BankTransactionID": "correct-existing-1",
+            "Reference": "",
+            "Total": "2343.80",
+            "IsReconciled": True,
+        }
+
+        preview = build_humanitix_xero_correction_preview(
+            payout,
+            bank_transactions=[existing],
+        )
+
+        self.assertEqual(preview["classification"], "already_correct")
+        self.assertEqual(preview["recommended_action"], "record_existing")
+        self.assertTrue(preview["automatic_action_allowed"])
+
+    @patch(
+        "integrations.services.humanitix_payouts.fetch_xero_bank_transactions"
+    )
+    @patch("integrations.services.humanitix_payouts.http_client.put")
+    def test_confirmed_post_blocks_legacy_transaction_before_xero_write(
+        self,
+        mock_put,
+        mock_fetch,
+    ):
+        payout = self._import_tied_payout()
+        mock_fetch.return_value = [
+            {
+                "BankTransactionID": "legacy-net-1",
+                "Reference": "",
+                "Date": "2025-03-04",
+                "Type": "RECEIVE",
+                "Status": "AUTHORISED",
+                "IsReconciled": True,
+                "Total": "2343.80",
+                "BankAccount": {"AccountID": "bank-1"},
+                "LineItems": [
+                    {
+                        "Quantity": 1,
+                        "UnitAmount": "2343.80",
+                        "AccountCode": "202",
+                        "TaxType": "NONE",
+                        "Tracking": [],
+                    }
+                ],
+            }
+        ]
+
+        with self.assertRaises(ReconciliationValidationError):
+            post_humanitix_xero_bank_transaction(
+                payout,
+                approved_by_slack_id="UADMIN",
+            )
+
+        mock_put.assert_not_called()
+        payout.refresh_from_db()
+        self.assertEqual(payout.status, HumanitixPayout.STATUS_READY)
+
+    @patch(
+        "integrations.services.humanitix_payouts.fetch_xero_bank_transactions",
+        return_value=[],
+    )
     @patch("integrations.services.humanitix_payouts.http_client.put")
     @patch("integrations.services.humanitix_payouts.http_client.get")
-    def test_confirmed_post_is_idempotent_and_resolves_tracking(self, mock_get, mock_put):
+    def test_confirmed_post_is_idempotent_and_resolves_tracking(
+        self,
+        mock_get,
+        mock_put,
+        _mock_fetch,
+    ):
         payout = self._import_tied_payout()
 
         categories_response = MagicMock()

@@ -26,6 +26,7 @@ from integrations.models import (
 )
 from integrations.services.humanitix_payouts import (
     HumanitixPayoutImportError,
+    build_humanitix_xero_correction_batch,
     build_humanitix_xero_preview,
     import_payout_csv,
     post_humanitix_xero_bank_transaction,
@@ -740,6 +741,56 @@ class HumanitixPayoutListView(ReconciliationAdminView):
                     serialize_humanitix_payout(record)
                     for record in records
                 ]
+            }
+        )
+
+
+class HumanitixPayoutCorrectionPreviewView(ReconciliationAdminView):
+    """Compare Humanitix payout previews with Xero without making Xero writes."""
+
+    def post(self, request):
+        _, organization, error = self.context(request, from_body=True)
+        if error:
+            return error
+        try:
+            max_count = max(1, min(int(request.data.get("max_count") or 500), 500))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "max_count must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        records = list(
+            HumanitixPayout.objects.filter(organization=organization)
+            .prefetch_related("lines")
+            .order_by("payout_date", "id")[:max_count]
+        )
+        try:
+            preview = build_humanitix_xero_correction_batch(records)
+        except ReconciliationProfile.DoesNotExist:
+            return Response(
+                {"error": "Reconciliation profile is not configured."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ReconciliationValidationError as exc:
+            return Response(
+                {"error": str(exc), "errors": exc.errors},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except requests.RequestException:
+            return Response(
+                {
+                    "error": (
+                        "Unable to read Xero bank transactions for the "
+                        "Humanitix correction preview."
+                    )
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {
+                "dry_run": True,
+                "xero_writes": False,
+                **preview,
             }
         )
 
