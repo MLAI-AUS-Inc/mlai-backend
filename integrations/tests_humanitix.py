@@ -27,6 +27,8 @@ from integrations.services.humanitix import (
 from integrations.services.humanitix_payouts import (
     build_humanitix_xero_preview,
     import_payout_csv,
+    import_humanitix_payout_receipt_text,
+    parse_humanitix_payout_receipt_text,
     post_humanitix_xero_bank_transaction,
 )
 from organizations.models import Organization
@@ -239,6 +241,24 @@ class HumanitixSyncTests(TestCase):
 
 
 class HumanitixPayoutImportTests(TestCase):
+    RECEIPT_TEXT = """
+Payout receipt
+Reference: HPVYXE2PRN
+Event name: Pitch Night: MedHack
+Event date: Thu, 27 Feb 2025, 5:45pm - 9pm AEDT
+Payout details $110.00Processed at: 4th Mar 2025
+Payout breakdown to date
+Sales via Humanitix payments $115.00
+Absorbed Humanitix fees ($2.00)
+Refunds ($3.00)
+Earnings by type
+Sales Refunds Total absorbed fees Earnings
+Ticket sales $100.00 ($3.00) ($2.00) $95.00
+Add-on sales $5.00 ($0.00) ($0.00) $5.00
+Additional donations $10.00 ($0.00) ($0.00) $10.00
+Total $115.00 ($3.00) ($2.00) $110.00
+"""
+
     def setUp(self):
         self.user = User.objects.create_user(email="founder@example.com", role="participant")
         self.organization = Organization.objects.create(name="MLAI", domain="mlai.au")
@@ -406,6 +426,55 @@ class HumanitixPayoutImportTests(TestCase):
         self.assertTrue(any("net payout" in error for error in preview["errors"]))
         payout.refresh_from_db()
         self.assertEqual(payout.status, HumanitixPayout.STATUS_NEEDS_REVIEW)
+
+    def test_receipt_text_parser_extracts_accounting_components(self):
+        row = parse_humanitix_payout_receipt_text(self.RECEIPT_TEXT)
+
+        self.assertEqual(row["payout reference"], "HPVYXE2PRN")
+        self.assertEqual(row["payout date"], "2025-03-04")
+        self.assertEqual(row["payout amount"], "110.00")
+        self.assertEqual(row["event name"], "Pitch Night: MedHack")
+        self.assertEqual(row["ticket sales"], "100.00")
+        self.assertEqual(row["add-on sales"], "5.00")
+        self.assertEqual(row["additional donations"], "10.00")
+        self.assertEqual(row["refunds"], "3.00")
+        self.assertEqual(row["absorbed humanitix fees"], "2.00")
+
+    def test_receipt_replaces_net_only_line_and_builds_ready_preview(self):
+        source = io.StringIO(
+            "Payout Reference,Payout Date,Currency,Payout Amount,Event ID,Event Name\n"
+            "HPVYXE2PRN,2025-03-04,AUD,110.00,event-medhack,Pitch Night: MedHack\n"
+        )
+        net_only = import_payout_csv(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=source,
+        )[0]
+        self.assertEqual(
+            set(net_only.lines.values_list("component", flat=True)),
+            {HumanitixPayoutLine.COMPONENT_NET_PAYOUT},
+        )
+
+        payout = import_humanitix_payout_receipt_text(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            text=self.RECEIPT_TEXT,
+        )
+        preview = build_humanitix_xero_preview(payout)
+
+        self.assertTrue(preview["ready"], preview["errors"])
+        self.assertEqual(preview["line_total"], "110.00")
+        self.assertEqual(
+            set(payout.lines.values_list("component", flat=True)),
+            {
+                HumanitixPayoutLine.COMPONENT_TICKET_SALES,
+                HumanitixPayoutLine.COMPONENT_ADD_ONS,
+                HumanitixPayoutLine.COMPONENT_DONATIONS,
+                HumanitixPayoutLine.COMPONENT_REFUNDS,
+                HumanitixPayoutLine.COMPONENT_ABSORBED_FEES,
+            },
+        )
+        self.assertEqual(set(payout.lines.values_list("event", flat=True)), {self.event.id})
 
     def test_global_payout_export_links_short_event_id_by_name_and_parses_date_paid(self):
         self.event.start_at = datetime(2025, 3, 12, 6, 45, tzinfo=timezone.utc)
