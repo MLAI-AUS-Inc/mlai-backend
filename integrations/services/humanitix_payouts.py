@@ -89,6 +89,17 @@ def _parse_date(value: Any):
     raw = str(value or "").strip()
     if not raw:
         return None
+    normalized = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", raw, flags=re.IGNORECASE)
+    normalized = re.sub(r"^[A-Za-z]{3,9}\s+", "", normalized).strip()
+    candidates = list(
+        dict.fromkeys(
+            [
+                raw,
+                normalized,
+                normalized.split(",", 1)[0].strip(),
+            ]
+        )
+    )
     for fmt in (
         "%Y-%m-%d",
         "%d/%m/%Y",
@@ -97,10 +108,11 @@ def _parse_date(value: Any):
         "%d %B %Y",
         "%Y-%m-%dT%H:%M:%S%z",
     ):
-        try:
-            return datetime.strptime(raw, fmt).date()
-        except ValueError:
-            continue
+        for candidate in candidates:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     raise HumanitixPayoutImportError(f"Invalid date value: {value}")
 
 
@@ -161,9 +173,36 @@ def _event_for_row(
             organization=organization,
             external_event_id=external_event_id,
         ).first()
-        if event is None:
-            warnings.append(f"Humanitix event ID {external_event_id} is not in the synced catalogue.")
-        return event, external_event_id, event_name or (event.event_name if event else ""), warnings
+        if event is not None:
+            return event, event.external_event_id, event_name or event.event_name, warnings
+
+        normalized = _normalized_name(event_name)
+        matches = [
+            candidate
+            for candidate in HumanitixEvent.objects.filter(organization=organization)
+            if _normalized_name(candidate.event_name) == normalized
+        ]
+        if len(matches) == 1:
+            event = matches[0]
+            warnings.append(
+                f"Humanitix report event ID {external_event_id} was linked by exact event name."
+            )
+            return event, event.external_event_id, event_name or event.event_name, warnings
+        if not event_name:
+            warnings.append(
+                f"Humanitix event ID {external_event_id} is not in the synced catalogue."
+            )
+        elif not matches:
+            warnings.append(
+                f'Humanitix report event ID {external_event_id} and event "{event_name}" '
+                "are not in the synced catalogue."
+            )
+        else:
+            warnings.append(
+                f'Humanitix report event ID {external_event_id} has an ambiguous event name '
+                f'"{event_name}".'
+            )
+        return None, external_event_id, event_name, warnings
 
     normalized = _normalized_name(event_name)
     matches = [
@@ -277,7 +316,14 @@ def import_payout_rows(
     for reference, payout_rows in grouped.items():
         payout_amount = _payout_amount(payout_rows)
         payout_date = _parse_date(
-            _first_nonempty(payout_rows, "payout date", "paid date", "payment date", "date")
+            _first_nonempty(
+                payout_rows,
+                "payout date",
+                "paid date",
+                "date paid",
+                "payment date",
+                "date",
+            )
         )
         cleared_date = _parse_date(
             _first_nonempty(payout_rows, "cleared date", "bank cleared date")
