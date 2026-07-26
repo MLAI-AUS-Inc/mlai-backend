@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import re
+import zipfile
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -48,6 +49,8 @@ from integrations.services.xero_reconciliation import (
 MONEY_QUANTUM = Decimal("0.01")
 RECEIPT_MONEY_PATTERN = r"\(?\$[\d,]+\.\d{2}\)?"
 MAX_RECEIPT_PDF_BYTES = 10 * 1024 * 1024
+MAX_RECEIPT_BUNDLE_BYTES = 200 * 1024 * 1024
+MAX_RECEIPTS_PER_BUNDLE = 100
 
 
 class HumanitixPayoutImportError(RuntimeError):
@@ -667,13 +670,10 @@ def import_humanitix_payout_receipt_text(
     )[0]
 
 
-def import_humanitix_payout_receipt_pdf(
-    *,
-    organization,
-    connection: ExternalServiceConnection,
+def extract_humanitix_payout_receipt_text(
     source: BinaryIO | bytes | str | Path,
-) -> HumanitixPayout:
-    """Enrich one net-only payout from Humanitix's receipt PDF without Xero writes."""
+) -> str:
+    """Read a bounded Humanitix receipt PDF and return only its text layer."""
 
     close_stream = False
     if isinstance(source, bytes):
@@ -710,11 +710,125 @@ def import_humanitix_payout_receipt_pdf(
     finally:
         if close_stream:
             stream.close()
+    return text
+
+
+def import_humanitix_payout_receipt_pdf(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: BinaryIO | bytes | str | Path,
+) -> HumanitixPayout:
+    """Enrich one net-only payout from Humanitix's receipt PDF without Xero writes."""
+
     return import_humanitix_payout_receipt_text(
         organization=organization,
         connection=connection,
-        text=text,
+        text=extract_humanitix_payout_receipt_text(source),
     )
+
+
+def import_humanitix_payout_receipt_bundle(
+    *,
+    organization,
+    connection: ExternalServiceConnection,
+    source: BinaryIO | bytes,
+    expected_references: Iterable[str] | None = None,
+) -> list[HumanitixPayout]:
+    """Validate and atomically import a ZIP of receipt PDFs without Xero writes."""
+
+    if isinstance(source, bytes):
+        payload = source
+    else:
+        payload = source.read(MAX_RECEIPT_BUNDLE_BYTES + 1)
+    if len(payload) > MAX_RECEIPT_BUNDLE_BYTES:
+        raise HumanitixPayoutImportError("Humanitix receipt bundle is too large.")
+
+    parsed_receipts: list[tuple[str, str, dict[str, Any]]] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            if not infos:
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle does not contain any files."
+                )
+            if len(infos) > MAX_RECEIPTS_PER_BUNDLE:
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle contains too many files."
+                )
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise HumanitixPayoutImportError(
+                    "Humanitix receipt bundle contains duplicate filenames."
+                )
+            for info in infos:
+                filename = Path(info.filename)
+                if (
+                    filename.name != info.filename
+                    or "\\" in info.filename
+                    or filename.suffix.lower() != ".pdf"
+                ):
+                    raise HumanitixPayoutImportError(
+                        f"Humanitix receipt bundle has an invalid filename: {info.filename}"
+                    )
+                if info.file_size > MAX_RECEIPT_PDF_BYTES:
+                    raise HumanitixPayoutImportError(
+                        f"Humanitix payout receipt PDF is too large: {info.filename}"
+                    )
+                receipt_bytes = archive.read(info)
+                text = extract_humanitix_payout_receipt_text(receipt_bytes)
+                row = parse_humanitix_payout_receipt_text(text)
+                parsed_receipts.append((info.filename, text, row))
+    except HumanitixPayoutImportError:
+        raise
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise HumanitixPayoutImportError(
+            "Unable to read the Humanitix receipt ZIP bundle."
+        ) from exc
+
+    references = [
+        str(row["payout reference"]).strip().upper()
+        for _, _, row in parsed_receipts
+    ]
+    duplicates = sorted(
+        reference for reference in set(references) if references.count(reference) > 1
+    )
+    if duplicates:
+        raise HumanitixPayoutImportError(
+            "Humanitix receipt bundle contains duplicate payout references: "
+            + ", ".join(duplicates)
+        )
+    actual = set(references)
+    if expected_references is not None:
+        expected = {
+            str(reference or "").strip().upper()
+            for reference in expected_references
+            if str(reference or "").strip()
+        }
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        problems = []
+        if missing:
+            problems.append("missing " + ", ".join(missing))
+        if unexpected:
+            problems.append("unexpected " + ", ".join(unexpected))
+        if problems:
+            raise HumanitixPayoutImportError(
+                "Humanitix receipt bundle does not match the expected payouts: "
+                + "; ".join(problems)
+            )
+
+    payouts: list[HumanitixPayout] = []
+    with transaction.atomic():
+        for _filename, text, _row in parsed_receipts:
+            payout = import_humanitix_payout_receipt_text(
+                organization=organization,
+                connection=connection,
+                text=text,
+            )
+            build_humanitix_xero_preview(payout)
+            payouts.append(payout)
+    return payouts
 
 
 def _tracking(profile: ReconciliationProfile, mapping: ReconciliationMapping) -> list[dict[str, str]]:
