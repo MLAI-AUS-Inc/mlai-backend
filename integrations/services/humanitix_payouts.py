@@ -39,8 +39,14 @@ from integrations.services.xero_reconciliation import (
     ReconciliationValidationError,
     XeroPostingError,
     _created_tracking_option,
+    _line_item_differences,
     _tracking_category_options,
+    _xero_bank_account_id,
     _xero_headers,
+    _xero_transaction_date,
+    _xero_transaction_summary,
+    _xero_transaction_total_cents,
+    fetch_xero_bank_transactions,
     xero_has_bank_transaction_scope,
     xero_has_settings_write_scope,
 )
@@ -1063,6 +1069,225 @@ def build_humanitix_xero_preview(payout: HumanitixPayout) -> dict[str, Any]:
     return preview
 
 
+def _matching_humanitix_xero_transactions(
+    payout: HumanitixPayout,
+    profile: ReconciliationProfile,
+    bank_transactions: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], str]]:
+    expected_date = payout.payout_date.isoformat() if payout.payout_date else ""
+    expected_cents = int(
+        (payout.payout_amount * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    bank_account_id = str(profile.xero_bank_account_id or "").strip()
+    eligible = [
+        item
+        for item in bank_transactions
+        if (
+            str(item.get("Status") or "").strip().upper()
+            not in {"DELETED", "VOIDED"}
+            and str(item.get("Type") or "").strip().upper() == "RECEIVE"
+            and (
+                not bank_account_id
+                or not _xero_bank_account_id(item)
+                or _xero_bank_account_id(item) == bank_account_id
+            )
+        )
+    ]
+    exact_reference = [
+        (item, "payout_reference")
+        for item in eligible
+        if str(item.get("Reference") or "").strip().casefold()
+        == payout.payout_reference.strip().casefold()
+    ]
+    if exact_reference:
+        return exact_reference
+    return [
+        (item, "date_and_amount")
+        for item in eligible
+        if _xero_transaction_date(item) == expected_date
+        and _xero_transaction_total_cents(item) == expected_cents
+    ]
+
+
+def build_humanitix_xero_correction_preview(
+    payout: HumanitixPayout,
+    *,
+    bank_transactions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Classify existing Xero transactions without making any Xero writes."""
+
+    proposed = build_humanitix_xero_preview(payout)
+    try:
+        profile = ReconciliationProfile.objects.select_related(
+            "xero_connection"
+        ).get(organization=payout.organization)
+    except ReconciliationProfile.DoesNotExist:
+        raise ReconciliationValidationError(
+            "Reconciliation profile is not configured."
+        )
+    if bank_transactions is None:
+        bank_transactions = fetch_xero_bank_transactions(profile)
+    matches = _matching_humanitix_xero_transactions(
+        payout,
+        profile,
+        bank_transactions,
+    )
+    summaries = [
+        _xero_transaction_summary(item, match_basis=basis)
+        for item, basis in matches
+    ]
+    result: dict[str, Any] = {
+        "payout_reference": payout.payout_reference,
+        "payout_date": payout.payout_date.isoformat() if payout.payout_date else None,
+        "amount": str(payout.payout_amount),
+        "proposed_ready": proposed["ready"],
+        "proposed_errors": proposed["errors"],
+        "candidate_count": len(matches),
+        "existing_transactions": summaries,
+        "classification": "",
+        "recommended_action": "",
+        "automatic_action_allowed": False,
+        "requires_manual_unreconcile": False,
+        "human_reconciliation_required": True,
+        "differences": {},
+        "proposed_xero_payload": proposed["xero_payload"],
+    }
+    if not matches:
+        result.update(
+            {
+                "classification": "missing_xero_transaction",
+                "recommended_action": "create_receive_money",
+                "automatic_action_allowed": bool(proposed["ready"]),
+            }
+        )
+        return result
+    if len(matches) > 1:
+        result.update(
+            {
+                "classification": "ambiguous_existing_transactions",
+                "recommended_action": "manual_review",
+            }
+        )
+        return result
+
+    existing, basis = matches[0]
+    summary = _xero_transaction_summary(existing, match_basis=basis)
+    differences = _line_item_differences(
+        existing,
+        proposed["xero_payload"],
+    )
+    result["differences"] = differences
+    expected_cents = int(
+        (payout.payout_amount * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    identity_matches = (
+        summary["type"].upper() == "RECEIVE"
+        and summary["total_cents"] == expected_cents
+        and (
+            payout.payout_date is None
+            or summary["date"] == payout.payout_date.isoformat()
+        )
+    )
+    if identity_matches and differences["line_items_match"]:
+        reconciled = summary["is_reconciled"]
+        result.update(
+            {
+                "classification": (
+                    "already_correct"
+                    if reconciled
+                    else "correct_transaction_ready_to_match"
+                ),
+                "recommended_action": (
+                    "record_existing"
+                    if reconciled
+                    else "record_existing_then_match"
+                ),
+                "automatic_action_allowed": bool(proposed["ready"]),
+            }
+        )
+        return result
+
+    looks_net_only = (
+        differences["current_line_count"] == 1
+        and (
+            differences["proposed_line_count"] > 1
+            or summary["tracking_count"] == 0
+        )
+        and summary["total_cents"] == expected_cents
+    )
+    reconciled = summary["is_reconciled"]
+    result.update(
+        {
+            "classification": (
+                "legacy_net_only"
+                if looks_net_only
+                else "mismatched_xero_transaction"
+            ),
+            "recommended_action": (
+                "unreconcile_then_replace"
+                if reconciled
+                else "replace_before_matching"
+            ),
+            "requires_manual_unreconcile": reconciled,
+        }
+    )
+    return result
+
+
+def build_humanitix_xero_correction_batch(
+    payouts: Iterable[HumanitixPayout],
+) -> dict[str, Any]:
+    records = list(payouts)
+    if not records:
+        return {
+            "payouts": [],
+            "summary": {
+                "payout_count": 0,
+                "safe_action_count": 0,
+                "manual_unreconcile_count": 0,
+            },
+        }
+    profile = ReconciliationProfile.objects.select_related("xero_connection").get(
+        organization=records[0].organization
+    )
+    bank_transactions = fetch_xero_bank_transactions(profile)
+    previews = [
+        build_humanitix_xero_correction_preview(
+            payout,
+            bank_transactions=bank_transactions,
+        )
+        for payout in records
+    ]
+    return {
+        "payouts": previews,
+        "summary": {
+            "payout_count": len(previews),
+            "safe_action_count": sum(
+                1 for item in previews if item["automatic_action_allowed"]
+            ),
+            "manual_unreconcile_count": sum(
+                1 for item in previews if item["requires_manual_unreconcile"]
+            ),
+            "classification_counts": {
+                classification: sum(
+                    1
+                    for item in previews
+                    if item["classification"] == classification
+                )
+                for classification in sorted(
+                    {item["classification"] for item in previews}
+                )
+            },
+        },
+    }
+
+
 def ensure_humanitix_tracking_options(
     payout: HumanitixPayout,
     *,
@@ -1172,6 +1397,29 @@ def post_humanitix_xero_bank_transaction(
     connection = profile.xero_connection
     if connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
+    correction = build_humanitix_xero_correction_preview(current)
+    allowed_classifications = {
+        "missing_xero_transaction",
+        "already_correct",
+        "correct_transaction_ready_to_match",
+    }
+    if correction["classification"] not in allowed_classifications:
+        raise ReconciliationValidationError(
+            "Humanitix payout cannot be posted safely while a conflicting Xero "
+            "transaction exists.",
+            errors=[
+                (
+                    f'{correction["classification"]}: '
+                    f'{correction["recommended_action"]}'
+                )
+            ],
+        )
+    existing_transaction_id = ""
+    if correction["candidate_count"] == 1:
+        existing_transaction_id = str(
+            correction["existing_transactions"][0].get("bank_transaction_id")
+            or ""
+        ).strip()
     ensure_humanitix_tracking_options(current, profile=profile)
     preview = build_humanitix_xero_preview(current)
     if not preview["ready"]:
@@ -1206,33 +1454,79 @@ def post_humanitix_xero_bank_transaction(
             current.payout_reference.encode("utf-8")
         ).hexdigest()[:32]
         headers["Idempotency-Key"] = f"humanitix-payout-{reference_hash}"
-        escaped_reference = current.payout_reference.replace('"', '""')
-        existing_response = http_client.get(
-            f"{XERO_API_URL}/BankTransactions",
-            headers=headers,
-            params={"where": f'Reference=="{escaped_reference}"'},
-            timeout=(3, 30),
+        bank_transaction = (
+            {"BankTransactionID": existing_transaction_id}
+            if existing_transaction_id
+            else None
         )
-        existing_response.raise_for_status()
-        existing = existing_response.json().get("BankTransactions", [])
-        bank_transaction = existing[0] if existing else None
         if bank_transaction is None:
-            response = http_client.put(
+            escaped_reference = current.payout_reference.replace('"', '""')
+            existing_response = http_client.get(
                 f"{XERO_API_URL}/BankTransactions",
                 headers=headers,
-                json={"BankTransactions": [preview["xero_payload"]]},
+                params={"where": f'Reference=="{escaped_reference}"'},
                 timeout=(3, 30),
             )
-            response.raise_for_status()
-            payload = response.json()
-            rows = payload.get("BankTransactions") if isinstance(payload, dict) else None
-            bank_transaction = rows[0] if isinstance(rows, list) and rows else {}
-            validation_errors = bank_transaction.get("ValidationErrors") or []
-            if bank_transaction.get("HasErrors") or validation_errors:
-                messages = [str(item.get("Message") or item) for item in validation_errors]
-                raise XeroPostingError(
-                    "; ".join(messages) or "Xero rejected the Humanitix bank transaction."
+            existing_response.raise_for_status()
+            existing = existing_response.json().get("BankTransactions", [])
+            existing = [item for item in existing or [] if isinstance(item, dict)]
+            if existing:
+                exact_matches = _matching_humanitix_xero_transactions(
+                    current,
+                    profile,
+                    existing,
                 )
+                if len(exact_matches) != 1:
+                    raise XeroPostingError(
+                        "An existing Xero transaction uses this Humanitix reference "
+                        "but does not match the approved bank account and transaction type."
+                    )
+                candidate = exact_matches[0][0]
+                summary = _xero_transaction_summary(
+                    candidate,
+                    match_basis="payout_reference",
+                )
+                differences = _line_item_differences(
+                    candidate,
+                    preview["xero_payload"],
+                )
+                expected_cents = int(
+                    (current.payout_amount * 100).quantize(
+                        Decimal("1"),
+                        rounding=ROUND_HALF_UP,
+                    )
+                )
+                if (
+                    summary["total_cents"] != expected_cents
+                    or (
+                        current.payout_date is not None
+                        and summary["date"] != current.payout_date.isoformat()
+                    )
+                    or not differences["line_items_match"]
+                ):
+                    raise XeroPostingError(
+                        "An existing Xero transaction uses this Humanitix reference "
+                        "but does not match the approved payout preview."
+                    )
+                bank_transaction = candidate
+            else:
+                response = http_client.put(
+                    f"{XERO_API_URL}/BankTransactions",
+                    headers=headers,
+                    json={"BankTransactions": [preview["xero_payload"]]},
+                    timeout=(3, 30),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                rows = payload.get("BankTransactions") if isinstance(payload, dict) else None
+                bank_transaction = rows[0] if isinstance(rows, list) and rows else {}
+                validation_errors = bank_transaction.get("ValidationErrors") or []
+                if bank_transaction.get("HasErrors") or validation_errors:
+                    messages = [str(item.get("Message") or item) for item in validation_errors]
+                    raise XeroPostingError(
+                        "; ".join(messages)
+                        or "Xero rejected the Humanitix bank transaction."
+                    )
         transaction_id = str(
             bank_transaction.get("BankTransactionID") or ""
         ).strip()
