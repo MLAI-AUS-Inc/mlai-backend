@@ -34,6 +34,7 @@ STRIPE_GATEWAYS = {"stripe", "stripe-payments"}
 OFFLINE_GATEWAYS = {"manual", "invoice", "cash"}
 HUMANITIX_NATIVE_GATEWAYS = {
     "afterpay",
+    "braintree",
     "bpoint",
     "credit",
     "discover-nsw",

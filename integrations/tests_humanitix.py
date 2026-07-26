@@ -82,6 +82,12 @@ class HumanitixAggregateTests(TestCase):
                 },
                 {
                     "financialStatus": "paid",
+                    "paymentGateway": "braintree",
+                    "manualOrder": False,
+                    "totals": {"grossSales": 40, "netSales": 40, "refunds": 0},
+                },
+                {
+                    "financialStatus": "paid",
                     "paymentGateway": "invoice",
                     "manualOrder": True,
                     "totals": {"grossSales": 25, "netSales": 25, "refunds": 0},
@@ -94,8 +100,12 @@ class HumanitixAggregateTests(TestCase):
             summary["gateway_breakdown"]["bpoint"]["classification"],
             "humanitix_native",
         )
+        self.assertEqual(
+            summary["gateway_breakdown"]["braintree"]["classification"],
+            "humanitix_native",
+        )
         self.assertEqual(summary["gateway_breakdown"]["invoice"]["classification"], "offline")
-        self.assertEqual(summary["gross_sales"], Decimal("175.00"))
+        self.assertEqual(summary["gross_sales"], Decimal("215.00"))
 
 
 class HumanitixSyncTests(TestCase):
@@ -445,6 +455,51 @@ Total $115.00 ($3.00) ($2.00) $110.00
         self.assertEqual(row["additional donations"], "10.00")
         self.assertEqual(row["refunds"], "3.00")
         self.assertEqual(row["absorbed humanitix fees"], "2.00")
+
+    def test_receipt_text_parser_joins_wrapped_payout_reference(self):
+        row = parse_humanitix_payout_receipt_text(
+            self.RECEIPT_TEXT.replace(
+                "Reference: HPVYXE2PRN",
+                "Reference: HPMP JAD8U6",
+            )
+        )
+
+        self.assertEqual(row["payout reference"], "HPMPJAD8U6")
+
+    def test_receipt_parser_excludes_earnings_paid_outside_humanitix(self):
+        row = parse_humanitix_payout_receipt_text(
+            self.RECEIPT_TEXT.replace(
+                "Ticket sales $100.00",
+                "Ticket sales $120.00",
+            )
+        )
+
+        self.assertEqual(row["reported ticket sales"], "120.00")
+        self.assertEqual(row["non-humanitix earnings excluded"], "20.00")
+        self.assertEqual(row["ticket sales"], "100.00")
+
+    def test_receipt_import_preserves_global_report_payout_date(self):
+        source = io.StringIO(
+            "Payout Reference,Payout Date,Currency,Payout Amount,Event ID,Event Name\n"
+            "HPVYXE2PRN,2025-03-06,AUD,110.00,event-medhack,Pitch Night: MedHack\n"
+        )
+        import_payout_csv(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=source,
+        )
+
+        payout = import_humanitix_payout_receipt_text(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            text=self.RECEIPT_TEXT,
+        )
+
+        self.assertEqual(payout.payout_date.isoformat(), "2025-03-06")
+        self.assertEqual(
+            payout.source_payload["receipt_processed_date"],
+            "2025-03-04",
+        )
 
     def test_receipt_replaces_net_only_line_and_builds_ready_preview(self):
         source = io.StringIO(
