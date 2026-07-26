@@ -1132,6 +1132,10 @@ if VICTOR_AI_ROO_ENABLED:
         )
 LUMA_API_KEY = os.environ.get('LUMA_API_KEY')
 LUMA_BASE_URL = os.environ.get('LUMA_BASE_URL', 'https://public-api.luma.com')
+HUMANITIX_API_BASE_URL = os.environ.get(
+    'HUMANITIX_API_BASE_URL',
+    'https://api.humanitix.com/v1',
+)
 
 # MedHack Game Configuration
 MEDHACK_ADMIN_IDS = [s.strip() for s in os.getenv('MEDHACK_ADMIN_IDS', '').split(',') if s.strip()]

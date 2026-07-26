@@ -116,6 +116,8 @@ def serialize_profile(profile: ReconciliationProfile) -> dict[str, Any]:
         "xero_bank_account_name": profile.xero_bank_account_name,
         "xero_contact_id": profile.xero_contact_id,
         "xero_contact_name": profile.xero_contact_name,
+        "humanitix_contact_id": profile.humanitix_contact_id,
+        "humanitix_contact_name": profile.humanitix_contact_name,
         "revenue_account_code": profile.revenue_account_code,
         "fee_account_code": profile.fee_account_code,
         "refund_account_code": profile.refund_account_code,
