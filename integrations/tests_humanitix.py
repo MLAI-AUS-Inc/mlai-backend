@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -405,3 +406,26 @@ class HumanitixPayoutImportTests(TestCase):
         self.assertTrue(any("net payout" in error for error in preview["errors"]))
         payout.refresh_from_db()
         self.assertEqual(payout.status, HumanitixPayout.STATUS_NEEDS_REVIEW)
+
+    def test_global_payout_export_links_short_event_id_by_name_and_parses_date_paid(self):
+        source = io.StringIO(
+            "Event ID,Event Name,Event Date,Payout reference,Invoice note,Date Paid,"
+            "Paid to account,Payout Amount\n"
+            'MEDHACK01,Pitch Night: MedHack,27/02/2025,HPGLOBAL01,,'
+            '"Wed 4th Mar 2025, 2:02 pm AEDT",06XXXX-XXXXX550,$2343.80\n'
+        )
+
+        payout = import_payout_csv(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=source,
+        )[0]
+        line = payout.lines.get()
+
+        self.assertEqual(payout.payout_date, date(2025, 3, 4))
+        self.assertEqual(line.event, self.event)
+        self.assertEqual(line.external_event_id, self.event.external_event_id)
+        self.assertEqual(line.component, HumanitixPayoutLine.COMPONENT_NET_PAYOUT)
+        self.assertTrue(
+            any("linked by exact event name" in warning for warning in payout.warnings)
+        )
