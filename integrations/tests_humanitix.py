@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -408,10 +408,22 @@ class HumanitixPayoutImportTests(TestCase):
         self.assertEqual(payout.status, HumanitixPayout.STATUS_NEEDS_REVIEW)
 
     def test_global_payout_export_links_short_event_id_by_name_and_parses_date_paid(self):
+        self.event.start_at = datetime(2025, 3, 12, 6, 45, tzinfo=timezone.utc)
+        self.event.timezone_name = "Australia/Melbourne"
+        self.event.save(update_fields=["start_at", "timezone_name", "updated_at"])
+        HumanitixEvent.objects.create(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            external_event_id="event-medhack-older",
+            event_name="pitch night medhack",
+            start_at=datetime(2024, 10, 2, 8, 0, tzinfo=timezone.utc),
+            timezone_name="Australia/Melbourne",
+            currency="AUD",
+        )
         source = io.StringIO(
             "Event ID,Event Name,Event Date,Payout reference,Invoice note,Date Paid,"
             "Paid to account,Payout Amount\n"
-            'MEDHACK01,Pitch Night: MedHack,27/02/2025,HPGLOBAL01,,'
+            'MEDHACK01,Pitch Night: MedHack,12/03/2025,HPGLOBAL01,,'
             '"Wed 4th Mar 2025, 2:02 pm AEDT",06XXXX-XXXXX550,$2343.80\n'
         )
 
@@ -427,5 +439,5 @@ class HumanitixPayoutImportTests(TestCase):
         self.assertEqual(line.external_event_id, self.event.external_event_id)
         self.assertEqual(line.component, HumanitixPayoutLine.COMPONENT_NET_PAYOUT)
         self.assertTrue(
-            any("linked by exact event name" in warning for warning in payout.warnings)
+            any("linked by exact event name and date" in warning for warning in payout.warnings)
         )
