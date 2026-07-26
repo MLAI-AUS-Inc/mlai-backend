@@ -47,6 +47,7 @@ from integrations.services.xero_reconciliation import (
 
 MONEY_QUANTUM = Decimal("0.01")
 RECEIPT_MONEY_PATTERN = r"\(?\$[\d,]+\.\d{2}\)?"
+MAX_RECEIPT_PDF_BYTES = 10 * 1024 * 1024
 
 
 class HumanitixPayoutImportError(RuntimeError):
@@ -676,12 +677,23 @@ def import_humanitix_payout_receipt_pdf(
 
     close_stream = False
     if isinstance(source, bytes):
+        if len(source) > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
         stream: BinaryIO = io.BytesIO(source)
     elif isinstance(source, (str, Path)):
-        stream = Path(source).expanduser().open("rb")
+        pdf_path = Path(source).expanduser()
+        if pdf_path.stat().st_size > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
+        stream = pdf_path.open("rb")
         close_stream = True
     else:
         stream = source
+    if not stream.seekable():
+        payload = stream.read(MAX_RECEIPT_PDF_BYTES + 1)
+        if len(payload) > MAX_RECEIPT_PDF_BYTES:
+            raise HumanitixPayoutImportError("Humanitix payout receipt PDF is too large.")
+        stream = io.BytesIO(payload)
+        close_stream = True
     try:
         reader = PdfReader(stream)
         if not reader.pages or len(reader.pages) > 10:

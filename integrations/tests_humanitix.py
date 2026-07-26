@@ -27,6 +27,7 @@ from integrations.services.humanitix import (
 from integrations.services.humanitix_payouts import (
     build_humanitix_xero_preview,
     import_payout_csv,
+    import_humanitix_payout_receipt_pdf,
     import_humanitix_payout_receipt_text,
     parse_humanitix_payout_receipt_text,
     post_humanitix_xero_bank_transaction,
@@ -475,6 +476,37 @@ Total $115.00 ($3.00) ($2.00) $110.00
             },
         )
         self.assertEqual(set(payout.lines.values_list("event", flat=True)), {self.event.id})
+
+    @patch("integrations.services.humanitix_payouts.import_humanitix_payout_receipt_text")
+    @patch("integrations.services.humanitix_payouts.PdfReader")
+    def test_receipt_pdf_buffers_non_seekable_stream(self, mock_reader, mock_import_text):
+        class NonSeekableStream(io.BytesIO):
+            def seekable(self):
+                return False
+
+            def seek(self, *args, **kwargs):
+                raise io.UnsupportedOperation("not seekable")
+
+        page = MagicMock()
+        page.extract_text.return_value = self.RECEIPT_TEXT
+        mock_reader.return_value.pages = [page]
+        expected = MagicMock()
+        mock_import_text.return_value = expected
+
+        payout = import_humanitix_payout_receipt_pdf(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=NonSeekableStream(b"%PDF receipt"),
+        )
+
+        self.assertIs(payout, expected)
+        buffered_stream = mock_reader.call_args.args[0]
+        self.assertIsInstance(buffered_stream, io.BytesIO)
+        mock_import_text.assert_called_once_with(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            text=self.RECEIPT_TEXT,
+        )
 
     def test_global_payout_export_links_short_event_id_by_name_and_parses_date_paid(self):
         self.event.start_at = datetime(2025, 3, 12, 6, 45, tzinfo=timezone.utc)
