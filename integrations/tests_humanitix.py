@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase
 
 from integrations.models import (
@@ -25,8 +28,10 @@ from integrations.services.humanitix import (
     sync_humanitix_connection,
 )
 from integrations.services.humanitix_payouts import (
+    HumanitixPayoutImportError,
     build_humanitix_xero_preview,
     import_payout_csv,
+    import_humanitix_payout_receipt_bundle,
     import_humanitix_payout_receipt_pdf,
     import_humanitix_payout_receipt_text,
     parse_humanitix_payout_receipt_text,
@@ -506,6 +511,151 @@ Total $115.00 ($3.00) ($2.00) $110.00
             organization=self.organization,
             connection=self.humanitix_connection,
             text=self.RECEIPT_TEXT,
+        )
+
+    @patch("integrations.services.humanitix_payouts.extract_humanitix_payout_receipt_text")
+    def test_receipt_bundle_imports_expected_references_atomically(self, mock_extract):
+        second_receipt = self.RECEIPT_TEXT.replace(
+            "HPVYXE2PRN",
+            "HPSECOND01",
+        )
+        mock_extract.side_effect = [self.RECEIPT_TEXT, second_receipt]
+        bundle = io.BytesIO()
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("receipt_HPVYXE2PRN.pdf", b"%PDF first")
+            archive.writestr("receipt_HPSECOND01.pdf", b"%PDF second")
+
+        payouts = import_humanitix_payout_receipt_bundle(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=bundle.getvalue(),
+            expected_references={"HPVYXE2PRN", "HPSECOND01"},
+        )
+
+        self.assertEqual(
+            {payout.payout_reference for payout in payouts},
+            {"HPVYXE2PRN", "HPSECOND01"},
+        )
+        self.assertEqual(
+            set(
+                HumanitixPayout.objects.filter(
+                    payout_reference__in={"HPVYXE2PRN", "HPSECOND01"}
+                ).values_list("status", flat=True)
+            ),
+            {HumanitixPayout.STATUS_READY},
+        )
+
+    @patch("integrations.services.humanitix_payouts.extract_humanitix_payout_receipt_text")
+    def test_receipt_bundle_rejects_missing_reference_before_database_writes(
+        self,
+        mock_extract,
+    ):
+        mock_extract.return_value = self.RECEIPT_TEXT
+        bundle = io.BytesIO()
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("receipt_HPVYXE2PRN.pdf", b"%PDF first")
+
+        with self.assertRaisesRegex(
+            HumanitixPayoutImportError,
+            "missing HPSECOND01",
+        ):
+            import_humanitix_payout_receipt_bundle(
+                organization=self.organization,
+                connection=self.humanitix_connection,
+                source=bundle.getvalue(),
+                expected_references={"HPVYXE2PRN", "HPSECOND01"},
+            )
+
+        self.assertFalse(
+            HumanitixPayout.objects.filter(
+                payout_reference__in={"HPVYXE2PRN", "HPSECOND01"}
+            ).exists()
+        )
+
+    @patch("integrations.services.humanitix_payouts.extract_humanitix_payout_receipt_text")
+    def test_receipt_bundle_rejects_receipts_when_expected_set_is_empty(
+        self,
+        mock_extract,
+    ):
+        mock_extract.return_value = self.RECEIPT_TEXT
+        bundle = io.BytesIO()
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("receipt_HPVYXE2PRN.pdf", b"%PDF first")
+
+        with self.assertRaisesRegex(
+            HumanitixPayoutImportError,
+            "unexpected HPVYXE2PRN",
+        ):
+            import_humanitix_payout_receipt_bundle(
+                organization=self.organization,
+                connection=self.humanitix_connection,
+                source=bundle.getvalue(),
+                expected_references=set(),
+            )
+
+    @patch(
+        "integrations.management.commands.import_humanitix_receipts."
+        "import_humanitix_payout_receipt_bundle"
+    )
+    def test_receipt_bundle_command_allows_zip_without_expected_manifest(
+        self,
+        mock_import_bundle,
+    ):
+        mock_import_bundle.return_value = []
+        output = io.StringIO()
+        fake_stdin = SimpleNamespace(buffer=io.BytesIO(b"ZIP bundle"))
+
+        with patch(
+            "integrations.management.commands.import_humanitix_receipts.sys.stdin",
+            new=fake_stdin,
+        ):
+            call_command(
+                "import_humanitix_receipts",
+                "--zip-stdin",
+                "--domain",
+                "mlai.au",
+                stdout=output,
+            )
+
+        self.assertIsNone(mock_import_bundle.call_args.kwargs["expected_references"])
+
+    @patch(
+        "integrations.management.commands.import_humanitix_receipts."
+        "import_humanitix_payout_receipt_bundle"
+    )
+    def test_receipt_bundle_command_requires_all_current_net_only_references(
+        self,
+        mock_import_bundle,
+    ):
+        source = io.StringIO(
+            "Payout Reference,Payout Date,Currency,Payout Amount,Event ID,Event Name\n"
+            "HPVYXE2PRN,2025-03-04,AUD,110.00,event-medhack,Pitch Night: MedHack\n"
+        )
+        import_payout_csv(
+            organization=self.organization,
+            connection=self.humanitix_connection,
+            source=source,
+        )
+        mock_import_bundle.return_value = []
+        output = io.StringIO()
+        fake_stdin = SimpleNamespace(buffer=io.BytesIO(b"ZIP bundle"))
+
+        with patch(
+            "integrations.management.commands.import_humanitix_receipts.sys.stdin",
+            new=fake_stdin,
+        ):
+            call_command(
+                "import_humanitix_receipts",
+                "--zip-stdin",
+                "--require-all-net-only",
+                "--domain",
+                "mlai.au",
+                stdout=output,
+            )
+
+        self.assertEqual(
+            mock_import_bundle.call_args.kwargs["expected_references"],
+            ["HPVYXE2PRN"],
         )
 
     def test_global_payout_export_links_short_event_id_by_name_and_parses_date_paid(self):
