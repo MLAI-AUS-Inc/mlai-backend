@@ -1380,8 +1380,14 @@ def post_humanitix_xero_bank_transaction(
     payout: HumanitixPayout,
     *,
     approved_by_slack_id: str,
+    bank_transactions: list[dict[str, Any]] | None = None,
 ) -> HumanitixPayout:
-    """Create one idempotent Xero Receive Money transaction for a reviewed payout."""
+    """Create one idempotent Xero Receive Money transaction for a reviewed payout.
+
+    A caller posting a reviewed batch may provide one fresh Xero ledger
+    snapshot.  Reusing it avoids refetching every bank-transaction page for
+    each payout while preserving the same duplicate and conflict checks.
+    """
     current = HumanitixPayout.objects.get(pk=payout.pk)
     if current.xero_bank_transaction_id:
         return current
@@ -1397,7 +1403,10 @@ def post_humanitix_xero_bank_transaction(
     connection = profile.xero_connection
     if connection is None:
         raise ReconciliationValidationError("A Xero connection must be selected.")
-    correction = build_humanitix_xero_correction_preview(current)
+    correction = build_humanitix_xero_correction_preview(
+        current,
+        bank_transactions=bank_transactions,
+    )
     allowed_classifications = {
         "missing_xero_transaction",
         "already_correct",
