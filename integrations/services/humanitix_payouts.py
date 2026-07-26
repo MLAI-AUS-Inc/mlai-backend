@@ -16,6 +16,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable, TextIO
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.utils import timezone
@@ -126,6 +127,41 @@ def _normalized_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
+def _event_local_date(event: HumanitixEvent):
+    if event.start_at is None:
+        return None
+    if event.timezone_name:
+        try:
+            return event.start_at.astimezone(ZoneInfo(event.timezone_name)).date()
+        except ZoneInfoNotFoundError:
+            pass
+    return event.start_at.date()
+
+
+def _event_matches_for_row(*, organization, event_name: str, row: dict[str, Any]):
+    normalized = _normalized_name(event_name)
+    matches = [
+        candidate
+        for candidate in HumanitixEvent.objects.filter(organization=organization)
+        if _normalized_name(candidate.event_name) == normalized
+    ]
+    raw_event_date = _value(row, "event date", "event start date", "start date")
+    if len(matches) > 1 and str(raw_event_date or "").strip():
+        try:
+            event_date = _parse_date(raw_event_date)
+        except HumanitixPayoutImportError:
+            event_date = None
+        if event_date is not None:
+            dated_matches = [
+                candidate
+                for candidate in matches
+                if _event_local_date(candidate) == event_date
+            ]
+            if len(dated_matches) == 1:
+                return dated_matches, True
+    return matches, False
+
+
 def _first_nonempty(rows: list[dict[str, Any]], *aliases: str) -> Any:
     for row in rows:
         value = _value(row, *aliases)
@@ -176,16 +212,16 @@ def _event_for_row(
         if event is not None:
             return event, event.external_event_id, event_name or event.event_name, warnings
 
-        normalized = _normalized_name(event_name)
-        matches = [
-            candidate
-            for candidate in HumanitixEvent.objects.filter(organization=organization)
-            if _normalized_name(candidate.event_name) == normalized
-        ]
+        matches, matched_on_date = _event_matches_for_row(
+            organization=organization,
+            event_name=event_name,
+            row=row,
+        )
         if len(matches) == 1:
             event = matches[0]
             warnings.append(
-                f"Humanitix report event ID {external_event_id} was linked by exact event name."
+                f"Humanitix report event ID {external_event_id} was linked by exact event "
+                f"name{' and date' if matched_on_date else ''}."
             )
             return event, event.external_event_id, event_name or event.event_name, warnings
         if not event_name:
@@ -204,12 +240,11 @@ def _event_for_row(
             )
         return None, external_event_id, event_name, warnings
 
-    normalized = _normalized_name(event_name)
-    matches = [
-        event
-        for event in HumanitixEvent.objects.filter(organization=organization)
-        if _normalized_name(event.event_name) == normalized
-    ]
+    matches, _matched_on_date = _event_matches_for_row(
+        organization=organization,
+        event_name=event_name,
+        row=row,
+    )
     if len(matches) == 1:
         return matches[0], matches[0].external_event_id, event_name, warnings
     if not event_name:
