@@ -397,10 +397,19 @@ def import_payout_rows(
             "payout_reference": reference,
             "payout_date": payout_date.isoformat() if payout_date else None,
             "cleared_date": cleared_date.isoformat() if cleared_date else None,
+            "receipt_processed_date": str(
+                _first_nonempty(payout_rows, "receipt processed date") or ""
+            ),
             "currency": currency,
             "payout_amount": str(payout_amount),
             "humanitix_sales": str(humanitix_sales),
             "box_office_card_sales": str(box_office_sales),
+            "reported_ticket_sales": str(
+                _sum_money(payout_rows, "reported ticket sales")
+            ),
+            "non_humanitix_earnings_excluded": str(
+                _sum_money(payout_rows, "non-humanitix earnings excluded")
+            ),
             "refunds": str(refunds),
             "absorbed_fees": str(absorbed_fees),
             "adjustments": str(adjustments),
@@ -581,10 +590,14 @@ def parse_humanitix_payout_receipt_text(text: str) -> dict[str, Any]:
     normalized = re.sub(r"\bT\s+o\b", "To", normalized)
     normalized = re.sub(r"\bT\s+otal\b", "Total", normalized)
     normalized = re.sub(r"\bT\s+ax\b", "Tax", normalized)
-    reference = _receipt_match(
-        normalized,
-        r"Reference:\s*([A-Z0-9_-]+)",
-        label="its payout reference",
+    reference = re.sub(
+        r"[ \t]+",
+        "",
+        _receipt_match(
+            normalized,
+            r"Reference:[ \t]*([A-Z0-9_-]+(?:[ \t]+[A-Z0-9_-]+)*)[ \t]*(?:\r?\n|Generated at:)",
+            label="its payout reference",
+        ),
     )
     event_name = _receipt_match(
         normalized,
@@ -615,18 +628,44 @@ def parse_humanitix_payout_receipt_text(text: str) -> dict[str, Any]:
             )
         )
 
+    humanitix_sales = receipt_money("Sales via Humanitix payments")
+    reported_ticket_sales = receipt_money("Ticket sales")
+    add_on_sales = receipt_money("Add-on sales")
+    additional_donations = receipt_money("Additional donations")
+    # The earnings table includes manual/invoice sales that never enter this
+    # Humanitix bank payout. Keep non-ticket categories, then derive the ticket
+    # amount from the payout-specific "Humanitix payments" total.
+    attributable_ticket_sales = (
+        humanitix_sales - add_on_sales - additional_donations
+    ).quantize(MONEY_QUANTUM)
+    if attributable_ticket_sales < 0:
+        raise HumanitixPayoutImportError(
+            "Humanitix payout receipt cannot allocate its Humanitix payment sales "
+            "across ticket, add-on, and donation revenue."
+        )
+    non_humanitix_earnings = max(
+        (
+            reported_ticket_sales
+            + add_on_sales
+            + additional_donations
+            - humanitix_sales
+        ).quantize(MONEY_QUANTUM),
+        Decimal("0.00"),
+    )
+
     return {
         "payout reference": reference,
         "payout date": payout_date.isoformat() if payout_date else "",
+        "receipt processed date": payout_date.isoformat() if payout_date else "",
         "currency": "AUD",
         "payout amount": str(payout_amount),
         "event name": re.sub(r"\s+", " ", event_name).strip(),
-        "sales via humanitix payments": str(
-            receipt_money("Sales via Humanitix payments")
-        ),
-        "ticket sales": str(receipt_money("Ticket sales")),
-        "add-on sales": str(receipt_money("Add-on sales")),
-        "additional donations": str(receipt_money("Additional donations")),
+        "sales via humanitix payments": str(humanitix_sales),
+        "reported ticket sales": str(reported_ticket_sales),
+        "non-humanitix earnings excluded": str(non_humanitix_earnings),
+        "ticket sales": str(attributable_ticket_sales),
+        "add-on sales": str(add_on_sales),
+        "additional donations": str(additional_donations),
         "refunds": str(abs(receipt_money("Refunds"))),
         "absorbed humanitix fees": str(
             abs(receipt_money("Absorbed Humanitix fees"))
@@ -654,6 +693,10 @@ def import_humanitix_payout_receipt_text(
             f"Humanitix payout {existing.payout_reference} is already posted to Xero."
         )
     if existing is not None:
+        if existing.payout_date is not None:
+            row["payout date"] = existing.payout_date.isoformat()
+        if existing.cleared_date is not None:
+            row["cleared date"] = existing.cleared_date.isoformat()
         linked_events = {
             line.event
             for line in existing.lines.all()
