@@ -88,6 +88,7 @@ jobs:
           core.tests.test_request_logging \
           org_memory.tests \
           tests.test_org_memory_governance \
+          tests.test_org_memory_production_deploy \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_health_check \
@@ -180,6 +181,11 @@ jobs:
         REDIS_URL: ${{ secrets.REDIS_URL }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
+        ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION: ${{ secrets.ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION }}
+        ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY: ${{ secrets.ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY }}
+        ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST: ${{ secrets.ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST }}
+        ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL: ${{ secrets.ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL }}
+        ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL: ${{ secrets.ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL }}
       run: |
         if [ -z "$CONNECTOR_CREDENTIAL_KEYS" ]; then
           echo "::error::Required repository secret CONNECTOR_CREDENTIAL_KEYS is not configured"
@@ -214,4 +220,30 @@ jobs:
           echo "::error::Victor AI and simulated-patient credentials must be distinct"
           exit 1
         fi
+        if ! printf '%s' "$ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+          echo "::error::ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION is missing or invalid"
+          exit 1
+        fi
+        if [ "${#ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY}" -lt 32 ]; then
+          echo "::error::ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY is missing or shorter than 32 characters"
+          exit 1
+        fi
+        if [ -z "$ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL" ] || [ -z "$ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL" ]; then
+          echo "::error::Both Admin Brain production operator email secrets are required"
+          exit 1
+        fi
+        if [ "$ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL" = "$ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL" ]; then
+          echo "::error::Admin Brain production staging and activation operators must be distinct"
+          exit 1
+        fi
+        python - <<'PY'
+        import json
+        import os
+
+        manifest = json.loads(os.environ["ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST"])
+        if not isinstance(manifest, dict):
+            raise SystemExit("ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST must be a JSON object")
+        if manifest.get("organization_domain") != "mlai.au":
+            raise SystemExit("Admin Brain production approval must target mlai.au")
+        PY
         ./deploy.sh

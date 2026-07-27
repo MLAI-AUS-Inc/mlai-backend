@@ -61,6 +61,36 @@ if [ "$VICTOR_AI_ROO_SIGNING_SECRET" = "$ROO_SIM_PATIENT_KEY" ]; then
     echo "❌ Victor AI and simulated-patient credentials must be distinct."
     exit 1
 fi
+if [[ ! "${ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+    echo "❌ ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION must be supplied in the required format."
+    exit 1
+fi
+if [ -z "${ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY:-}" ] || [ "${#ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY}" -lt 32 ]; then
+    echo "❌ ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY must contain at least 32 characters."
+    exit 1
+fi
+if [ -z "${ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST:-}" ]; then
+    echo "❌ ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST must be supplied by the deployment secret store."
+    exit 1
+fi
+if [ -z "${ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL:-}" ] || [ -z "${ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL:-}" ]; then
+    echo "❌ Both Admin Brain production operator emails must be supplied by the deployment secret store."
+    exit 1
+fi
+if [ "$ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL" = "$ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL" ]; then
+    echo "❌ Admin Brain production staging and activation operators must be distinct."
+    exit 1
+fi
+python3 - <<'PY'
+import json
+import os
+
+manifest = json.loads(os.environ["ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST"])
+if not isinstance(manifest, dict):
+    raise SystemExit("Admin Brain production approval must be a JSON object")
+if manifest.get("organization_domain") != "mlai.au":
+    raise SystemExit("Admin Brain production approval must target mlai.au")
+PY
 echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)..."
 
 # 1. Sync files to the server
@@ -167,6 +197,84 @@ echo "🔐 Updating connector credential keyring (values redacted)..."
     printf "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID=%s\n" "$active_key_id" >> "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" .env
+'
+
+# Install the production pilot HMAC and its explicit rotation version without
+# exposing either value in argv or logs. The release gate fails closed if this
+# key does not match the active approval-bound deployment row.
+echo "🔐 Updating Admin Brain production allowlist key (value redacted)..."
+{
+    printf '%s\n' "$ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION"
+    printf '%s\n' "$ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY"
+} | ssh "$DEPLOY_SSH_TARGET" '
+    set -euo pipefail
+    project_dir="/root/mlai-backend"
+    mkdir -p "$project_dir"
+    cd "$project_dir"
+    umask 077
+    IFS= read -r key_version
+    IFS= read -r hmac_key
+    if ! printf "%s" "$key_version" | grep -Eq "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"; then
+        echo "Invalid Admin Brain allowlist key version" >&2
+        exit 1
+    fi
+    if [ "${#hmac_key}" -lt 32 ]; then
+        echo "Invalid Admin Brain allowlist HMAC key" >&2
+        exit 1
+    fi
+    tmp=$(mktemp .env.org-memory-key.XXXXXX)
+    if [ -f .env ]; then
+        grep -Ev "^(ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION|ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY)=" .env > "$tmp" || true
+    fi
+    printf "ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION=%s\n" "$key_version" >> "$tmp"
+    printf "ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY=%s\n" "$hmac_key" >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+'
+
+# The restricted approval and two independent operator identities live outside
+# the checkout. They are replaced atomically on every reviewed main release.
+echo "🔐 Updating Admin Brain production approval (content redacted)..."
+printf '%s' "$ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST" | ssh "$DEPLOY_SSH_TARGET" '
+    set -euo pipefail
+    operations_dir="/root/mlai-backend-operations"
+    mkdir -p "$operations_dir"
+    umask 077
+    tmp=$(mktemp "$operations_dir/.pilot-approval.XXXXXX")
+    cat > "$tmp"
+    python3 - "$tmp" <<'"'"'PY'"'"'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+if not isinstance(manifest, dict) or manifest.get("organization_domain") != "mlai.au":
+    raise SystemExit("Invalid Admin Brain production approval")
+PY
+    chmod 600 "$tmp"
+    mv "$tmp" "$operations_dir/pilot-approval.json"
+'
+
+echo "🔐 Updating Admin Brain production operators (values redacted)..."
+{
+    printf '%s\n' "$ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL"
+    printf '%s\n' "$ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL"
+} | ssh "$DEPLOY_SSH_TARGET" '
+    set -euo pipefail
+    operations_dir="/root/mlai-backend-operations"
+    mkdir -p "$operations_dir"
+    umask 077
+    IFS= read -r stage_operator
+    IFS= read -r activation_operator
+    if [ -z "$stage_operator" ] || [ -z "$activation_operator" ] || [ "$stage_operator" = "$activation_operator" ]; then
+        echo "Invalid Admin Brain production operators" >&2
+        exit 1
+    fi
+    tmp=$(mktemp "$operations_dir/.pilot-operators.XXXXXX")
+    printf "%s\n%s\n" "$stage_operator" "$activation_operator" > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$operations_dir/pilot-operators"
 '
 
 # 2. Run setup commands on the server
@@ -278,6 +386,16 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # request limits, including on hosts whose .env predates these defaults.
     upsert_env_value HEALTH_HACK_AI_MAX_PROMPT_TOKENS "12000"
     upsert_env_value HEALTH_HACK_AI_MAX_COMPLETION_TOKENS "2000"
+    # Admin Brain is deployed directly to production. Retrieval is active only
+    # for the exact approval-bound actors and private Slack contexts. Learned
+    # selector export/shadow and every mutation path remain hard-disabled.
+    upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "true"
+    upsert_env_value ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN "mlai.au"
+    upsert_env_value ORG_MEMORY_PUBLICATION_ENABLED "false"
+    upsert_env_value ORG_MEMORY_ACTIONS_ENABLED "false"
+    upsert_env_value ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED "false"
+    upsert_env_value ORG_MEMORY_SELECTOR_EXPORT_ENABLED "false"
+    upsert_env_value ORG_MEMORY_SELECTOR_SHADOW_ENABLED "false"
     # Web concurrency: gunicorn sync-worker count (read by scripts/start-web.sh).
     # Sized to droplet RAM (~250MB/worker). 16 fits the 8GB/4vCPU droplet with headroom.
     upsert_env_value GUNICORN_WORKERS "16"
@@ -417,9 +535,6 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "✅ Verifying migration readiness..."
     compose_run_web python manage.py migrate --check --noinput
 
-    echo "🔐 Verifying the Admin Roo pilot release gate..."
-    compose_run_web python manage.py check_org_memory_pilot_release_gate
-
     echo "🧠 Verifying vector installation and rebuilding memory text indexes..."
     compose_run_web python manage.py check_org_memory_search --require-vector --require-installed
     compose_run_web python manage.py rebuild_memory_search_vectors
@@ -448,6 +563,72 @@ if not index_name:
     raise SystemExit('unique_active_booking_per_user_date is missing')
 print(index_name)
 "
+
+    approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
+    approval_manifest_container="/run/org-memory-pilot-approval.json"
+    operators_file="/root/mlai-backend-operations/pilot-operators"
+    test -s "\$approval_manifest"
+    test -s "\$operators_file"
+    stage_operator=\$(sed -n '1p' "\$operators_file")
+    activation_operator=\$(sed -n '2p' "\$operators_file")
+    test -n "\$stage_operator"
+    test -n "\$activation_operator"
+    test "\$stage_operator" != "\$activation_operator"
+    approval_hash=\$(python3 - "\$approval_manifest" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+canonical = json.dumps(
+    manifest,
+    ensure_ascii=True,
+    allow_nan=False,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+PY
+)
+    allowlist_key_version=\$(read_env_value ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION)
+    approval_hash_short=\${approval_hash:0:32}
+    stage_idempotency_key="production-\${allowlist_key_version}-\${approval_hash_short}-stage"
+    activation_idempotency_key="production-\${allowlist_key_version}-\${approval_hash_short}-activate"
+
+    compose_run_web_with_approval() {
+        docker compose run -T --rm --no-deps \
+            -v "\$approval_manifest:\$approval_manifest_container:ro" \
+            web "\$@" </dev/null
+    }
+
+    echo "🔐 Applying the reviewed Admin Brain production binding..."
+    compose_run_web_with_approval python manage.py stage_org_memory_pilot \
+        --organization-domain mlai.au \
+        --approval-manifest "\$approval_manifest_container" \
+        --operator-email "\$stage_operator" \
+        --idempotency-key "\$stage_idempotency_key" \
+        --environment production \
+        --apply
+    compose_run_web_with_approval python manage.py activate_org_memory_pilot \
+        --organization-domain mlai.au \
+        --approval-manifest "\$approval_manifest_container" \
+        --operator-email "\$activation_operator" \
+        --idempotency-key "\$activation_idempotency_key" \
+        --environment production \
+        --apply
+    unset stage_operator activation_operator approval_hash approval_hash_short
+
+    echo "🔐 Verifying enforced, active, non-shadow Admin Brain production..."
+    compose_run_web python manage.py check_org_memory_pilot_release_gate \
+        --organization-domain mlai.au \
+        --require-active
+    compose_run_web python manage.py report_org_memory_pilot_deployment \
+        --organization-domain mlai.au \
+        --fail-if-ineffective
+    compose_run_web_with_approval python manage.py check_org_memory_pilot_access_matrix \
+        --organization-domain mlai.au \
+        --approval-manifest "\$approval_manifest_container"
 
     trap - ERR
 

@@ -1,9 +1,9 @@
-# Admin Brain read-only pilot rollout
+# Admin Brain read-only production rollout
 
-The implementation sequence is complete through the controlled runtime
-activation boundary. The next phase is a deliberately small read-only Admin
-Roo pilot. This runbook does not itself authorise production access, enable a
-feature flag, or modify Public Roo.
+Admin Brain deploys directly into the existing production backend. There is no
+separate staging environment and no selector-shadow phase. Access remains a
+deliberately small, approval-bound, read-only Admin Roo rollout; Public Roo is
+unchanged.
 
 `check_org_memory_pilot_readiness` consolidates the existing release gates into
 one read-only, content-free JSON report. It does not create users, approve
@@ -68,27 +68,36 @@ The operator used to stage, activate, or suspend must have an effective
 the approved pilot actors. The activation operator must also be different from
 the staging operator.
 
-`ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN` is used by the deployment-time release
-gate only when `ORG_MEMORY_QUERY_API_ENABLED=true`. A flag-on release fails
-unless that exact organisation has a current staged or active binding under
-the configured HMAC key version and every optional feature remains off. A
-flag-off release remains unaffected.
+Configure these GitHub repository secrets before merging the production
+enforcement commit:
 
-## 1. Preflight
+- `ORG_MEMORY_PILOT_ALLOWLIST_KEY_VERSION`;
+- `ORG_MEMORY_PILOT_ALLOWLIST_HMAC_KEY`;
+- `ORG_MEMORY_PRODUCTION_APPROVAL_MANIFEST`;
+- `ORG_MEMORY_PRODUCTION_STAGE_OPERATOR_EMAIL`;
+- `ORG_MEMORY_PRODUCTION_ACTIVATION_OPERATOR_EMAIL`.
 
-Run against staging first:
+The two operator accounts must be distinct, active MLAI organisation members
+with `manage_sources`, independent of the approved pilot actors. The deploy
+stores the approval and operator records mode-0600 outside the checkout and
+transports all secret values over SSH stdin.
+
+## 1. Production preflight
+
+Run the complete preflight against production before merging:
 
 ```bash
 python manage.py check_org_memory_pilot_readiness \
-  --organization-domain example.org \
-  --approval-manifest /secure/operations/example-pilot-approval.json \
+  --organization-domain mlai.au \
+  --approval-manifest /secure/operations/mlai-pilot-approval.json \
   --governance-manifest /secure/operations/provider-policies.json \
-  --environment staging \
+  --environment production \
   --fail-on-blockers
 ```
 
-Preflight expects the private query API to remain disabled and reports
-`query_api_activation_pending` as a warning. A ready preflight requires:
+A pre-deploy report may show the query activation and runtime binding as
+pending warnings. Every data, identity, source, search, evaluation, and
+governance prerequisite must otherwise be ready:
 
 - a current, exact human approval;
 - deployment, organisation, and approval provider lists to align;
@@ -114,96 +123,42 @@ Preflight expects the private query API to remain disabled and reports
 - passing Django security checks, including connector credential encryption.
 
 Missing learned-selector labels are a warning, not a blocker for the rules-
-based read-only pilot. The 3,000-label selector gate remains independent.
 
-## 2. Stage the exact approved binding
+## 2. Merge and deploy production
 
-Run the staging command without `--apply` first. It repeats the complete
-preflight and rolls back its proposed database change:
+Every push to `main` runs the official tests before the backend deploy. The
+production deploy then hard-sets this runtime shape:
 
-```bash
-python manage.py stage_org_memory_pilot \
-  --organization-domain example.org \
-  --approval-manifest /secure/operations/example-pilot-approval.json \
-  --governance-manifest /secure/operations/provider-policies.json \
-  --operator-email staging-operator@example.org \
-  --idempotency-key pilot-2026-07-stage-1 \
-  --environment production
+```dotenv
+ORG_MEMORY_QUERY_API_ENABLED=true
+ORG_MEMORY_PILOT_ORGANIZATION_DOMAIN=mlai.au
+ORG_MEMORY_PUBLICATION_ENABLED=false
+ORG_MEMORY_ACTIONS_ENABLED=false
+ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED=false
+ORG_MEMORY_SELECTOR_EXPORT_ENABLED=false
+ORG_MEMORY_SELECTOR_SHADOW_ENABLED=false
 ```
 
-Review the content-free output, then repeat the exact command with `--apply`.
-This creates an immutable staged row containing only the approval hash,
-HMAC-pseudonymised allowlist values, aggregate source counts, review expiry,
-and operator audit references. It does not enable an API or grant access.
+After migrations and while web traffic is paused, deployment repeats the full
+production readiness checks, creates the exact approval-bound logical staged
+row, and activates it with the independent second operator. Both transitions
+use stable idempotency keys derived from the canonical approval hash and HMAC
+key version, so an identical release is safely repeatable. The logical staged
+row is an audited two-person transition in the production database, not a
+separate deployment environment.
 
-Use a stable, unique idempotency key for each reviewed staging action. Reusing
-the same key with different approval data is rejected. A different open staged
-binding for the same organisation is also rejected.
-
-## 3. Deploy the live query flag
-
-Only after the staged binding and deployment change are independently
-reviewed, deploy `ORG_MEMORY_QUERY_API_ENABLED=true` to the private Admin Roo
-backend. Keep every optional publication, action, selector-export, and
-selector-shadow flag off.
-
-The query flag alone grants nobody access: the runtime permission rejects every
-request until the exact staged binding is separately activated.
-
-The production deployment runs this non-mutating command after migrations and
-before restarting the web service:
-
-```bash
-python manage.py check_org_memory_pilot_release_gate
-```
-
-Operators can repeat it explicitly after activation with the stronger stable-
-state requirement:
+Before traffic resumes, all three content-free stable-state gates must pass:
 
 ```bash
 python manage.py check_org_memory_pilot_release_gate \
-  --organization-domain example.org \
+  --organization-domain mlai.au \
   --require-active
-```
-
-## 4. Activate with an independent operator
-
-Run the activation command without `--apply` first:
-
-```bash
-python manage.py activate_org_memory_pilot \
-  --organization-domain example.org \
-  --approval-manifest /secure/operations/example-pilot-approval.json \
-  --governance-manifest /secure/operations/provider-policies.json \
-  --operator-email activation-operator@example.org \
-  --idempotency-key pilot-2026-07-activate-1 \
-  --environment production
-```
-
-The command runs live readiness while accepting only the exact staged binding
-as the activation transition. Review the output, then repeat with `--apply`.
-Activation fails if the query flag is not live, the approval has changed or
-expired, the HMAC key version differs, readiness has a blocker, or the
-activation operator is the staging operator.
-
-After activation, verify the stable content-free state:
-
-```bash
 python manage.py report_org_memory_pilot_deployment \
-  --organization-domain example.org \
+  --organization-domain mlai.au \
   --fail-if-ineffective
-
-python manage.py check_org_memory_pilot_readiness \
-  --organization-domain example.org \
-  --approval-manifest /secure/operations/example-pilot-approval.json \
-  --governance-manifest /secure/operations/provider-policies.json \
-  --environment production \
-  --live \
-  --fail-on-blockers
-
 python manage.py check_org_memory_pilot_access_matrix \
-  --organization-domain example.org \
-  --approval-manifest /secure/operations/example-pilot-approval.json
+  --organization-domain mlai.au \
+  --approval-manifest /root/mlai-backend-operations/pilot-approval.json
 ```
 
 The access-matrix gate is non-mutating. It binds the active deployment back to
@@ -233,13 +188,16 @@ response contains only a schema version, `ready`, and a stable code. The Roo
 runner checks expected 200 and 401/403 outcomes using aggregate counters and
 never sends a query body.
 
-An active row grants access only when the signed Admin Roo assertion contains
+The deploy fails and restores the prior web service if any approval,
+connection, evidence, evaluation, reconciliation, principal, actor, private
+context, active-binding, or non-shadow invariant fails. An active row grants
+access only when the signed Admin Roo assertion contains
 an approved Slack actor and an exact approved private channel, or a DM for that
 same approved actor. The ordinary membership, capability, service-principal,
 source, classification, and ACL checks still apply. Public Roo and public
 Slack contexts continue to fail at independent boundaries.
 
-## 5. Evidence collection
+## 3. Evidence collection
 
 During the pilot, collect query traces, explicit relevance/correctness/staleness
 feedback, citation and abstention audits, latency, freshness, cost, and access-
