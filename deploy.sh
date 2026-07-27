@@ -10,6 +10,7 @@ DROPLET_IP="209.38.85.60"
 DEPLOY_SSH_TARGET="${DEPLOY_SSH_TARGET:-root@$DROPLET_IP}"
 PROJECT_DIR="/root/mlai-backend"
 APP_RELEASE="${APP_RELEASE:-$(git rev-parse --short=12 HEAD 2>/dev/null || date +%Y%m%d%H%M)}"
+APP_RELEASE_SHORT="${APP_RELEASE:0:12}"
 
 if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
@@ -476,14 +477,14 @@ print(index_name)
     release_ok=0
     for attempt in \$(seq 1 12); do
         health_body=\$(curl -fsS https://api.mlai.au/healthz/ready || true)
-        if printf '%s\n' "\$health_body" | grep -F "\"release\": \"$APP_RELEASE\"" >/dev/null; then
+        if printf '%s\n' "\$health_body" | grep -F "\"release\": \"$APP_RELEASE_SHORT\"" >/dev/null; then
             release_ok=1
             break
         fi
         sleep 5
     done
     if [ "\$release_ok" != "1" ]; then
-        echo "Expected /healthz/ready to report release $APP_RELEASE"
+        echo "Expected /healthz/ready to report release $APP_RELEASE_SHORT for $APP_RELEASE"
         echo "\$health_body"
         exit 1
     fi
