@@ -35,9 +35,12 @@ from integrations.services.linear_meeting_actions import (
     LinearMeetingGraphQLError,
     LinearMeetingIdempotencyConflictError,
     LinearMeetingRateLimitError,
+    LinearMeetingSizingConflictError,
     create_linear_meeting_issue,
     create_linear_meeting_project_update,
+    get_linear_issue_receipt,
     get_linear_meeting_context,
+    get_linear_project_sizing_context,
 )
 from startup_updates.data_deletion import disconnect_gmail_for_user
 
@@ -55,6 +58,14 @@ def _linear_meeting_error_response(exc):
             {
                 "detail": str(exc),
                 "code": "linear_issue_creation_in_progress",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, LinearMeetingSizingConflictError):
+        return Response(
+            {
+                "detail": str(exc),
+                "code": "linear_studio_sizing_stale",
             },
             status=status.HTTP_409_CONFLICT,
         )
@@ -718,10 +729,50 @@ class LinearMeetingIssueCreateView(APIView):
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearMeetingSizingConflictError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class LinearProjectSizingContextView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, project_id):
+        try:
+            payload = get_linear_project_sizing_context(
+                project_id,
+                update_limit=request.query_params.get("update_limit") or 5,
+                active_issue_limit=request.query_params.get("active_issue_limit") or 40,
+                terminal_issue_limit=request.query_params.get("terminal_issue_limit") or 10,
+                precedent_limit=request.query_params.get("precedent_limit") or 20,
+            )
+        except (
+            LinearMeetingConfigurationError,
+            LinearMeetingRateLimitError,
+            LinearMeetingGraphQLError,
+            ValueError,
+        ) as exc:
+            return _linear_meeting_error_response(exc)
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class LinearMeetingIssueReceiptView(APIView):
+    permission_classes = [HasRooApiKey]
+
+    def get(self, request, idempotency_key):
+        try:
+            payload = get_linear_issue_receipt(idempotency_key)
+        except ValueError as exc:
+            return _linear_meeting_error_response(exc)
+        response_status = (
+            status.HTTP_404_NOT_FOUND
+            if payload.get("status") == "not_found"
+            else status.HTTP_200_OK
+        )
+        return Response(payload, status=response_status)
 
 
 class LinearMeetingProjectUpdateCreateView(APIView):
