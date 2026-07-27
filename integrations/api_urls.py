@@ -187,6 +187,16 @@ urlpatterns = [
         name='linear_meeting_issue_create',
     ),
     path(
+        'linear/issues/receipts/<str:idempotency_key>',
+        api_views_connectors.LinearMeetingIssueReceiptView.as_view(),
+        name='linear_meeting_issue_receipt',
+    ),
+    path(
+        'linear/projects/<str:project_id>/sizing-context',
+        api_views_connectors.LinearProjectSizingContextView.as_view(),
+        name='linear_project_sizing_context',
+    ),
+    path(
         'linear/project-updates',
         api_views_connectors.LinearMeetingProjectUpdateCreateView.as_view(),
         name='linear_meeting_project_update_create',

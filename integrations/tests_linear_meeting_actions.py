@@ -24,6 +24,7 @@ class FakeLinearResponse:
     ROO_API_KEY="roo-api-key",
     INTERNAL_API_KEY="",
     MLAI_API_KEY="",
+    LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="off",
 )
 class LinearMeetingActionsApiTests(SimpleTestCase):
     def setUp(self):
@@ -389,6 +390,7 @@ class LinearMeetingActionsApiTests(SimpleTestCase):
     ROO_API_KEY="roo-api-key",
     INTERNAL_API_KEY="",
     MLAI_API_KEY="",
+    LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="off",
 )
 class LinearMeetingIssueIdempotencyTests(TestCase):
     def setUp(self):
@@ -460,3 +462,337 @@ class LinearMeetingIssueIdempotencyTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("idempotency_key", response.json()["detail"])
+
+    @override_settings(LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="required")
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_required_studio_sizing_is_enforced_and_persisted(self, mock_post):
+        from integrations.models import LinearIssueCreationReceipt
+
+        sizing_metadata = {
+            "effortLabel": "Extra Small (XS)",
+            "rationale": "This is a well-scoped email expected to take about 15 minutes.",
+            "projectId": "project-studio",
+            "projectNameAtAssessment": "[Studio] Founder Games",
+            "rubricVersion": "studio-effort-v1",
+        }
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "project": {
+                            "id": "project-studio",
+                            "name": "[Studio] Founder Games",
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issueLabels": {
+                            "nodes": [
+                                {
+                                    "id": "effort-xs",
+                                    "name": "Extra Small (XS)",
+                                    "team": None,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "issueCreate": {
+                            "success": True,
+                            "issue": {
+                                "id": "issue-1",
+                                "identifier": "STU-1",
+                                "title": "Email the Founder Games run sheet",
+                                "url": "https://linear.app/acme/issue/STU-1",
+                            },
+                        }
+                    }
+                }
+            ),
+        ]
+        payload = {
+            "title": "Email the Founder Games run sheet",
+            "team_id": "team-1",
+            "project_id": "project-studio",
+            "label_ids": ["effort-xs"],
+            "idempotency_key": "s" * 64,
+            "sizing_metadata": sizing_metadata,
+        }
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            payload,
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["sizingMetadata"], sizing_metadata)
+        self.assertTrue(response.json()["sizingEnforcement"]["valid"])
+        linear_input = mock_post.call_args_list[-1].kwargs["json"]["variables"]["input"]
+        self.assertNotIn("sizing_metadata", linear_input)
+        self.assertEqual(linear_input["labelIds"], ["effort-xs"])
+        receipt = LinearIssueCreationReceipt.objects.get(idempotency_key="s" * 64)
+        self.assertEqual(receipt.linear_issue_payload["sizingMetadata"], sizing_metadata)
+
+        replay = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            payload,
+            format="json",
+            **self.auth_headers,
+        )
+        self.assertEqual(replay.status_code, 201)
+        self.assertTrue(replay.json()["idempotentReplay"])
+        self.assertEqual(replay.json()["sizingMetadata"], sizing_metadata)
+        self.assertEqual(mock_post.call_count, 3)
+
+    @override_settings(LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="required")
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_required_studio_sizing_fails_closed_and_marks_receipt_failed(self, mock_post):
+        from integrations.models import LinearIssueCreationReceipt
+
+        mock_post.side_effect = [
+            FakeLinearResponse(
+                {
+                    "data": {
+                        "project": {
+                            "id": "project-studio",
+                            "name": "[Studio] Founder Games",
+                        }
+                    }
+                }
+            ),
+            FakeLinearResponse({"data": {"issueLabels": {"nodes": []}}}),
+        ]
+
+        response = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            {
+                "title": "Ambiguous Studio task",
+                "team_id": "team-1",
+                "project_id": "project-studio",
+                "idempotency_key": "f" * 64,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sizing_metadata", response.json()["detail"])
+        receipt = LinearIssueCreationReceipt.objects.get(idempotency_key="f" * 64)
+        self.assertEqual(receipt.status, LinearIssueCreationReceipt.Status.FAILED)
+        self.assertIn("ValueError", receipt.last_error)
+
+    @override_settings(LINEAR_STUDIO_SIZING_ENFORCEMENT_MODE="required")
+    @patch("integrations.services.linear_meeting_actions.http_requests.post")
+    def test_project_rename_after_studio_preview_returns_conflict(self, mock_post):
+        from integrations.models import LinearIssueCreationReceipt
+
+        mock_post.return_value = FakeLinearResponse(
+            {
+                "data": {
+                    "project": {
+                        "id": "project-studio",
+                        "name": "Founder Games",
+                    }
+                }
+            }
+        )
+        response = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            {
+                "title": "Send the run sheet",
+                "team_id": "team-1",
+                "project_id": "project-studio",
+                "label_ids": ["effort-s"],
+                "idempotency_key": "r" * 64,
+                "sizing_metadata": {
+                    "effortLabel": "Small (S)",
+                    "rationale": "The remaining edit should take about 45 minutes.",
+                    "projectId": "project-studio",
+                    "projectNameAtAssessment": "[Studio] Founder Games",
+                    "rubricVersion": "studio-effort-v1",
+                },
+            },
+            format="json",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "linear_studio_sizing_stale")
+        receipt = LinearIssueCreationReceipt.objects.get(idempotency_key="r" * 64)
+        self.assertEqual(receipt.status, LinearIssueCreationReceipt.Status.FAILED)
+
+    def test_pending_idempotency_conflict_returns_409_and_receipt_can_be_read(self):
+        from integrations.models import LinearIssueCreationReceipt
+
+        receipt = LinearIssueCreationReceipt.objects.create(
+            idempotency_key="p" * 64,
+            request_payload={
+                "title": "In flight",
+                "team_id": "team-1",
+                "sizing_metadata": {"effortLabel": "Small (S)"},
+            },
+        )
+
+        conflict = self.client.post(
+            "/api/v1/integrations/linear/issues",
+            {
+                "title": "In flight",
+                "team_id": "team-1",
+                "idempotency_key": "p" * 64,
+            },
+            format="json",
+            **self.auth_headers,
+        )
+        lookup = self.client.get(
+            f"/api/v1/integrations/linear/issues/receipts/{receipt.idempotency_key}",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["code"], "linear_issue_creation_in_progress")
+        self.assertEqual(lookup.status_code, 200)
+        self.assertEqual(lookup.json()["status"], "pending")
+        self.assertEqual(lookup.json()["sizingMetadata"]["effortLabel"], "Small (S)")
+
+
+@override_settings(
+    LINEAR_API_KEY="lin-api-key",
+    ROO_API_KEY="roo-api-key",
+    INTERNAL_API_KEY="",
+    MLAI_API_KEY="",
+)
+class LinearProjectSizingContextApiTests(SimpleTestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.auth_headers = {"HTTP_X_API_KEY": "roo-api-key"}
+
+    @patch("integrations.api_views_connectors.get_linear_project_sizing_context")
+    def test_project_sizing_context_forwards_bounded_options(self, mock_context):
+        mock_context.return_value = {
+            "project": {"id": "project-studio", "name": "[Studio] Founder Games"},
+            "projectUpdates": {"nodes": []},
+            "activeIssues": {"nodes": []},
+            "terminalReferences": {"nodes": []},
+            "sizingPrecedents": {"nodes": []},
+        }
+
+        response = self.client.get(
+            "/api/v1/integrations/linear/projects/project-studio/sizing-context"
+            "?update_limit=7&active_issue_limit=45&terminal_issue_limit=12&precedent_limit=22",
+            **self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["project"]["name"], "[Studio] Founder Games")
+        mock_context.assert_called_once_with(
+            "project-studio",
+            update_limit="7",
+            active_issue_limit="45",
+            terminal_issue_limit="12",
+            precedent_limit="22",
+        )
+
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch(
+        "integrations.services.linear_meeting_actions._fetch_linear_project_sizing_detail"
+    )
+    def test_sizing_context_classifies_remaining_and_reference_work(
+        self,
+        mock_project_detail,
+        mock_labels,
+    ):
+        from integrations.services.linear_meeting_actions import (
+            get_linear_project_sizing_context,
+        )
+
+        mock_labels.return_value = [
+            {"id": "effort-s", "name": "Small (S)", "team": None}
+        ]
+        mock_project_detail.return_value = (
+            {
+                "id": "project-studio",
+                "name": "[Studio] Founder Games",
+                "progress": 0.6,
+                "projectUpdates": {
+                    "nodes": [{"id": "update-1", "body": "The run sheet is drafted."}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "active-1",
+                            "identifier": "STU-1",
+                            "title": "Send the run sheet",
+                            "state": {"name": "In Progress", "type": "started"},
+                            "labels": {
+                                "nodes": [{"id": "effort-s", "name": "Small (S)"}]
+                            },
+                            "relations": {
+                                "nodes": [
+                                    {
+                                        "type": "blocks",
+                                        "relatedIssue": {
+                                            "id": "related-1",
+                                            "identifier": "STU-2",
+                                            "title": "Confirm venue",
+                                            "state": {
+                                                "name": "Todo",
+                                                "type": "unstarted",
+                                            },
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                            "inverseRelations": {"nodes": [], "pageInfo": {}},
+                        },
+                        {
+                            "id": "done-1",
+                            "identifier": "STU-3",
+                            "title": "Draft the run sheet",
+                            "state": {"name": "Done", "type": "completed"},
+                            "labels": {"nodes": []},
+                            "relations": {"nodes": [], "pageInfo": {}},
+                            "inverseRelations": {"nodes": [], "pageInfo": {}},
+                        },
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            },
+            True,
+        )
+
+        payload = get_linear_project_sizing_context("project-studio")
+
+        self.assertEqual(payload["activeIssues"]["nodes"][0]["id"], "active-1")
+        self.assertEqual(
+            payload["activeIssues"]["nodes"][0]["relations"]["edges"][0]["type"],
+            "blocks",
+        )
+        self.assertEqual(
+            payload["terminalReferences"]["nodes"][0]["id"],
+            "done-1",
+        )
+        self.assertEqual(
+            payload["sizingPrecedents"]["nodes"][0]["id"],
+            "active-1",
+        )
+        self.assertEqual(
+            payload["effortLabelRegistry"]["expectedNames"],
+            [
+                "Extra Small (XS)",
+                "Small (S)",
+                "Medium (M)",
+                "Large (L)",
+                "Extra Large (XL)",
+            ],
+        )
