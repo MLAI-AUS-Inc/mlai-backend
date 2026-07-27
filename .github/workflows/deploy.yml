@@ -80,6 +80,8 @@ jobs:
           integrations.tests_github_app_probe \
           integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
+          integrations.tests_smart_scan \
+          integrations.tests_http_client \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
