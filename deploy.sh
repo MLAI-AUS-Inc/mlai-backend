@@ -215,6 +215,9 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     upsert_env_value GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-analytics"
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
+    # Keep Slack's daily digest to three genuinely featured jobs. Other matches
+    # remain available on the public daily jobs page.
+    upsert_env_value JOBS_TOP_PICK_LIMIT "3"
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model

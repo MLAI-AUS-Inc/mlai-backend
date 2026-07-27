@@ -28,7 +28,7 @@ from jobs.services.slack import format_slack_message, post_slack_message
     JOBS_SCHEDULER_POST_TO_NOTION=False,
     JOBS_SCHEDULER_MAX_PAGES=1,
     JOBS_SCHEDULER_PER_KEYWORD_LIMIT=1,
-    JOBS_TOP_PICK_LIMIT=7,
+    JOBS_TOP_PICK_LIMIT=3,
     JOBS_TRIGGER_TOKEN="jobs-trigger-secret",
 )
 class JobsSchedulerTests(TestCase):
@@ -100,7 +100,7 @@ class JobsSchedulerTests(TestCase):
         self.assertIn('"research_automations"', output)
         self.assertIn('"queued": 2', output)
 
-    def test_slack_payload_is_capped_to_seven_jobs(self):
+    def test_slack_payload_is_compact_and_capped_to_three_jobs(self):
         run = JobRun.objects.create(run_date="2026-05-04", run_id="2026-05-04-slack-test")
         for rank in range(1, 10):
             JobListing.objects.create(
@@ -117,15 +117,59 @@ class JobsSchedulerTests(TestCase):
                 why_selected="strong AI relevance, Australia fit",
             )
 
-        payload = format_slack_message(run.run_date, list(run.jobs.order_by("rank")), "https://example.com/all")
+        payload = format_slack_message(
+            run.run_date,
+            list(run.jobs.order_by("rank")),
+            "https://example.com/all",
+            matched_count=9,
+        )
 
-        self.assertIn("7. AI Engineer 7", payload["text"])
-        self.assertNotIn("8. AI Engineer 8", payload["text"])
-        self.assertNotIn("9. AI Engineer 9", payload["text"])
-        self.assertIn("blocks", payload)
+        self.assertIn("Top 3 AI + startup jobs", payload["text"])
+        self.assertIn("3. <https://example.com/jobs/3|AI Engineer 3>", payload["text"])
+        self.assertNotIn("AI Engineer 4", payload["text"])
+        self.assertIn("9 matched jobs today", payload["text"])
+        self.assertEqual(len(payload["blocks"]), 5)
         self.assertEqual(payload["blocks"][0]["type"], "header")
-        self.assertIn("Job link:", str(payload["blocks"]))
-        self.assertIn("Apply now", str(payload["blocks"]))
+        self.assertEqual(payload["blocks"][1]["type"], "section")
+        self.assertEqual(payload["blocks"][2]["type"], "section")
+        self.assertEqual(payload["blocks"][3]["type"], "section")
+        self.assertEqual(payload["blocks"][4]["type"], "context")
+        self.assertNotIn("fields", str(payload["blocks"]))
+        self.assertNotIn("Source:", str(payload["blocks"]))
+        self.assertNotIn("Job link:", str(payload["blocks"]))
+        self.assertIn("View all matched jobs", str(payload["blocks"]))
+
+    @override_settings(JOBS_PUBLIC_BASE_URL="https://api.example.com")
+    def test_slack_payload_endpoint_uses_canonical_daily_page(self):
+        run = JobRun.objects.create(
+            run_date="2026-05-04",
+            run_id="2026-05-04-canonical-slack-link",
+            full_list_url="https://notion.so/top-picks-only",
+            deduped_count=8,
+        )
+        JobListing.objects.create(
+            run=run,
+            run_date=run.run_date,
+            title="AI Engineer",
+            company_name="Example AI Co",
+            location="Melbourne, Australia",
+            description="Build artificial intelligence and machine learning systems.",
+            job_url="https://example.com/jobs/ai-engineer",
+            source_name="SEEK",
+            dedupe_key="ai-engineer|example|canonical-link",
+            ai_score=1.0,
+            ranking_score=0.9,
+            is_top_pick=True,
+            rank=1,
+        )
+
+        response = APIClient().get(f"/api/v1/jobs/runs/{run.run_id}/slack-payload")
+
+        self.assertEqual(response.status_code, 200)
+        expected_url = f"https://api.example.com/api/v1/jobs/daily/{run.run_date}"
+        self.assertIn(expected_url, response.data["text"])
+        self.assertIn("8 matched jobs today", response.data["text"])
+        self.assertNotIn("notion.so", str(response.data))
 
     @patch("jobs.services.slack._slack_service")
     def test_slack_post_passes_block_layout_to_slack_service(self, mock_slack_service):
@@ -238,7 +282,7 @@ class JobsSchedulerTests(TestCase):
         payload = format_slack_message(run.run_date, [retail, valid], "https://example.com/all")
 
         self.assertNotIn("Senior Retail Category Manager", payload["text"])
-        self.assertIn("1. AI Engineer", payload["text"])
+        self.assertIn("1. <https://example.com/jobs/ai-engineer|AI Engineer>", payload["text"])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
     def test_previous_top_pick_is_not_repeated_even_when_url_changes(self, _mock_judge):
@@ -286,6 +330,41 @@ class JobsSchedulerTests(TestCase):
         self.assertEqual(selected, [])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
+    def test_default_top_jobs_marks_only_three_and_keeps_other_matches(self, _mock_judge):
+        run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-three-top-jobs")
+        jobs = []
+        for index in range(4):
+            jobs.append(
+                JobListing.objects.create(
+                    run=run,
+                    run_date=run.run_date,
+                    title=f"AI Engineer {index + 1}",
+                    company_name=f"Example AI Company {index + 1}",
+                    location="Remote - worldwide",
+                    description="Build artificial intelligence and machine learning systems.",
+                    job_url=f"https://example.com/jobs/top-three-ai-engineer-{index + 1}",
+                    source_name="Himalayas",
+                    dedupe_key=f"top-three-ai-engineer-{index + 1}|example",
+                    ai_score=1.0,
+                    ranking_score=0.9 - index / 100,
+                )
+            )
+
+        selected = job_pipeline.select_top_jobs(run)
+
+        self.assertEqual(len(selected), 3)
+        self.assertEqual([job.rank for job in selected], [1, 2, 3])
+        jobs[3].refresh_from_db()
+        self.assertFalse(jobs[3].is_top_pick)
+        self.assertIsNone(jobs[3].rank)
+
+        response = APIClient().get(f"/api/v1/jobs/daily/{run.run_date}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI Engineer 4", response.content.decode())
+
+    @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
+    @override_settings(JOBS_TOP_PICK_LIMIT=7)
     def test_top_jobs_fills_seven_slots_from_screened_candidates_when_source_mix_is_limited(self, _mock_judge):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-seven-screened-jobs")
         for index in range(7):
@@ -310,6 +389,7 @@ class JobsSchedulerTests(TestCase):
         self.assertTrue(all(job.is_top_pick for job in selected))
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
+    @override_settings(JOBS_TOP_PICK_LIMIT=7)
     def test_top_jobs_prefers_ai_roles_before_startup_only_broad_roles(self, _mock_judge):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-ai-before-startup-only")
         for index in range(7):
@@ -349,6 +429,7 @@ class JobsSchedulerTests(TestCase):
         self.assertNotIn("Product Designer", [job.title for job in selected])
 
     @patch("jobs.services.job_pipeline.judge_top_candidates", side_effect=lambda jobs, candidate_limit: (jobs, {}))
+    @override_settings(JOBS_TOP_PICK_LIMIT=7)
     def test_top_jobs_uses_startup_only_broad_role_only_as_fill_slot(self, _mock_judge):
         run = JobRun.objects.create(run_date="2026-05-31", run_id="2026-05-31-startup-fill-slot")
         for index in range(6):

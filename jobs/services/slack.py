@@ -13,95 +13,130 @@ def _slack_service():
     return SlackService
 
 
-def format_slack_message(run_date: str, top_jobs: list[JobListing], full_list_url: str) -> dict:
+def format_slack_message(
+    run_date: str,
+    top_jobs: list[JobListing],
+    full_list_url: str,
+    *,
+    matched_count: int | None = None,
+) -> dict:
     try:
         date_value = datetime.fromisoformat(run_date)
         parsed_date = date_value.strftime("%A, %d %B %Y").replace(", 0", ", ")
     except ValueError:
         parsed_date = run_date
-    lines = [
-        f"Today's best AI + startup jobs for {parsed_date}",
-        "Fresh roles with the strongest Australia, remote, AI, and startup fit.",
-        "",
-    ]
 
     screened_jobs = [job for job in top_jobs if apply_publish_screen(job)][: settings.jobs_top_pick_limit]
-    for display_rank, job in enumerate(screened_jobs[: settings.jobs_top_pick_limit], start=1):
-        title = job.title or "Untitled role"
-        company = job.company_name or "Unknown company"
-        location = job.location or "Location not listed"
-        why = job.why_selected or "good match for today"
-        link = job.apply_url or job.job_url
-        lines.append(f"{display_rank}. {title} - {company} - {location}")
-        lines.append(f"   {why}")
-        lines.append(f"   <{link}|Apply now>")
+    digest_title = _digest_title(parsed_date, len(screened_jobs))
+    lines = [digest_title, ""]
+    for display_rank, job in enumerate(screened_jobs, start=1):
+        lines.append(_job_heading(job, display_rank))
+        lines.append(_job_details(job))
+        lines.append("")
+    lines.append(_full_list_footer(full_list_url, matched_count))
 
-    lines.extend(["", f"More opportunities: <{full_list_url}|View all matched jobs>"])
     return {
         "channel": settings.slack_jobs_channel,
         "text": "\n".join(lines),
-        "blocks": build_slack_blocks(parsed_date, screened_jobs, full_list_url),
+        "blocks": build_slack_blocks(
+            parsed_date,
+            screened_jobs,
+            full_list_url,
+            matched_count=matched_count,
+        ),
     }
 
 
-def build_slack_blocks(run_date_label: str, jobs: list[JobListing], full_list_url: str) -> list[dict]:
+def build_slack_blocks(
+    run_date_label: str,
+    jobs: list[JobListing],
+    full_list_url: str,
+    *,
+    matched_count: int | None = None,
+) -> list[dict]:
     blocks: list[dict] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Today's best AI + startup jobs for {run_date_label}",
+                "text": _digest_title(run_date_label, len(jobs)),
                 "emoji": True,
             },
         },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "Fresh roles with the strongest Australia, remote, AI, and startup fit.",
-            },
-        },
     ]
-
     for display_rank, job in enumerate(jobs, start=1):
-        title = slack_escape(job.title or "Untitled role")
-        company = slack_escape(job.company_name or "Unknown company")
-        location = slack_escape(job.location or "Location not listed")
-        source = slack_escape(job.source_name or "Unknown source")
-        why = slack_escape(job.why_selected or "good match for today")
-        link = job.apply_url or job.job_url
-        link_text = f"<{link}|Apply now>" if link else "Not listed"
-        blocks.extend(
-            [
-                {"type": "divider"},
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*#{display_rank} {title}*"},
-                    "fields": [
-                        {"type": "mrkdwn", "text": f"*Company:*\n{company}"},
-                        {"type": "mrkdwn", "text": f"*Location:*\n{location}"},
-                        {"type": "mrkdwn", "text": f"*Source:*\n{source}"},
-                        {"type": "mrkdwn", "text": f"*Why selected:*\n{why}"},
-                        {"type": "mrkdwn", "text": f"*Job link:*\n{link_text}"},
-                    ],
-                },
-            ]
-        )
-
-    blocks.extend(
-        [
-            {"type": "divider"},
+        blocks.append(
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*More opportunities:* <{full_list_url}|View all matched jobs>"},
-            },
-        ]
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{_job_heading(job, display_rank)}\n{_job_details(job)}",
+                },
+            }
+        )
+    if not jobs:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_No screened matches available._",
+                },
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": _full_list_footer(full_list_url, matched_count),
+                }
+            ],
+        },
     )
-    return blocks[:50]
+    return blocks
 
 
-def slack_escape(value: str) -> str:
-    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _digest_title(run_date_label: str, job_count: int) -> str:
+    noun = "job" if job_count == 1 else "jobs"
+    return f"Top {job_count} AI + startup {noun} · {run_date_label}"
+
+
+def _job_heading(job: JobListing, display_rank: int) -> str:
+    title = slack_escape(job.title or "Untitled role", limit=140)
+    company = slack_escape(job.company_name or "Unknown company", limit=80)
+    link = job.apply_url or job.job_url
+    linked_title = f"<{link}|{title}>" if link else title
+    return f"*{display_rank}. {linked_title}* — {company}"
+
+
+def _job_details(job: JobListing) -> str:
+    location = slack_escape(job.location or "Location not listed", limit=100)
+    why = slack_escape(job.why_selected or "Good match for today", limit=240)
+    return f"{location} · {why}"
+
+
+def _full_list_footer(full_list_url: str, matched_count: int | None) -> str:
+    if matched_count is None:
+        summary = "More opportunities"
+    else:
+        noun = "job" if matched_count == 1 else "jobs"
+        summary = f"{matched_count} matched {noun} today"
+    if not full_list_url:
+        return summary
+    return f"{summary} · <{full_list_url}|View all matched jobs →>"
+
+
+def slack_escape(value: str, *, limit: int | None = None) -> str:
+    escaped = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if limit is None or len(escaped) <= limit:
+        return escaped
+
+    truncated = escaped[: max(0, limit - 1)].rstrip()
+    if truncated.rfind("&") > truncated.rfind(";"):
+        truncated = truncated[: truncated.rfind("&")].rstrip()
+    return truncated + "…"
 
 
 def post_slack_message(payload: dict) -> tuple[bool, str | None]:

@@ -15,7 +15,7 @@ from core.permissions import HasRooApiKey
 from .conf import settings
 from .models import JobListing, JobRun
 from .serializers import DailyRunRequestSerializer, JobListingSerializer
-from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date
+from .services.job_pipeline import enqueue_run_from_request, latest_run_for_date, public_daily_jobs_url
 from .services.slack import format_slack_message
 
 VALID_BUCKETS = {"australian_ai", "australian_startup", "remote_ai", "remote_startup"}
@@ -140,7 +140,14 @@ class JobRunSlackPayloadView(APIView):
         top_jobs = list(JobListing.objects.filter(run=run, is_top_pick=True).order_by("rank"))
         if not top_jobs:
             raise Http404("Run has no top jobs yet")
-        return Response(format_slack_message(run.run_date, top_jobs, run.full_list_url or ""))
+        return Response(
+            format_slack_message(
+                run.run_date,
+                top_jobs,
+                public_daily_jobs_url(run.run_date),
+                matched_count=run.deduped_count,
+            )
+        )
 
 
 class JobsHistoryView(APIView):

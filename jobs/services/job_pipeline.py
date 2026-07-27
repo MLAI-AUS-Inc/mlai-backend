@@ -95,7 +95,7 @@ def create_run(
 ) -> JobRun:
     run_date = run_date or melbourne_today()
     run_id = f"{run_date}-{uuid.uuid4().hex[:8]}"
-    full_list_url = f"{settings.public_base_url}/api/v1/jobs/daily/{run_date}"
+    full_list_url = public_daily_jobs_url(run_date)
     return JobRun.objects.create(
         run_id=run_id,
         run_date=run_date,
@@ -109,6 +109,10 @@ def create_run(
         per_keyword_limit=per_keyword_limit,
         trigger_source=trigger_source,
     )
+
+
+def public_daily_jobs_url(run_date: str) -> str:
+    return f"{settings.public_base_url}/api/v1/jobs/daily/{run_date}"
 
 
 def latest_run_for_date(run_date: str) -> JobRun | None:
@@ -511,8 +515,8 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
         )
     candidates.sort(key=lambda job: (-job.ranking_score, job.id))
     # Jobs already shown as a top pick on a previous day are excluded outright, not
-    # used as a fallback to pad out to `limit` - a light day posts fewer than 7
-    # rather than repeating an old pick (Slack history already has it).
+    # used as a fallback to pad out to `limit` - a light day posts fewer than the
+    # configured limit rather than repeating an old pick (Slack history already has it).
     unseen_candidates = [
         job
         for job in candidates
@@ -560,7 +564,7 @@ def select_top_jobs(run: JobRun, limit: int | None = None) -> list[JobListing]:
     unseen_startup_fallbacks = [job for job in unseen_candidates if float(job.ai_score or 0.0) < 0.35]
 
     # Fresh AI/data/ML roles are the primary digest. Source/company diversity is
-    # softened only after score-first passes fail to fill the seven slots.
+    # softened only after score-first passes fail to fill the configured slots.
     pick_from(unseen_ai_candidates, max_per_source=2)
     pick_from(unseen_ai_candidates, max_per_source=3)
     pick_from(unseen_ai_candidates, max_per_source=None)
@@ -623,7 +627,12 @@ def run_daily_jobs(
                 run.full_list_url = notion_url
 
         if post_to_slack and top_jobs:
-            payload = format_slack_message(run.run_date, top_jobs, run.full_list_url or "")
+            payload = format_slack_message(
+                run.run_date,
+                top_jobs,
+                public_daily_jobs_url(run.run_date),
+                matched_count=run.deduped_count,
+            )
             posted, slack_error = post_slack_message(payload)
             if posted:
                 run.slack_posted_at = timezone.now()

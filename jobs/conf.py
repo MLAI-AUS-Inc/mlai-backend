@@ -75,7 +75,7 @@ class JobsSettings:
 
     @property
     def jobs_top_pick_limit(self) -> int:
-        return int(getattr(django_settings, "JOBS_TOP_PICK_LIMIT", 7))
+        return int(getattr(django_settings, "JOBS_TOP_PICK_LIMIT", 3))
 
     @property
     def notion_top_pick_limit(self) -> int:
