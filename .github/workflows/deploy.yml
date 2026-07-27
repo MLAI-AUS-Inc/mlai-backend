@@ -33,9 +33,6 @@ jobs:
 
     - name: Validate organisational-memory governance
       env:
-        APP_ENV: production
-        SECRET_KEY: ci-governance-validation-placeholder-not-a-real-secret
-        REDIS_URL: redis://127.0.0.1:6379/15
         ORG_MEMORY_ENABLED_PROVIDERS: ""
       run: python manage.py validate_org_memory_governance --environment production
 
