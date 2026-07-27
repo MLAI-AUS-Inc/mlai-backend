@@ -2340,6 +2340,8 @@ def _upsert_xero_repeating_invoices(connection: ExternalServiceConnection, invoi
         if not external_record_id:
             continue
         schedule = _as_dict(invoice.get("Schedule") or invoice.get("schedule"))
+        schedule_unit = _nested_text(schedule, "Unit", "unit").upper() or "MONTHLY"
+        schedule_period = _nested_text(schedule, "Period", "period") or "1"
         defaults = {
             "record_type": ExternalFinancialRecord.RECORD_XERO_REPEATING_INVOICE,
             "connection": connection,
@@ -2359,7 +2361,9 @@ def _upsert_xero_repeating_invoices(connection: ExternalServiceConnection, invoi
             ),
             "description": _xero_invoice_description(invoice) or "Xero repeating invoice",
             "merchant_name": _xero_contact_name(invoice),
-            "category": "repeating_invoice",
+            # Only the recurrence cadence is exposed to aggregate consumers;
+            # raw contact/invoice payloads stay outside organisational memory.
+            "category": f"recurrence:{schedule_unit}:{schedule_period}",
             "class_name": _nested_text(invoice, "Type", "type"),
             "raw_payload": invoice,
         }
@@ -3267,6 +3271,22 @@ def _linear_graphql_request(
         raise ConnectorOAuthError(message)
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def linear_graphql_request(
+    connection: ExternalServiceConnection,
+    query: str,
+    variables: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Run an authenticated Linear GraphQL operation for reviewed backend adapters."""
+
+    if connection.provider != ExternalServiceProvider.LINEAR:
+        raise ConnectorConfigurationError("Connection is not a Linear connection.")
+    if not connection.organization_id:
+        raise ConnectorConfigurationError(
+            "Linear connection is not linked to an organization."
+        )
+    return _linear_graphql_request(connection, query, variables)
 
 
 def _linear_source_project_id(project_id: str) -> str:

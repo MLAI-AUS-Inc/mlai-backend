@@ -83,6 +83,70 @@ services:
           - mlai-backend-analytics-sync
     restart: unless-stopped
 
+  memory-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_memory_worker
+          --poll-seconds "$${ORG_MEMORY_WORKER_POLL_SECONDS}"
+          --lease-seconds "$${ORG_MEMORY_WORKER_LEASE_SECONDS}"
+      '
+    environment:
+      APP_ENV: local
+      ORG_MEMORY_WORKER_POLL_SECONDS: ${ORG_MEMORY_WORKER_POLL_SECONDS:-2}
+      ORG_MEMORY_WORKER_LEASE_SECONDS: ${ORG_MEMORY_WORKER_LEASE_SECONDS:-120}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-memory-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  memory-scheduler:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          if ! python manage.py schedule_memory_work; then
+            echo "Memory scheduler tick failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: local
+      ORG_MEMORY_SCHEDULER_POLL_SECONDS: ${ORG_MEMORY_SCHEDULER_POLL_SECONDS:-60}
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+      - .env.local-docker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      default:
+      local-shared:
+        aliases:
+          - mlai-backend-memory-scheduler
+    restart: unless-stopped
+    stop_grace_period: 30s
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"

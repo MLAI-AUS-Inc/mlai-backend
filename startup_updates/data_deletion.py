@@ -70,6 +70,10 @@ DELETED_COUNT_KEYS = (
     "startupEvents",
     "startupMetrics",
     "monthlyDrafts",
+    "orgMemorySourcesTombstoned",
+    "orgMemoryVersionsRetired",
+    "orgMemoryChunksDeactivated",
+    "orgMemoryConfigurationsDisabled",
 )
 
 
@@ -561,6 +565,54 @@ def _scrub_runs_with_counts(
     return counts
 
 
+def _add_memory_deletion_counts(counts: dict[str, int], result: dict[str, int]) -> None:
+    counts["orgMemorySourcesTombstoned"] += int(
+        result.get("sources_tombstoned") or 0
+    )
+    counts["orgMemoryVersionsRetired"] += int(
+        result.get("versions_retired") or 0
+    )
+    counts["orgMemoryChunksDeactivated"] += int(
+        result.get("chunks_deactivated") or 0
+    )
+    counts["orgMemoryConfigurationsDisabled"] += int(
+        result.get("configurations_disabled") or 0
+    )
+
+
+def _tombstone_gmail_memory(
+    *,
+    organizations: Iterable[Organization],
+    google_connection_id: int,
+    requested_by,
+    reason: str,
+) -> dict[str, int]:
+    from org_memory.kernel import tombstone_connection_memory
+    from org_memory.models import MemoryConnectionConfiguration
+
+    counts = _zero_deleted_counts()
+    configurations = list(
+        MemoryConnectionConfiguration.objects.select_related("organization").filter(
+            organization__in=list(organizations),
+            google_connection_id=google_connection_id,
+        )
+    )
+    for configuration in configurations:
+        result = tombstone_connection_memory(
+            configuration,
+            reason=reason,
+            requested_by=requested_by,
+            request_id=f"gmail-disconnect:{google_connection_id}",
+        )
+        _add_memory_deletion_counts(counts, result)
+    if configurations:
+        counts["orgMemoryConfigurationsDisabled"] += len(configurations)
+        MemoryConnectionConfiguration.objects.filter(
+            pk__in=[configuration.pk for configuration in configurations]
+        ).delete()
+    return counts
+
+
 _ACTIVE_MAILBOX = object()
 
 
@@ -637,6 +689,15 @@ def disconnect_gmail_for_user(
         with transaction.atomic():
             _add_counts(
                 deleted,
+                _tombstone_gmail_memory(
+                    organizations=organizations,
+                    google_connection_id=google_connection_id,
+                    requested_by=user,
+                    reason=reason,
+                ),
+            )
+            _add_counts(
+                deleted,
                 _delete_gmail_artifacts(
                     organization_ids=organization_ids,
                     google_connection_id=google_connection_id,
@@ -710,6 +771,15 @@ def delete_startup_data_for_organization(
 
     try:
         with transaction.atomic():
+            from org_memory.kernel import tombstone_organization_memory
+
+            memory_result = tombstone_organization_memory(
+                organization,
+                reason=reason,
+                requested_by=requested_by_user,
+                request_id=deletion_request.request_id,
+            )
+            _add_memory_deletion_counts(deleted, memory_result)
             _add_counts(deleted, _delete_gmail_artifacts(organization_ids=organization_ids))
             _add_counts(deleted, _delete_slack_artifacts(organization_ids=organization_ids))
             _add_counts(deleted, _delete_linear_artifacts(organization_ids=organization_ids))

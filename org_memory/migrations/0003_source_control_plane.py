@@ -1,0 +1,250 @@
+# Generated manually for the organisational-memory source control plane.
+
+import uuid
+
+import django.db.models.deletion
+import django.utils.timezone
+from django.conf import settings
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("organizations", "0002_organization_company_linkedin_url"),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ("integrations", "0019_luma_provider_choice"),
+        ("org_memory", "0002_organization_authorization"),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name="MemoryConnectionConfiguration",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("provider", models.CharField(choices=[("google_drive", "Google Drive"), ("slack", "Slack"), ("linear", "Linear"), ("notion", "Notion"), ("gmail", "Gmail"), ("stripe", "Stripe"), ("xero", "Xero"), ("luma", "Luma")], db_index=True, max_length=32)),
+                ("lifecycle_state", models.CharField(choices=[("draft", "Draft"), ("scoped", "Scoped"), ("previewed", "Previewed"), ("dry_run_ready", "Dry run ready"), ("approved", "Approved"), ("backfill_pending", "Backfill pending"), ("active", "Active"), ("paused", "Paused"), ("delete_pending", "Delete pending"), ("deleted", "Deleted"), ("error", "Error")], db_index=True, default="draft", max_length=32)),
+                ("state_before_pause", models.CharField(blank=True, default="", max_length=32)),
+                ("default_classification", models.CharField(choices=[("internal", "Internal"), ("committee", "Committee"), ("executive", "Executive"), ("finance", "Finance"), ("people_sensitive", "People sensitive"), ("no_agent", "No agent")], default="internal", max_length=32)),
+                ("allowed_memory_kinds", models.JSONField(blank=True, default=list)),
+                ("historical_cutoff", models.DateTimeField(blank=True, null=True)),
+                ("retention_policy", models.JSONField(blank=True, default=dict)),
+                ("configuration", models.JSONField(blank=True, default=dict)),
+                ("approved_at", models.DateTimeField(blank=True, null=True)),
+                ("last_discovered_at", models.DateTimeField(blank=True, null=True)),
+                ("last_previewed_at", models.DateTimeField(blank=True, null=True)),
+                ("last_dry_run_at", models.DateTimeField(blank=True, null=True)),
+                ("last_backfill_requested_at", models.DateTimeField(blank=True, null=True)),
+                ("last_sync_requested_at", models.DateTimeField(blank=True, null=True)),
+                ("last_successful_sync_at", models.DateTimeField(blank=True, null=True)),
+                ("last_error", models.TextField(blank=True, default="")),
+                ("deleted_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("approved_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="approved_memory_connections", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("organization", "provider", "created_at")},
+        ),
+        migrations.CreateModel(
+            name="MemorySourcePolicy",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("provider", models.CharField(choices=[("google_drive", "Google Drive"), ("slack", "Slack"), ("linear", "Linear"), ("notion", "Notion"), ("gmail", "Gmail"), ("stripe", "Stripe"), ("xero", "Xero"), ("luma", "Luma")], db_index=True, max_length=32)),
+                ("policy_key", models.SlugField(max_length=64)),
+                ("name", models.CharField(max_length=128)),
+                ("scope_type", models.CharField(blank=True, default="", max_length=32)),
+                ("selector", models.JSONField(blank=True, default=dict)),
+                ("classification", models.CharField(choices=[("internal", "Internal"), ("committee", "Committee"), ("executive", "Executive"), ("finance", "Finance"), ("people_sensitive", "People sensitive"), ("no_agent", "No agent")], db_index=True, default="internal", max_length=32)),
+                ("authority_score", models.FloatField(default=0.5)),
+                ("volatility", models.CharField(choices=[("stable", "Stable"), ("normal", "Normal"), ("volatile", "Volatile")], default="normal", max_length=16)),
+                ("stale_after_seconds", models.PositiveIntegerField(default=86400)),
+                ("allowed_memory_kinds", models.JSONField(blank=True, default=list)),
+                ("auto_activation_rules", models.JSONField(blank=True, default=dict)),
+                ("review_rules", models.JSONField(blank=True, default=dict)),
+                ("retention_policy", models.JSONField(blank=True, default=dict)),
+                ("historical_cutoff", models.DateTimeField(blank=True, null=True)),
+                ("is_active", models.BooleanField(db_index=True, default=True)),
+                ("reviewed_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("organization", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="memory_source_policies", to="organizations.organization")),
+                ("reviewed_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="reviewed_memory_source_policies", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("organization", "provider", "policy_key")},
+        ),
+        migrations.CreateModel(
+            name="MemorySourcePreview",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("version", models.PositiveIntegerField()),
+                ("status", models.CharField(choices=[("ready", "Ready"), ("error", "Error"), ("stale", "Stale")], db_index=True, default="ready", max_length=16)),
+                ("is_current", models.BooleanField(db_index=True, default=True)),
+                ("selection_fingerprint", models.CharField(db_index=True, max_length=64)),
+                ("selection_snapshot", models.JSONField(blank=True, default=list)),
+                ("policy_snapshot", models.JSONField(blank=True, default=dict)),
+                ("summary", models.JSONField(blank=True, default=dict)),
+                ("warnings", models.JSONField(blank=True, default=list)),
+                ("dry_run_summary", models.JSONField(blank=True, default=dict)),
+                ("dry_run_completed_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("configuration", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="previews", to="org_memory.memoryconnectionconfiguration")),
+                ("dry_run_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="dry_run_memory_source_previews", to=settings.AUTH_USER_MODEL)),
+                ("requested_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="requested_memory_source_previews", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("configuration", "-version")},
+        ),
+        migrations.CreateModel(
+            name="MemorySourceAuditEvent",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("event_type", models.CharField(db_index=True, max_length=64)),
+                ("from_state", models.CharField(blank=True, default="", max_length=32)),
+                ("to_state", models.CharField(blank=True, default="", max_length=32)),
+                ("request_id", models.CharField(blank=True, db_index=True, default="", max_length=128)),
+                ("metadata", models.JSONField(blank=True, default=dict)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("actor_identity", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="memory_source_audit_events", to="org_memory.organizationidentity")),
+                ("actor_membership", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="memory_source_audit_events", to="org_memory.organizationmembership")),
+                ("actor_user", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="memory_source_audit_events", to=settings.AUTH_USER_MODEL)),
+                ("configuration", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="audit_events", to="org_memory.memoryconnectionconfiguration")),
+                ("organization", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="memory_source_audit_events", to="organizations.organization")),
+            ],
+            options={"ordering": ("-created_at",)},
+        ),
+        migrations.CreateModel(
+            name="MemorySourceActionRequest",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("action", models.CharField(choices=[("discover", "Discover"), ("preview", "Preview"), ("dry_run", "Dry run"), ("backfill", "Backfill"), ("sync", "Sync"), ("reprocess", "Reprocess"), ("refresh_permissions", "Refresh permissions"), ("delete", "Delete")], db_index=True, max_length=32)),
+                ("status", models.CharField(choices=[("pending", "Pending"), ("running", "Running"), ("completed", "Completed"), ("failed", "Failed"), ("cancelled", "Cancelled")], db_index=True, default="pending", max_length=16)),
+                ("idempotency_key", models.CharField(blank=True, max_length=128, null=True)),
+                ("scope_external_ids", models.JSONField(blank=True, default=list)),
+                ("parameters", models.JSONField(blank=True, default=dict)),
+                ("result_summary", models.JSONField(blank=True, default=dict)),
+                ("request_id", models.CharField(blank=True, db_index=True, default="", max_length=128)),
+                ("requested_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("started_at", models.DateTimeField(blank=True, null=True)),
+                ("completed_at", models.DateTimeField(blank=True, null=True)),
+                ("last_error", models.TextField(blank=True, default="")),
+                ("configuration", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="action_requests", to="org_memory.memoryconnectionconfiguration")),
+                ("requested_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="requested_memory_source_actions", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("-requested_at",)},
+        ),
+        migrations.CreateModel(
+            name="MemoryProviderEnablement",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("provider", models.CharField(choices=[("google_drive", "Google Drive"), ("slack", "Slack"), ("linear", "Linear"), ("notion", "Notion"), ("gmail", "Gmail"), ("stripe", "Stripe"), ("xero", "Xero"), ("luma", "Luma")], db_index=True, max_length=32)),
+                ("is_enabled", models.BooleanField(db_index=True, default=False)),
+                ("approved_at", models.DateTimeField(blank=True, null=True)),
+                ("reason", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("approved_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="approved_memory_provider_enablements", to=settings.AUTH_USER_MODEL)),
+                ("organization", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="memory_provider_enablements", to="organizations.organization")),
+            ],
+            options={"ordering": ("organization", "provider")},
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="approved_preview",
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="approved_for_configurations", to="org_memory.memorysourcepreview"),
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="created_by",
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="created_memory_connections", to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="default_policy",
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="connection_configurations", to="org_memory.memorysourcepolicy"),
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="external_connection",
+            field=models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="memory_configuration", to="integrations.externalserviceconnection"),
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="google_connection",
+            field=models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="memory_configuration", to="integrations.googleconnection"),
+        ),
+        migrations.AddField(
+            model_name="memoryconnectionconfiguration",
+            name="organization",
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="memory_connection_configurations", to="organizations.organization"),
+        ),
+        migrations.CreateModel(
+            name="MemorySourceScope",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("scope_type", models.CharField(max_length=32)),
+                ("external_id", models.CharField(max_length=512)),
+                ("name", models.CharField(blank=True, default="", max_length=512)),
+                ("canonical_url", models.URLField(blank=True, default="", max_length=1024)),
+                ("selected", models.BooleanField(db_index=True, default=False)),
+                ("status", models.CharField(choices=[("discovered", "Discovered"), ("selected", "Selected"), ("excluded", "Excluded"), ("removed", "Removed")], db_index=True, default="discovered", max_length=16)),
+                ("default_classification", models.CharField(choices=[("internal", "Internal"), ("committee", "Committee"), ("executive", "Executive"), ("finance", "Finance"), ("people_sensitive", "People sensitive"), ("no_agent", "No agent")], default="internal", max_length=32)),
+                ("metadata", models.JSONField(blank=True, default=dict)),
+                ("discovered_at", models.DateTimeField(default=django.utils.timezone.now)),
+                ("last_seen_at", models.DateTimeField(db_index=True, default=django.utils.timezone.now)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("configuration", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="source_scopes", to="org_memory.memoryconnectionconfiguration")),
+                ("policy", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="source_scopes", to="org_memory.memorysourcepolicy")),
+            ],
+            options={
+                "ordering": ("scope_type", "name", "external_id"),
+                "indexes": [models.Index(fields=["configuration", "selected", "status"], name="orgmem_scope_config_selected")],
+            },
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourcescope",
+            constraint=models.UniqueConstraint(fields=("configuration", "scope_type", "external_id"), name="orgmem_config_scope_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourcepreview",
+            constraint=models.UniqueConstraint(fields=("configuration", "version"), name="orgmem_config_preview_version_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourcepreview",
+            constraint=models.UniqueConstraint(condition=models.Q(("is_current", True)), fields=("configuration",), name="orgmem_config_current_preview_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourcepolicy",
+            constraint=models.UniqueConstraint(fields=("organization", "provider", "policy_key"), name="orgmem_source_policy_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourcepolicy",
+            constraint=models.CheckConstraint(check=models.Q(("authority_score__gte", 0.0), ("authority_score__lte", 1.0)), name="orgmem_policy_authority_range"),
+        ),
+        migrations.AddIndex(
+            model_name="memorysourceauditevent",
+            index=models.Index(fields=["organization", "event_type", "created_at"], name="orgmem_audit_org_event"),
+        ),
+        migrations.AddIndex(
+            model_name="memorysourceactionrequest",
+            index=models.Index(fields=["configuration", "status", "requested_at"], name="orgmem_action_config_status"),
+        ),
+        migrations.AddConstraint(
+            model_name="memorysourceactionrequest",
+            constraint=models.UniqueConstraint(condition=models.Q(("idempotency_key__isnull", False)), fields=("configuration", "idempotency_key"), name="orgmem_action_idempotency_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memoryproviderenablement",
+            constraint=models.UniqueConstraint(fields=("organization", "provider"), name="orgmem_provider_enablement_uniq"),
+        ),
+        migrations.AddConstraint(
+            model_name="memoryproviderenablement",
+            constraint=models.CheckConstraint(check=models.Q(("is_enabled", False), models.Q(("approved_at__isnull", False), ("approved_by__isnull", False)), _connector="OR"), name="orgmem_enabled_provider_approved"),
+        ),
+        migrations.AddIndex(
+            model_name="memoryconnectionconfiguration",
+            index=models.Index(fields=["organization", "provider", "lifecycle_state"], name="orgmem_cfg_org_prov_state"),
+        ),
+        migrations.AddConstraint(
+            model_name="memoryconnectionconfiguration",
+            constraint=models.CheckConstraint(check=models.Q(models.Q(("external_connection__isnull", False), ("google_connection__isnull", True)), models.Q(("external_connection__isnull", True), ("google_connection__isnull", False)), _connector="OR"), name="orgmem_config_one_connection"),
+        ),
+    ]

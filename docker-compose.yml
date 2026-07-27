@@ -88,6 +88,64 @@ services:
         aliases:
           - mlai-backend-analytics-sync
 
+  memory-worker:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        exec python manage.py run_memory_worker
+          --poll-seconds "$${ORG_MEMORY_WORKER_POLL_SECONDS}"
+          --lease-seconds "$${ORG_MEMORY_WORKER_LEASE_SECONDS}"
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      ORG_MEMORY_WORKER_POLL_SECONDS: ${ORG_MEMORY_WORKER_POLL_SECONDS:-2}
+      ORG_MEMORY_WORKER_LEASE_SECONDS: ${ORG_MEMORY_WORKER_LEASE_SECONDS:-120}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-memory-worker
+
+  memory-scheduler:
+    build: .
+    command: >-
+      sh -ec '
+        until python manage.py migrate --check --noinput; do
+          echo "Waiting for migrations to complete...";
+          sleep 5;
+        done;
+        while true; do
+          if ! python manage.py schedule_memory_work; then
+            echo "Memory scheduler tick failed; the next bounded poll will retry" >&2;
+          fi;
+          sleep "$${ORG_MEMORY_SCHEDULER_POLL_SECONDS}";
+        done
+      '
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      ORG_MEMORY_SCHEDULER_POLL_SECONDS: ${ORG_MEMORY_SCHEDULER_POLL_SECONDS:-60}
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      default:
+      mlai-shared:
+        aliases:
+          - mlai-backend-memory-scheduler
+
   bridge-worker:
     build: .
     command: sh -c "until python manage.py migrate --check --noinput; do echo 'Waiting for migrations to complete...'; sleep 5; done; python manage.py run_community_bridge"
@@ -106,11 +164,16 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:15
+    image: pgvector/pgvector:0.8.2-pg15-bookworm
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
 networks:
   mlai-shared:

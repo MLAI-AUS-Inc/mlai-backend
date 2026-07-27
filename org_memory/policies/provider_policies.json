@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "policy_id": "mlai-org-memory-provider-policy",
+  "status": "draft",
+  "last_reviewed_at": null,
+  "default_production_decision": "deny",
+  "owners": {
+    "data": null,
+    "security": null,
+    "review": null,
+    "operations": null,
+    "privacy_legal": null
+  },
+  "global_rules": {
+    "public_roo_private_memory_access": "denied",
+    "admin_roo_allowed_contexts": [],
+    "published_public_knowledge": "separate_human_reviewed_corpus_only",
+    "source_content_is_untrusted": true,
+    "direct_message_ingestion": "excluded",
+    "model_training_on_mlai_data": "prohibited",
+    "hard_delete_rules_approved": false
+  },
+  "slos": {
+    "approval_status": "draft",
+    "approved_by": null,
+    "freshness": {
+      "verified_webhook_change_p95_minutes": 10,
+      "slack_thread_after_quiet_p95_minutes": 15,
+      "polled_source_p99_hours": 24,
+      "notified_access_revocation_p95_minutes": 15,
+      "dead_work_alert_minutes": 60,
+      "daily_health_report_local_time": "08:00 Australia/Sydney"
+    },
+    "review": {
+      "high_risk_target_business_hours": 8,
+      "standard_target_business_days": 3,
+      "oldest_open_item_alert_business_days": 5,
+      "escalation_destination": null
+    },
+    "cost_limits": {
+      "daily_model_budget_aud": null,
+      "monthly_model_budget_aud": null,
+      "on_limit": "pause_new_model_work_and_alert"
+    }
+  },
+  "providers": {
+    "google_drive": {
+      "provider": "google_drive",
+      "display_name": "Google Drive",
+      "production_enabled": false,
+      "classification": "committee",
+      "allowed_memory_types": ["decision", "commitment", "task", "project_update", "policy", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "allowed_formats": ["google_doc", "docx", "pdf", "txt", "md", "vtt", "srt"],
+        "excluded": ["unselected_folders", "personal_drives", "recordings_without_transcript_consent"]
+      },
+      "authority": {
+        "default": "meeting testimony; decisions require explicit decision cues or corroboration",
+        "system_of_record_for": []
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "inventory": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "privacy_approved_by": null,
+        "max_files": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "slack": {
+      "provider": "slack",
+      "display_name": "Slack",
+      "production_enabled": false,
+      "classification": "committee",
+      "allowed_memory_types": ["decision", "commitment", "task", "project_update", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "direct_messages": "excluded",
+        "acquisition_method": null,
+        "excluded": ["dms", "unselected_channels", "ephemeral_content"]
+      },
+      "authority": {
+        "default": "informal discussion; low authority unless corroborated or reviewed",
+        "system_of_record_for": []
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "linear": {
+      "provider": "linear",
+      "display_name": "Linear",
+      "production_enabled": false,
+      "classification": "committee",
+      "allowed_memory_types": ["task", "project_update", "commitment", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "excluded": ["unselected_teams", "unselected_projects", "private_projects"]
+      },
+      "authority": {
+        "default": "system of record for issue status, assignee, priority, and project fields",
+        "system_of_record_for": ["issue_status", "issue_assignee", "issue_priority", "project_state"]
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "notion": {
+      "provider": "notion",
+      "display_name": "Notion",
+      "production_enabled": false,
+      "classification": "committee",
+      "allowed_memory_types": ["policy", "decision", "project_update", "task", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "excluded": ["unselected_root_pages", "private_pages", "archived_pages"]
+      },
+      "authority": {
+        "default": "published workspace documentation; authority depends on page owner and policy status",
+        "system_of_record_for": []
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "gmail": {
+      "provider": "gmail",
+      "display_name": "Gmail",
+      "production_enabled": false,
+      "classification": "executive",
+      "allowed_memory_types": ["commitment", "decision", "relationship_update", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "required_labels": [],
+        "excluded": ["personal_accounts", "unlabelled_mail", "auth_messages", "medical_hr_legal"]
+      },
+      "authority": {
+        "default": "correspondence evidence; commitments and commercial terms require review",
+        "system_of_record_for": []
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "stripe": {
+      "provider": "stripe",
+      "display_name": "Stripe",
+      "production_enabled": false,
+      "classification": "finance",
+      "aggregate_only": true,
+      "allowed_memory_types": ["financial_metric", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "excluded": ["raw_payment_details", "payment_credentials", "customer_pii"]
+      },
+      "authority": {
+        "default": "system of record for approved payment and subscription aggregates",
+        "system_of_record_for": ["approved_revenue_aggregates", "approved_subscription_aggregates"]
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "xero": {
+      "provider": "xero",
+      "display_name": "Xero",
+      "production_enabled": false,
+      "classification": "finance",
+      "aggregate_only": true,
+      "allowed_memory_types": ["financial_metric", "risk"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "excluded": ["raw_bank_transactions", "bank_details", "contact_pii"]
+      },
+      "authority": {
+        "default": "system of record for approved accounting aggregates",
+        "system_of_record_for": ["approved_accounting_aggregates"]
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    },
+    "luma": {
+      "provider": "luma",
+      "display_name": "Luma",
+      "production_enabled": false,
+      "classification": "internal",
+      "attendee_pii_allowed": false,
+      "allowed_memory_types": ["event", "event_metric", "project_update"],
+      "source_scope": {
+        "selectors": [],
+        "historical_cutoff": null,
+        "excluded": ["attendee_pii", "unselected_calendars", "private_registration_answers"]
+      },
+      "authority": {
+        "default": "system of record for selected event dates and approved attendance aggregates",
+        "system_of_record_for": ["selected_event_dates", "approved_event_aggregates"]
+      },
+      "retention": {
+        "raw_evidence_days": null,
+        "derived_memory_days": null,
+        "query_audit_days": null
+      },
+      "review_owner": null,
+      "approval": {
+        "status": "draft",
+        "approved_by": null,
+        "approved_at": null,
+        "terms_reviewed_by": null,
+        "terms_reviewed_at": null
+      }
+    }
+  }
+}

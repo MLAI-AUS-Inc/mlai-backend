@@ -261,8 +261,8 @@ def get_message_metadata(connection: GoogleConnection, message_id: str, *, servi
     )
 
 
-def get_message_full(connection: GoogleConnection, message_id: str) -> dict:
-    service = build_gmail_service(connection, cache_discovery=False)
+def get_message_full(connection: GoogleConnection, message_id: str, *, service=None) -> dict:
+    service = service or build_gmail_service(connection, cache_discovery=False)
     return _execute_gmail_request(
         lambda: service.users().messages().get(userId="me", id=message_id, format="full"),
         description=f"messages.get.full:{message_id}",
@@ -290,27 +290,101 @@ def get_attachment_payload(connection: GoogleConnection, message_id: str, attach
     )
 
 
+def list_gmail_labels(connection: GoogleConnection, *, service=None) -> list[dict]:
+    service = service or build_gmail_service(connection, cache_discovery=False)
+    payload = _execute_gmail_request(
+        lambda: service.users().labels().list(userId="me"),
+        description="labels.list",
+    )
+    return [item for item in (payload.get("labels") or []) if isinstance(item, dict)]
+
+
+def get_gmail_profile(connection: GoogleConnection, *, service=None) -> dict:
+    service = service or build_gmail_service(connection, cache_discovery=False)
+    return _execute_gmail_request(
+        lambda: service.users().getProfile(userId="me"),
+        description="users.getProfile",
+    )
+
+
+def list_label_message_page(
+    connection: GoogleConnection,
+    *,
+    label_id: str,
+    query: str = "-in:spam -in:trash",
+    page_token: Optional[str] = None,
+    max_results: int = 100,
+    service=None,
+) -> dict:
+    service = service or build_gmail_service(connection, cache_discovery=False)
+    return _execute_gmail_request(
+        lambda: (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                labelIds=[label_id],
+                q=query,
+                pageToken=page_token,
+                maxResults=max_results,
+                includeSpamTrash=False,
+            )
+        ),
+        description=f"messages.list.label:{label_id}",
+    )
+
+
+def watch_gmail_mailbox(
+    connection: GoogleConnection,
+    *,
+    topic_name: str,
+    label_ids: Iterable[str],
+    service=None,
+) -> dict:
+    service = service or build_gmail_service(connection, cache_discovery=False)
+    return _execute_gmail_request(
+        lambda: (
+            service.users()
+            .watch(
+                userId="me",
+                body={
+                    "topicName": str(topic_name),
+                    "labelIds": [str(value) for value in label_ids],
+                    "labelFilterBehavior": "INCLUDE",
+                },
+            )
+        ),
+        description="users.watch",
+    )
+
+
 def list_history_page(
     connection: GoogleConnection,
     *,
     start_history_id: str,
     page_token: Optional[str] = None,
     max_results: int = 250,
+    history_types: Optional[Iterable[str]] = ("messageAdded",),
+    label_id: Optional[str] = None,
     service=None,
 ) -> dict:
     service = service or build_gmail_service(connection, cache_discovery=False)
     try:
+        request_kwargs = {
+            "userId": "me",
+            "startHistoryId": start_history_id,
+            "pageToken": page_token,
+            "maxResults": max_results,
+        }
+        if history_types:
+            request_kwargs["historyTypes"] = list(history_types)
+        if label_id:
+            request_kwargs["labelId"] = label_id
         return _execute_gmail_request(
             lambda: (
                 service.users()
                 .history()
-                .list(
-                    userId="me",
-                    startHistoryId=start_history_id,
-                    pageToken=page_token,
-                    maxResults=max_results,
-                    historyTypes=["messageAdded"],
-                )
+                .list(**request_kwargs)
             )
             ,
             description=f"history.list:{start_history_id}",

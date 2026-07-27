@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "organization_domain": "example.org",
+  "approval_status": "draft",
+  "approved_at": null,
+  "review_due_at": null,
+  "approvers": {
+    "data": "",
+    "security": "",
+    "review": "",
+    "operations": ""
+  },
+  "pilot_admin_refs": [
+    "slack:U_REPLACE"
+  ],
+  "allowed_slack_contexts": [
+    "dm:U_REPLACE",
+    "channel:G_REPLACE"
+  ],
+  "approved_providers": [
+    "google_drive"
+  ],
+  "approved_source_scopes": {
+    "google_drive": [
+      "folder:REPLACE_WITH_EXACT_FOLDER_ID"
+    ]
+  },
+  "controls": {
+    "data_processing_terms_approved": false,
+    "retention_and_deletion_approved": false,
+    "backup_restore_tested": false,
+    "incident_response_runbook_approved": false,
+    "freshness_latency_cost_slos_approved": false,
+    "public_roo_isolation_verified": false
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "organization_domain": "replace.example.org",
+  "approval_status": "draft",
+  "approved_at": "2026-01-01T00:00:00Z",
+  "review_due_at": "2026-02-01T00:00:00Z",
+  "pilot_approval_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "approvers": {
+    "review": "Replace with review owner",
+    "security": "Replace with security owner",
+    "operations": "Replace with operations owner"
+  },
+  "window": {
+    "start_at": "2026-01-02T00:00:00Z",
+    "end_at": "2026-01-16T00:00:00Z"
+  },
+  "rubric_version": "admin-roo-pilot-v1",
+  "minimum_samples": {
+    "pilot_days": 14,
+    "audited_queries": 20,
+    "answered_queries": 10,
+    "abstained_queries": 5,
+    "high_risk_citations": 10,
+    "current_state_queries": 5,
+    "temporal_queries": 5
+  },
+  "thresholds": {
+    "high_risk_citation_precision": 0.95,
+    "current_state_accuracy": 0.85,
+    "temporal_accuracy": 0.8,
+    "abstention_accuracy": 0.85,
+    "answer_faithfulness": 0.9,
+    "max_query_failure_rate": 0.05,
+    "max_p95_latency_ms": 10000,
+    "max_p95_total_tokens": 10000,
+    "max_daily_total_tokens": 100000
+  },
+  "controls": {
+    "manual_audit_double_checked": false,
+    "incident_log_reconciled": false,
+    "cost_measurement_approved": false
+  }
+}

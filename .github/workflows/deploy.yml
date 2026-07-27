@@ -1,6 +1,8 @@
 name: Deploy to Digital Ocean
 
 on:
+  pull_request:
+    branches: [ main ]
   push:
     branches: [ main ]
 
@@ -9,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: sqlite:////tmp/mlai_backend_ci.sqlite3
+      CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
+      CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ci-v1
     steps:
     - uses: actions/checkout@v6
 
@@ -26,6 +30,20 @@ jobs:
 
     - name: Run Django system checks
       run: python manage.py check
+
+    - name: Validate organisational-memory governance
+      env:
+        ORG_MEMORY_ENABLED_PROVIDERS: ""
+      run: python manage.py validate_org_memory_governance --environment production
+
+    - name: Run organisational-memory extraction seed evals
+      run: python manage.py evaluate_org_memory_extraction
+
+    - name: Run organisational-memory consolidation seed evals
+      run: python manage.py evaluate_org_memory_consolidation
+
+    - name: Run organisational-memory retrieval seed evals
+      run: python manage.py evaluate_org_memory_retrieval
 
     - name: Validate production URL settings
       env:
@@ -67,6 +85,10 @@ jobs:
       run: |
         python manage.py test \
           roo.tests_api.TaskViewSetTests \
+          core.tests.test_request_logging \
+          org_memory.tests \
+          tests.test_org_memory_governance \
+          tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
           tests.test_health_check \
           tests.test_content_factory_org_config \
@@ -76,6 +98,7 @@ jobs:
           tests.test_content_factory_reconciliation \
           tests.test_content_factory_status_contract \
           content_factory.tests_admin_metrics \
+          integrations.tests_fields \
           integrations.tests_github_installation_reconciliation \
           integrations.tests_github_app_probe \
           integrations.tests_humanitix \
@@ -92,9 +115,52 @@ jobs:
           victor_ai \
           --verbosity 2
 
-  deploy:
+  postgres-search:
     runs-on: ubuntu-latest
-    needs: checks
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg15-bookworm
+        env:
+          POSTGRES_DB: mlai_test
+          POSTGRES_USER: mlai
+          POSTGRES_PASSWORD: mlai_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mlai -d mlai_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://mlai:mlai_test_password@127.0.0.1:5432/mlai_test
+      CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
+      CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ci-v1
+      ORG_MEMORY_EMBEDDING_MODEL: text-embedding-3-small
+      ORG_MEMORY_EMBEDDING_VERSION: openai-text-embedding-3-small-v1
+      ORG_MEMORY_EMBEDDING_DIMENSIONS: "1536"
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-engine.txt
+
+    - name: Verify PostgreSQL search infrastructure
+      run: |
+        python manage.py check_org_memory_search --require-vector
+        python manage.py migrate --noinput
+        python manage.py check_org_memory_search --require-vector --require-installed
+        python manage.py test org_memory.tests.test_search_postgres --verbosity 2
+
+  deploy:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    needs: [checks, postgres-search]
     steps:
     - uses: actions/checkout@v6
 
@@ -108,10 +174,30 @@ jobs:
 
     - name: Deploy
       env:
+        APP_RELEASE: ${{ github.sha }}
+        CONNECTOR_CREDENTIAL_KEYS: ${{ secrets.CONNECTOR_CREDENTIAL_KEYS }}
+        CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ${{ secrets.CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID }}
         REDIS_URL: ${{ secrets.REDIS_URL }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
         VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
       run: |
+        if [ -z "$CONNECTOR_CREDENTIAL_KEYS" ]; then
+          echo "::error::Required repository secret CONNECTOR_CREDENTIAL_KEYS is not configured"
+          exit 1
+        fi
+        if [ -z "$CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID" ]; then
+          echo "::error::Required repository secret CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID is not configured"
+          exit 1
+        fi
+        python - <<'PY'
+        import json
+        import os
+
+        keys = json.loads(os.environ["CONNECTOR_CREDENTIAL_KEYS"])
+        active = os.environ["CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID"]
+        if not isinstance(keys, dict) or not keys or active not in keys:
+            raise SystemExit("Connector credential keyring secrets are inconsistent")
+        PY
         if [ -z "$REDIS_URL" ]; then
           echo "::error::Required repository secret REDIS_URL is not configured"
           exit 1

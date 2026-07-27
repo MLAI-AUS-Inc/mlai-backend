@@ -15,6 +15,27 @@ if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
     exit 1
 fi
+if [ -z "${CONNECTOR_CREDENTIAL_KEYS:-}" ]; then
+    echo "❌ CONNECTOR_CREDENTIAL_KEYS must be supplied by the deployment secret store."
+    exit 1
+fi
+if [ -z "${CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID:-}" ]; then
+    echo "❌ CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID must be supplied by the deployment secret store."
+    exit 1
+fi
+if [[ ! "$CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; then
+    echo "❌ CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID has an invalid format."
+    exit 1
+fi
+python3 - <<'PY'
+import json
+import os
+
+keys = json.loads(os.environ["CONNECTOR_CREDENTIAL_KEYS"])
+active = os.environ["CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID"]
+if not isinstance(keys, dict) or not keys or active not in keys:
+    raise SystemExit("Connector credential keyring secrets are inconsistent")
+PY
 if [[ "$REDIS_URL" != redis://* && "$REDIS_URL" != rediss://* ]]; then
     echo "❌ REDIS_URL must use the redis:// or rediss:// scheme."
     exit 1
@@ -114,6 +135,35 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
         grep -v "^REDIS_URL=" .env > "$tmp" || true
     fi
     printf "REDIS_URL=%s\n" "$secret" >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+'
+
+# Install the versioned connector keyring atomically before Django system
+# checks or migrations can write connector credentials with the active key.
+# Values are carried over SSH stdin and are never printed or placed in argv.
+echo "🔐 Updating connector credential keyring (values redacted)..."
+{
+    printf '%s\n' "$CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID"
+    printf '%s\n' "$CONNECTOR_CREDENTIAL_KEYS"
+} | ssh "$DEPLOY_SSH_TARGET" '
+    set -euo pipefail
+    project_dir="/root/mlai-backend"
+    mkdir -p "$project_dir"
+    cd "$project_dir"
+    umask 077
+    IFS= read -r active_key_id
+    IFS= read -r keyring
+    if [ -z "$active_key_id" ] || [ -z "$keyring" ]; then
+        echo "Missing connector credential keyring payload" >&2
+        exit 1
+    fi
+    tmp=$(mktemp .env.connector-keys.XXXXXX)
+    if [ -f .env ]; then
+        grep -Ev "^(CONNECTOR_CREDENTIAL_KEYS|CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID)=" .env > "$tmp" || true
+    fi
+    printf "CONNECTOR_CREDENTIAL_KEYS=%s\n" "$keyring" >> "$tmp"
+    printf "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID=%s\n" "$active_key_id" >> "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" .env
 '
@@ -258,7 +308,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     fi
     unset health_hack_key roo_sim_key roo_api_key victor_ai_roo_secret
 
-    runtime_services=(web scheduler)
+    runtime_services=(web scheduler memory-worker memory-scheduler)
     if env_has_value SLACK_BRIDGE_BOT_TOKEN && env_has_value DISCORD_BRIDGE_BOT_TOKEN; then
         runtime_services+=(bridge-worker)
         bridge_worker_enabled=1
@@ -329,6 +379,12 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
     echo "🔗 Validating production URL configuration and service connectivity..."
     compose_run_web python manage.py validate_prod_urls --check-connectivity --warn-connectivity --timeout 8
 
+    echo "🧠 Validating organisational-memory provider governance..."
+    compose_run_web python manage.py validate_org_memory_governance --environment production
+
+    echo "🔎 Preflighting PostgreSQL full-text and vector support..."
+    compose_run_web python manage.py check_org_memory_search --require-vector
+
     echo "🔐 Verifying GitHub App server credentials..."
     compose_run_web python manage.py check_github_app_credentials
 
@@ -359,6 +415,13 @@ print('yes' if recorder.migration_qs.filter(app='\${app_label}', name='\${migrat
 
     echo "✅ Verifying migration readiness..."
     compose_run_web python manage.py migrate --check --noinput
+
+    echo "🔐 Verifying the Admin Roo pilot release gate..."
+    compose_run_web python manage.py check_org_memory_pilot_release_gate
+
+    echo "🧠 Verifying vector installation and rebuilding memory text indexes..."
+    compose_run_web python manage.py check_org_memory_search --require-vector --require-installed
+    compose_run_web python manage.py rebuild_memory_search_vectors
 
     echo "🧩 Verifying startup update schema..."
     compose_run_web python manage.py validate_startup_update_schema

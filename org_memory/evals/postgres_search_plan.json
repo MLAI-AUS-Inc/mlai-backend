@@ -1,0 +1,11 @@
+{
+  "required_indexes": [
+    "orgmem_chunk_search_gin",
+    "orgmem_embed_vector_hnsw",
+    "orgmem_embed_org_version"
+  ],
+  "text_operator": "@@",
+  "vector_operator": "<=>",
+  "distance": "cosine",
+  "notes": "CI disables sequential scans only for deterministic index-plan contract checks."
+}

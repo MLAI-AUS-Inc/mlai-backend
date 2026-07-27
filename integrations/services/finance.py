@@ -413,13 +413,17 @@ def _upsert_stripe_subscriptions(connection: ExternalServiceConnection, subscrip
                 "organization": connection.organization,
                 "external_account_id": connection.external_account_id,
                 "currency": _subscription_currency(subscription),
-                "amount": _subscription_amount(subscription),
+                # Sanitized monthly-normalized value lets aggregate consumers
+                # avoid the raw Stripe object, which may contain customer data.
+                "amount": _subscription_monthly_amount(subscription),
                 "direction": "credit",
                 "status": str(subscription.get("status") or ""),
                 "posted_at": occurred_at,
                 "transaction_date": occurred_at.date() if occurred_at else None,
                 "description": str(subscription.get("description") or ""),
                 "merchant_name": str(subscription.get("customer") or ""),
+                "category": "monthly_normalized",
+                "class_name": "subscription_mrr",
                 "raw_payload": subscription,
             },
         )
@@ -472,12 +476,29 @@ def _subscription_items(subscription: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
-def _subscription_amount(subscription: dict[str, Any]) -> Decimal:
+def _subscription_monthly_amount(subscription: dict[str, Any]) -> Decimal:
     total = Decimal("0")
     for item in _subscription_items(subscription):
         price = item.get("price") if isinstance(item.get("price"), dict) else {}
         quantity = Decimal(str(item.get("quantity") or 1))
-        total += _minor_units(price.get("unit_amount") or 0) * quantity
+        amount = _minor_units(price.get("unit_amount") or 0) * quantity
+        recurring = price.get("recurring") if isinstance(price.get("recurring"), dict) else {}
+        interval = str(recurring.get("interval") or "month").lower()
+        try:
+            interval_count = Decimal(str(recurring.get("interval_count") or 1))
+        except (InvalidOperation, TypeError, ValueError):
+            interval_count = Decimal("1")
+        if interval_count <= 0:
+            interval_count = Decimal("1")
+        if interval == "year":
+            amount = amount / (Decimal("12") * interval_count)
+        elif interval == "week":
+            amount = amount * Decimal("52") / Decimal("12") / interval_count
+        elif interval == "day":
+            amount = amount * Decimal("365") / Decimal("12") / interval_count
+        else:
+            amount = amount / interval_count
+        total += amount
     return total
 
 

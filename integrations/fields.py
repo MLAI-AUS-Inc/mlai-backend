@@ -1,13 +1,19 @@
 import base64
 import hashlib
-import logging
+import json
+import re
 
-from cryptography.fernet import Fernet, MultiFernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 
-logger = logging.getLogger(__name__)
+CREDENTIAL_ENVELOPE_PREFIX = "mlai-enc:v1:"
+KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+class CredentialEncryptionError(ValueError):
+    """Raised instead of returning plaintext when credential decryption fails."""
 
 
 def _fernet_key_from_secret(secret: str) -> bytes:
@@ -65,6 +71,49 @@ def _multifernet() -> MultiFernet:
     return MultiFernet([Fernet(key) for key in _decryption_keys()])
 
 
+def _configured_keyring() -> tuple[dict[str, Fernet], str]:
+    raw = str(getattr(settings, "CONNECTOR_CREDENTIAL_KEYS", "") or "").strip()
+    active_key_id = str(
+        getattr(settings, "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID", "") or ""
+    ).strip()
+    if raw:
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ImproperlyConfigured(
+                "CONNECTOR_CREDENTIAL_KEYS must be a JSON object"
+            ) from exc
+        if not isinstance(decoded, dict) or not decoded:
+            raise ImproperlyConfigured(
+                "CONNECTOR_CREDENTIAL_KEYS must be a non-empty JSON object"
+            )
+        keyring: dict[str, Fernet] = {}
+        for key_id, encoded_key in decoded.items():
+            key_id = str(key_id)
+            if not KEY_ID_PATTERN.fullmatch(key_id):
+                raise ImproperlyConfigured(
+                    f"Invalid connector credential key ID: {key_id}"
+                )
+            try:
+                keyring[key_id] = Fernet(str(encoded_key).encode("ascii"))
+            except (ValueError, TypeError) as exc:
+                raise ImproperlyConfigured(
+                    f"Connector credential key {key_id} is not a valid Fernet key"
+                ) from exc
+        if not active_key_id or active_key_id not in keyring:
+            raise ImproperlyConfigured(
+                "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID must identify a configured key"
+            )
+        return keyring, active_key_id
+
+    if not bool(getattr(settings, "IS_LOCAL_ENV", False)):
+        raise ImproperlyConfigured(
+            "Production requires CONNECTOR_CREDENTIAL_KEYS and "
+            "CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID"
+        )
+    return {"local": _primary_fernet()}, "local"
+
+
 def encrypt_value(value: str) -> str:
     return _primary_fernet().encrypt(str(value).encode()).decode()
 
@@ -73,26 +122,52 @@ def decrypt_value(token: str) -> str:
     return _multifernet().decrypt(token.encode()).decode()
 
 
+def encrypt_credential_value(value: str) -> str:
+    if value in (None, ""):
+        return value
+    keyring, active_key_id = _configured_keyring()
+    token = keyring[active_key_id].encrypt(str(value).encode("utf-8")).decode("ascii")
+    return f"{CREDENTIAL_ENVELOPE_PREFIX}{active_key_id}:{token}"
+
+
+def decrypt_credential_value(value: str) -> str:
+    if value in (None, ""):
+        return value
+    raw = str(value)
+    if raw.startswith(CREDENTIAL_ENVELOPE_PREFIX):
+        remainder = raw[len(CREDENTIAL_ENVELOPE_PREFIX):]
+        try:
+            key_id, token = remainder.split(":", 1)
+        except ValueError as exc:
+            raise CredentialEncryptionError(
+                "Malformed connector credential envelope"
+            ) from exc
+        keyring, _ = _configured_keyring()
+        fernet = keyring.get(key_id)
+        if fernet is None:
+            raise CredentialEncryptionError(
+                f"Connector credential references unavailable key ID {key_id}"
+            )
+        try:
+            return fernet.decrypt(token.encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeError, ValueError) as exc:
+            raise CredentialEncryptionError(
+                "Connector credential decryption failed"
+            ) from exc
+
+    try:
+        return decrypt_value(raw)
+    except (InvalidToken, UnicodeError, ValueError) as exc:
+        raise CredentialEncryptionError(
+            "Unversioned connector credential could not be decrypted"
+        ) from exc
+
+
 class EncryptedTextField(models.TextField):
-    description = "A TextField that is encrypted at rest"
+    description = "A versioned TextField encrypted at rest"
 
     def from_db_value(self, value, expression, connection):
-        if value is None:
-            return value
-        try:
-            return decrypt_value(value)
-        except Exception:
-            # The value may be legacy plaintext (pre-encryption) or written under
-            # a key we no longer hold. Stay resilient on read -- return as-is --
-            # but surface it so the row can be re-encrypted / investigated rather
-            # than failing silently.
-            logger.warning(
-                "EncryptedTextField could not decrypt a stored value; returning it raw. "
-                "Run `manage.py reencrypt_secrets` if this is an old key."
-            )
-            return value
+        return decrypt_credential_value(value)
 
     def get_prep_value(self, value):
-        if value is None:
-            return value
-        return encrypt_value(value)
+        return encrypt_credential_value(value)
