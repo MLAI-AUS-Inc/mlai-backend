@@ -150,6 +150,11 @@ def sync_next_financial_page(*, run: ContentFactoryRun) -> dict[str, Any]:
                 "error": connection.last_error,
             }
             errors.append(connection.last_error)
+        else:
+            # Some connectors (e.g. Basiq failed jobs) report failure via the
+            # result payload instead of raising.
+            if isinstance(result, dict) and str(result.get("status") or "") == ExternalServiceConnectionStatus.ERROR:
+                errors.append(str(result.get("error") or "") or "Financial sync failed.")
         sync_results.append(result)
 
     result_payload = {
